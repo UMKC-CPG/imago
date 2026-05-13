@@ -254,8 +254,10 @@ class SpaceGroupDB():
                             sub_group)
 
                 # Read the empty line that follows the space
-                #   group symmetry operations.
-                next(infile)
+                #   group symmetry operations. If no there is no trailing
+                #   separator, then return a default None. (That happens at
+                #   the end of the file.)
+                next(infile, None)
 
     def get_sub_group_name(self, sub_group, infile):
         """Obtain all naming information for a subgroup.

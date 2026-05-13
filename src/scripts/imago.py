@@ -1263,7 +1263,7 @@ def execute_program(job_clp, settings, fn, bin_dir,
     executable. After execution, handles secondary jobs that
     must run immediately afterwards:
       - SYBD (jobID % 100 == 8): runs makeSYBD
-      - OPTC/NLOP (jobID % 100 == 4 or 6): runs imagoKkc
+      - OPTC/NLOP (jobID % 100 == 4 or 6): runs imagoKKc
         for Kramers-Kronig conversion, and processPOPTC for
         partial optical properties if applicable.
 
@@ -1312,7 +1312,7 @@ def execute_program(job_clp, settings, fn, bin_dir,
         #   eps1 for the linear optical properties and of
         #   chi2 to chi1 for the nonlinear optical properties.
         #   Also compute the energy loss function (all done in
-        #   imagoKkc). We need to pass the program the number
+        #   imagoKKc). We need to pass the program the number
         #   of lines in the input file and which set of file
         #   numbers to use. A 1 means use the spin up or
         #   default file numbers, and a 2 means use the spin
@@ -1324,11 +1324,11 @@ def execute_program(job_clp, settings, fn, bin_dir,
         optc_lines = result.stdout.split()[0]
 
         # The optc, poptc, and nlop calculations all need to
-        #   run imagoKkc on the "standard" total eps2.
+        #   run imagoKKc on the "standard" total eps2.
 
         # We always use the #1 file numbers.
         subprocess.run(
-            f"{bin_dir}/imagoKkc "
+            f"{bin_dir}/imagoKKc "
             f"{optc_lines} 1 0 1",
             shell=True, capture_output=True, text=True,
         )
@@ -1337,20 +1337,20 @@ def execute_program(job_clp, settings, fn, bin_dir,
         #   spin polarized calculations.
         if spin_pol == 2:
             subprocess.run(
-                f"{bin_dir}/imagoKkc "
+                f"{bin_dir}/imagoKKc "
                 f"{optc_lines} 2 0 1",
                 shell=True,
                 capture_output=True, text=True,
             )
 
         # If we are doing the partial optical properties,
-        #   call processPOPTC for the imagoKkc calculation.
+        #   call processPOPTC for the imagoKKc calculation.
         #   (The fort.209 file contains the information
         #   needed to produce partial epsilon1 using
         #   Kramers-Kronig conversion. It is only produced
         #   by partial optical properties calculations.)
         #   The processPOPTC will repeatedly call the
-        #   imagoKkc program.
+        #   imagoKKc program.
         if os.path.exists("fort.209"):
             if spin_pol == 1:
                 subprocess.run(
@@ -1670,7 +1670,7 @@ def _manage_optc_output(e_, b, fn, ph, sp, rt):
     """Valence band optical properties output files."""
     if sp == 2:  # Spin polarized case.
         # In all cases, the total optc output file set from
-        #   IMAGO_OPTC and imagoKkc needs to be copied.
+        #   IMAGO_OPTC and imagoKKc needs to be copied.
         safe_copy("fort.40",
                   f"{e_}{fn.optc}{b}{fn.tot}{fn.cond}"
                   f"{fn.up}.40", rt)
