@@ -1,0 +1,75 @@
+#!/bin/bash
+
+###########################################################
+#BEGIN SCRIPT VARIABLES
+###########################################################
+
+#Define the current branch.
+export IMAGO_BRANCH="imago"
+
+#Root directories of the IMAGO program suite and any additional codes.
+if [ -z ${1+foo} ]; then
+   export IMAGO_DIR="$HOME/$IMAGO_BRANCH" # Default
+else
+   export IMAGO_DIR="$1" # Command line provided (used by nanoHUB)
+fi
+export GRASP_DIR="$CPG_SHARE/programs/grasp2k/grasp2Kdev"
+#export GRASP_DIR="$HOME/programs/grasp2018/GRASP2018"
+
+#Default location of all script resource control files.
+export IMAGO_RC="$IMAGO_DIR/.imago"
+
+#Location of binary executables.
+export IMAGO_BIN="$IMAGO_DIR/bin"
+export GRASP_BIN="$GRASP_DIR/bin"
+
+#Location of data files.
+export IMAGO_DATA="$IMAGO_DIR/share"
+
+#Location of python modules.
+export PYTHONPATH=$IMAGO_BIN:$PYTHONPATH
+
+#Location for all intermediate directories.
+if [ -z ${1+foo} ]; then
+   export IMAGO_TEMP="$HOME/data/scratch/$IMAGO_BRANCH" # Default
+else
+   export IMAGO_TEMP="/tmp" #  Used by nanoHUB
+fi
+
+#Execution mechanism for Fortran programs within the imago script.
+#export IMAGO_EXE="srun -n1 --exclusive"
+export IMAGO_EXE=""
+
+#Modifications of the linux environment.
+export PATH=$IMAGO_BIN:$PATH
+export PERL5LIB=$IMAGO_BIN/perl5:$PERL5LIB
+
+#Type of tar tool available:  Valid values are "linux" or "unix".
+export IMAGO_TAR="linux"
+
+#Do intermediate files need to be touched?  Yes=1, No=0
+export IMAGO_TOUCH=0
+
+#Number of bytes for FORTRAN 90 floating point doubles.
+#This is needed for memory estimation.
+export IMAGO_DOUBLE=16
+
+#Define the type of queueing system used on this machine.
+# 0 = BASH SCRIPT; 1 = PBS; 2 = LSF; 3 = SLURM;
+export IMAGO_QUEUE=3
+
+#Define the head location of the VASP pseudopotential database.
+export VASPPOT_DIR="/cluster/VAST/rulisp-lab/cpg/vasp_pot"
+
+# Define the location of each type of VASP potential.
+export VASPPOT_USPP_LDA="$VASPPOT_DIR/potUSPP_LDA"
+export VASPPOT_USPP_GGA="$VASPPOT_DIR/potUSPP_GGA"
+export VASPPOT_PAW_LDA="$VASPPOT_DIR/potpaw_LDA"
+export VASPPOT_PAW_GGA="$VASPPOT_DIR/potpaw_GGA"
+export VASPPOT_PAW_PBE="$VASPPOT_DIR/potpaw_PBE"
+export VASPPOT_PAW_LDA5x="$VASPPOT_DIR/potpaw_LDA.52"
+export VASPPOT_PAW_PBE5x="$VASPPOT_DIR/potpaw_PBE.52"
+
+###########################################################
+#END SCRIPT VARIABLES
+###########################################################

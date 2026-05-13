@@ -1,0 +1,18 @@
+#!/bin/bash
+
+# Get the name and path of this invoke script and replace any link
+#   with the full path name.
+middlewareDirectory=$(readlink -f $(dirname $0))
+
+# Get the name of the directory above the "middleware" directory. This
+#   should be the main tool directory.
+toolDirectory=$(realpath ${middlewareDirectory}/..)
+
+# Source the imagorc script so that nanoHUB executions will have
+#   access to the imago environment variables and force IMAGO_DIR
+#   to be set.
+. ${toolDirectory}/.imago/imagorc ${toolDirectory}
+
+# Run the invoke_app script for imago.
+/usr/bin/invoke_app "$@" -t imago \
+                         -C rappture
