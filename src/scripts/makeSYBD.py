@@ -289,12 +289,18 @@ def read_kpoint_names(dat_file):
     names from the SYBD_INPUT_DATA section.
 
     The SYBD_INPUT_DATA section of the setup .dat file contains:
-      - A header line (skipped)
-      - A line with space-separated counts whose sum gives the
-        total number of high-symmetry k-points
+      - A line whose first integer token is the number of
+        discontinuous high-symmetry k-point paths.  Any trailing
+        tokens on the same line (e.g. total kpoint count, the
+        isCartesian flag, an inline "!" comment) are positional
+        metadata that is not consumed here.
+      - A line whose first num_paths integer tokens give the
+        per-path vertex counts; their sum is the total number of
+        high-symmetry k-points.  Trailing tokens (in practice an
+        inline "!" comment) are again ignored.
       - One line per k-point, where the last token on each line
         is the k-point name (or "GAMMA" which is shortened to
-        "G" for display)
+        "G" for display).
 
     Args:
         dat_file: Path to the setup .dat file.
@@ -312,15 +318,21 @@ def read_kpoint_names(dat_file):
             if "SYBD_INPUT_DATA" in line:
                 break
 
-        # Extract the number of high symmetry kpoints from the
-        #   next two lines. The first line after the marker is
-        #   skipped (it is a header). The second line contains
-        #   space-separated integers whose sum is the total
-        #   number of high-symmetry k-points.
-        next(f)  # Skip one line.
-        count_line = next(f)
+        # First post-marker line: the number of discontinuous
+        #   high-symmetry k-point paths is the first integer token.
+        #   The remaining tokens (total kpoint count, isCartesian
+        #   flag, "!"-introduced comments) are positional metadata
+        #   that the Fortran reader picks up via readData but that
+        #   we do not need on this side.
+        paths_line = next(f)
+        num_paths = int(paths_line.split()[0])
+
+        # Second post-marker line: the per-path vertex counts.
+        #   Read only the first num_paths integer tokens; everything
+        #   after them (typically an inline "!" comment) is skipped.
+        counts_line = next(f)
         num_high_sym_kp = sum(
-            int(x) for x in count_line.split()
+            int(x) for x in counts_line.split()[:num_paths]
         )
 
         # Read one line per high-symmetry k-point to get the
@@ -396,11 +408,18 @@ def read_kpoint_positions(out_file, k_names):
         current = 0  # Which high symmetry kpoint we seek.
         for line in f:
             tokens = line.strip().split()
-            if len(tokens) >= 3:
-                # If we found the matching index number, then
-                #   replace the index with the position value.
-                if tokens[1] == k_values[current]:
-                    k_values[current] = tokens[2]
+            if len(tokens) >= 2:
+                # Each row of the kpoint table is laid out as
+                #   <kpoint_index> <arc_position> <kx> <ky> <kz>
+                #   <weight>. With str.split() the index sits at
+                #   tokens[0] and the arc position (the value we
+                #   want to keep) sits at tokens[1]. The original
+                #   Perl used split(/\s+/, ...) which left an empty
+                #   leading element, so its tempArray[1]/[2] map to
+                #   Python's tokens[0]/[1] -- don't reintroduce the
+                #   off-by-one when porting other readers.
+                if tokens[0] == k_values[current]:
+                    k_values[current] = tokens[1]
                     current += 1
                     if current == len(k_values):
                         break
@@ -465,8 +484,11 @@ def merge_path_breaks(k_values, k_names):
 def write_plot_file(raw_file, plot_file, k_values, k_names):
     """Read the SYBD .raw file and write the annotated .plot file.
 
-    The .raw file begins with a header line containing:
-      <something>  <num_kpoints>  <num_states>  ...
+    The .raw file begins with a header line containing two
+    whitespace-separated integer tokens: the number of k-points
+    along the band path and the number of eigenvalue states per
+    k-point. The Fortran writer indents these with leading
+    whitespace, e.g. "         297          25".
 
     The eigenvalue data for each k-point may span multiple lines.
     Each k-point starts with one line, followed by additional
@@ -489,11 +511,15 @@ def write_plot_file(raw_file, plot_file, k_values, k_names):
 
     with open(raw_file, "r") as raw_f:
         # Read the header line to get the number of k-points
-        #   and the number of states.
+        #   and the number of states. The header has exactly two
+        #   whitespace-separated integer tokens; str.split() with
+        #   no arguments discards any leading whitespace from the
+        #   Fortran-formatted output, so the kpoint count is at
+        #   index 0 and the state count is at index 1.
         header = raw_f.readline()
         tokens = header.split()
-        num_kpoints = int(tokens[1])
-        num_states_orig = int(tokens[2])
+        num_kpoints = int(tokens[0])
+        num_states_orig = int(tokens[1])
 
         # The eigenvalues are written 11 per line. If the total
         #   number of states is not a multiple of 11, we round
