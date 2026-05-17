@@ -172,7 +172,9 @@ the current design:
   (0=Gaussian, 1=LAT) (kpoints.f90)
 - `readKPoints`: reads the k-point input file; branches
   on `kPointStyleCode`. For style codes 1 and 2, reads
-  point group operations into `abcPointOps`
+  point group operations into `xyzPointOps` and
+  `xyzFracTrans` (Cartesian xyz convention emitted by
+  makeinput.py's `_to_cartesian_ops`; see DESIGN 2.7)
   (kpoints.f90)
 - `computeAxialKPoints`: converts `minKPointDensity`
   into `numAxialKPoints(:)` using `recipMag` and
@@ -182,10 +184,41 @@ the current design:
   `applySymmetry=1`, folds the mesh to the IBZ using
   `abcRecipPointOps` and saves `fullKPToIBZKPMap`
   (kpoints.f90)
-- `computeRecipPointOps`: converts the abc point group
-  ops from the kpoint file into reciprocal-space abc
-  ops using `realVectors` and `recipVectors` from
-  O_Lattice (kpoints.f90)
+- `computeRecipPointOps`: conjugates the Cartesian xyz
+  point group ops in `xyzPointOps` into the basis of
+  whichever reciprocal lattice O_Lattice currently
+  holds, using `realVectors` and `recipVectors`; output
+  is `abcRecipPointOps` (kpoints.f90).  See DESIGN 2.7
+  for the basis-invariance design.
+- `computeRealPointOps`: real-space sibling of
+  `computeRecipPointOps`. Conjugates `xyzPointOps`
+  and `xyzFracTrans` into the basis of the loaded real
+  lattice, producing `abcRealPointOps` and
+  `abcRealFracTrans` for `buildAtomPerm` (kpoints.f90,
+  DESIGN 2.7)
+- `xyzPointOps`, `xyzFracTrans`: on-disk Cartesian xyz
+  form of the symmetry operations read from the kp file
+  (kpoints.f90).  Basis-invariant intermediate between
+  makeinput.py's producer-side conversion and imago's
+  consumer-side conjugation.
+- `abcRealPointOps`, `abcRealFracTrans`: symmetry
+  operations expressed in the basis of the real lattice
+  currently in O_Lattice (full conventional cell or
+  primitive reduction).  Consumed by `buildAtomPerm`
+  (kpoints.f90 / atomicSites.f90, DESIGN 2.7)
+- `_to_cartesian_ops` (makeinput.py): producer-side
+  helper that converts spaceDB conventional-cell-abc
+  operations into the Cartesian xyz form written into
+  the kp file. Uses `sc.full_cell_real_lattice`, the
+  conventional-cell snapshot taken at the top of
+  `apply_space_group()` (structure_control.py).
+- `sc.full_cell_real_lattice` (structure_control.py):
+  snapshot of the conventional lattice captured before
+  `apply_space_group()` may overwrite `sc.real_lattice`
+  with a primitive reduction; sibling of
+  `full_cell_mag` / `full_cell_angle`; same 1-indexed
+  layout as `real_lattice`; used by `_to_cartesian_ops`
+  (DESIGN 2.7)
 - `generateTetrahedra`: tiles the full uniform mesh
   with tetrahedra (6 per sub-cube) using
   `getIndexFromIndices` for periodic wrapping.

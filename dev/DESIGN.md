@@ -913,11 +913,180 @@ passed in from O_KPoints as arguments.
   makeinput.py no longer produces style code 0 files;
   mesh mode (`-kp`) now writes style code 1.
 
+**SYBD path bypasses atomPerm.**  Symmetric band structure
+(`-sybd`, `-pscfsybd`) replaces the loaded k-point set with
+a 1-D path between user-specified high-symmetry vertices.
+On that path every k-point is its own end product -- band-
+structure output is per-k-point eigenvalues, and the planned
+partial decomposition (future work) is a direct per-atom
+projection at the very k-point being plotted, with no star
+to unfold.  There are simply no shell-summed quantities for
+atomPerm to reconstruct, so the table is not needed.
+
+This matters in practice because the SYBD branch of
+`initializeKPoints` calls `makePathKPoints` and skips all of
+the point-ops setup that the style-code 0/1/2 branches do
+(`numPointOps` assignment, `xyzPointOps`/`xyzFracTrans`
+allocation, `computeRealPointOps`).  `abcRealPointOps` and
+`abcRealFracTrans` therefore stay unallocated.
+Consequently, the calls to `buildAtomPerm` and
+`buildInvAtomPerm` in `setupSCF` (SCF path) and `intgPSCF`
+(PSCF path) are guarded with `if (doSYBD_SCF /= 1)` and
+`if (doSYBD_PSCF /= 1)` respectively.
+
+The downstream consumers of `atomPerm` and `invAtomPerm`
+are `computeBond` (effective charge / bond order star
+distribution) and the LAT PDOS channel-permutation step
+in `dos.F90`.  Both are themselves gated by their own
+`doBond_*` / `doDOS_*` flags, so a pure `-sybd` (or
+`-pscfsybd`) run with no decomposition flag never reaches
+them.  Combining `-sybd` with `-bond` or `-dos` is not
+physically meaningful (you cannot integrate Q* or PDOS
+over a 1-D path) and is left as an unguarded combination
+for now -- if it occurs, those consumers will trip on the
+unallocated `atomPerm` and fail loudly rather than emit
+silent wrong answers.  Adding an explicit early refusal
+for that combination is a worthwhile follow-up.
+
 Note: `kPointWeight` is irrelevant for LAT integration --
 the DOS contribution is determined entirely by the
 analytic formula over each tetrahedron. The weight array
 still matters for SCF electron counting (charge density
 integration).
+
+
+### 2.7 Cartesian-Form On-Disk Symmetry Operations
+
+`buildAtomPerm` (PSEUDOCODE 4) consumes point group
+operations to permute atoms across the star of each IBZ
+k-point.  The operations must act on atom positions in the
+basis of the lattice currently held in `O_Lattice` --
+otherwise the matrix-vector product mixes inconsistent
+quantities and no image atom matches.  The skeleton's
+`full` / `prim` flag controls which lattice ends up in
+`O_Lattice`: the conventional cell in `full` mode, a
+primitive reduction in `prim` mode.  This subsection pins
+down the basis convention used to thread operations from
+the space-group database through the kp file and into the
+runtime so the result is correct for both modes and for
+every cell type (cubic, hexagonal, monoclinic, ...) the
+code supports.
+
+**The basis-mismatch issue.** Operations in
+`share/spaceDB/<sg>` are stored in the natural axes of
+the conventional crystallographic setting: rotation matrix
+entries act on conventional-cell-abc fractional vectors
+and per-operation translation vectors are conventional-
+cell fractions.  When `apply_space_group()` reduces a
+centered conventional cell to its primitive form, the
+in-memory lattice in `O_Lattice` is overwritten and is no
+longer the cell those operations were written for.  Using
+the operations as-is against primitive-cell atom positions
+mixes bases and produces wrong images.  The same mismatch
+arises in `full` mode for non-orthogonal-conventional cells
+(hex, trigonal-hex setting, monoclinic, triclinic), where
+the conventional-abc form differs from a Cartesian xyz
+form even when the loaded lattice is the conventional cell
+itself.
+
+**Resolution: producer-side conversion to Cartesian xyz.**
+At kp-file write time, `makeinput.py` converts each
+spaceDB operation from its conventional-cell-abc form into
+a basis-invariant Cartesian xyz form via the standard
+similarity transform
+
+```
+R_xyz = M_conv * R_conv_abc * M_conv^{-1}
+t_xyz = M_conv * t_conv_abc
+```
+
+where `M_conv` is the matrix whose columns are the
+conventional lattice vectors in xyz Bohr.  `M_conv` comes
+from a snapshot of the lattice taken inside
+`apply_space_group()` before the primitive reduction may
+overwrite it, threaded to the kp-file writer via
+`sc.full_cell_real_lattice`.  Both identities hold for any
+non-singular lattice; no cell-shape, centering, or
+symmetry assumption is built into the math.  Cubic systems
+with axes parallel to xyz produce numerically identical
+output to the old conv-abc form (the conjugation is a
+no-op there), so existing cubic full-cell kp files
+round-trip bit-identically through this stage.
+
+**Consumer-side conjugation in imago.**  At runtime, imago
+reads Cartesian operations into `xyzPointOps` and
+`xyzFracTrans` and conjugates them into the basis of the
+real lattice it currently holds:
+
+```
+R_real_abc = realVectors^{-1} * R_xyz * realVectors
+           = invRealVectors^T * R_xyz * realVectors
+
+t_real_abc = realVectors^{-1} * t_xyz
+           = invRealVectors^T * t_xyz
+```
+
+The output `abcRealPointOps` and `abcRealFracTrans` live
+in the basis of whichever cell ended up in `O_Lattice`,
+which is exactly the basis `buildAtomPerm` uses for atom
+positions.  The matching reciprocal-space transform
+already lives in `computeRecipPointOps` (the same Cartesian
+input feeds both routines), so the IBZ machinery on the
+k-folding side is unchanged: kpoints fold via
+`abcRecipPointOps`, atoms permute via `abcRealPointOps`,
+and both descend from the same Cartesian on-disk
+operation list with no full/prim branching.
+
+**Why Cartesian xyz on disk, rather than primitive-abc.**
+The Cartesian form is the universal intermediate: it
+depends on neither the conventional cell nor the loaded
+cell, only on a chosen orientation of xyz axes (already
+fixed by the lattice definitions in the skl).  Emitting
+primitive-abc directly would tie the kp file to the
+specific primitive lattice the producer happened to
+choose, breaking re-use of a kp file if the lattice is
+later perturbed; emitting conv-abc keeps the file
+producer-friendly but requires the consumer to know the
+conventional cell, which it does not after primitive
+reduction.  Cartesian splits the responsibility cleanly:
+the producer knows the conventional cell and converts
+conv-abc to Cartesian; the consumer knows its loaded
+cell and converts Cartesian to its working basis.
+
+**Generality.**  This design works for every cell type
+imago describes.  Old uolcao had a latent version of the
+same bug for non-cubic systems: `makeKPoints` used the
+analogous Cartesian-assumed conjugation
+(`computeABCRecipPointOps`) but consumed conv-abc input
+that was only equivalent to Cartesian for cubic-aligned
+conventional axes.  The pre-`buildAtomPerm` pipeline
+never propagated the bug because the SCF binary received
+pre-folded explicit k-points and never saw a rotation
+matrix, so the wrongness silently cancelled.  The imago
+design carries operations all the way to the SCF binary
+and uses them for both reciprocal-space folding and real-
+space atom permutation, so the producer-side conversion
+to a basis-invariant form is necessary for correctness
+across cell types.
+
+**Diagnostic history.** The issue surfaced when
+diamond/prim (SG 227 Fd-3m reduced to its primitive
+rhombohedral cell) stopped at `buildAtomPerm: no atom
+match found` after the new IBZ-correctness machinery
+landed.  The Fd-3m mirror perpendicular to cubic x,
+applied directly to the primitive-cell atom positions,
+sent atom 2 from (0.25, 0.25, 0.25) to (0.25, -0.25,
+-0.25), wrapped to (0.25, 0.75, 0.75) -- a vacancy.
+The non-symmorphic translation (0.25, 0.25, 0.25)
+happens to round-trip through the new transform with
+the same numerical value (the body-diagonal-of-conv-
+cube coincidence shared with the primitive-cell body
+diagonal), but rotations like the cubic-x mirror require
+the actual conjugation to produce the right primitive-
+basis matrix.  After the fix, the same operation maps
+atom 2 to itself (a self-image fixed point of the
+mirror), and diamond/prim runs cleanly through
+`buildAtomPerm` and the rest of the SCF.
 
 ---
 

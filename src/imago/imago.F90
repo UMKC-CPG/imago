@@ -115,7 +115,8 @@ subroutine setupSCF
          & atomDMOverlap_aid, atomMMOverlap_aid, atomKOverlap_aid, &
          & atomKOverlapPlusG_aid, atomPotTermOL_aid, &
          & numComponents, fullCVDims, packedVVDims
-      use O_CommandLine, only: doDIMO_SCF, doOPTC_SCF, doField_SCF, doMTOP_SCF
+      use O_CommandLine, only: doDIMO_SCF, doOPTC_SCF, doField_SCF, &
+         & doMTOP_SCF, doSYBD_SCF
    use O_Input, only: parseInput, numStates
    use O_Lattice, only: initializeLattice, initializeFindVec, &
          & cleanUpLattice, recipVectors
@@ -205,18 +206,31 @@ subroutine setupSCF
    call initializeKPoints (1) ! inSCF == 1
 
 
-   ! Build the atom permutation table for IBZ
-   !   unfolding of effective charge, bond order, and
-   !   PDOS. For style codes 1 and 2 this maps atoms
-   !   under the crystal point group; for style code 0
-   !   it builds a trivial identity table (each atom
-   !   maps to itself under the single identity op).
-   call buildAtomPerm
+   ! Build the atom permutation table for IBZ unfolding of
+   !   effective charge, bond order, and PDOS. For style codes
+   !   1 and 2 this maps atoms under the crystal point group;
+   !   for style code 0 it builds a trivial identity table
+   !   (each atom maps to itself under the single identity op).
+   !
+   ! Skipped on the SYBD path. Symmetric band structure is a
+   !   1-D path of k-points where each point is its own end
+   !   product (per-band eigenvalues, and -- when partial
+   !   decomposition is added later -- a direct per-atom
+   !   projection at that very k-point). There are no shell-
+   !   summed quantities to reconstruct by unfolding an IBZ
+   !   star, so atomPerm is genuinely unnecessary. The point
+   !   ops machinery (computeRealPointOps, abcRealPointOps,
+   !   abcRealFracTrans) is not initialized on this path
+   !   either, so calling buildAtomPerm here would also be a
+   !   runtime error. See DESIGN 2.6.
+   if (doSYBD_SCF /= 1) then
+      call buildAtomPerm
 
-   ! Build the inverse atom permutation table for LAT
-   !   PDOS channel permutation (DESIGN 1.4). Must
-   !   follow buildAtomPerm.
-   call buildInvAtomPerm
+      ! Build the inverse atom permutation table for LAT
+      !   PDOS channel permutation (DESIGN 1.4). Must
+      !   follow buildAtomPerm.
+      call buildInvAtomPerm
+   endif
 
 
    ! Renormalize the basis functions
@@ -607,18 +621,31 @@ subroutine intgPSCF
    call initializeKPoints(0) ! inSCF == 0
 
 
-   ! Build the atom permutation table for IBZ
-   !   unfolding of effective charge, bond order, and
-   !   PDOS. For style codes 1 and 2 this maps atoms
-   !   under the crystal point group; for style code 0
-   !   it builds a trivial identity table (each atom
-   !   maps to itself under the single identity op).
-   call buildAtomPerm
+   ! Build the atom permutation table for IBZ unfolding of
+   !   effective charge, bond order, and PDOS. For style codes
+   !   1 and 2 this maps atoms under the crystal point group;
+   !   for style code 0 it builds a trivial identity table
+   !   (each atom maps to itself under the single identity op).
+   !
+   ! Skipped on the SYBD path. Symmetric band structure is a
+   !   1-D path of k-points where each point is its own end
+   !   product (per-band eigenvalues, and -- when partial
+   !   decomposition is added later -- a direct per-atom
+   !   projection at that very k-point). There are no shell-
+   !   summed quantities to reconstruct by unfolding an IBZ
+   !   star, so atomPerm is genuinely unnecessary. The point
+   !   ops machinery (computeRealPointOps, abcRealPointOps,
+   !   abcRealFracTrans) is not initialized on this path
+   !   either, so calling buildAtomPerm here would also be a
+   !   runtime error. See DESIGN 2.6.
+   if (doSYBD_PSCF /= 1) then
+      call buildAtomPerm
 
-   ! Build the inverse atom permutation table for LAT
-   !   PDOS channel permutation (DESIGN 1.4). Must
-   !   follow buildAtomPerm.
-   call buildInvAtomPerm
+      ! Build the inverse atom permutation table for LAT
+      !   PDOS channel permutation (DESIGN 1.4). Must
+      !   follow buildAtomPerm.
+      call buildInvAtomPerm
+   endif
 
 
    ! Renormalize the basis functions.

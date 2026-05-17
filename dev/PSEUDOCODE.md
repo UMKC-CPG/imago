@@ -648,7 +648,7 @@ function bloechlCornerWeights(E, eps):
 
 ---
 
-## 4. Build Atom Permutation Table (DESIGN 2.4)
+## 4. Build Atom Permutation Table (DESIGN 2.4, 2.7)
 
 The atom permutation table records, for each point group
 operation R and each atom A, which atom B = R(A) the
@@ -656,23 +656,32 @@ operation maps A to.  This is the single piece of
 infrastructure needed for correct IBZ unfolding of all
 shell-summed quantities (Q*, bond order, PDOS modes 0-2).
 
-The algorithm works in fractional (abc) coordinates
-because the point group operations are stored in that
-basis.  Cartesian atom positions are converted to
-fractional using invRealVectors (= recipVectors / 2*pi).
+The algorithm works in fractional (abc) coordinates of
+the loaded real lattice (whichever cell ended up in
+O_Lattice -- full conventional or primitive reduction).
+The rotation matrices and per-operation translations
+used here are abcRealPointOps and abcRealFracTrans --
+the loaded-cell-abc forms produced by computeRealPointOps
+(section 4b below) from the Cartesian xyz operations
+that arrive on disk.  Atom Cartesian positions are
+converted to fractional using invRealVectors (=
+recipVectors / 2*pi) of the same loaded lattice.
 
 ```
-function buildAtomPerm(numPointOps, abcPointOps,
-                       numAtomSites, atomSites,
-                       invRealVectors):
+function buildAtomPerm(numPointOps, abcRealPointOps,
+                       abcRealFracTrans, numAtomSites,
+                       atomSites, invRealVectors):
     # Returns atomPerm(numPointOps, numAtomSites)
     #   where atomPerm(R, A) = B means operation R
-    #   maps atom A to atom B.
+    #   maps atom A to atom B.  Both R and atom
+    #   positions are in the loaded real lattice abc
+    #   basis after computeRealPointOps has run.
 
     allocate atomPerm(numPointOps, numAtomSites)
 
     # Convert all atom positions from Cartesian (xyz)
-    # to fractional (abc) coordinates.
+    # to fractional (abc) coordinates of the loaded
+    # real lattice.
     allocate abcAtomPos(3, numAtomSites)
     for A = 1 to numAtomSites:
         for i = 1 to 3:
@@ -680,17 +689,18 @@ function buildAtomPerm(numPointOps, abcPointOps,
                 sum(invRealVectors(i,:)
                     * atomSites(A)%cartPos(:))
 
-    # For each operation and atom, apply R to the
-    # fractional position and find the matching atom.
+    # For each operation and atom, apply {R|t} in the
+    # loaded-cell abc basis and find the matching atom.
     for R = 1 to numPointOps:
         for A = 1 to numAtomSites:
 
-            # Apply the point group rotation to atom
-            # A's fractional position.
+            # Apply the rotation + translation in the
+            # loaded-cell abc basis.
             for i = 1 to 3:
                 rotPos(i) =
-                    sum(abcPointOps(i,:,R)
+                    sum(abcRealPointOps(i,:,R)
                         * abcAtomPos(:,A))
+                    + abcRealFracTrans(i, R)
 
             # Wrap the rotated position into [0,1).
             for i = 1 to 3:
@@ -752,6 +762,143 @@ function buildInvAtomPerm(numPointOps,
 
     return invAtomPerm
 ```
+
+---
+
+## 4b. Cartesian On-Disk Operations and Conjugation (DESIGN 2.7)
+
+Symmetry operations cross two boundaries on the way from
+the space-group database to `buildAtomPerm`: a producer-
+side step in `makeinput.py` that converts each operation
+from its conventional-cell-abc form (the spaceDB
+convention) into a basis-invariant Cartesian xyz form, and
+a consumer-side step in imago (Fortran) that conjugates
+the Cartesian operations into the basis of the lattice
+currently loaded in O_Lattice (full conventional cell or
+primitive reduction, depending on the skeleton's `full`
+/ `prim` flag).  Both steps live behind `realVectors`-
+type lattice matrices and require no special-casing by
+cell type, centering, or full-vs-prim mode.  See DESIGN
+2.7 for the motivation and full background.
+
+### 4b.1 Producer-Side Cartesian Conversion (makeinput.py)
+
+Run once per kp file, after `_extract_point_ops` returns
+the raw spaceDB matrices.  Reads
+`sc.full_cell_real_lattice` (snapshot of the conventional
+lattice captured at the top of `apply_space_group()`).
+
+```
+function to_cartesian_ops(point_ops, frac_trans,
+                          conv_lattice):
+    # Pack the conventional lattice into a 3x3 matrix
+    # whose columns are the conventional lattice vectors
+    # in xyz, matching imago's realVectors convention.
+    M_conv     = [[conv(1,1), conv(2,1), conv(3,1)],
+                  [conv(1,2), conv(2,2), conv(3,2)],
+                  [conv(1,3), conv(2,3), conv(3,3)]]
+    M_conv_inv = inverse_3x3(M_conv)
+
+    allocate point_ops_xyz, frac_trans_xyz
+
+    for each (R_in, t_in) in (point_ops, frac_trans):
+
+        # The Python-side R_in is row-major over file
+        # lines; imago reads each file line as a column,
+        # so the on-disk layout is the transpose of the
+        # operator matrix.  Transpose in, conjugate in
+        # standard form, transpose back out so the
+        # round-trip through imago's read-as-column path
+        # is exact.
+        R_std = transpose_3x3(R_in)
+        R_xyz = M_conv * R_std * M_conv_inv
+        point_ops_xyz.append(transpose_3x3(R_xyz))
+
+        # Translations are plain vectors -- no transpose
+        # concern.  The conv-abc fraction becomes the
+        # Cartesian translation by multiplying by the
+        # conv-lattice matrix.
+        frac_trans_xyz.append(M_conv * t_in)
+
+    return (point_ops_xyz, frac_trans_xyz)
+```
+
+The output is written into the kp file in the existing
+3-rotation-lines + 1-translation-line format; only the
+numerical values change, not the layout.  For cubic
+systems with Cartesian-aligned conventional axes the
+output equals the input verbatim (the conjugation is a
+numerical no-op); for hex, monoclinic, etc. the output
+matrix entries take on irrational values that capture
+the true Cartesian rotation.
+
+### 4b.2 Consumer-Side Lattice Conjugation (imago Fortran)
+
+Run inside `initializeKPoints` once per kp-file load,
+right after `readKPoints` deposits the on-disk operations
+into `xyzPointOps` and `xyzFracTrans`.  Two siblings:
+
+```
+function computeRealPointOps(numPointOps, xyzPointOps,
+                             xyzFracTrans, realVectors,
+                             invRealVectors):
+    # Conjugate Cartesian operations into the basis of
+    # the loaded real lattice for use by buildAtomPerm.
+    #
+    #   R_real_abc = invRealVectors^T * R_xyz * realVectors
+    #   t_real_abc = invRealVectors^T * t_xyz
+    #
+    # invRealVectors^T equals realVectors^{-1} by the
+    # orthogonality identity realVectors^T * recipVectors
+    # = 2*pi*I, so the formula uses pre-computed O_Lattice
+    # matrices and never re-inverts at runtime.
+    allocate abcRealPointOps(3, 3, numPointOps)
+    allocate abcRealFracTrans(3, numPointOps)
+
+    for i = 1 to numPointOps:
+        abcRealPointOps(:,:,i) =
+            invRealVectors^T
+            * xyzPointOps(:,:,i)
+            * realVectors
+
+        abcRealFracTrans(:,i) =
+            invRealVectors^T * xyzFracTrans(:,i)
+
+    return (abcRealPointOps, abcRealFracTrans)
+```
+
+```
+function computeRecipPointOps(numPointOps, xyzPointOps,
+                              realVectors, recipVectors):
+    # Conjugate Cartesian operations into the basis of
+    # the loaded reciprocal lattice for use by
+    # initializeKPointMesh (IBZ folding).
+    #
+    #   R_recip_abc = realVectors^T * R_xyz * recipVectors
+    #                 / (2*pi)
+    #
+    # The same Cartesian xyz input feeds both this and
+    # computeRealPointOps so the two halves of the IBZ
+    # infrastructure stay consistent.
+    allocate abcRecipPointOps(3, 3, numPointOps)
+
+    for i = 1 to numPointOps:
+        abcRecipPointOps(:,:,i) =
+            realVectors^T
+            * xyzPointOps(:,:,i)
+            * recipVectors
+            / (2 * pi)
+
+    return abcRecipPointOps
+```
+
+Both routines run unconditionally in every style-code
+branch (style 0 sets up trivial identity operations as
+before; styles 1 and 2 read real symmetry from the kp
+file).  No branch on `full` vs. `prim` mode is needed --
+the conjugation uses whichever lattice O_Lattice
+currently holds and produces operations correct for that
+lattice.
 
 ---
 

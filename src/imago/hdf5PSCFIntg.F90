@@ -344,6 +344,10 @@ subroutine initPSCFIntegralHDF5 (pscf_fid, attribIntPSCF_dsid,&
       enddo
 
       do j = 1, 3
+         ! Enforce the plain name (no "real" or "imag").
+         write (currentName,fmt="(i7.7)") i
+         currentName = trim (currentName)
+
          call h5dcreate_f (atomDMxyzOL_PSCF_gid(j),currentName,&
                & H5T_NATIVE_DOUBLE,packedVVPSCF_dsid,&
                & atomDMOverlapPSCF_did(i,j),hdferr,packedVVPSCF_plid)
@@ -577,6 +581,10 @@ subroutine accessPSCFIntegralHDF5 (pscf_fid)
       enddo
 
       do j = 1, 3
+         ! Enforce the name (no "real" or "imag").
+         write (currentName,fmt="(i7.7)") i
+         currentName = trim (currentName)
+
          call h5dopen_f (atomDMxyzOL_PSCF_gid(j),currentName,&
                & atomDMOverlapPSCF_did(i,j),hdferr)
          if (hdferr /= 0) stop 'Failed to open DM overlap did PSCF'

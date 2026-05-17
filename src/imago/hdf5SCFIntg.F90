@@ -382,6 +382,7 @@ subroutine initSCFIntegralHDF5 (scf_fid, attribInt_dsid, attribIntDims)
       if (hdferr /= 0) stop 'Failed to create nuclear overlap did SCF'
 
       do j = 1, 3
+         ! Enforce the name (no "real" or "imag").
          write (currentName,fmt="(i7.7)") i
          currentName = trim (currentName)
 
@@ -666,6 +667,9 @@ subroutine accessSCFIntegralHDF5 (scf_fid)
       if (hdferr /= 0) stop 'Failed to open nuclear overlap did SCF'
 
       do j = 1, 3
+         write (currentName,fmt="(i7.7)") i
+         currentName = trim (currentName)
+
          call h5dopen_f (atomDMxyzOL_gid(j),currentName,&
                & atomDMOverlap_did(i,j),hdferr)
          if (hdferr /= 0) stop 'Failed to open DM overlap did SCF'

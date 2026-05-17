@@ -225,7 +225,24 @@ class StructureControl:
         real_lattice[abc_axis][xyz_axis]: both 1-indexed (1..3).
         real_lattice[1]=[None,ax,ay,az] (a vector), [2]=b, [3]=c.
         Index 0 of the outer list and index 0 of each inner list are None.
-        Lattice vectors in Angstroms.
+        Lattice vectors in Angstroms.  After apply_space_group() runs this
+        holds whichever cell was requested by the skeleton's ``full`` /
+        ``prim`` flag -- conventional cell if ``full``, primitive
+        reduction if ``prim``.
+    full_cell_real_lattice : list of list
+        Snapshot of the conventional lattice taken inside
+        apply_space_group() immediately before the binary runs.  Same
+        1-indexed layout as real_lattice and same units (Angstroms).
+        This is the cell as it appears in the user's skeleton file and
+        as it was handed to the applySpaceGroup binary, regardless of
+        whether the caller subsequently requested a primitive reduction.
+        Downstream code (notably makeinput.py's k-point-file writer)
+        uses it to convert space-group operations from their on-disk
+        conventional-cell-abc basis into the basis-invariant Cartesian
+        xyz form that imago consumes -- a conversion that requires
+        knowing the conventional cell even after real_lattice has been
+        overwritten with a primitive one.  Sibling of full_cell_mag /
+        full_cell_angle / full_cell_angle_deg below.
     real_lattice_inv : list of list
         Inverse of the real lattice matrix.  Same 1-indexed layout.
     recip_lattice : list of list
@@ -552,6 +569,17 @@ class StructureControl:
         self.real_lattice[0]     = None  # index 0 unused
         self.real_lattice_inv[0] = None
         self.recip_lattice[0]    = None
+
+        # Conventional-cell snapshot of the real-space lattice.  Filled
+        # by apply_space_group() at function entry, before applySpaceGroup
+        # may overwrite real_lattice with a primitive reduction.  Same
+        # 1-indexed layout and units as real_lattice.  Sibling of
+        # full_cell_mag / full_cell_angle / full_cell_angle_deg below;
+        # see the class docstring for the downstream consumers.
+        self.full_cell_real_lattice = [
+            [None, 0.0, 0.0, 0.0] for _ in range(4)
+        ]
+        self.full_cell_real_lattice[0] = None
 
         # 1-indexed lattice magnitudes and angles.
         # mag[1]=|a|, mag[2]=|b|, mag[3]=|c|;  index 0 is None.
@@ -4289,7 +4317,33 @@ class StructureControl:
         Note: element_list and species_list are intentionally left untouched —
         space group operations never change which elements or species are
         present, only how many atoms of each there are.
+
+        Conventional-lattice snapshot.  This routine captures
+        self.full_cell_real_lattice from self.real_lattice as its very
+        first step, before any other state changes.  The captured copy is
+        the conventional cell exactly as it arrived from the skeleton,
+        and it survives the primitive reduction that may overwrite
+        self.real_lattice when do_full_cell is False.  Downstream callers
+        (notably makeinput.py's k-point-file writer) consult the snapshot
+        to convert space-group operations into a basis-invariant
+        Cartesian form even after the primitive reduction has happened.
         """
+        # Snapshot the conventional lattice before any other work in
+        #   this routine, including before the sginput build that
+        #   references self.real_lattice in place.  Doing the snapshot
+        #   here -- rather than at skeleton-read time -- guarantees that
+        #   the snapshot reflects exactly the lattice that
+        #   applySpaceGroup is about to receive, regardless of any
+        #   earlier transformations.  We make a deep copy because the
+        #   per-axis entries are inner lists; a shallow assignment
+        #   would later be silently mutated by the sgoutput parser
+        #   below.
+        for abc_axis in range(1, 4):
+            for xyz_axis in range(1, 4):
+                self.full_cell_real_lattice[abc_axis][xyz_axis] = (
+                    self.real_lattice[abc_axis][xyz_axis]
+                )
+
         # Use the space group ID (name or number) to open the space group
         # operations file from the space group database.
         sg_path = os.path.join(self.space_group_db, self.space_group)

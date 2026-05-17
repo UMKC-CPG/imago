@@ -239,6 +239,107 @@
   symmetry-equivalent atoms produce identical Q* and
   bond order -- confirmed correct
 
+#### Phase F follow-up -- Basis-invariant on-disk operations (DESIGN 2.7)
+
+Surfaced when diamond/prim (Fd-3m reduced to its
+primitive rhombohedral cell) tripped
+`buildAtomPerm: no atom match found`.  Root cause:
+spaceDB operations were stored in conventional-cell-abc
+form, but the loaded lattice after primitive reduction
+was the primitive cell, so the matrix-vector product
+inside buildAtomPerm mixed two bases.  Same latent issue
+applied to every non-cubic system in either full or
+prim mode.  Resolution: move the basis change to the
+kp-file boundary -- makeinput.py emits Cartesian xyz
+operations; imago conjugates into whatever cell ended
+up loaded.  See DESIGN 2.7 + PSEUDOCODE 4b.
+
+- [x] C31a. Add `full_cell_real_lattice` to
+  StructureControl: declared in `__init__` next to
+  `full_cell_mag` and friends, documented in the class
+  docstring's "Lattice parameters" section, snapshotted
+  at the top of `apply_space_group()` before any other
+  state changes, and propagated through the existing
+  Angstrom-to-Bohr conversion in `_convert_a_to_au` so
+  it stays in sync with `real_lattice` units
+  (structure_control.py, makeinput.py)
+- [x] C31b. Add `_to_cartesian_ops` helper in
+  makeinput.py to convert spaceDB operations (rotations
+  and translations) from conventional-cell-abc to
+  Cartesian xyz via the standard similarity transform.
+  Wired into both density-mode and mesh-mode call sites
+  in `_make_kp` between `_extract_point_ops` and the
+  kp-file writer.  Includes plain-Python 3x3 helpers
+  (`_matmul_3x3`, `_matvec_3x3`, `_transpose_3x3`,
+  `_inv_3x3`) -- no numpy dependency
+  (PSEUDOCODE 4b.1, DESIGN 2.7)
+- [x] C31c. Add `computeRealPointOps` to kpoints.f90 as
+  real-space sibling of `computeRecipPointOps`.  Emits
+  `abcRealPointOps` and `abcRealFracTrans` in the
+  basis of the lattice currently in O_Lattice.  Called
+  unconditionally from every style-code branch of
+  `initializeKPoints` so consumers can stay branch-free
+  (PSEUDOCODE 4b.2, DESIGN 2.7)
+- [x] C31d. Rename `abcPointOps` -> `xyzPointOps` and
+  `abcFracTrans` -> `xyzFracTrans` across kpoints.f90
+  to reflect the new on-disk Cartesian convention.
+  Tightened docstrings on both compute siblings and on
+  the readKPoints style-1 / style-2 branches.
+- [x] C31e. Switch `buildAtomPerm` to consume
+  `abcRealPointOps` / `abcRealFracTrans` instead of
+  the raw `xyzPointOps` / `xyzFracTrans`.  Operations
+  and atom positions now agree on basis (whichever cell
+  ended up loaded) and the matrix-vector product is
+  meaningful (atomicSites.f90)
+- [x] C31f. Validate: diamond/prim (227_a / prim) runs
+  through buildAtomPerm and completes SCF.  Confirmed
+  by user 2026-05-13.
+
+#### Phase F follow-up -- SYBD path bypasses atomPerm (DESIGN 2.6)
+
+Surfaced when diamond/prim was rerun with `-pscfsybd`
+and crashed at atomicSites.f90:357 with
+`Array bound mismatch for dimension 1 of array
+'abcatompos' (3/1)`.  Root cause: the SYBD branch of
+`initializeKPoints` calls `makePathKPoints` and skips
+all of the point-ops setup (numPointOps assignment,
+xyzPointOps/xyzFracTrans allocation,
+computeRealPointOps), leaving `abcRealPointOps` and
+`abcRealFracTrans` unallocated.  But `setupSCF` and
+`intgPSCF` then called `buildAtomPerm` unconditionally
+-- a Phase F wiring gap from C28.  Resolution: skip
+`buildAtomPerm` / `buildInvAtomPerm` under SYBD.  Band
+structure is per-k eigenvalues along a 1-D path; no
+shell-summed quantities to unfold; the future partial-
+decomposition path is direct (per-atom projection at
+the very k-point being plotted) and will not need
+atomPerm either.  See DESIGN 2.6.
+
+- [x] C31g. Guard `buildAtomPerm` and `buildInvAtomPerm`
+  in setupSCF with `if (doSYBD_SCF /= 1)`, and the
+  matching pair in intgPSCF with `if (doSYBD_PSCF /= 1)`.
+  Added `doSYBD_SCF` to the `O_CommandLine` use clause
+  in setupSCF (already imported in intgPSCF).  Comment
+  blocks at both call sites explain why SYBD does not
+  need the table (imago.F90).
+- [x] C31h. Document the SYBD-path bypass in DESIGN 2.6
+  alongside the existing style-code-0 warning, including
+  the consumer audit (computeBond / LAT-PDOS channel
+  permutation are both already gated by `doBond_*` /
+  `doDOS_*`) and the failure mode for the unsupported
+  `-sybd + -bond` or `-sybd + -dos` combinations.
+- [ ] C31i. Validate: rerun diamond/prim with
+  `-pscfsybd` and confirm it completes through
+  `bandPSCF` and `printSYBD` (job at
+  jobs/c/diamond/prim).
+- [ ] C31j. (Follow-up, optional) Add an explicit early
+  refusal in `Imago` when `doSYBD_*` is combined with
+  `doBond_*` or `doDOS_*`, so the user gets a clear
+  message instead of an unallocated-`atomPerm` crash
+  downstream.  Defer until a real user actually hits
+  that combination; current behavior already fails
+  loudly rather than silently producing wrong answers.
+
 ### Phase G -- UFF bond parameter database (DESIGN 4)
 
 - [x] C32. Create bond_parameters.dat with UFF per-element

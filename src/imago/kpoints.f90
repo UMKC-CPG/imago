@@ -86,24 +86,56 @@ module O_KPoints
          !   real space superlattice vector.
    character*1, allocatable, dimension (:,:) :: highSymKPChar ! The characters
          !   that identify each point on the high symmetry kpoint paths.
-   integer :: numPointOps ! Number of point group operations for IBZ symmetry
-         !   reduction. Read from the kpoint input file for style codes 1 and
-         !   2. These are the rotational parts of the space group operations
-         !   (translations stripped) in fractional (abc) coordinates.
-   real (kind=double), allocatable, dimension (:,:,:) :: abcPointOps
-         !   The 3x3 rotation matrices for each point group operation, stored
-         !   in fractional (abc) coordinates. Dimensions: (3,3,numPointOps).
-   real (kind=double), allocatable, dimension (:,:) :: abcFracTrans
-         !   The fractional translation vector for each point group operation,
-         !   stored in fractional (abc) coordinates. Dims: (3, numPointOps). For
-         !   symmorphic space groups all entries are zero; for non-symmorphic
-         !   groups (e.g. Fd-3m) some operations carry non-zero translations
-         !   (screw axes, glide planes). Used by buildAtomPerm to compute the
-         !   correct real-space atom mapping: r_B = R * r_A + t.
+   integer :: numPointOps ! Number of point group operations for IBZ
+         !   symmetry reduction. Read from the kpoint input file for style
+         !   codes 1 and 2. These are the rotational parts of the space
+         !   group operations (translations stripped).
+   real (kind=double), allocatable, dimension (:,:,:) :: xyzPointOps
+         !   The 3x3 rotation matrices for each point group operation,
+         !   stored in Cartesian xyz form -- the basis-invariant
+         !   representation produced by makeinput.py's _to_cartesian_ops at
+         !   kp-file write time. Storing them in xyz lets us conjugate them
+         !   into either the real-space abc basis (computeRealPointOps,
+         !   consumed by buildAtomPerm) or the reciprocal-space abc basis
+         !   (computeRecipPointOps, consumed by IBZ folding) without ever
+         !   needing the conventional cell information they originally
+         !   came from. Dimensions: (3,3,numPointOps).
+   real (kind=double), allocatable, dimension (:,:) :: xyzFracTrans
+         !   The translation vector for each point group operation, in
+         !   Cartesian xyz (Bohr) -- the basis-invariant form produced by
+         !   makeinput.py at kp-file write time, matching the convention
+         !   of xyzPointOps above. For symmorphic space groups all entries
+         !   are zero; for non-symmorphic groups (e.g. Fd-3m) some
+         !   operations carry non-zero translations (screw axes, glide
+         !   planes). Conjugated into the loaded real lattice's abc basis
+         !   by computeRealPointOps and consumed by buildAtomPerm to form
+         !   the real-space atom mapping r_B = R * r_A + t.
+         !   Dimensions: (3, numPointOps).
    real (kind=double), allocatable, dimension (:,:,:) :: abcRecipPointOps
          !   The point group operations converted to reciprocal-space abc
          !   coordinates using the real and reciprocal lattice vectors.
          !   Computed by computeRecipPointOps. Dims: (3,3,numPointOps).
+   real (kind=double), allocatable, dimension (:,:,:) :: abcRealPointOps
+         !   The point group operations transformed into the basis of the
+         !   real-space lattice currently loaded in O_Lattice. That
+         !   lattice may be the full conventional cell or a primitive
+         !   reduction of it -- whichever the skeleton's `full`/`prim`
+         !   flag and applySpaceGroup produced. Computed by
+         !   computeRealPointOps. This is the real-space sibling of
+         !   abcRecipPointOps: rotations stored here act on atom
+         !   positions expressed in fractional coordinates of that real
+         !   lattice; rotations stored in abcRecipPointOps act on kpoints
+         !   expressed in fractional coordinates of the matching
+         !   reciprocal lattice. buildAtomPerm consumes these.
+         !   Dimensions: (3, 3, numPointOps).
+   real (kind=double), allocatable, dimension (:,:) :: abcRealFracTrans
+         !   Per-operation fractional translation vectors transformed
+         !   into the same real-space abc basis as abcRealPointOps -- the
+         !   basis of whichever cell O_Lattice currently holds, not
+         !   necessarily a primitive one. buildAtomPerm forms
+         !   r_B = R * r_A + t entirely in that basis, so both the
+         !   rotation matrix and the translation vector must already live
+         !   in it before the routine runs. Dimensions: (3, numPointOps).
    integer :: numFullMeshKP ! The total number of kpoints in the full uniform
          !   mesh BEFORE IBZ reduction. This is the product of
          !   numAxialKPoints(1) * numAxialKPoints(2) * numAxialKPoints(3). Only
@@ -215,39 +247,45 @@ subroutine readKPoints(readUnit, writeUnit)
             & len('KP_SHIFT_A_B_C'),&
             & 'KP_SHIFT_A_B_C')
 
-      ! Read the number of point group operations for IBZ reduction. These are
-      !   the rotational parts of the space group symmetry operations
-      !   (translations stripped) and are given in fractional (abc) coordinates.
+      ! Read the number of point group operations for IBZ reduction.
+      !   These are the rotational parts of the space group symmetry
+      !   operations (translations stripped), expressed in the
+      !   basis-invariant Cartesian xyz form that makeinput.py emits.
       call readData(readUnit,writeUnit,numPointOps,&
             & len('NUM_POINT_OPS'),'NUM_POINT_OPS')
 
-      ! Read the point group operation matrices and their fractional translation
-      !   vectors. Each operation is a 3x3 rotation matrix in abc coordinates
-      !   followed by a 3-component fractional translation. The file may contain
-      !   blank lines between operations for readability.
-      allocate (abcPointOps(3,3,numPointOps))
-      allocate (abcFracTrans(3,numPointOps))
+      ! Read the point group operation matrices and their per-operation
+      !   translation vectors. Each operation is a 3x3 Cartesian xyz
+      !   rotation matrix followed by a 3-component Cartesian xyz
+      !   translation (in Bohr). The file may contain blank lines
+      !   between operations for readability.
+      allocate (xyzPointOps(3,3,numPointOps))
+      allocate (xyzFracTrans(3,numPointOps))
       call readAndCheckLabel(readUnit,writeUnit,&
             & len('POINT_OPS'),'POINT_OPS')
       do i = 1, numPointOps
-         ! Skip any blank line before this operation. The first operation has
-         !   no blank line before it, but subsequent ones do.
+         ! Skip any blank line before this operation. The first
+         !   operation has no blank line before it, but subsequent
+         !   ones do.
          if (i > 1) read (readUnit,*)
-         ! Read each row of the matrix from one file line. Each line fills
-         !   one column of the Fortran array (column-major storage).
-         read (readUnit,*) abcPointOps(:,1,i)
-         read (readUnit,*) abcPointOps(:,2,i)
-         read (readUnit,*) abcPointOps(:,3,i)
-         ! Read the fractional translation for this operation. For symmorphic
-         !   groups all translations are zero; for non-symmorphic groups some
-         !   operations carry non-zero translations (screw axes, glide planes).
-         read (readUnit,*) abcFracTrans(:,i)
+         ! Read each row of the matrix from one file line. Each
+         !   line fills one column of the Fortran array (column-major
+         !   storage); see computeRealPointOps in this file for the
+         !   downstream consumer that depends on this convention.
+         read (readUnit,*) xyzPointOps(:,1,i)
+         read (readUnit,*) xyzPointOps(:,2,i)
+         read (readUnit,*) xyzPointOps(:,3,i)
+         ! Read the per-operation translation in Cartesian xyz Bohr.
+         !   Symmorphic groups carry all-zero translations; non-
+         !   symmorphic groups (e.g. Fd-3m) carry non-zero values
+         !   here (screw axes, glide planes).
+         read (readUnit,*) xyzFracTrans(:,i)
          do counter = 1, 3
             write (writeUnit,fmt="(3f14.8)") &
-                  & abcPointOps(:,counter,i)
+                  & xyzPointOps(:,counter,i)
          enddo
          write (writeUnit,fmt="(3f14.8)") &
-               & abcFracTrans(:,i)
+               & xyzFracTrans(:,i)
          write (writeUnit,*)
       enddo
       call flush (writeUnit)
@@ -272,17 +310,20 @@ subroutine readKPoints(readUnit, writeUnit)
             & len('KP_SHIFT_A_B_C'),&
             & 'KP_SHIFT_A_B_C')
 
-      ! Read the number of point group operations for IBZ reduction. These are
-      !   the rotational parts of the space group symmetry operations along with
-      !   their fractional translations, given in fractional (abc) coordinates.
+      ! Read the number of point group operations for IBZ reduction.
+      !   These are the rotational parts of the space group symmetry
+      !   operations along with their per-operation translations,
+      !   expressed in the basis-invariant Cartesian xyz form that
+      !   makeinput.py emits (rotations and translations alike).
       call readData(readUnit,writeUnit,numPointOps,&
             & len('NUM_POINT_OPS'),'NUM_POINT_OPS')
 
-      ! Read the point group operation matrices and their fractional translation
-      !   vectors. Each operation is a 3x3 rotation matrix in abc coordinates
-      !   followed by a 3-component fractional translation.
-      allocate (abcPointOps(3,3,numPointOps))
-      allocate (abcFracTrans(3,numPointOps))
+      ! Read the point group operation matrices and their per-operation
+      !   translation vectors. Each operation is a 3x3 Cartesian xyz
+      !   rotation matrix followed by a 3-component Cartesian xyz
+      !   translation (in Bohr).
+      allocate (xyzPointOps(3,3,numPointOps))
+      allocate (xyzFracTrans(3,numPointOps))
       call readAndCheckLabel(readUnit,writeUnit,&
             & len('POINT_OPS'),'POINT_OPS')
       do i = 1, numPointOps
@@ -291,17 +332,17 @@ subroutine readKPoints(readUnit, writeUnit)
          if (i > 1) read (readUnit,*)
          ! Read each row of the matrix from one file line. Each line fills
          !   one column of the Fortran array (column-major storage).
-         read (readUnit,*) abcPointOps(:,1,i)
-         read (readUnit,*) abcPointOps(:,2,i)
-         read (readUnit,*) abcPointOps(:,3,i)
+         read (readUnit,*) xyzPointOps(:,1,i)
+         read (readUnit,*) xyzPointOps(:,2,i)
+         read (readUnit,*) xyzPointOps(:,3,i)
          ! Read the fractional translation for this operation.
-         read (readUnit,*) abcFracTrans(:,i)
+         read (readUnit,*) xyzFracTrans(:,i)
          do counter = 1, 3
             write (writeUnit,fmt="(3f14.8)") &
-                  & abcPointOps(:,counter,i)
+                  & xyzPointOps(:,counter,i)
          enddo
          write (writeUnit,fmt="(3f14.8)") &
-               & abcFracTrans(:,i)
+               & xyzFracTrans(:,i)
          write (writeUnit,*)
       enddo
       call flush (writeUnit)
@@ -1035,13 +1076,20 @@ subroutine initializeKPoints (inSCF)
       !   is its own IBZ representative (star size 1) with the identity point
       !   group operation.
       numPointOps = 1
-      allocate (abcPointOps(3, 3, 1))
-      abcPointOps(:,:,1) = 0.0_double
-      abcPointOps(1,1,1) = 1.0_double
-      abcPointOps(2,2,1) = 1.0_double
-      abcPointOps(3,3,1) = 1.0_double
-      allocate (abcFracTrans(3, 1))
-      abcFracTrans(:,1) = 0.0_double
+      allocate (xyzPointOps(3, 3, 1))
+      xyzPointOps(:,:,1) = 0.0_double
+      xyzPointOps(1,1,1) = 1.0_double
+      xyzPointOps(2,2,1) = 1.0_double
+      xyzPointOps(3,3,1) = 1.0_double
+      allocate (xyzFracTrans(3, 1))
+      xyzFracTrans(:,1) = 0.0_double
+
+      ! Build the real-abc twin of the (trivial) identity operation in
+      !   the basis of whichever cell is currently loaded. For a single
+      !   identity op the transform is a no-op, but invoking
+      !   computeRealPointOps unconditionally keeps every code path that
+      !   consumes abcRealPointOps free of style-code special cases.
+      call computeRealPointOps
 
       numFullMeshKP = numKPoints
       allocate (fullKPToIBZKPMap(numKPoints))
@@ -1052,11 +1100,13 @@ subroutine initializeKPoints (inSCF)
       enddo
    elseif (kPointStyleCode == 1) then
       call computeRecipPointOps
+      call computeRealPointOps
       call initializeKPointMesh(1) ! Apply symmetry.
       call convertKPointsToXYZ
    elseif (kPointStyleCode == 2) then
       call computeAxialKPoints
       call computeRecipPointOps
+      call computeRealPointOps
       call initializeKPointMesh(1) ! Apply symmetry.
       call convertKPointsToXYZ
    endif
@@ -1347,13 +1397,41 @@ subroutine computeTetraVol
 end subroutine computeTetraVol
 
 
-! Convert the abc-coordinate point group operations into reciprocal-space
-!   abc-coordinate operations. This is needed for IBZ symmetry reduction
-!   of the kpoint mesh. The transformation uses the real and reciprocal
-!   lattice vectors: R_recip = R^T * R_real * R_recip_lattice, where the
-!   dot product between real and reciprocal lattice vectors provides the
-!   metric. The resulting abcRecipPointOps can be applied directly to kpoints
-!   expressed in fractional reciprocal coordinates.
+! Convert the on-disk point group operations (read into xyzPointOps
+!   from the kp file in Cartesian xyz form) into the basis of the
+!   reciprocal lattice currently held in O_Lattice. The resulting
+!   abcRecipPointOps act directly on kpoints expressed in fractional
+!   reciprocal coordinates of that lattice and are used by
+!   initializeKPointMesh for runtime IBZ symmetry reduction.
+!
+! Input convention. The operations arrive here already in Cartesian
+!   xyz form thanks to the producer-side transform applied by
+!   makeinput.py's _to_cartesian_ops at kp-file write time. xyzPointOps
+!   therefore acts on xyz column vectors directly -- no implicit cell
+!   shape, centering, or symmetry assumption is built into the input,
+!   regardless of which conventional setting the operations originally
+!   came from in share/spaceDB/<sg>.
+!
+! Output convention. Whichever cell ended up in O_Lattice after the
+!   input pipeline (the full conventional cell when the skeleton's
+!   flag is `full`, a primitive reduction when it is `prim`), the
+!   conjugation below uses the realVectors and recipVectors that
+!   O_Lattice currently holds and produces operations correct for
+!   that lattice. No full/prim branch is needed: the same machinery
+!   does the right thing in both modes.
+!
+! Mathematics. The transformation is the similarity transform
+!
+!   R_recip_abc = recipVectors^{-1} * R_xyz * recipVectors,
+!
+! rewritten via the orthogonality identity realVectors^T * recipVectors
+!   = 2*pi*I (which gives recipVectors^{-1} = realVectors^T / (2*pi)) as
+!
+!   R_recip_abc = realVectors^T * R_xyz * recipVectors / (2*pi).
+!
+! See computeRealPointOps below for the matching real-space transform,
+!   which buildAtomPerm consumes to permute atoms across the same set
+!   of operations.
 subroutine computeRecipPointOps
 
    ! Import necessary modules.
@@ -1376,9 +1454,12 @@ subroutine computeRecipPointOps
       ! Initialize the accumulator for this operation.
       tempPointOp(:,:) = 0.0_double
 
-      ! Transform the abc real-space point group operation into an abc
-      !   reciprocal-space operation using the real and reciprocal lattice
-      !   vectors.
+      ! Apply the conjugation R_recip_abc = realVectors^T * R *
+      !   recipVectors / (2*pi) entry by entry. Index j sums over the
+      !   xyz components of the real lattice vector that contracts on
+      !   the left, k over the xyz components shared by the operation
+      !   matrix in the middle and the reciprocal lattice on the right,
+      !   and l selects which a,b,c column of the output we are building.
       do j = 1, 3    ! x,y,z of the real lattice
          do k = 1, 3 ! x,y,z of the reciprocal lattice
             do l = 1, 3 ! a,b,c of the reciprocal lattice
@@ -1386,7 +1467,7 @@ subroutine computeRecipPointOps
                ! Array-loop over real a,b,c.
                tempPointOp(:,l) = tempPointOp(:,l) &
                      & + realVectors(j,:) &
-                     & * abcPointOps(j,k,i) &
+                     & * xyzPointOps(j,k,i) &
                      & * recipVectors(k,l) &
                      & / (2.0_double * pi)
 
@@ -1400,6 +1481,141 @@ subroutine computeRecipPointOps
    enddo ! i (operations)
 
 end subroutine computeRecipPointOps
+
+
+! Convert the on-disk point group operations and their fractional
+!   translation vectors (read into xyzPointOps and xyzFracTrans from
+!   the kp file in Cartesian xyz form) into the basis of the real-space
+!   lattice currently held in O_Lattice. The resulting abcRealPointOps
+!   and abcRealFracTrans act directly on atom positions expressed in
+!   fractional real-space coordinates of that same lattice, which is
+!   how buildAtomPerm represents them internally (see atomicSites.f90
+!   step 1).
+!
+! Input convention. The operations arrive here already in Cartesian
+!   xyz form thanks to the producer-side transform applied by
+!   makeinput.py's _to_cartesian_ops at kp-file write time. xyzPointOps
+!   acts on xyz column vectors directly, and xyzFracTrans is the
+!   translation in xyz Bohr -- both are basis-invariant representations
+!   of the space-group operations regardless of which conventional
+!   setting (cubic, hexagonal, monoclinic, ...) the operations
+!   originally came from in share/spaceDB/<sg>.
+!
+! Output convention. Whichever cell ended up in O_Lattice after the
+!   input pipeline (the full conventional cell when the skeleton's
+!   flag is `full`, a primitive reduction when it is `prim`), the
+!   conjugation below uses realVectors and invRealVectors as they
+!   currently stand and produces rotations / translations correct
+!   for that lattice. No full/prim branch is needed; the same
+!   machinery does the right thing in both modes.
+!
+! Mathematics. Let realVectors be the matrix whose columns are the
+!   currently-loaded real lattice vectors in xyz components, so that
+!   realVectors * v_abc = v_xyz for a position vector. The inverse is
+!   v_abc = realVectors^{-1} * v_xyz. Using the orthogonality identity
+!   realVectors^T * recipVectors = 2*pi*I, that inverse can be written
+!   realVectors^{-1} = recipVectors^T / (2*pi) = invRealVectors^T, the
+!   transpose of the matrix O_Lattice already pre-computes (no extra
+!   inversion needed at runtime).
+!
+!   The similarity transform that carries each Cartesian rotation
+!   R_xyz into the real-abc basis is then
+!
+!     R_real_abc = realVectors^{-1} * R_xyz * realVectors
+!                = invRealVectors^T * R_xyz * realVectors,
+!
+!   and the matching transform for a Cartesian translation vector
+!   t_xyz is
+!
+!     t_real_abc = realVectors^{-1} * t_xyz
+!                = invRealVectors^T * t_xyz.
+!
+!   These are general identities for any non-singular realVectors:
+!   no cell-shape, centering, or symmetry assumption is built into
+!   the derivation. The routine is therefore correct for any cell
+!   imago can describe.
+!
+! Relationship to computeRecipPointOps above. That routine performs
+!   the matching transform for the reciprocal-space side, with
+!   recipVectors in place of realVectors. The two together keep the
+!   IBZ infrastructure consistent: kpoints fold via abcRecipPointOps,
+!   atoms permute via abcRealPointOps, and both descend from the same
+!   Cartesian on-disk operation list with no full/prim branching.
+subroutine computeRealPointOps
+
+   ! Import necessary modules.
+   use O_Kinds
+   use O_Lattice, only: realVectors, invRealVectors
+
+   ! Make sure no funny variables are defined.
+   implicit none
+
+   ! Define local variables.
+   integer :: i ! Loop index over point group operations.
+   integer :: j ! Loop index over the xyz components contracted by the
+                !   left-hand factor invRealVectors^T (= realVectors^{-1}).
+   integer :: k ! Loop index over the xyz components shared by the
+                !   on-disk operation and the right-hand factor realVectors.
+   integer :: l ! Loop index over the a,b,c columns of the output
+                !   transformed operation, one column at a time.
+   real (kind=double), dimension (3,3) :: tempPointOp ! Per-operation
+         !   accumulator for the transformed rotation matrix. Reset to
+         !   zero at the start of each operation and copied into
+         !   abcRealPointOps at the end of the i-loop.
+
+   ! Allocate storage for both transformed quantities. The arrays are
+   !   freed in cleanUpKPoints alongside the other point-group tables.
+   allocate (abcRealPointOps(3, 3, numPointOps))
+   allocate (abcRealFracTrans(3, numPointOps))
+
+   do i = 1, numPointOps
+
+      ! Reset the per-operation accumulator before building it up entry
+      !   by entry. The Fortran array slice on the left, paired with the
+      !   `:` slices on the right factors, performs the implicit sum
+      !   over the m index of tempPointOp(m, l).
+      tempPointOp(:,:) = 0.0_double
+
+      ! Apply the similarity transform
+      !   R_real_abc = invRealVectors^T * R_xyz * realVectors
+      ! entry by entry, building one a,b,c column of the output at a
+      !   time. Note the access pattern invRealVectors(j, :): taking
+      !   row j of invRealVectors realizes the transpose access needed
+      !   for the left-hand factor; the loop counter j therefore plays
+      !   the role of the "summed-over" xyz index, while the trailing
+      !   `:` sweeps the output's m index across all three a,b,c rows.
+      do j = 1, 3    ! xyz index contracted with invRealVectors^T
+         do k = 1, 3 ! xyz index shared by xyzPointOps and realVectors
+            do l = 1, 3 ! a,b,c column of the output operation
+
+               tempPointOp(:, l) = tempPointOp(:, l) &
+                     & + invRealVectors(j, :) &
+                     & * xyzPointOps(j, k, i) &
+                     & * realVectors(k, l)
+
+            enddo ! l (real-space a,b,c)
+         enddo ! k (xyz of xyzPointOps / realVectors)
+      enddo ! j (xyz of invRealVectors^T)
+
+      ! Save the transformed operation. Per-operation translations are
+      !   transformed in the same iteration so abcRealPointOps and
+      !   abcRealFracTrans are filled together and the two arrays always
+      !   refer to the same set of operations in the same order.
+      abcRealPointOps(:, :, i) = tempPointOp(:, :)
+
+      ! Transform the per-operation translation in the matching basis:
+      !   t_real_abc(m) = sum_k invRealVectors(k, m) * t_xyz(k).
+      !   Taking invRealVectors(:, m) yields column m of invRealVectors,
+      !   which is exactly row m of invRealVectors^T -- the slice
+      !   needed to dot against the input Cartesian translation t_xyz.
+      do l = 1, 3 ! m index of the output translation
+         abcRealFracTrans(l, i) = &
+               & sum(invRealVectors(:, l) * xyzFracTrans(:, i))
+      enddo
+
+   enddo ! i (operations)
+
+end subroutine computeRealPointOps
 
 
 subroutine cleanUpKPoints
@@ -1427,14 +1643,20 @@ subroutine cleanUpKPoints
    endif
 
    ! Only allocated for density-based kpoint input (kPointStyleCode == 2).
-   if (allocated(abcPointOps)) then
-      deallocate (abcPointOps)
+   if (allocated(xyzPointOps)) then
+      deallocate (xyzPointOps)
    endif
-   if (allocated(abcFracTrans)) then
-      deallocate (abcFracTrans)
+   if (allocated(xyzFracTrans)) then
+      deallocate (xyzFracTrans)
    endif
    if (allocated(abcRecipPointOps)) then
       deallocate (abcRecipPointOps)
+   endif
+   if (allocated(abcRealPointOps)) then
+      deallocate (abcRealPointOps)
+   endif
+   if (allocated(abcRealFracTrans)) then
+      deallocate (abcRealFracTrans)
    endif
 
    ! Only allocated when the mesh is built internally (style codes 1, 2) with or

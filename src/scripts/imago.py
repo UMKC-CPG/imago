@@ -907,18 +907,38 @@ def check_gamma_kp(kp_file, inputs):
     """Open a kpoint file and check if it requests a gamma
     kpoint (single k-point at 0,0,0).
 
-    The kpoint file format is:
-        Line 1: kpoint style code tag
-        Line 2: kpoint style code value
-        Line 3: integration code tag
-        Line 4: integration code value
-        Line 5: number of kpoints tag
-        Line 6: number of kpoints value
-        Line 7: explicit kpoint list header tag
-        Line 8+: kpoint coordinates
+    The detection logic depends on the kpoint style code,
+    which is always the value on line 2.  Three styles are
+    supported -- they share the first four lines
+    (``KPOINT_STYLE_CODE`` / value / ``KPOINT_INTG_CODE`` /
+    value) and diverge after that.  See ``readKPoints`` in
+    ``src/imago/kpoints.f90`` for the authoritative file
+    grammar; the layouts below are mirrored from there.
+
+    Style code 0 (explicit list, legacy)::
+
+        Line 1: KPOINT_STYLE_CODE     Line 5: NUM_BLOCH_VECTORS
+        Line 2: 0                     Line 6: <count>
+        Line 3: KPOINT_INTG_CODE      Line 7: NUM_WEIGHT_KA_KB_KC
+        Line 4: <intg_code>           Line 8+: explicit kpoints
+
+    Style code 1 (axial counts; produced by mesh mode)::
+
+        Line 5: NUM_KP_A_B_C
+        Line 6: <na> <nb> <nc>
+        Line 7: KP_SHIFT_A_B_C
+        Line 8: <sa> <sb> <sc>
+
+    Style code 2 (density; produced by ``-kpd``)::
+
+        Line 5: MIN_KP_LINE_DENSITY
+        Line 6: <density>             (a float, e.g. 200.0)
+        Line 7: KP_SHIFT_A_B_C
+        Line 8: <sa> <sb> <sc>
 
     Returns:
-        bool: True if this is a gamma-point-only calculation.
+        bool: True if this is a gamma-point-only calculation
+        and the gamma-specialized executable can be used.
     """
     kp_path = os.path.join(inputs, kp_file)
     if not os.path.exists(kp_path):
@@ -929,28 +949,52 @@ def check_gamma_kp(kp_file, inputs):
     with open(kp_path, 'r') as f:
         lines = f.readlines()
 
-    # Read past the kpoint style code tag and value, the
-    #   integration code tag and value, and the number of
-    #   kpoints tag (5 lines). Then read the number of
-    #   kpoints (1 for Gamma).
-    num_kp_line = lines[5].split()
-    num_kp = int(num_kp_line[0])
+    # Style code lives on line 2 (0-indexed line 1) for
+    #   every supported file format.
+    style_code = int(lines[1].split()[0])
 
-    # Read past the explicit kpoint list header tag and
-    #   then read the specific coordinates for the first
-    #   kpoint.
-    kp_line = lines[7].split()
+    if style_code == 0:
+        # Legacy explicit-list path.  Line 6 carries the
+        #   total kpoint count; the first kpoint's
+        #   coordinates appear two lines past
+        #   NUM_WEIGHT_KA_KB_KC as
+        #   "<index> <weight> <ka> <kb> <kc>", so the
+        #   coords are tokens 2..4 of line 8.
+        num_kp = int(lines[5].split()[0])
+        kp_line = lines[7].split()
+        return (num_kp == 1
+                and float(kp_line[2]) == 0.0
+                and float(kp_line[3]) == 0.0
+                and float(kp_line[4]) == 0.0)
 
-    # If the number of kpoints equals 1 and the only kpoint
-    #   is at 0,0,0, then we are doing a Gamma kpoint
-    #   calculation.
-    if (num_kp == 1
-            and float(kp_line[2]) == 0
-            and float(kp_line[3]) == 0
-            and float(kp_line[4]) == 0):
-        return True
-    else:
+    if style_code == 1:
+        # Axial-count path.  A gamma-only mesh corresponds
+        #   to exactly one kpoint along each reciprocal
+        #   axis and zero shift on every axis -- any other
+        #   combination produces a multi-point mesh that
+        #   the general executable must handle.
+        axial = [int(x) for x in lines[5].split()[:3]]
+        shift = [float(x) for x in lines[7].split()[:3]]
+        return (axial == [1, 1, 1]
+                and all(s == 0.0 for s in shift))
+
+    if style_code == 2:
+        # Density-mode files defer mesh sizing to Imago at
+        #   runtime, where the per-axis counts are
+        #   computed from the reciprocal lattice and the
+        #   requested volume density.  The script has no
+        #   reciprocal lattice in hand, so it cannot decide
+        #   gamma-only here.  Returning False routes the
+        #   job to the general executable, which is always
+        #   correct (and gamma-mode would only buy a
+        #   speedup that density-mode users are not asking
+        #   for in the first place).
         return False
+
+    sys.exit(
+        f"Unrecognized KPOINT_STYLE_CODE {style_code} "
+        f"in {kp_path}; cannot determine gamma status."
+    )
 
 
 def init_exes(settings, fn, inputs):
@@ -1262,7 +1306,7 @@ def execute_program(job_clp, settings, fn, bin_dir,
     Constructs and runs the command line for the Imago Fortran
     executable. After execution, handles secondary jobs that
     must run immediately afterwards:
-      - SYBD (jobID % 100 == 8): runs makeSYBD
+      - SYBD (jobID % 100 == 8): runs makeSYBD.py
       - OPTC/NLOP (jobID % 100 == 4 or 6): runs imagoKKc
         for Kramers-Kronig conversion, and processPOPTC for
         partial optical properties if applicable.
@@ -1297,13 +1341,13 @@ def execute_program(job_clp, settings, fn, bin_dir,
     #   immediately afterwards.
     if settings.job_id % 100 == 8:  # SYBD
         subprocess.run(
-            f"{bin_dir}/makeSYBD -dat fort.5 -out fort.20 "
+            f"{bin_dir}/makeSYBD.py -dat fort.5 -out fort.20 "
             f"-raw fort.31 -plot fort.41",
             shell=True,
         )
         if spin_pol == 2:  # Spin polarized case
             subprocess.run(
-                f"{bin_dir}/makeSYBD -dat fort.5 "
+                f"{bin_dir}/makeSYBD.py -dat fort.5 "
                 f"-out fort.20 -raw fort.32 -plot fort.42",
                 shell=True,
             )

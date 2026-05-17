@@ -260,9 +260,17 @@ subroutine buildAtomPerm
    ! fractional position, the result is wrapped into [0,1), and the matching
    ! atom B of the same species is identified by minimum-image comparison.
 
-   ! Import the point group rotation matrices and the fractional translation
-   !   vectors needed for IBZ symmetry reduction and real-space atom mapping.
-   use O_KPoints, only: numPointOps, abcPointOps, abcFracTrans
+   ! Import the point group rotation matrices and the fractional
+   !   translation vectors needed for real-space atom mapping. We
+   !   pull in the *real-space-abc* forms (abcRealPointOps and
+   !   abcRealFracTrans) -- the operations that have already been
+   !   conjugated by computeRealPointOps from the Cartesian xyz form
+   !   on disk into the basis of the real-space lattice currently held
+   !   in O_Lattice, the same basis we use for the atom positions
+   !   below. See computeRealPointOps in kpoints.f90 for the
+   !   transform itself and the on-disk Cartesian convention it
+   !   assumes about its inputs.
+   use O_KPoints, only: numPointOps, abcRealPointOps, abcRealFracTrans
 
    ! Import the inverse real-space lattice vectors for the Cartesian-to-
    !   fractional coordinate conversion: abc = invRealVectors * xyz.
@@ -289,9 +297,10 @@ subroutine buildAtomPerm
    !   invRealVectors(i,j) * xyz(j). Dimensions: (3, numAtomSites).
    real (kind=double), allocatable, dimension (:,:) :: abcAtomPos
 
-   ! The fractional position of atom A after the full space group operation
-   !   {R|t}: rotPos(i) = sum_j abcPointOps(i,j,R) * abcAtomPos(j,A) +
-   !   abcFracTrans(i,R).
+   ! The fractional position of atom A after the full space group
+   !   operation {R|t} expressed in the loaded-lattice abc basis:
+   !   rotPos(i) = sum_j abcRealPointOps(i,j,R) * abcAtomPos(j,A) +
+   !   abcRealFracTrans(i,R).
    real (kind=double), dimension (dim3) :: rotPos
 
    ! Difference between the rotated position and a candidate atom's
@@ -335,13 +344,18 @@ subroutine buildAtomPerm
    do opIdx = 1, numPointOps
       do atomA = 1, numAtomSites
 
-         ! Apply the full space group operation {R|t} in fractional coordinates:
-         !   rotPos = R*abc + t (R = rotation matrix, t = fractional translation).
+         ! Apply the full space group operation {R|t} in fractional
+         !   coordinates of the loaded-lattice abc basis:
+         !     rotPos = R * abc + t
+         !   where both R (= abcRealPointOps) and t (= abcRealFracTrans)
+         !   have already been transformed into that basis by
+         !   computeRealPointOps -- see the use-statement comment at the
+         !   top of the routine.
          do axis = 1, dim3
             rotPos(axis) = &
-                  & sum(abcPointOps(axis,:,opIdx) &
+                  & sum(abcRealPointOps(axis,:,opIdx) &
                   &     * abcAtomPos(:,atomA)) &
-                  & + abcFracTrans(axis, opIdx)
+                  & + abcRealFracTrans(axis, opIdx)
          enddo
 
          ! Wrap the rotated position into [0, 1). The Fortran modulo

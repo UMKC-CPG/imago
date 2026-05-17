@@ -20,6 +20,20 @@
 # Ignore any __pycache__ files (in the .imago directory).
 __pycache__
 
+# Ignore Fortran compiler module artifacts.  These are produced
+# by gfortran/ifort as a by-product of compiling a module source
+# file and live alongside the .o objects.  They must not be
+# tracked because they are compiler- and version-specific and
+# get rewritten on every build.
+*.mod
+
+# Ignore editor swap and backup files (vim, emacs).  These are
+# transient and per-session; tracking them produces spurious
+# untracked entries in git status during normal editing.
+*.swp
+*.swo
+*~
+
 # RC files in .imago/ are installed from src/scripts/ by
 # "make install" and may be edited by the user after
 # installation.  They must not be tracked here; the canonical
