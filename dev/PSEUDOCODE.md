@@ -765,129 +765,206 @@ function buildInvAtomPerm(numPointOps,
 
 ---
 
-## 4b. Cartesian On-Disk Operations and Conjugation (DESIGN 2.7)
+## 4b. Conv-abc On-Disk Operations and Lattice
+       Conjugation (DESIGN 2.7)
 
 Symmetry operations cross two boundaries on the way from
 the space-group database to `buildAtomPerm`: a producer-
-side step in `makeinput.py` that converts each operation
-from its conventional-cell-abc form (the spaceDB
-convention) into a basis-invariant Cartesian xyz form, and
-a consumer-side step in imago (Fortran) that conjugates
-the Cartesian operations into the basis of the lattice
+side write step in `makeinput.py` that emits each
+operation in its native conventional-cell-abc fractional
+form (the spaceDB convention) into the kp file, and a
+consumer-side step in imago (Fortran) that conjugates
+those conv-abc operations into the basis of the lattice
 currently loaded in O_Lattice (full conventional cell or
 primitive reduction, depending on the skeleton's `full`
-/ `prim` flag).  Both steps live behind `realVectors`-
-type lattice matrices and require no special-casing by
-cell type, centering, or full-vs-prim mode.  See DESIGN
-2.7 for the motivation and full background.
+/ `prim` flag).  The on-disk format also carries two
+small metadata blocks -- `CONV_LATTICE` (the
+conventional-cell matrix in Bohr) and `CELL_MODE`
+(`full` or `prim`) -- which give the consumer the
+inputs it needs to form the change-of-basis matrix and
+to choose between the full conjugation path and a
+`full`-mode identity shortcut.  Both boundaries live
+behind `realVectors`-type lattice matrices and require
+no special-casing by cell type, centering, or full-vs-
+prim mode beyond the identity shortcut.  See DESIGN 2.7
+for the motivation and full background.
 
-### 4b.1 Producer-Side Cartesian Conversion (makeinput.py)
+### 4b.1 Writer Additions (makeinput.py kp-file writer)
 
-Run once per kp file, after `_extract_point_ops` returns
-the raw spaceDB matrices.  Reads
-`sc.full_cell_real_lattice` (snapshot of the conventional
-lattice captured at the top of `apply_space_group()`).
+The previous design used a producer-side similarity
+helper (`_to_cartesian_ops`) that converted spaceDB
+operations into a Cartesian xyz intermediate before
+writing.  Under the new design that helper is removed:
+each spaceDB operation is written into the kp file
+exactly as it appears in `share/spaceDB/<sg>` -- three
+rotation lines plus one translation line per operation
+-- with no producer-side math applied to the matrix
+entries or fractional translations.
+
+Two small additions accompany the existing block of
+operation lines: `CONV_LATTICE` and `CELL_MODE`.
 
 ```
-function to_cartesian_ops(point_ops, frac_trans,
-                          conv_lattice):
-    # Pack the conventional lattice into a 3x3 matrix
-    # whose columns are the conventional lattice vectors
-    # in xyz, matching imago's realVectors convention.
-    M_conv     = [[conv(1,1), conv(2,1), conv(3,1)],
-                  [conv(1,2), conv(2,2), conv(3,2)],
-                  [conv(1,3), conv(2,3), conv(3,3)]]
-    M_conv_inv = inverse_3x3(M_conv)
+function writeKPointSymmetryBlock(point_ops, frac_trans,
+                                  conv_lattice,
+                                  cell_mode):
+    # point_ops, frac_trans:  conv-abc fractional
+    #     entries lifted straight from
+    #     share/spaceDB/<sg>
+    # conv_lattice:           sc.full_cell_real_lattice,
+    #     the conventional-cell snapshot captured at the
+    #     top of apply_space_group() before any
+    #     primitive reduction may overwrite the
+    #     in-memory lattice
+    # cell_mode:              'full' or 'prim' from the
+    #     skeleton's lattice-mode flag
 
-    allocate point_ops_xyz, frac_trans_xyz
+    write 'POINT_OPS', numPointOps
+    for each (R_conv_abc, t_conv_abc) in
+            (point_ops, frac_trans):
+        write 3 rows of R_conv_abc (one per line)
+        write the 3-component t_conv_abc on a 4th line
 
-    for each (R_in, t_in) in (point_ops, frac_trans):
+    # New: emit the conventional lattice in Bohr so the
+    # consumer can form M_loaded^{-1} * M_conv without
+    # carrying implicit cell-choice knowledge.
+    write 'CONV_LATTICE'
+    write 3 rows of conv_lattice (Bohr)
 
-        # The Python-side R_in is row-major over file
-        # lines; imago reads each file line as a column,
-        # so the on-disk layout is the transpose of the
-        # operator matrix.  Transpose in, conjugate in
-        # standard form, transpose back out so the
-        # round-trip through imago's read-as-column path
-        # is exact.
-        R_std = transpose_3x3(R_in)
-        R_xyz = M_conv * R_std * M_conv_inv
-        point_ops_xyz.append(transpose_3x3(R_xyz))
-
-        # Translations are plain vectors -- no transpose
-        # concern.  The conv-abc fraction becomes the
-        # Cartesian translation by multiplying by the
-        # conv-lattice matrix.
-        frac_trans_xyz.append(M_conv * t_in)
-
-    return (point_ops_xyz, frac_trans_xyz)
+    # New: emit the cell-mode flag so the consumer can
+    # take the identity shortcut when the loaded cell
+    # equals the conventional cell.
+    write 'CELL_MODE'
+    write cell_mode    # 'full' or 'prim'
 ```
 
-The output is written into the kp file in the existing
-3-rotation-lines + 1-translation-line format; only the
-numerical values change, not the layout.  For cubic
-systems with Cartesian-aligned conventional axes the
-output equals the input verbatim (the conjugation is a
-numerical no-op); for hex, monoclinic, etc. the output
-matrix entries take on irrational values that capture
-the true Cartesian rotation.
+The `POINT_OPS` block is byte-identical to the spaceDB
+entries for every cell type (cubic, hex, monoclinic,
+triclinic, ...); only `CONV_LATTICE` and `CELL_MODE`
+are new on-disk content.
 
-### 4b.2 Consumer-Side Lattice Conjugation (imago Fortran)
+### 4b.2 Reader Additions (imago readKPoints)
+
+For style codes 1 and 2, the imago Fortran reader parses
+the existing operations block into the renamed arrays
+`convAbcPointOps(3, 3, numPointOps)` and
+`convAbcFracTrans(3, numPointOps)` -- same on-disk
+layout as before, only the destination array names
+change to reflect the basis the entries live in.  Two
+new parse steps follow the operations block:
+
+```
+function readKPointSymmetryBlock(file):
+    # Existing: POINT_OPS plus per-operation
+    # translation.
+    read 'POINT_OPS', numPointOps
+    for i = 1 to numPointOps:
+        read 3 rows into convAbcPointOps(:,:,i)
+        read 3-vector into convAbcFracTrans(:,i)
+
+    # New: conventional-cell matrix (Bohr), 3 rows.
+    read 'CONV_LATTICE'
+    read 3 rows into convLattice(:,:)
+
+    # New: cell-mode flag, single string token.
+    read 'CELL_MODE'
+    read string into cellMode    # 'full' or 'prim'
+
+    return (numPointOps, convAbcPointOps,
+            convAbcFracTrans, convLattice, cellMode)
+```
+
+Style code 0 still synthesizes identity-only operations
+in memory and does not require the new blocks; `cellMode`
+defaults to `full` and `convLattice` defaults to
+`realVectors` for that path so the consumer-side
+shortcut applies trivially.
+
+### 4b.3 Consumer-Side Lattice Conjugation
+       (imago Fortran)
 
 Run inside `initializeKPoints` once per kp-file load,
-right after `readKPoints` deposits the on-disk operations
-into `xyzPointOps` and `xyzFracTrans`.  Two siblings:
+right after `readKPoints` deposits the on-disk
+operations into `convAbcPointOps` / `convAbcFracTrans`
+and the metadata into `convLattice` / `cellMode`.  Two
+siblings:
 
 ```
-function computeRealPointOps(numPointOps, xyzPointOps,
-                             xyzFracTrans, realVectors,
+function computeRealPointOps(numPointOps,
+                             convAbcPointOps,
+                             convAbcFracTrans,
+                             cellMode, convLattice,
+                             realVectors,
                              invRealVectors):
-    # Conjugate Cartesian operations into the basis of
+    # Conjugate conv-abc operations into the basis of
     # the loaded real lattice for use by buildAtomPerm.
     #
-    #   R_real_abc = invRealVectors^T * R_xyz * realVectors
-    #   t_real_abc = invRealVectors^T * t_xyz
+    #   C          = M_loaded^{-1} * M_conv
+    #              = invRealVectors^T * convLattice
+    #   R_real_abc = C * R_conv_abc * C^{-1}
+    #   t_real_abc = C * t_conv_abc
     #
     # invRealVectors^T equals realVectors^{-1} by the
-    # orthogonality identity realVectors^T * recipVectors
-    # = 2*pi*I, so the formula uses pre-computed O_Lattice
-    # matrices and never re-inverts at runtime.
+    # orthogonality identity
+    #   realVectors^T * recipVectors = 2*pi*I,
+    # so the formula uses pre-computed O_Lattice matrices
+    # and never re-inverts realVectors at runtime.
     allocate abcRealPointOps(3, 3, numPointOps)
     allocate abcRealFracTrans(3, numPointOps)
 
-    for i = 1 to numPointOps:
-        abcRealPointOps(:,:,i) =
-            invRealVectors^T
-            * xyzPointOps(:,:,i)
-            * realVectors
-
-        abcRealFracTrans(:,i) =
-            invRealVectors^T * xyzFracTrans(:,i)
+    if cellMode == 'full':
+        # Identity shortcut: M_loaded == M_conv, so
+        # C = I and the conjugation collapses to a copy
+        # from the on-disk arrays into the runtime
+        # arrays.  Saves the inverse and the per-op
+        # similarity kernel for the most common mode.
+        for i = 1 to numPointOps:
+            abcRealPointOps(:,:,i) =
+                convAbcPointOps(:,:,i)
+            abcRealFracTrans(:,i) =
+                convAbcFracTrans(:,i)
+    else:
+        # Full conjugation path: form C once, then
+        # apply the similarity transform per operation.
+        C     = invRealVectors^T * convLattice
+        C_inv = inverse_3x3(C)
+        for i = 1 to numPointOps:
+            abcRealPointOps(:,:,i) =
+                C * convAbcPointOps(:,:,i) * C_inv
+            abcRealFracTrans(:,i) =
+                C * convAbcFracTrans(:,i)
 
     return (abcRealPointOps, abcRealFracTrans)
 ```
 
 ```
-function computeRecipPointOps(numPointOps, xyzPointOps,
-                              realVectors, recipVectors):
-    # Conjugate Cartesian operations into the basis of
+function computeRecipPointOps(numPointOps,
+                              convAbcPointOps,
+                              cellMode, convLattice,
+                              realVectors,
+                              invRealVectors):
+    # Conjugate conv-abc operations into the basis of
     # the loaded reciprocal lattice for use by
     # initializeKPointMesh (IBZ folding).
     #
-    #   R_recip_abc = realVectors^T * R_xyz * recipVectors
-    #                 / (2*pi)
-    #
-    # The same Cartesian xyz input feeds both this and
-    # computeRealPointOps so the two halves of the IBZ
-    # infrastructure stay consistent.
+    # Point group rotations transform identically under
+    # the dual abc bases, so the similarity uses the
+    # same change-of-basis matrix C as the real-space
+    # sibling.  No translation field -- reciprocal-space
+    # operations have no translation.
     allocate abcRecipPointOps(3, 3, numPointOps)
 
-    for i = 1 to numPointOps:
-        abcRecipPointOps(:,:,i) =
-            realVectors^T
-            * xyzPointOps(:,:,i)
-            * recipVectors
-            / (2 * pi)
+    if cellMode == 'full':
+        # Same identity shortcut as the real-space side.
+        for i = 1 to numPointOps:
+            abcRecipPointOps(:,:,i) =
+                convAbcPointOps(:,:,i)
+    else:
+        C     = invRealVectors^T * convLattice
+        C_inv = inverse_3x3(C)
+        for i = 1 to numPointOps:
+            abcRecipPointOps(:,:,i) =
+                C * convAbcPointOps(:,:,i) * C_inv
 
     return abcRecipPointOps
 ```
@@ -895,10 +972,10 @@ function computeRecipPointOps(numPointOps, xyzPointOps,
 Both routines run unconditionally in every style-code
 branch (style 0 sets up trivial identity operations as
 before; styles 1 and 2 read real symmetry from the kp
-file).  No branch on `full` vs. `prim` mode is needed --
-the conjugation uses whichever lattice O_Lattice
-currently holds and produces operations correct for that
-lattice.
+file).  The `cellMode` flag selects the identity
+shortcut versus the full conjugation path -- no other
+`full`-vs-`prim` branching exists outside these two
+routines.
 
 ---
 

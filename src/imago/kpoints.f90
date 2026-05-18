@@ -90,27 +90,48 @@ module O_KPoints
          !   symmetry reduction. Read from the kpoint input file for style
          !   codes 1 and 2. These are the rotational parts of the space
          !   group operations (translations stripped).
-   real (kind=double), allocatable, dimension (:,:,:) :: xyzPointOps
+   real (kind=double), allocatable, dimension (:,:,:) :: convAbcPointOps
          !   The 3x3 rotation matrices for each point group operation,
-         !   stored in Cartesian xyz form -- the basis-invariant
-         !   representation produced by makeinput.py's _to_cartesian_ops at
-         !   kp-file write time. Storing them in xyz lets us conjugate them
-         !   into either the real-space abc basis (computeRealPointOps,
-         !   consumed by buildAtomPerm) or the reciprocal-space abc basis
-         !   (computeRecipPointOps, consumed by IBZ folding) without ever
-         !   needing the conventional cell information they originally
-         !   came from. Dimensions: (3,3,numPointOps).
-   real (kind=double), allocatable, dimension (:,:) :: xyzFracTrans
+         !   stored in their on-disk conventional-cell-abc fractional
+         !   form -- byte-identical to the entries in
+         !   share/spaceDB/<sg>.  The kp file carries them verbatim;
+         !   makeinput.py applies no producer-side similarity transform.
+         !   computeRealPointOps and computeRecipPointOps rebase them at
+         !   runtime via the change-of-basis matrix
+         !   C = invRealVectors^T * convLattice (full conjugation in
+         !   prim mode, identity-shortcut copy in full mode).
+         !   Dimensions: (3, 3, numPointOps).  See DESIGN 2.7.
+   real (kind=double), allocatable, dimension (:,:) :: convAbcFracTrans
          !   The translation vector for each point group operation, in
-         !   Cartesian xyz (Bohr) -- the basis-invariant form produced by
-         !   makeinput.py at kp-file write time, matching the convention
-         !   of xyzPointOps above. For symmorphic space groups all entries
-         !   are zero; for non-symmorphic groups (e.g. Fd-3m) some
-         !   operations carry non-zero translations (screw axes, glide
-         !   planes). Conjugated into the loaded real lattice's abc basis
-         !   by computeRealPointOps and consumed by buildAtomPerm to form
-         !   the real-space atom mapping r_B = R * r_A + t.
-         !   Dimensions: (3, numPointOps).
+         !   the same on-disk conventional-cell-abc fractional form as
+         !   convAbcPointOps above.  For symmorphic space groups all
+         !   entries are zero; for non-symmorphic groups (e.g. Fd-3m)
+         !   some operations carry non-zero translations (screw axes,
+         !   glide planes).  Conjugated into the loaded real lattice's
+         !   abc basis by computeRealPointOps and consumed by
+         !   buildAtomPerm to form the real-space atom mapping
+         !   r_B = R * r_A + t.  Dimensions: (3, numPointOps).
+   real (kind=double), dimension (3, 3) :: convLattice
+         !   The conventional-cell matrix in Bohr, read from the kp
+         !   file's CONV_LATTICE block.  Rows are conventional lattice
+         !   vectors, columns are xyz, matching the row layout of
+         !   O_Lattice's realVectors.  Required by computeRealPointOps
+         !   and computeRecipPointOps to form the change-of-basis
+         !   matrix C = invRealVectors^T * convLattice that carries
+         !   conv-abc operations into the basis of the loaded cell.
+         !   For style code 0 (explicit kpoint list) this defaults to
+         !   realVectors so the identity shortcut applies trivially.
+         !   See DESIGN 2.7.
+   character (len=4) :: cellMode
+         !   Cell-mode flag read from the kp file's CELL_MODE block --
+         !   either 'full' (the loaded cell IS the conventional cell:
+         !   M_loaded == M_conv, so C = I and the transform routines
+         !   take the identity shortcut) or 'prim' (the loaded cell is
+         !   a primitive reduction of the conventional cell: C != I
+         !   and the full similarity transform runs).  This mirrors the
+         !   skeleton's full/prim lattice-mode flag.  Defaults to
+         !   'full' for style code 0 so the trivial-identity path goes
+         !   through the same shortcut.  See DESIGN 2.7.
    real (kind=double), allocatable, dimension (:,:,:) :: abcRecipPointOps
          !   The point group operations converted to reciprocal-space abc
          !   coordinates using the real and reciprocal lattice vectors.
@@ -249,18 +270,20 @@ subroutine readKPoints(readUnit, writeUnit)
 
       ! Read the number of point group operations for IBZ reduction.
       !   These are the rotational parts of the space group symmetry
-      !   operations (translations stripped), expressed in the
-      !   basis-invariant Cartesian xyz form that makeinput.py emits.
+      !   operations, expressed in their on-disk conventional-cell-abc
+      !   fractional form -- byte-identical to share/spaceDB/<sg>.
+      !   computeRealPointOps and computeRecipPointOps rebase them
+      !   into the loaded-cell abc basis at runtime.
       call readData(readUnit,writeUnit,numPointOps,&
             & len('NUM_POINT_OPS'),'NUM_POINT_OPS')
 
       ! Read the point group operation matrices and their per-operation
-      !   translation vectors. Each operation is a 3x3 Cartesian xyz
-      !   rotation matrix followed by a 3-component Cartesian xyz
-      !   translation (in Bohr). The file may contain blank lines
-      !   between operations for readability.
-      allocate (xyzPointOps(3,3,numPointOps))
-      allocate (xyzFracTrans(3,numPointOps))
+      !   translation vectors. Each operation is a 3x3 conv-abc rotation
+      !   matrix followed by a 3-component conv-abc fractional
+      !   translation. The file may contain blank lines between
+      !   operations for readability.
+      allocate (convAbcPointOps(3,3,numPointOps))
+      allocate (convAbcFracTrans(3,numPointOps))
       call readAndCheckLabel(readUnit,writeUnit,&
             & len('POINT_OPS'),'POINT_OPS')
       do i = 1, numPointOps
@@ -272,22 +295,48 @@ subroutine readKPoints(readUnit, writeUnit)
          !   line fills one column of the Fortran array (column-major
          !   storage); see computeRealPointOps in this file for the
          !   downstream consumer that depends on this convention.
-         read (readUnit,*) xyzPointOps(:,1,i)
-         read (readUnit,*) xyzPointOps(:,2,i)
-         read (readUnit,*) xyzPointOps(:,3,i)
-         ! Read the per-operation translation in Cartesian xyz Bohr.
+         read (readUnit,*) convAbcPointOps(:,1,i)
+         read (readUnit,*) convAbcPointOps(:,2,i)
+         read (readUnit,*) convAbcPointOps(:,3,i)
+         ! Read the per-operation conv-abc fractional translation.
          !   Symmorphic groups carry all-zero translations; non-
          !   symmorphic groups (e.g. Fd-3m) carry non-zero values
          !   here (screw axes, glide planes).
-         read (readUnit,*) xyzFracTrans(:,i)
+         read (readUnit,*) convAbcFracTrans(:,i)
          do counter = 1, 3
             write (writeUnit,fmt="(3f14.8)") &
-                  & xyzPointOps(:,counter,i)
+                  & convAbcPointOps(:,counter,i)
          enddo
          write (writeUnit,fmt="(3f14.8)") &
-               & xyzFracTrans(:,i)
+               & convAbcFracTrans(:,i)
          write (writeUnit,*)
       enddo
+      call flush (writeUnit)
+
+      ! Read the conventional-cell matrix (Bohr).  Rows are
+      !   conventional lattice vectors, columns are xyz, matching
+      !   the row layout of O_Lattice's realVectors.  Required by
+      !   the per-routine change-of-basis matrix C =
+      !   invRealVectors^T * convLattice (see DESIGN 2.7 and the
+      !   computeRealPointOps docstring).
+      call readAndCheckLabel(readUnit,writeUnit,&
+            & len('CONV_LATTICE'),'CONV_LATTICE')
+      do counter = 1, 3
+         read (readUnit,*) convLattice(counter,:)
+         write (writeUnit,fmt="(3f18.12)") &
+               & convLattice(counter,:)
+      enddo
+      call flush (writeUnit)
+
+      ! Read the cell-mode flag.  'full' means the loaded cell IS
+      !   the conventional cell (so C = I and the transform routines
+      !   take the identity shortcut); 'prim' means the loaded cell
+      !   is a primitive reduction (so C != I and the full
+      !   conjugation runs).
+      call readAndCheckLabel(readUnit,writeUnit,&
+            & len('CELL_MODE'),'CELL_MODE')
+      read (readUnit,*) cellMode
+      write (writeUnit,fmt="(a)") trim(cellMode)
       call flush (writeUnit)
 
       ! The kpoint mesh will be constructed later, once implicit information
@@ -313,17 +362,19 @@ subroutine readKPoints(readUnit, writeUnit)
       ! Read the number of point group operations for IBZ reduction.
       !   These are the rotational parts of the space group symmetry
       !   operations along with their per-operation translations,
-      !   expressed in the basis-invariant Cartesian xyz form that
-      !   makeinput.py emits (rotations and translations alike).
+      !   expressed in their on-disk conventional-cell-abc fractional
+      !   form -- byte-identical to share/spaceDB/<sg>.
+      !   computeRealPointOps and computeRecipPointOps rebase them
+      !   into the loaded-cell abc basis at runtime.
       call readData(readUnit,writeUnit,numPointOps,&
             & len('NUM_POINT_OPS'),'NUM_POINT_OPS')
 
       ! Read the point group operation matrices and their per-operation
-      !   translation vectors. Each operation is a 3x3 Cartesian xyz
-      !   rotation matrix followed by a 3-component Cartesian xyz
-      !   translation (in Bohr).
-      allocate (xyzPointOps(3,3,numPointOps))
-      allocate (xyzFracTrans(3,numPointOps))
+      !   translation vectors. Each operation is a 3x3 conv-abc rotation
+      !   matrix followed by a 3-component conv-abc fractional
+      !   translation.
+      allocate (convAbcPointOps(3,3,numPointOps))
+      allocate (convAbcFracTrans(3,numPointOps))
       call readAndCheckLabel(readUnit,writeUnit,&
             & len('POINT_OPS'),'POINT_OPS')
       do i = 1, numPointOps
@@ -332,19 +383,39 @@ subroutine readKPoints(readUnit, writeUnit)
          if (i > 1) read (readUnit,*)
          ! Read each row of the matrix from one file line. Each line fills
          !   one column of the Fortran array (column-major storage).
-         read (readUnit,*) xyzPointOps(:,1,i)
-         read (readUnit,*) xyzPointOps(:,2,i)
-         read (readUnit,*) xyzPointOps(:,3,i)
-         ! Read the fractional translation for this operation.
-         read (readUnit,*) xyzFracTrans(:,i)
+         read (readUnit,*) convAbcPointOps(:,1,i)
+         read (readUnit,*) convAbcPointOps(:,2,i)
+         read (readUnit,*) convAbcPointOps(:,3,i)
+         ! Read the conv-abc fractional translation for this operation.
+         read (readUnit,*) convAbcFracTrans(:,i)
          do counter = 1, 3
             write (writeUnit,fmt="(3f14.8)") &
-                  & xyzPointOps(:,counter,i)
+                  & convAbcPointOps(:,counter,i)
          enddo
          write (writeUnit,fmt="(3f14.8)") &
-               & xyzFracTrans(:,i)
+               & convAbcFracTrans(:,i)
          write (writeUnit,*)
       enddo
+      call flush (writeUnit)
+
+      ! Read the conventional-cell matrix (Bohr).  See the matching
+      !   block in the style-code-1 branch above for the layout
+      !   convention and the role of this block under DESIGN 2.7.
+      call readAndCheckLabel(readUnit,writeUnit,&
+            & len('CONV_LATTICE'),'CONV_LATTICE')
+      do counter = 1, 3
+         read (readUnit,*) convLattice(counter,:)
+         write (writeUnit,fmt="(3f18.12)") &
+               & convLattice(counter,:)
+      enddo
+      call flush (writeUnit)
+
+      ! Read the cell-mode flag.  See the matching block in the
+      !   style-code-1 branch above for the role of this flag.
+      call readAndCheckLabel(readUnit,writeUnit,&
+            & len('CELL_MODE'),'CELL_MODE')
+      read (readUnit,*) cellMode
+      write (writeUnit,fmt="(a)") trim(cellMode)
       call flush (writeUnit)
 
       ! The kpoint mesh will be constructed later, once implicit information
@@ -981,6 +1052,11 @@ subroutine initializeKPoints (inSCF)
    use O_Kinds
    use O_Constants, only: dim3
    use O_CommandLine, only: doSYBD_SCF, doSYBD_PSCF, doMTOP_SCF, doMTOP_PSCF
+   use O_Lattice, only: realVectors
+         ! Used by the style-code-0 trivial-identity setup to seed
+         !   convLattice with the currently-loaded cell, so that
+         !   computeRealPointOps' identity shortcut applies (see
+         !   DESIGN 2.7).
 
    ! Prevent accidental variable definition.
    implicit none
@@ -1076,13 +1152,23 @@ subroutine initializeKPoints (inSCF)
       !   is its own IBZ representative (star size 1) with the identity point
       !   group operation.
       numPointOps = 1
-      allocate (xyzPointOps(3, 3, 1))
-      xyzPointOps(:,:,1) = 0.0_double
-      xyzPointOps(1,1,1) = 1.0_double
-      xyzPointOps(2,2,1) = 1.0_double
-      xyzPointOps(3,3,1) = 1.0_double
-      allocate (xyzFracTrans(3, 1))
-      xyzFracTrans(:,1) = 0.0_double
+      allocate (convAbcPointOps(3, 3, 1))
+      convAbcPointOps(:,:,1) = 0.0_double
+      convAbcPointOps(1,1,1) = 1.0_double
+      convAbcPointOps(2,2,1) = 1.0_double
+      convAbcPointOps(3,3,1) = 1.0_double
+      allocate (convAbcFracTrans(3, 1))
+      convAbcFracTrans(:,1) = 0.0_double
+
+      ! Style code 0 never sees a CONV_LATTICE / CELL_MODE block on
+      !   disk because there are no real symmetry operations to
+      !   rebase. Default to 'full' with convLattice = realVectors so
+      !   computeRealPointOps' identity shortcut applies trivially --
+      !   M_loaded == M_conv gives C = I and the single identity op
+      !   passes through unchanged. See DESIGN 2.7 for the shortcut
+      !   convention.
+      cellMode = 'full'
+      convLattice(:,:) = realVectors(:,:)
 
       ! Build the real-abc twin of the (trivial) identity operation in
       !   the basis of whichever cell is currently loaded. For a single
@@ -1397,225 +1483,300 @@ subroutine computeTetraVol
 end subroutine computeTetraVol
 
 
-! Convert the on-disk point group operations (read into xyzPointOps
-!   from the kp file in Cartesian xyz form) into the basis of the
-!   reciprocal lattice currently held in O_Lattice. The resulting
-!   abcRecipPointOps act directly on kpoints expressed in fractional
-!   reciprocal coordinates of that lattice and are used by
-!   initializeKPointMesh for runtime IBZ symmetry reduction.
+! Convert the on-disk point group operations (read into
+!   convAbcPointOps from the kp file in their native conventional-
+!   cell-abc fractional form) into the basis of the reciprocal
+!   lattice currently held in O_Lattice. The resulting
+!   abcRecipPointOps act directly on kpoints expressed in
+!   fractional reciprocal coordinates of that lattice and are used
+!   by initializeKPointMesh for runtime IBZ symmetry reduction.
 !
-! Input convention. The operations arrive here already in Cartesian
-!   xyz form thanks to the producer-side transform applied by
-!   makeinput.py's _to_cartesian_ops at kp-file write time. xyzPointOps
-!   therefore acts on xyz column vectors directly -- no implicit cell
-!   shape, centering, or symmetry assumption is built into the input,
-!   regardless of which conventional setting the operations originally
-!   came from in share/spaceDB/<sg>.
+! Input convention. The operations arrive here byte-identical to
+!   share/spaceDB/<sg>: each rotation matrix is in the natural
+!   axes of the conventional crystallographic setting and acts on
+!   conv-abc fractional vectors directly. No producer-side
+!   similarity transform has been applied; the entire basis change
+!   happens here on the consumer side. See DESIGN 2.7 for the
+!   motivation behind locating the conjugation here.
 !
-! Output convention. Whichever cell ended up in O_Lattice after the
-!   input pipeline (the full conventional cell when the skeleton's
-!   flag is `full`, a primitive reduction when it is `prim`), the
-!   conjugation below uses the realVectors and recipVectors that
-!   O_Lattice currently holds and produces operations correct for
-!   that lattice. No full/prim branch is needed: the same machinery
-!   does the right thing in both modes.
+! Output convention. Whichever cell ended up in O_Lattice after
+!   the input pipeline (the full conventional cell when the
+!   skeleton's flag is `full`, a primitive reduction when it is
+!   `prim`), the conjugation below uses realVectors and
+!   invRealVectors as they currently stand together with the
+!   conventional cell read from the kp file's CONV_LATTICE block.
+!   The result is correct for any cell imago can describe.
 !
-! Mathematics. The transformation is the similarity transform
+! Mathematics. The change-of-basis matrix that carries a vector
+!   from the conv-abc basis to the loaded-cell abc basis is
 !
-!   R_recip_abc = recipVectors^{-1} * R_xyz * recipVectors,
+!     C = M_loaded^{-1} * M_conv
+!       = invRealVectors^T * convLattice,
 !
-! rewritten via the orthogonality identity realVectors^T * recipVectors
-!   = 2*pi*I (which gives recipVectors^{-1} = realVectors^T / (2*pi)) as
+!   where the equality uses the orthogonality identity
+!   realVectors^T * recipVectors = 2*pi*I, which makes
+!   realVectors^{-1} equal to invRealVectors^T (no extra
+!   inversion of realVectors at runtime).  The point-group
+!   rotation transforms by the similarity
 !
-!   R_recip_abc = realVectors^T * R_xyz * recipVectors / (2*pi).
+!     R_recip_abc = C * R_conv_abc * C^{-1}.
 !
-! See computeRealPointOps below for the matching real-space transform,
-!   which buildAtomPerm consumes to permute atoms across the same set
-!   of operations.
+!   Point-group rotations transform identically under the dual
+!   real- and reciprocal-space abc bases, so this matches the
+!   real-space transform in computeRealPointOps below.  There is
+!   no translation field to transform on the reciprocal side.
+!
+! Identity shortcut. In `full` mode the loaded cell IS the
+!   conventional cell, so M_loaded == M_conv and C = I; the
+!   conjugation collapses to a copy.  The cellMode flag (read
+!   from the kp file's CELL_MODE block) selects between the
+!   shortcut and the full conjugation path.
 subroutine computeRecipPointOps
 
    ! Import necessary modules.
    use O_Kinds
-   use O_Constants, only: pi
-   use O_Lattice, only: realVectors, recipVectors
-
-   ! Make sure no funny variables are defined.
-   implicit none
-
-   ! Define local variables.
-   integer :: i, j, k, l
-   real (kind=double), dimension (3,3) :: tempPointOp
-
-   ! Allocate storage for the reciprocal-space operations.
-   allocate (abcRecipPointOps(3,3,numPointOps))
-
-   do i = 1, numPointOps
-
-      ! Initialize the accumulator for this operation.
-      tempPointOp(:,:) = 0.0_double
-
-      ! Apply the conjugation R_recip_abc = realVectors^T * R *
-      !   recipVectors / (2*pi) entry by entry. Index j sums over the
-      !   xyz components of the real lattice vector that contracts on
-      !   the left, k over the xyz components shared by the operation
-      !   matrix in the middle and the reciprocal lattice on the right,
-      !   and l selects which a,b,c column of the output we are building.
-      do j = 1, 3    ! x,y,z of the real lattice
-         do k = 1, 3 ! x,y,z of the reciprocal lattice
-            do l = 1, 3 ! a,b,c of the reciprocal lattice
-
-               ! Array-loop over real a,b,c.
-               tempPointOp(:,l) = tempPointOp(:,l) &
-                     & + realVectors(j,:) &
-                     & * xyzPointOps(j,k,i) &
-                     & * recipVectors(k,l) &
-                     & / (2.0_double * pi)
-
-            enddo ! l (recip a,b,c)
-         enddo ! k (recip x,y,z)
-      enddo ! j (real x,y,z)
-
-      ! Save the transformed operation.
-      abcRecipPointOps(:,:,i) = tempPointOp(:,:)
-
-   enddo ! i (operations)
-
-end subroutine computeRecipPointOps
-
-
-! Convert the on-disk point group operations and their fractional
-!   translation vectors (read into xyzPointOps and xyzFracTrans from
-!   the kp file in Cartesian xyz form) into the basis of the real-space
-!   lattice currently held in O_Lattice. The resulting abcRealPointOps
-!   and abcRealFracTrans act directly on atom positions expressed in
-!   fractional real-space coordinates of that same lattice, which is
-!   how buildAtomPerm represents them internally (see atomicSites.f90
-!   step 1).
-!
-! Input convention. The operations arrive here already in Cartesian
-!   xyz form thanks to the producer-side transform applied by
-!   makeinput.py's _to_cartesian_ops at kp-file write time. xyzPointOps
-!   acts on xyz column vectors directly, and xyzFracTrans is the
-!   translation in xyz Bohr -- both are basis-invariant representations
-!   of the space-group operations regardless of which conventional
-!   setting (cubic, hexagonal, monoclinic, ...) the operations
-!   originally came from in share/spaceDB/<sg>.
-!
-! Output convention. Whichever cell ended up in O_Lattice after the
-!   input pipeline (the full conventional cell when the skeleton's
-!   flag is `full`, a primitive reduction when it is `prim`), the
-!   conjugation below uses realVectors and invRealVectors as they
-!   currently stand and produces rotations / translations correct
-!   for that lattice. No full/prim branch is needed; the same
-!   machinery does the right thing in both modes.
-!
-! Mathematics. Let realVectors be the matrix whose columns are the
-!   currently-loaded real lattice vectors in xyz components, so that
-!   realVectors * v_abc = v_xyz for a position vector. The inverse is
-!   v_abc = realVectors^{-1} * v_xyz. Using the orthogonality identity
-!   realVectors^T * recipVectors = 2*pi*I, that inverse can be written
-!   realVectors^{-1} = recipVectors^T / (2*pi) = invRealVectors^T, the
-!   transpose of the matrix O_Lattice already pre-computes (no extra
-!   inversion needed at runtime).
-!
-!   The similarity transform that carries each Cartesian rotation
-!   R_xyz into the real-abc basis is then
-!
-!     R_real_abc = realVectors^{-1} * R_xyz * realVectors
-!                = invRealVectors^T * R_xyz * realVectors,
-!
-!   and the matching transform for a Cartesian translation vector
-!   t_xyz is
-!
-!     t_real_abc = realVectors^{-1} * t_xyz
-!                = invRealVectors^T * t_xyz.
-!
-!   These are general identities for any non-singular realVectors:
-!   no cell-shape, centering, or symmetry assumption is built into
-!   the derivation. The routine is therefore correct for any cell
-!   imago can describe.
-!
-! Relationship to computeRecipPointOps above. That routine performs
-!   the matching transform for the reciprocal-space side, with
-!   recipVectors in place of realVectors. The two together keep the
-!   IBZ infrastructure consistent: kpoints fold via abcRecipPointOps,
-!   atoms permute via abcRealPointOps, and both descend from the same
-!   Cartesian on-disk operation list with no full/prim branching.
-subroutine computeRealPointOps
-
-   ! Import necessary modules.
-   use O_Kinds
-   use O_Lattice, only: realVectors, invRealVectors
+   use O_Lattice, only: invRealVectors
 
    ! Make sure no funny variables are defined.
    implicit none
 
    ! Define local variables.
    integer :: i ! Loop index over point group operations.
-   integer :: j ! Loop index over the xyz components contracted by the
-                !   left-hand factor invRealVectors^T (= realVectors^{-1}).
-   integer :: k ! Loop index over the xyz components shared by the
-                !   on-disk operation and the right-hand factor realVectors.
-   integer :: l ! Loop index over the a,b,c columns of the output
-                !   transformed operation, one column at a time.
-   real (kind=double), dimension (3,3) :: tempPointOp ! Per-operation
-         !   accumulator for the transformed rotation matrix. Reset to
-         !   zero at the start of each operation and copied into
-         !   abcRealPointOps at the end of the i-loop.
+   real (kind=double), dimension (3,3) :: changeBasis
+         !   Composed change-of-basis matrix C = invRealVectors^T
+         !   * convLattice.  Computed once before the per-op loop;
+         !   acts as the conjugating factor on the left of each
+         !   similarity transform.
+   real (kind=double), dimension (3,3) :: changeBasisInv
+         !   Inverse of changeBasis (C^{-1}), used on the right
+         !   of each similarity transform.  Computed once before
+         !   the per-op loop.
 
-   ! Allocate storage for both transformed quantities. The arrays are
-   !   freed in cleanUpKPoints alongside the other point-group tables.
+   ! Allocate storage for the reciprocal-space operations.
+   allocate (abcRecipPointOps(3,3,numPointOps))
+
+   if (cellMode == 'full') then
+      ! Identity shortcut: M_loaded == M_conv, so C = I and the
+      !   conjugation collapses to a copy from the on-disk array
+      !   into the runtime array.  Skips the matrix inverse and
+      !   the per-op kernel for the most common cell mode.
+      do i = 1, numPointOps
+         abcRecipPointOps(:,:,i) = convAbcPointOps(:,:,i)
+      enddo
+   else
+      ! Full conjugation path.  Form C once, then apply the
+      !   similarity R_recip_abc = C * R_conv_abc * C^{-1} per
+      !   operation.  invRealVectors^T equals realVectors^{-1}
+      !   by the orthogonality identity (see header), so the
+      !   factor on the left of C uses pre-computed O_Lattice
+      !   state without a runtime inversion of realVectors.
+      changeBasis = matmul(transpose(invRealVectors), convLattice)
+      call invert3x3(changeBasis, changeBasisInv)
+
+      do i = 1, numPointOps
+         abcRecipPointOps(:,:,i) = matmul( &
+               & changeBasis, &
+               & matmul(convAbcPointOps(:,:,i), &
+               &        changeBasisInv))
+      enddo
+   endif
+
+end subroutine computeRecipPointOps
+
+
+! Convert the on-disk point group operations and their fractional
+!   translation vectors (read into convAbcPointOps and
+!   convAbcFracTrans from the kp file in conv-abc form) into the
+!   basis of the real-space lattice currently held in O_Lattice.
+!   The resulting abcRealPointOps and abcRealFracTrans act directly
+!   on atom positions expressed in fractional real-space
+!   coordinates of that same lattice, which is how buildAtomPerm
+!   represents them internally (see atomicSites.f90 step 1).
+!
+! Input convention. The operations arrive here byte-identical to
+!   share/spaceDB/<sg>: each rotation matrix and per-operation
+!   translation vector is in the natural axes of the conventional
+!   crystallographic setting and acts on conv-abc fractional
+!   vectors directly. No producer-side similarity transform has
+!   been applied; the entire basis change happens here on the
+!   consumer side. See DESIGN 2.7 for the motivation behind
+!   locating the conjugation here.
+!
+! Output convention. Whichever cell ended up in O_Lattice after
+!   the input pipeline (the full conventional cell when the
+!   skeleton's flag is `full`, a primitive reduction when it is
+!   `prim`), the conjugation below uses realVectors and
+!   invRealVectors as they currently stand together with the
+!   conventional cell read from the kp file's CONV_LATTICE block.
+!   The result is correct for any cell imago can describe.
+!
+! Mathematics. The change-of-basis matrix that carries a vector
+!   from the conv-abc basis to the loaded-cell abc basis is
+!
+!     C = M_loaded^{-1} * M_conv
+!       = invRealVectors^T * convLattice,
+!
+!   where the equality uses the orthogonality identity
+!   realVectors^T * recipVectors = 2*pi*I, which makes
+!   realVectors^{-1} equal to invRealVectors^T (no extra
+!   inversion of realVectors at runtime).  The rotation and the
+!   translation then transform as
+!
+!     R_real_abc = C * R_conv_abc * C^{-1},
+!     t_real_abc = C * t_conv_abc.
+!
+!   Both identities hold for any non-singular realVectors and
+!   convLattice; no cell-shape, centering, or symmetry assumption
+!   is built into the derivation, and the routine is therefore
+!   correct for every cell type imago can describe.
+!
+! Identity shortcut. In `full` mode the loaded cell IS the
+!   conventional cell, so M_loaded == M_conv and C = I; the
+!   conjugation collapses to a copy of both the rotation matrices
+!   and the translation vectors.  The cellMode flag (read from
+!   the kp file's CELL_MODE block) selects between the shortcut
+!   and the full conjugation path.
+!
+! Relationship to computeRecipPointOps above. That routine
+!   performs the matching transform for the reciprocal-space side
+!   using the same change-of-basis matrix C, so kpoint folding
+!   via abcRecipPointOps and atom permutation via abcRealPointOps
+!   descend from a single source of operations and a single
+!   change-of-basis step.
+subroutine computeRealPointOps
+
+   ! Import necessary modules.
+   use O_Kinds
+   use O_Lattice, only: invRealVectors
+
+   ! Make sure no funny variables are defined.
+   implicit none
+
+   ! Define local variables.
+   integer :: i ! Loop index over point group operations.
+   real (kind=double), dimension (3,3) :: changeBasis
+         !   Composed change-of-basis matrix C = invRealVectors^T
+         !   * convLattice.  Computed once before the per-op loop;
+         !   acts as the conjugating factor on the left of each
+         !   similarity transform and as the multiplier on each
+         !   conv-abc translation.
+   real (kind=double), dimension (3,3) :: changeBasisInv
+         !   Inverse of changeBasis (C^{-1}), used on the right
+         !   of each rotation's similarity transform.
+
+   ! Allocate storage for both transformed quantities. The arrays
+   !   are freed in cleanUpKPoints alongside the other point-group
+   !   tables.
    allocate (abcRealPointOps(3, 3, numPointOps))
    allocate (abcRealFracTrans(3, numPointOps))
 
-   do i = 1, numPointOps
-
-      ! Reset the per-operation accumulator before building it up entry
-      !   by entry. The Fortran array slice on the left, paired with the
-      !   `:` slices on the right factors, performs the implicit sum
-      !   over the m index of tempPointOp(m, l).
-      tempPointOp(:,:) = 0.0_double
-
-      ! Apply the similarity transform
-      !   R_real_abc = invRealVectors^T * R_xyz * realVectors
-      ! entry by entry, building one a,b,c column of the output at a
-      !   time. Note the access pattern invRealVectors(j, :): taking
-      !   row j of invRealVectors realizes the transpose access needed
-      !   for the left-hand factor; the loop counter j therefore plays
-      !   the role of the "summed-over" xyz index, while the trailing
-      !   `:` sweeps the output's m index across all three a,b,c rows.
-      do j = 1, 3    ! xyz index contracted with invRealVectors^T
-         do k = 1, 3 ! xyz index shared by xyzPointOps and realVectors
-            do l = 1, 3 ! a,b,c column of the output operation
-
-               tempPointOp(:, l) = tempPointOp(:, l) &
-                     & + invRealVectors(j, :) &
-                     & * xyzPointOps(j, k, i) &
-                     & * realVectors(k, l)
-
-            enddo ! l (real-space a,b,c)
-         enddo ! k (xyz of xyzPointOps / realVectors)
-      enddo ! j (xyz of invRealVectors^T)
-
-      ! Save the transformed operation. Per-operation translations are
-      !   transformed in the same iteration so abcRealPointOps and
-      !   abcRealFracTrans are filled together and the two arrays always
-      !   refer to the same set of operations in the same order.
-      abcRealPointOps(:, :, i) = tempPointOp(:, :)
-
-      ! Transform the per-operation translation in the matching basis:
-      !   t_real_abc(m) = sum_k invRealVectors(k, m) * t_xyz(k).
-      !   Taking invRealVectors(:, m) yields column m of invRealVectors,
-      !   which is exactly row m of invRealVectors^T -- the slice
-      !   needed to dot against the input Cartesian translation t_xyz.
-      do l = 1, 3 ! m index of the output translation
-         abcRealFracTrans(l, i) = &
-               & sum(invRealVectors(:, l) * xyzFracTrans(:, i))
+   if (cellMode == 'full') then
+      ! Identity shortcut: M_loaded == M_conv, so C = I and the
+      !   conjugation collapses to a copy from the on-disk arrays
+      !   into the runtime arrays.  Skips the matrix inverse and
+      !   the per-op kernel for the most common cell mode.
+      do i = 1, numPointOps
+         abcRealPointOps(:,:,i)  = convAbcPointOps(:,:,i)
+         abcRealFracTrans(:,i)   = convAbcFracTrans(:,i)
       enddo
+   else
+      ! Full conjugation path.  Form C once, then apply the
+      !   similarity per operation:
+      !     R_real_abc = C * R_conv_abc * C^{-1}
+      !     t_real_abc = C * t_conv_abc
+      !   invRealVectors^T equals realVectors^{-1} by the
+      !   orthogonality identity (see header), so the factor on
+      !   the left of C uses pre-computed O_Lattice state without
+      !   a runtime inversion of realVectors.
+      changeBasis = matmul(transpose(invRealVectors), convLattice)
+      call invert3x3(changeBasis, changeBasisInv)
 
-   enddo ! i (operations)
+      do i = 1, numPointOps
+         abcRealPointOps(:,:,i) = matmul( &
+               & changeBasis, &
+               & matmul(convAbcPointOps(:,:,i), &
+               &        changeBasisInv))
+         abcRealFracTrans(:,i) = matmul( &
+               & changeBasis, convAbcFracTrans(:,i))
+      enddo
+   endif
 
 end subroutine computeRealPointOps
+
+
+! Invert a 3x3 real matrix using cofactor expansion.  Used by
+!   computeRealPointOps and computeRecipPointOps to form
+!   C^{-1} from C = invRealVectors^T * convLattice when the
+!   `prim` cell-mode path is taken (the `full` path skips this
+!   entirely via the identity shortcut).
+!
+! A non-singular convLattice and realVectors are preconditions of
+!   the calling code, so a singular C here means the kp file's
+!   CONV_LATTICE block is corrupt or the loaded real lattice has
+!   collapsed -- either points to an input problem rather than a
+!   bug in this routine.  The check uses |det| < 1.0e-14 as the
+!   singularity threshold, matching the producer-side check that
+!   used to live in makeinput.py's _inv_3x3 helper.
+subroutine invert3x3(matrixIn, matrixOut)
+
+   ! Import necessary modules.
+   use O_Kinds
+
+   implicit none
+
+   ! Passed parameters.
+   real (kind=double), dimension(3,3), intent(in)  :: matrixIn
+   real (kind=double), dimension(3,3), intent(out) :: matrixOut
+
+   ! Local variables.
+   real (kind=double) :: det
+         !   Determinant of matrixIn.  Used to check for
+         !   singularity and to divide out of the cofactor matrix.
+   real (kind=double) :: invDet
+         !   Reciprocal of det, cached so each output entry is a
+         !   single multiply.
+
+   ! Compute the determinant via expansion along the first row.
+   det = matrixIn(1,1) * (matrixIn(2,2)*matrixIn(3,3) &
+       &                - matrixIn(2,3)*matrixIn(3,2)) &
+       & - matrixIn(1,2) * (matrixIn(2,1)*matrixIn(3,3) &
+       &                  - matrixIn(2,3)*matrixIn(3,1)) &
+       & + matrixIn(1,3) * (matrixIn(2,1)*matrixIn(3,2) &
+       &                  - matrixIn(2,2)*matrixIn(3,1))
+
+   if (abs(det) < 1.0e-14_double) then
+      write (20,*) 'invert3x3: singular matrix (|det| =', &
+            & abs(det), '); check kp file CONV_LATTICE and the'
+      write (20,*) 'loaded real lattice.  This is an input/state'
+      write (20,*) 'problem rather than a bug in invert3x3.'
+      stop
+   endif
+
+   invDet = 1.0_double / det
+
+   ! Cofactor / adjugate construction: matrixOut(i,j) = (-1)^{i+j}
+   !   * minor(j,i) / det.  Note the transpose: the (i,j) entry
+   !   of the inverse comes from the (j,i) cofactor.
+   matrixOut(1,1) =  (matrixIn(2,2)*matrixIn(3,3) &
+                  & - matrixIn(2,3)*matrixIn(3,2)) * invDet
+   matrixOut(1,2) = -(matrixIn(1,2)*matrixIn(3,3) &
+                  & - matrixIn(1,3)*matrixIn(3,2)) * invDet
+   matrixOut(1,3) =  (matrixIn(1,2)*matrixIn(2,3) &
+                  & - matrixIn(1,3)*matrixIn(2,2)) * invDet
+   matrixOut(2,1) = -(matrixIn(2,1)*matrixIn(3,3) &
+                  & - matrixIn(2,3)*matrixIn(3,1)) * invDet
+   matrixOut(2,2) =  (matrixIn(1,1)*matrixIn(3,3) &
+                  & - matrixIn(1,3)*matrixIn(3,1)) * invDet
+   matrixOut(2,3) = -(matrixIn(1,1)*matrixIn(2,3) &
+                  & - matrixIn(1,3)*matrixIn(2,1)) * invDet
+   matrixOut(3,1) =  (matrixIn(2,1)*matrixIn(3,2) &
+                  & - matrixIn(2,2)*matrixIn(3,1)) * invDet
+   matrixOut(3,2) = -(matrixIn(1,1)*matrixIn(3,2) &
+                  & - matrixIn(1,2)*matrixIn(3,1)) * invDet
+   matrixOut(3,3) =  (matrixIn(1,1)*matrixIn(2,2) &
+                  & - matrixIn(1,2)*matrixIn(2,1)) * invDet
+
+end subroutine invert3x3
 
 
 subroutine cleanUpKPoints
@@ -1642,12 +1803,15 @@ subroutine cleanUpKPoints
       deallocate (mtopKPMap)
    endif
 
-   ! Only allocated for density-based kpoint input (kPointStyleCode == 2).
-   if (allocated(xyzPointOps)) then
-      deallocate (xyzPointOps)
+   ! On-disk conv-abc operations and their per-op translations.
+   !   Allocated for every style code (style 0 sets up a single
+   !   identity operation in memory; styles 1 and 2 read them from
+   !   the kp file).
+   if (allocated(convAbcPointOps)) then
+      deallocate (convAbcPointOps)
    endif
-   if (allocated(xyzFracTrans)) then
-      deallocate (xyzFracTrans)
+   if (allocated(convAbcFracTrans)) then
+      deallocate (convAbcFracTrans)
    endif
    if (allocated(abcRecipPointOps)) then
       deallocate (abcRecipPointOps)

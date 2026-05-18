@@ -3474,22 +3474,32 @@ def _make_kp(settings, sc):
     kp_group_file = ["", KP_SCF, KP_PSCF]  # 1-indexed
     settings.kp_num = [0, 0, 0]
 
+    # The conventional-cell snapshot (Bohr) and the
+    # skeleton's full/prim flag are the same in either
+    # mode -- both get written into every kp file so the
+    # consumer side (imago) can form its change-of-basis
+    # matrix and pick the right transform path.  See
+    # DESIGN 2.7 and the docstrings in
+    # _write_point_ops_block / computeRealPointOps for
+    # the consumer-side math.
+    cell_mode = "full" if sc.do_full_cell else "prim"
+    conv_lattice = sc.full_cell_real_lattice
+
     if settings.use_kp_density:
         # Density mode: write style-code-2 files directly.
         print("      Generating KPoints (density mode).")
 
-        # Extract the point group operations from the space
-        # group database, then convert them from their on-disk
-        # conventional-cell-abc basis into a basis-invariant
-        # Cartesian xyz form.  imago reads Cartesian operations
-        # and conjugates them into the basis of whichever cell
-        # is loaded in O_Lattice, so the same kp-file content
-        # works whether the user selected full or primitive
-        # mode in the skeleton.  See _to_cartesian_ops for the
-        # math and the file-storage convention details.
+        # Extract the point group operations straight from
+        # the space group database in their native
+        # conventional-cell-abc fractional form.  The kp
+        # file carries them verbatim along with the
+        # conventional lattice and the cell-mode flag;
+        # imago rebases them at runtime via the
+        # change-of-basis matrix C = invRealVectors^T
+        # * convLattice.  See DESIGN 2.7 for the
+        # diagnostic background that motivated moving the
+        # conjugation onto the consumer side.
         point_ops, frac_trans = _extract_point_ops(settings)
-        point_ops, frac_trans = _to_cartesian_ops(
-            point_ops, frac_trans, sc.full_cell_real_lattice)
 
         for kp_group in range(1, 3):
             dest = os.path.join(
@@ -3499,6 +3509,7 @@ def _make_kp(settings, sc):
                 settings.kp_density[kp_group],
                 settings.kp_shift,
                 point_ops, frac_trans,
+                conv_lattice, cell_mode,
                 settings.kp_intg_code[kp_group])
         # No kpSpecs.dat is produced in density mode.
     else:
@@ -3512,12 +3523,12 @@ def _make_kp(settings, sc):
 
         # Extract point group operations (same as density
         # mode -- both need them for IBZ reduction inside
-        # imago) and convert them to Cartesian xyz form.
-        # See the matching block in the density branch above
-        # and _to_cartesian_ops for the rationale.
+        # imago) in their native conv-abc fractional form.
+        # See the matching block in the density branch
+        # above for the rationale; the values written into
+        # the kp file are byte-identical to
+        # share/spaceDB/<sg>.
         point_ops, frac_trans = _extract_point_ops(settings)
-        point_ops, frac_trans = _to_cartesian_ops(
-            point_ops, frac_trans, sc.full_cell_real_lattice)
 
         kp_mesh = [
             None,
@@ -3533,6 +3544,7 @@ def _make_kp(settings, sc):
                 kp_mesh[kp_group],
                 settings.kp_shift,
                 point_ops, frac_trans,
+                conv_lattice, cell_mode,
                 settings.kp_intg_code[kp_group])
 
 
@@ -3614,174 +3626,10 @@ def _extract_point_ops(settings):
     return point_ops, frac_trans
 
 
-def _to_cartesian_ops(point_ops, frac_trans, conv_lattice):
-    """Transform space group operations from the conventional-cell
-    abc basis stored in spaceDB to a basis-invariant Cartesian xyz
-    form ready for imago to consume.
-
-    The space-group database files in ``share/spaceDB/<sg>`` store
-    each rotation matrix and per-operation translation vector in
-    the natural axes of the conventional crystallographic setting.
-    imago's runtime IBZ machinery (``computeRecipPointOps`` and
-    ``computeRealPointOps`` in ``src/imago/kpoints.f90``) is set up
-    to receive Cartesian xyz operations and conjugate them into the
-    basis of whichever lattice ends up loaded in ``O_Lattice`` --
-    the conventional cell when the skeleton selects ``full`` mode,
-    a primitive reduction when it selects ``prim`` mode.  This
-    helper performs the producer-side bridge between the two: take
-    the conventional-abc operations and produce Cartesian operations
-    that work identically in both modes.
-
-    The transformation is the standard similarity transform
-        R_xyz = M_conv * R_conv_abc * M_conv^{-1}
-        t_xyz = M_conv * t_conv_abc
-    where ``M_conv`` is the 3x3 matrix whose columns are the
-    conventional-cell lattice vectors in xyz (Bohr units).  Both
-    identities hold for any non-singular conventional lattice; no
-    cell-shape, centering, or symmetry assumption is built into
-    the math, so the result is correct for cubic, orthorhombic,
-    tetragonal, hexagonal, trigonal, monoclinic, and triclinic
-    systems alike.
-
-    File-storage convention.  imago reads each per-operation block
-    of the kp file as three lines, depositing line k as column k of
-    its internal rotation matrix (column-major fill, see
-    ``readKPoints`` in ``kpoints.f90``).  The Python list returned
-    by ``_extract_point_ops`` mirrors this on-disk layout literally:
-    ``point_ops[i][k]`` is the k-th file line of operation i, and
-    by the column-fill convention that is the k-th column of the
-    rotation matrix.  Python's row-major matrix view is therefore
-    the transpose of the actual rotation operator.  The transform
-    below transposes in before the similarity transform and back
-    out afterwards so the in-between algebra stays in standard math
-    form and the written-out matrix round-trips cleanly through
-    imago's read-as-column path.
-
-    Parameters
-    ----------
-    point_ops : list of 3x3 nested lists
-        Each entry is a list of 3 file-line rows of 3 floats, as
-        produced by ``_extract_point_ops``.  ``point_ops[i][k][j]``
-        is the j-th value on the k-th file line of operation i.
-    frac_trans : list of length-3 lists
-        Per-operation fractional translation vectors, in
-        conventional-cell-abc fractions.  ``frac_trans[i]`` is the
-        translation of operation i.
-    conv_lattice : list of list
-        Conventional-cell snapshot in the StructureControl 1-indexed
-        layout (Bohr): ``conv_lattice[abc_axis][xyz_axis]`` for
-        ``abc_axis``, ``xyz_axis`` in 1..3.  Comes from
-        ``sc.full_cell_real_lattice`` after the Angstrom-to-Bohr
-        conversion in ``_convert_a_to_au``.
-
-    Returns
-    -------
-    tuple of (list, list)
-        Same outer shape as the inputs.  Each rotation is now a
-        Cartesian xyz rotation expressed in the same file-line
-        layout, and each translation is a Cartesian xyz vector in
-        Bohr.
-    """
-    # Pack the 1-indexed conv_lattice into a plain 3x3 row-major
-    # matrix whose columns are the conventional lattice vectors in
-    # xyz, matching the column convention used by imago's
-    # realVectors array.  conv_lattice[abc][1..3] gives the xyz
-    # components of the abc-th conventional lattice vector.
-    m_conv = [
-        [conv_lattice[1][1], conv_lattice[2][1], conv_lattice[3][1]],
-        [conv_lattice[1][2], conv_lattice[2][2], conv_lattice[3][2]],
-        [conv_lattice[1][3], conv_lattice[2][3], conv_lattice[3][3]],
-    ]
-    m_conv_inv = _inv_3x3(m_conv)
-
-    point_ops_xyz = []
-    frac_trans_xyz = []
-    for r_python, t_in in zip(point_ops, frac_trans):
-        # Transpose Python's row-major file-line layout into the
-        # standard math form of the operator, apply the conjugation
-        # in standard form, then transpose back so the rotation
-        # written out follows the same column-fill convention imago
-        # expects to read.
-        r_std = _transpose_3x3(r_python)
-        r_xyz = _matmul_3x3(
-            m_conv, _matmul_3x3(r_std, m_conv_inv))
-        point_ops_xyz.append(_transpose_3x3(r_xyz))
-        # Translations are plain 3-vectors and do not need a
-        # transpose -- the conv-abc fractional translation becomes
-        # the Cartesian translation via the same conventional
-        # lattice matrix that converts abc fractions into xyz Bohr.
-        frac_trans_xyz.append(_matvec_3x3(m_conv, t_in))
-
-    return point_ops_xyz, frac_trans_xyz
-
-
-def _matmul_3x3(matrix_a, matrix_b):
-    """Compute the 3x3 matrix product ``matrix_a @ matrix_b`` for
-    plain row-major Python lists.  Both inputs and the result are
-    3-element lists of 3-element lists, 0-indexed."""
-    return [
-        [sum(matrix_a[row][k] * matrix_b[k][col]
-             for k in range(3))
-         for col in range(3)]
-        for row in range(3)
-    ]
-
-
-def _matvec_3x3(matrix_m, vec):
-    """Compute the matrix-vector product ``matrix_m @ vec`` for a
-    plain row-major 3x3 matrix and a length-3 vector.  Returns a
-    new length-3 list, 0-indexed."""
-    return [sum(matrix_m[row][k] * vec[k] for k in range(3))
-            for row in range(3)]
-
-
-def _transpose_3x3(matrix_m):
-    """Return the transpose of a row-major 3x3 list-of-lists."""
-    return [[matrix_m[col][row] for col in range(3)]
-            for row in range(3)]
-
-
-def _inv_3x3(matrix_m):
-    """Invert a 3x3 row-major Python matrix via cofactor expansion.
-
-    Raises ``ValueError`` when the matrix is numerically singular
-    (|det| below 1e-14).  A non-singular conventional-cell lattice
-    is a precondition of the calling code, so a failure here means
-    the caller's input is corrupt rather than this routine.
-    """
-    a, b, c = matrix_m[0]
-    d, e, f = matrix_m[1]
-    g, h, i = matrix_m[2]
-    # Cofactor entries before sign flips.  Variable names line up
-    # with the row/column they end up at in the adjugate transpose
-    # below, so the final return reads off as columns of the
-    # cofactor matrix divided by the determinant.
-    cof_a =  (e * i - f * h)
-    cof_b = -(d * i - f * g)
-    cof_c =  (d * h - e * g)
-    cof_d = -(b * i - c * h)
-    cof_e =  (a * i - c * g)
-    cof_f = -(a * h - b * g)
-    cof_g =  (b * f - c * e)
-    cof_h = -(a * f - c * d)
-    cof_i =  (a * e - b * d)
-    det = a * cof_a + b * cof_b + c * cof_c
-    if abs(det) < 1.0e-14:
-        raise ValueError(
-            f"_inv_3x3: singular matrix (det = {det}). "
-            "Lattice matrix is likely malformed -- check "
-            "conv_real_lattice / real_lattice in the caller.")
-    inv_det = 1.0 / det
-    return [
-        [cof_a * inv_det, cof_d * inv_det, cof_g * inv_det],
-        [cof_b * inv_det, cof_e * inv_det, cof_h * inv_det],
-        [cof_c * inv_det, cof_f * inv_det, cof_i * inv_det],
-    ]
-
-
 def _write_mesh_kp_file(dest_path, kp_mesh,
                         kp_shift, point_ops,
-                        frac_trans, intg_code=0):
+                        frac_trans, conv_lattice,
+                        cell_mode, intg_code=0):
     """Write a style-code-1 k-point file for mesh
     mode.
 
@@ -3809,15 +3657,26 @@ def _write_mesh_kp_file(dest_path, kp_mesh,
       - ``KP_SHIFT_A_B_C`` = the a, b, c shift values
       - ``NUM_POINT_OPS`` = number of point group ops
       - ``POINT_OPS`` label, then for each operation a
-        3x3 Cartesian xyz rotation matrix (3 lines)
-        followed by a Cartesian xyz translation vector
-        in Bohr (1 line), with blank-line separators
-        between operations.  The Cartesian form is
-        produced by ``_to_cartesian_ops`` so that the
-        same on-disk content works for both ``full`` and
-        ``prim`` skeleton modes; see the Fortran
-        ``computeRecipPointOps`` / ``computeRealPointOps``
-        docstrings for the matching consumer-side math.
+        3x3 rotation matrix (3 lines) followed by a
+        3-component fractional translation vector
+        (1 line), with blank-line separators between
+        operations.  Entries are emitted verbatim from
+        ``share/spaceDB/<sg>`` in their native
+        conventional-cell-abc fractional form -- no
+        producer-side similarity transform.
+      - ``CONV_LATTICE`` label, then 3 lines giving the
+        conventional cell in Bohr (one row per lattice
+        vector, xyz columns); needed by the consumer to
+        form the change-of-basis matrix.
+      - ``CELL_MODE`` label, then a single token
+        ``full`` or ``prim`` matching the skeleton's
+        lattice-mode flag; selects the identity
+        shortcut versus full conjugation on the
+        consumer side.
+
+    See the Fortran ``computeRecipPointOps`` /
+    ``computeRealPointOps`` docstrings (and DESIGN 2.7)
+    for the matching consumer-side math.
 
     Parameters
     ----------
@@ -3832,12 +3691,26 @@ def _write_mesh_kp_file(dest_path, kp_mesh,
         Space-separated shift values
         (e.g. ``"0.5 0.5 0.5"``).
     point_ops : list of list[list[float]]
-        Point group rotation matrices in Cartesian xyz
-        form (post-``_to_cartesian_ops``).  Each entry is
-        a list of 3 file-line rows of 3 floats.
+        Point group rotation matrices in conventional-
+        cell-abc form, as returned by
+        ``_extract_point_ops``.  Each entry is a list
+        of 3 file-line rows of 3 floats.
     frac_trans : list of list[float]
-        Per-operation translation vectors in Cartesian xyz
-        Bohr (post-``_to_cartesian_ops``).
+        Per-operation translation vectors in
+        conventional-cell-abc fractions, as returned
+        by ``_extract_point_ops``.
+    conv_lattice : list of list
+        Conventional-cell snapshot in the
+        StructureControl 1-indexed layout (Bohr):
+        ``conv_lattice[abc_axis][xyz_axis]`` for
+        ``abc_axis``, ``xyz_axis`` in 1..3.  Sourced
+        from ``sc.full_cell_real_lattice`` after the
+        Angstrom-to-Bohr conversion in
+        ``_convert_a_to_au``.
+    cell_mode : str
+        Either ``"full"`` or ``"prim"``, mirroring the
+        skeleton's lattice-mode flag (i.e.
+        ``sc.do_full_cell``).
     intg_code : int, optional
         K-point integration method code.  0 = Gaussian
         /histogram (default), 1 = LAT (linear analytic
@@ -3855,12 +3728,14 @@ def _write_mesh_kp_file(dest_path, kp_mesh,
         f.write("KP_SHIFT_A_B_C\n")
         f.write(f"{kp_shift}\n")
         _write_point_ops_block(
-            f, point_ops, frac_trans)
+            f, point_ops, frac_trans,
+            conv_lattice, cell_mode)
 
 
 def _write_density_kp_file(dest_path, density,
                            kp_shift, point_ops,
-                           frac_trans,
+                           frac_trans, conv_lattice,
+                           cell_mode,
                            intg_code=0):
     """Write a style-code-2 k-point file for density
     mode.
@@ -3885,15 +3760,23 @@ def _write_density_kp_file(dest_path, density,
       - ``KP_SHIFT_A_B_C`` = the a, b, c shift values
       - ``NUM_POINT_OPS`` = number of point group ops
       - ``POINT_OPS`` label, then for each operation a
-        3x3 Cartesian xyz rotation matrix (3 lines)
-        followed by a Cartesian xyz translation vector
-        in Bohr (1 line), with blank-line separators
-        between operations.  The Cartesian form is
-        produced by ``_to_cartesian_ops`` so that the
-        same on-disk content works for both ``full`` and
-        ``prim`` skeleton modes; see the Fortran
-        ``computeRecipPointOps`` / ``computeRealPointOps``
-        docstrings for the matching consumer-side math.
+        3x3 rotation matrix (3 lines) followed by a
+        3-component fractional translation vector
+        (1 line), with blank-line separators between
+        operations.  Entries are emitted verbatim from
+        ``share/spaceDB/<sg>`` in their native
+        conventional-cell-abc fractional form -- no
+        producer-side similarity transform.
+      - ``CONV_LATTICE`` label, then 3 lines giving the
+        conventional cell in Bohr; needed by the
+        consumer to form the change-of-basis matrix.
+      - ``CELL_MODE`` label, then a single token
+        ``full`` or ``prim`` mirroring the skeleton's
+        lattice-mode flag.
+
+    See the Fortran ``computeRecipPointOps`` /
+    ``computeRealPointOps`` docstrings (and DESIGN 2.7)
+    for the matching consumer-side math.
 
     Parameters
     ----------
@@ -3907,12 +3790,22 @@ def _write_density_kp_file(dest_path, density,
         Space-separated shift values
         (e.g. ``"0.5 0.5 0.5"``).
     point_ops : list of list[list[float]]
-        Point group rotation matrices in Cartesian xyz
-        form (post-``_to_cartesian_ops``).  Each entry is
-        a list of 3 file-line rows of 3 floats.
+        Point group rotation matrices in conventional-
+        cell-abc form, as returned by
+        ``_extract_point_ops``.  Each entry is a list
+        of 3 file-line rows of 3 floats.
     frac_trans : list of list[float]
-        Per-operation translation vectors in Cartesian xyz
-        Bohr (post-``_to_cartesian_ops``).
+        Per-operation translation vectors in
+        conventional-cell-abc fractions, as returned
+        by ``_extract_point_ops``.
+    conv_lattice : list of list
+        Conventional-cell snapshot in the
+        StructureControl 1-indexed layout (Bohr).
+        Sourced from ``sc.full_cell_real_lattice``.
+    cell_mode : str
+        Either ``"full"`` or ``"prim"``, mirroring the
+        skeleton's lattice-mode flag (i.e.
+        ``sc.do_full_cell``).
     intg_code : int, optional
         K-point integration method code.  0 = Gaussian
         /histogram (default), 1 = LAT (linear analytic
@@ -3929,35 +3822,66 @@ def _write_density_kp_file(dest_path, density,
         f.write("KP_SHIFT_A_B_C\n")
         f.write(f"{kp_shift}\n")
         _write_point_ops_block(
-            f, point_ops, frac_trans)
+            f, point_ops, frac_trans,
+            conv_lattice, cell_mode)
 
 
-def _write_point_ops_block(f, point_ops,
-                           frac_trans):
-    """Write point group operations block to an open
-    file.
+def _write_point_ops_block(f, point_ops, frac_trans,
+                           conv_lattice, cell_mode):
+    """Write the point-group operations block plus the
+    ``CONV_LATTICE`` and ``CELL_MODE`` metadata blocks
+    to an open kp file.
 
-    This shared helper writes the ``NUM_POINT_OPS``
-    and ``POINT_OPS`` sections used by both
-    style-code-1 and style-code-2 k-point files.
-    The format matches what ``readKPoints`` in
-    ``kpoints.f90`` expects: a count line, a label
-    line, then for each operation a 3x3 rotation
-    matrix (3 lines) followed by its fractional
-    translation vector (1 line), with blank-line
-    separators between operations.
+    This shared helper writes the ``NUM_POINT_OPS`` /
+    ``POINT_OPS`` sections (used by both style-code-1
+    and style-code-2 k-point files) followed by the two
+    new metadata blocks introduced under DESIGN 2.7's
+    conv-abc on-disk format.  The format matches what
+    ``readKPoints`` in ``kpoints.f90`` expects:
+
+      1. ``NUM_POINT_OPS`` label, count line.
+      2. ``POINT_OPS`` label, then for each operation a
+         3x3 rotation matrix (3 lines) followed by its
+         fractional translation vector (1 line), with
+         blank-line separators between operations.
+         Values are conv-abc fractions copied verbatim
+         from ``share/spaceDB/<sg>``.
+      3. ``CONV_LATTICE`` label, then 3 lines giving
+         the conventional cell in Bohr (one row per
+         lattice vector, xyz columns).  Required by the
+         consumer to form the change-of-basis matrix
+         ``C = invRealVectors^T * convLattice`` (see
+         DESIGN 2.7 and the Fortran
+         ``computeRealPointOps`` docstring).
+      4. ``CELL_MODE`` label, then a single token --
+         ``full`` if the skeleton requested the full
+         conventional cell, ``prim`` if it requested a
+         primitive reduction.  The consumer uses this
+         flag to choose between an identity-shortcut
+         copy (``full``: ``M_loaded == M_conv``, so
+         ``C = I``) and the full conjugation path
+         (``prim``).
 
     Parameters
     ----------
     f : file object
         An open file handle to write to.
     point_ops : list of list[list[float]]
-        Point group rotation matrices in Cartesian xyz
-        form (post-``_to_cartesian_ops``).  Each entry is
-        a list of 3 file-line rows of 3 floats.
+        Point group rotation matrices in conventional-
+        cell-abc form (verbatim from spaceDB).  Each
+        entry is a list of 3 file-line rows of 3
+        floats.
     frac_trans : list of list[float]
-        Per-operation translation vectors in Cartesian xyz
-        Bohr (post-``_to_cartesian_ops``).
+        Per-operation translation vectors in
+        conventional-cell-abc fractions (verbatim from
+        spaceDB).
+    conv_lattice : list of list
+        Conventional-cell matrix in the
+        StructureControl 1-indexed layout (Bohr):
+        ``conv_lattice[abc_axis][xyz_axis]`` for
+        ``abc_axis``, ``xyz_axis`` in 1..3.
+    cell_mode : str
+        Either ``"full"`` or ``"prim"``.
     """
     f.write("NUM_POINT_OPS\n")
     f.write(f"{len(point_ops)}\n")
@@ -3973,6 +3897,26 @@ def _write_point_ops_block(f, point_ops,
         f.write(f"  {t[0]:12.8f}"
                 f"  {t[1]:12.8f}"
                 f"  {t[2]:12.8f}\n")
+
+    # Emit the conventional-cell matrix in Bohr.  The
+    # StructureControl layout is 1-indexed:
+    # ``conv_lattice[abc][xyz]`` for ``abc``, ``xyz``
+    # in 1..3, with slot 0 set to None.  Write one row
+    # per conventional lattice vector, columns x, y, z
+    # -- this matches imago's realVectors row layout
+    # and the readKPoints CONV_LATTICE parser.
+    f.write("CONV_LATTICE\n")
+    for abc in range(1, 4):
+        f.write(f"  {conv_lattice[abc][1]:18.12f}"
+                f"  {conv_lattice[abc][2]:18.12f}"
+                f"  {conv_lattice[abc][3]:18.12f}\n")
+
+    # Emit the cell-mode flag.  The consumer uses this
+    # token to take the identity shortcut (full) or
+    # invoke the full similarity-transform path (prim)
+    # in computeRealPointOps / computeRecipPointOps.
+    f.write("CELL_MODE\n")
+    f.write(f"{cell_mode}\n")
 
 
 def _print_kp_in_file(settings, sc, kp_mesh_request, kp_group):
