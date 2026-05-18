@@ -794,7 +794,7 @@ keeps the common case branch-free.
 > requirement reflects the project's documentation
 > policy in CLAUDE.md and is not optional.
 
-- [ ] C44. Implement src/scripts/initial_potential_db.py
+- [x] C44. Implement src/scripts/initial_potential_db.py
   reader: PotentialEntry and ElementDatabase
   dataclasses; load() enforcing all six DESIGN 5.2
   validation rules (top-level and per-entry presence,
@@ -802,18 +802,23 @@ keeps the common case branch-free.
   coefficients/alphas length, label uniqueness,
   required "isolated" baseline); require_provenance()
   with Imago-source extra fields; lookup() and
-  baseline() helpers (PSEUDOCODE 11.1)
-- [ ] C45. Implement initial_potential_db.save() --
+  baseline() helpers (PSEUDOCODE 11.1).  Landed
+  2026-05-18 alongside C45 and C46 as one commit.
+- [x] C45. Implement initial_potential_db.save() --
   deterministic hand-formatted TOML emitter with fixed
   key ordering, %.16e floats, per-block = alignment,
   and multi-line array layout (PSEUDOCODE 11.2,
-  DESIGN 5.5)
-- [ ] C46. Add unit tests for initial_potential_db.py:
+  DESIGN 5.5).  Landed 2026-05-18 alongside C44/C46.
+- [x] C46. Add unit tests for initial_potential_db.py:
   each validation rule fires with the expected error
   message and field name; emitter is bit-deterministic
   for a fixed in-memory database; round-trip
   load(save(db)) preserves all numerical and
-  provenance fields
+  provenance fields.  Landed 2026-05-18 in
+  src/tests/test_initial_potential_db.py with 37
+  tests covering all six validation rules, emitter
+  alignment/format/escapes, %.16e bit-exact
+  round-trip, and save idempotency.
 - [ ] C47. Add -pot CLI argument to makeinput.py and
   integrate emitInitialPotentials per PSEUDOCODE 11.3:
   load augmented per-element database when present;
