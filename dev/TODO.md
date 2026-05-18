@@ -340,6 +340,58 @@ atomPerm either.  See DESIGN 2.6.
   that combination; current behavior already fails
   loudly rather than silently producing wrong answers.
 
+#### Phase F follow-up #2 -- Conv-abc on-disk redesign (DESIGN 2.7 revised)
+
+Iterated on the C31 fix.  The Cartesian-xyz on-disk
+intermediate worked but pushed a similarity transform onto
+the producer side and put numerical values on disk that no
+longer traced back to `share/spaceDB/<sg>`.  Reworked the
+boundary so the on-disk operations are byte-identical to
+spaceDB conv-abc entries and the conjugation happens
+entirely on the consumer side via
+`C = invRealVectors^T * convLattice`.  Identity shortcut in
+`full` mode (M_loaded == M_conv => C = I => copy through)
+keeps the common case branch-free.
+
+- [x] C52a. Revise DESIGN 2.7 to make conv-abc the on-disk
+  form; document M_conv / CONV_LATTICE / CELL_MODE, the
+  consumer-side C and identity shortcut, and a
+  "Diagnostic history" paragraph that records the
+  Cartesian-xyz iteration this supersedes
+- [x] C52b. Update ARCHITECTURE.md kpoints section: rename
+  the on-disk arrays to `convAbcPointOps` /
+  `convAbcFracTrans`; document the new CONV_LATTICE /
+  CELL_MODE storage and the C-based transform with the
+  full-mode identity shortcut
+- [x] C52c. Rewrite PSEUDOCODE 4b end-to-end: 4b.1 writer
+  near-passthrough (spaceDB ops emitted verbatim plus new
+  metadata blocks), new 4b.2 reader additions, 4b.3
+  consumer-side conjugation with C and identity shortcut
+- [x] C52d. makeinput.py: drop `_to_cartesian_ops` and its
+  plain-Python 3x3 helpers (`_matmul_3x3`, `_matvec_3x3`,
+  `_transpose_3x3`, `_inv_3x3`); pass `conv_lattice` and
+  `cell_mode` through `_write_mesh_kp_file` /
+  `_write_density_kp_file`; emit the new `CONV_LATTICE` /
+  `CELL_MODE` blocks in `_write_point_ops_block`.
+  `POINT_OPS` values are now byte-identical to
+  `share/spaceDB/<sg>`
+- [x] C52e. kpoints.f90: rename `xyzPointOps` ->
+  `convAbcPointOps` and `xyzFracTrans` ->
+  `convAbcFracTrans` (reverting C31d's direction); add
+  module-level `convLattice(3,3)` and `cellMode`; parse
+  the new blocks in the style-1 and style-2 branches of
+  `readKPoints`; default `cellMode='full'` and
+  `convLattice=realVectors` in the style-0 trivial-
+  identity setup; rewrite `computeRealPointOps` and
+  `computeRecipPointOps` around
+  `C = invRealVectors^T * convLattice` with the full-
+  mode identity-shortcut copy path; add a private
+  `invert3x3` helper for `C^{-1}`
+- [x] C52f. Validate: clean build, full/prim agreement on
+  decomposition properties (the physics test for the
+  shortcut + conjugation paths producing identical
+  results).  Confirmed by user 2026-05-18.
+
 ### Phase G -- UFF bond parameter database (DESIGN 4)
 
 - [x] C32. Create bond_parameters.dat with UFF per-element
