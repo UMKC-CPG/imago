@@ -26,7 +26,7 @@ def writeSkl(el,directory,n):
 		listout.append(line)
 
 	os.chdir(cwd)
-	os.chdir('../Olcaoskl')
+	os.chdir('../skl')
 	try:
 		os.mkdir(directory)
 	except:
