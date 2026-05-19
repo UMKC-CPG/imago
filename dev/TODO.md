@@ -84,6 +84,50 @@
   direct-comparison cache under `share/atomicBDB/cache/scf/<reference_id>/`
   with byte-compared structure file copies (no hashing) for
   debuggability; strict refusal on COD-fetch failures.
+- [x] D9. Phase 2 design: schema v2 with per-entry
+  `default` tag and `[[potential.fingerprint]]` sub-blocks
+  (DESIGN 5.2); gold sketch update (DESIGN 5.3); in-memory
+  `FingerprintRecord` and `default_entry()` (DESIGN 5.4);
+  full composition selection algorithm with spatial-scope
+  references between `-target`/`-block name=NAME` and
+  `-reduce`/`-bispec scope=NAME` (DESIGN 5.6); producer-
+  side fingerprint harvest with loen runs cached per
+  `(method, sub_spec)` (DESIGN 5.7 v2); two of three
+  Phase-2 open questions resolved (DESIGN 5.9, with
+  interpolation parked for Phase 3 and element-aware
+  bispec carried as a Phase-2 follow-up D10);
+  nested-makeinput bootstrap for Fortran-side matchers
+  (DESIGN 5.10); matcher protocol architectural section
+  inside `makeinput.py` (ARCHITECTURE 8.9).  Done
+  2026-05-19, refined the same day to shrink
+  ARCHITECTURE 8.2 to a pointer at DESIGN 5.2/5.3,
+  rewrite ARCHITECTURE 8.4 around the matcher-driven
+  reality, clarify ARCHITECTURE 8.7's
+  Fortran-changes scope (Phase-2 base vs follow-up),
+  swap "species centroid" for a per-matcher
+  `representative` method (DESIGN 5.6.5 / ARCHITECTURE
+  8.9), correct DESIGN 5.10.2 step 2 (no `-pot` flag in
+  the nested call; default tag flows through), and
+  enumerate the full bispec LOEN parameter contract
+  (DESIGN 5.10.5).  Element-aware bispectrum design
+  is now its own task D10.
+- [ ] D10. Design the element-aware bispectrum
+  (Phase-2 follow-up).  Specify the `bispecByElement`
+  parameter in `O_Input`; the per-neighbor-element
+  accumulation in `computeBispectrumComponent`; the
+  extended `fort.21` output format (per-element
+  vector slices labeled in atomic-number order); the
+  `(neighbor_element, vector)` payload shape in
+  `[[potential.fingerprint]]` records; the matcher-
+  distance semantics that zip by neighbor-element
+  symbol with missing-element fallback to L2 of the
+  present side; the `by_element = true` sub_spec key
+  in `BispecMatcher.to_loen_input` per DESIGN 5.10.5;
+  and how the producer harvests the element-aware
+  variant.  Adds at least one new sub-section under
+  DESIGN 5 (proposed 5.11) and updates DESIGN 5.9 to
+  fold this back in.  Must land before C62
+  implementation begins.
 
 ---
 
@@ -104,6 +148,32 @@
   makeinput.py lookup with fallback chain (11.3),
   regeneration pipeline (11.4), and validation harness
   (11.5) (PSEUDOCODE 11, DESIGN 5)
+- [x] P5. Write Phase-2 pseudocode for the matcher
+  protocol and the new selection path: matcher base
+  class plus `ReduceMatcher` / `BispecMatcher`
+  concrete subclasses (ARCHITECTURE 8.9); registry
+  lookup; preflight coverage check (DESIGN 5.6.3 step
+  4); species-pass composition with `scope=NAME`
+  spatial reference resolution (DESIGN 5.6.4);
+  manifest-entry pick per species via fingerprint
+  match, similarity floor, default-tag fallback
+  (DESIGN 5.6.5); type-pass inheritance from parent
+  species (DESIGN 5.6.6); nested-makeinput bootstrap
+  orchestration with recursion guard (DESIGN 5.10).
+  Update existing PSEUDOCODE 11.3 to reflect the
+  Phase-2 selection flow rather than the Phase-1
+  literal-label flow.  Done 2026-05-19: PSEUDOCODE
+  11.3 expanded into seven sub-sections (11.3.a
+  matcher protocol; 11.3.b preflight + coverage
+  check; 11.3.c species pass with scope resolution;
+  11.3.d entry pick with three-step precedence;
+  11.3.e type pass with XANES split; 11.3.f bootstrap
+  with recursion guard; 11.3.g driver) and 11.4 was
+  refreshed to schema v2 in the same pass (manifest
+  rules 1-9, is_cached_v2 with field-by-field +
+  byte-compare, fingerprint harvest split between
+  Python-side and Fortran-side matchers, default tag
+  carried into PotentialEntry).
 
 ---
 
@@ -850,6 +920,140 @@ keeps the common case branch-free.
   database via build_initial_potentials.py, run
   bench_initial_potential.py, and confirm mean_pct
   >= 20% reduction per VISION Principle 7
+
+#### Phase 2 -- fingerprint-driven manifest selection
+
+Builds on Phase 1 (C47-C51).  Phase 1 must be at
+least functionally complete (literal-label selection
+working end-to-end) before this chain lands, because
+the matcher protocol and the bootstrap subprocess
+both invoke makeinput's Phase-1 emission path
+internally.  The chain may be developed in parallel
+with Phase 1 but cannot ship until Phase 1 has
+shipped.
+
+- [ ] C53. initial_potential_db.py: bump schema
+  validation from v1 to v2.  Add `default: bool` to
+  `PotentialEntry`; add `FingerprintRecord` dataclass
+  with `method` / `sub_spec` / `payload`; add
+  `fingerprints` list to `PotentialEntry`; add
+  `default_entry(db)` and `find_fingerprint(entry,
+  method, sub_spec)` public functions; extend the
+  reader to enforce the new rules 7/8/9 (DESIGN 5.2);
+  extend the emitter to write the new fields
+  deterministically (DESIGN 5.5 layout extended to the
+  new blocks); update C44/C45/C46 tests for the v2
+  schema.  Existing v1 files in `share/atomicPDB/` are
+  out-of-tree at the moment (C47 not yet shipped); the
+  v1-to-v2 migration is handled by C60 regenerating
+  them through the producer.
+- [ ] C54. makeinput.py: introduce the Matcher
+  protocol (ARCHITECTURE 8.9) and the `MATCHERS`
+  registry.  Refactor the existing `group_reduce`
+  algorithm into `ReduceMatcher` (with
+  `needs_loen_run = false`); preserve current
+  behavior of `-reduce` as the regression target.
+  This lands before the new schemes so the existing
+  test surface validates the refactor.
+- [ ] C55. makeinput.py: add `BispecMatcher` class
+  with `needs_loen_run = true`.  Implement
+  `to_loen_input(sub_spec)` returning the full LOEN
+  parameter dict per DESIGN 5.10.5 (`loenCode`,
+  `twoj1`, `twoj2`, `max_neigh`, `cutoff`,
+  `angleSqueeze`; required keys `twoj1`/`twoj2`, the
+  others with documented defaults matching today's
+  hardcoded values);
+  `parse_loen_output(path, sub_spec)` returning the
+  per-site real-vector rows of `fort.21`; a
+  `distance` metric over those vectors; and
+  `representative(members)` returning the
+  element-wise mean (ARCHITECTURE 8.9).  Reject the
+  optional `by_element` sub_spec key with a clear
+  "not yet implemented" error (placeholder for C62).
+- [ ] C56. makeinput.py: add `name=NAME` keyword to
+  the `-target` and `-block` argparse handlers.
+  Validate uniqueness across the run; store the name
+  in the existing spatial-flag records so subsequent
+  scope references can resolve it.
+- [ ] C57. makeinput.py: add `scope=NAME` and
+  `scope=~NAME` keyword to the `-reduce` handler;
+  introduce the new `-bispec` argparse handler with
+  the same scope keyword plus `twoj1=` / `twoj2=`
+  sub_spec fields.  Enforce the
+  environment-scheme mutual exclusion (DESIGN 5.6.2):
+  at most one `-reduce` *or* one `-bispec` per run.
+- [ ] C58. makeinput.py: implement the nested-makeinput
+  bootstrap of DESIGN 5.10.  Spawn a subprocess into
+  `.inputTemp/loen_bootstrap/` with a stripped-down
+  argument list (no `-pot` flag -- default tag flows
+  through via the per-element preflight; Γ-only
+  k-points; no grouping flags), invoke
+  `imago.py -loen -scf no` against the produced
+  `imago.dat`, and parse `fort.21` for the active
+  matcher's per-atom fingerprint vectors.  Thread the
+  matcher's `to_loen_input(sub_spec)` parameter dict
+  (per DESIGN 5.10.5) into the existing
+  `LOEN_INPUT_DATA` block emission in makeinput.py
+  (currently hardcoded at lines 4659-4665), so the
+  bootstrap's loen call uses the active matcher's
+  parameters rather than the hardcoded defaults.  Add
+  the `--no-loen-bootstrap` belt-and-suspenders flag
+  to the nested call.
+- [ ] C59. makeinput.py: implement the Phase-2
+  species pass (DESIGN 5.6.4-5.6.7).  Walk
+  `settings.methods` in order; dispatch each
+  environment-based flag through its matcher with
+  the resolved spatial scope; bucket atoms by
+  fingerprint distance with the matcher's default
+  similarity floor; pick one manifest entry per
+  species via fingerprint match + similarity floor
+  + default-tag fallback; propagate species choices
+  through the type pass (XANES integration intact);
+  emit per-type potentials into the Imago input
+  file in today's on-the-wire format.
+- [ ] C60. build_initial_potentials.py: bump the
+  manifest reader to v2 (new `default` per entry,
+  new `[[reference_solid.entry.fingerprint]]`
+  declarations; new validation rules 7/8/9 per
+  DESIGN 5.7).  Add the fingerprint-harvest step
+  to the per-entry loop: invoke Python-side
+  matchers in-process and Fortran-side matchers
+  via cached `imago.py -loen -scf no` runs.
+  Attach `FingerprintRecord`s and the `default`
+  flag to each produced `PotentialEntry`.
+- [ ] C61. Add end-to-end Phase-2 tests: a small
+  reference structure runs through the bootstrap +
+  loen + bucketing + entry-pick + emit chain
+  producing a deterministic Imago input file.
+  Include negative tests for the preflight coverage
+  check (missing fingerprint family aborts cleanly),
+  the mutual exclusion (`-reduce -bispec` together
+  errors at parse time), and the similarity floor
+  (sub-threshold match falls back to default with a
+  warning).
+
+#### Phase 2 follow-up -- element-aware bispectrum (parked)
+
+- [ ] C62. Implement the element-aware bispectrum per
+  D10.  Fortran side: add `bispecByElement` to
+  `O_Input::readLoEnControl`, default false; extend
+  `O_LocalEnv::computeBispectrumComponent` to
+  accumulate per-neighbor-element when the flag is
+  set; emit the extended `fort.21` format per D10's
+  specification.  Python side: update
+  `BispecMatcher.parse_loen_output` to return a list
+  of `(neighbor_element, vector)` pairs when
+  `sub_spec["by_element"]` is true; replace the
+  "not yet implemented" rejection in
+  `BispecMatcher.to_loen_input` (added under C55)
+  with the real handling; update the matcher's
+  `distance` per D10's semantics.  Producer side:
+  update `build_initial_potentials.py` to harvest
+  the element-aware variant when declared.  Library
+  side: extend the database schema and reader if
+  D10's payload shape requires it.  Parked pending
+  both (a) Phase-2 base chain (C53-C61) landing
+  first and (b) D10 design landing.
 
 ---
 

@@ -513,82 +513,48 @@ solid-state runs.
 
 ### 8.2 File Format
 
-The augmented database uses TOML. Justification: files are
-small (well under 1 MB per element), human inspection of
-checked-in files is a hard requirement, and TOML reads via
-the Python stdlib (`tomllib`, 3.11+). Writes are
-hand-formatted from inside the build pipeline -- the subset
-of TOML this project emits (string/number/bool scalars,
-inline arrays of floats, simple `[[potential]]` arrays of
-tables) is small enough that a focused emitter in the helper
-module (`initial_potential_db.py`) is simpler than pulling
-in a third-party writer dependency.
+The augmented database uses TOML.  Files are small (well
+under 1 MB per element), human inspection of checked-in
+files is a hard requirement, and TOML reads via the Python
+stdlib (`tomllib`).  Writes are hand-formatted from inside
+the helper module (`initial_potential_db.py`) -- the subset
+of TOML emitted is small enough that a focused emitter is
+simpler than pulling in a third-party writer dependency.
 
-Each per-element `s_gaussian_pot.toml` carries one or more
-labeled `[[potential]]` entries. Each entry wraps the same
-numerical content as today's `pot1` + `coeff1` pair (radial
-Gaussian fit of the nuclear and electronic potentials) in a
-TOML envelope of metadata.
+Architectural invariants the format enforces:
 
-Sketch (gold, two entries):
-
-```toml
-schema_version = 1
-element_symbol = "Au"
-nuclear_z      = 79
-
-[[potential]]
-label           = "isolated"
-description     = "Single isolated Au atom (from atomSCF)."
-nuclear_alpha   = 0.4
-covalent_radius = 1.0     # presently unused
-num_gaussians   = 32
-alpha_min       = 0.001
-alpha_max       = 100.0   # implicit geometric series
-coefficients    = [ ... ]
-alphas          = [ ... ]
-
-[potential.provenance]
-source       = "atomSCF"
-imago_commit = "..."
-
-[[potential]]
-label           = "fcc_bulk_metal"
-description     = "Gold in fcc bulk (Fm-3m)."
-# ... numerical fields as above ...
-
-[potential.provenance]
-source         = "Imago"
-cod_id         = "COD-XXXXXXX"
-atom_site      = 1
-kpoint_density = 0.05
-scf_iterations = 28
-imago_commit   = "..."
-```
-
-Choices and trade-offs:
-
-- **Pure TOML, inline arrays.** Today's coefficient arrays
-  are short enough (tens of entries) that inline TOML stays
-  readable. If a future entry's arrays grow long enough to
-  hurt readability, a hybrid scheme (TOML metadata + a
-  sidecar columnar block referenced by relative path) is
-  the contingency. The reader/writer abstraction in 8.7
-  must be designed so this swap is local.
-- **`schema_version` on every file.** Lets the reader
-  refuse unknown versions, and lets future schema changes
-  be additive without breaking older files.
-- **Provenance is required, not optional.** Every entry
-  must carry enough information to retrace its origin --
-  source structure, atom site, Imago commit, convergence
-  parameters, SCF iteration count. This is non-negotiable
-  per VISION Principle 5 (curation/regeneration as
-  deliverable) and feeds the validation harness in 8.6.
+- **`schema_version` on every file.**  Lets the reader
+  refuse unknown versions and lets future schema changes
+  be additive without breaking older files.  Bumped from
+  v1 (Phase 1) to v2 (Phase 2) to carry the per-entry
+  default tag and the per-entry fingerprint sub-blocks.
+- **Provenance is required, not optional.**  Every
+  numerical-potential entry must carry enough information
+  to retrace its origin -- source structure, atom site,
+  Imago commit, convergence parameters, SCF iteration
+  count.  Non-negotiable per VISION Principle 5 and feeds
+  the validation harness (8.6).
 - **Geometric-alpha layout preserved but explicit.**
   `alpha_min`, `alpha_max`, and `num_gaussians` define an
-  implicit geometric series today; `alphas[]` is written
-  explicitly to allow future non-geometric layouts without
-  a format change.
+  implicit geometric series; `alphas[]` is written
+  explicitly to allow future non-geometric layouts
+  without a format change.
+- **Numerical content is the same as the legacy
+  `pot1` + `coeff1` pair** (radial Gaussian fit of the
+  nuclear and electronic potentials); the TOML file wraps
+  it in a metadata envelope.
+
+Full schema (top-level keys, per-entry keys, fingerprint
+sub-blocks, provenance, validation rules), the
+deterministic emitter contract, and a worked sketch live
+in DESIGN §5.2, §5.3, and §5.5.  This section names the
+architectural choice; DESIGN owns the bytes.
+
+A future arrays-grow-long-enough-to-hurt-readability
+contingency (hybrid TOML metadata + sidecar columnar
+block referenced by relative path) is the format-level
+escape hatch.  The reader/writer abstraction in §8.7 is
+designed so that swap is local.
 
 ### 8.3 Data Flow
 
@@ -625,38 +591,53 @@ end to end.
 
 ### 8.4 Labeling and Lookup
 
-A "label" is a string key under which one numerical
-potential entry lives.
+A "label" is an arbitrary string key under which one
+numerical potential entry lives within an element's
+database file.  The format imposes no naming convention
+on labels beyond one reserved value: `"isolated"`, which
+is the atomSCF-derived baseline and must be present per
+DESIGN §5.2 rule 6.  Every other label is curator-chosen
+(`"default_solid"`, `"fcc_bulk_metal"`, `"tetrahedral_O"`,
+etc.) and conveys meaning only to humans reading the file.
 
-Phase 1 labels (initial deliverable):
-- `"isolated"` -- mirrors `atomSCF` output, retained as
-  baseline.
-- `"default_solid"` -- one improved-bulk potential per
-  element, chosen by the curator. The first non-trivial
-  deliverable per VISION.
+Selection -- the question of *which labeled entry to use
+for each atom* -- happens through two cooperating
+mechanisms:
 
-Phase 2+ labels (schema-extensible; not built in Phase 1):
-- `coordination = N`
-- `oxidation_state = +N`
-- `local_environment = "<descriptor>"` (e.g.,
-  `"tetrahedral_O"`, hashed near-neighbor signatures)
+- **The `default` tag (DESIGN §5.2 rule 7).**  Exactly
+  one entry per file carries `default = true`.  This is
+  the entry picked for any atom that no scheme grouped
+  by local environment.
+- **Fingerprint records (DESIGN §5.2 fingerprint
+  sub-blocks).**  Each entry optionally carries one or
+  more `[[potential.fingerprint]]` records keyed by
+  `(method, sub_spec)`.  When the user requests an
+  environment-based grouping (`-reduce`, `-bispec`), the
+  matcher protocol (§8.9) computes a per-atom fingerprint,
+  buckets atoms into species by descriptor similarity,
+  and picks the manifest entry whose recorded fingerprint
+  best matches each species.
 
-Phase 1 lookup is a *single global default per run*: a
-CLI-level argument to `makeinput.py` (e.g.,
-`-pot default_solid` or `-pot isolated`) selects one label
-that is applied uniformly to every atom in the structure.
-The same labeled entry is fetched per element and used for
-all atoms of that element. No per-site selection happens in
-Phase 1.
+**Phase 1** ships only the literal-label override
+(`-pot LABEL` applied uniformly across the structure)
+plus the `default` tag fallback.  No fingerprint records
+are required in Phase-1 files; entries that lack them
+simply don't participate in fingerprint matching.
 
-Phase 2 introduces a selection / interpolation method:
-per-site label assignment driven by local environment,
-oxidation state, or coordination, with interpolation across
-nearby labels when no exact match exists. The schema and
-lookup interface in Phase 1 must already permit this without
-breaking the single-default path. Algorithmic specifics
-(descriptor computation, interpolation procedure) are
-DESIGN-level.
+**Phase 2** layers the matcher-driven path on top of
+Phase 1 without changing the legacy override: `-pot LABEL`
+still wins when given.  The matcher protocol is the
+extension point for new descriptor families (element-
+aware bispectrum, SOAP, future schemes) -- adding one is
+a new matcher class in `makeinput.py` plus a new
+`[[potential.fingerprint]]` shape, with no schema
+rewrite.
+
+Full algorithm (CLI surface, mutual-exclusion rules,
+spatial scoping, per-species pick, type inheritance) is
+in DESIGN §5.6.  The Phase-3 interpolation question --
+what to do when the best fingerprint match exceeds the
+matcher's similarity floor -- is parked in DESIGN §5.9.
 
 ### 8.5 Curation and Regeneration
 
@@ -671,15 +652,19 @@ src/scripts/
 ```
 
 Inputs:
-- A curation manifest in TOML, schema v1 (full spec in DESIGN
+- A curation manifest in TOML, schema v2 (full spec in DESIGN
   5.7), listing reference solids, atom sites to harvest from
-  each, and the labels to assign.  Reference structures are
-  fetched from the Crystallography Open Database at regeneration
-  time using a pinned revision, with a `structure_path` escape
-  hatch for materials not in COD.
+  each, the labels to assign, which entry per element carries
+  the `default` tag, and which `(method, sub_spec)` fingerprints
+  to harvest alongside each numerical potential.  Reference
+  structures are fetched from the Crystallography Open Database
+  at regeneration time using a pinned revision, with a
+  `structure_path` escape hatch for materials not in COD.
 - The existing `pot1` / `coeff1` files (for `"isolated"`
   entries).
-- An Imago build (for running reference SCF calculations).
+- An Imago build (for running reference SCF calculations and,
+  for Fortran-side fingerprint matchers, follow-on
+  `imago.py -loen -scf no` runs per declared fingerprint).
 
 Outputs:
 - Regenerated augmented database file in each affected
@@ -750,8 +735,16 @@ so that any future format swap or schema-version bump is a
 one-file change rather than a spread of edits across the
 three scripts above.
 
-Fortran: no changes. Imago consumes the same input file
-format; the choice of initial potential is opaque to it.
+Fortran: no changes for the Phase-1 chain or the Phase-2
+base chain.  Imago consumes the same input file format;
+the choice of initial potential is opaque to it.  The
+Phase-2 follow-up (element-aware bispectrum, TODO C62)
+requires extensions to `O_Input` (a new `bispecByElement`
+parameter) and `loen.f90` (per-neighbor-element
+accumulation in `computeBispectrumComponent` plus an
+extended `fort.21` output format).  Those extensions are
+scoped under DESIGN §5.9 and TODO D10 / C62 -- they are
+not part of the Phase-2 base deliverable.
 
 Shared modules: no changes. The new files live inside the
 existing `share/atomicPDB/<elem>/` directories alongside
@@ -764,14 +757,176 @@ Flagged here so DESIGN can pick them up rather than
 litigating them inline:
 
 - **Curation manifest format.** *Resolved (2026-05-11).* TOML,
-  schema v1.  Full schema, validation rules, cache layout, and
-  COD-fetch contract are specified in DESIGN 5.7.  TOML was
+  schema v1 (Phase 1), bumped to v2 in Phase 2 to carry the
+  default tag and the per-entry fingerprint declarations.
+  Full schema, validation rules, cache layout, and COD-fetch
+  contract are specified in DESIGN 5.7.  TOML was
   chosen so the manifest reader uses the same `tomllib` stdlib
   machinery as the per-element database file.
-- **Phase 2 selection / interpolation method.** When
-  per-site label assignment replaces the global default,
-  the selection rule is open: a sparse override map keyed
-  by atom index, an environment-descriptor lookup, or a
-  hybrid. The numerical interpolation procedure for the
-  no-exact-match case is part of this same DESIGN
-  question.
+- **Phase 2 selection / interpolation method.** *Selection
+  resolved (2026-05-19); interpolation parked for Phase 3.*
+  Per-site label selection is now driven by the matcher
+  protocol (8.9): environment-based grouping flags
+  (`-reduce`, `-bispec`) compute per-atom fingerprints,
+  bucket atoms into species by fingerprint similarity, and
+  pick the manifest entry whose recorded fingerprint best
+  matches the species centroid.  Atoms outside any
+  environment scheme fall through to the file's
+  default-tagged entry.  The interpolation question (what
+  to do when the best fingerprint match exceeds the
+  similarity floor) is parked for Phase 3; Phase 2 falls
+  back to the default tag with a warning.  Full algorithm
+  in DESIGN 5.6, parameter mapping in 5.10.
+
+### 8.9 Matcher Protocol
+
+The Phase-2 selection algorithm dispatches on a small
+abstraction called a **matcher**.  Each matcher knows
+exactly one descriptor family (e.g., reduce shell-codes,
+bispectrum components) and exposes a uniform interface
+so the species pass and the producer can call it without
+caring which family it is.
+
+**Location.**  The matcher protocol and its concrete
+implementations live inside `src/scripts/makeinput.py`,
+not in a new script.  Per the parked memory note's
+decision to avoid script proliferation, the matcher
+classes are co-located with the species-pass machinery
+that drives them.  Producer-side use of matchers
+(`build_initial_potentials.py`) imports the protocol
+from `makeinput.py`.
+
+**Protocol surface.**  Each matcher class exposes:
+
+  Member                          Purpose
+  -----------------------------------------------------
+  name                            Matcher identifier
+                                  (the string written
+                                  into manifest
+                                  `method` fields).
+                                  E.g., `"reduce"`,
+                                  `"bispectrum"`.
+  needs_loen_run (bool)           True for matchers
+                                  whose descriptor is
+                                  computed by Imago
+                                  (loen path), false
+                                  for matchers that
+                                  compute in Python.
+                                  Drives the
+                                  nested-makeinput
+                                  bootstrap of DESIGN
+                                  5.10.
+  default_similarity_floor (float) Per-matcher default
+                                  distance threshold
+                                  used by the
+                                  fingerprint-match
+                                  step (DESIGN 5.6.5).
+                                  Atoms whose nearest
+                                  manifest fingerprint
+                                  is farther than this
+                                  fall back to the
+                                  default tag.  Users
+                                  can override per
+                                  scheme on the CLI.
+  to_loen_input(sub_spec)         Translates a
+                                  `sub_spec` inline
+                                  table into the
+                                  parameter dict the
+                                  LOEN block of
+                                  `imago.dat`
+                                  expects.  Only
+                                  meaningful when
+                                  `needs_loen_run` is
+                                  true.
+  parse_loen_output(path,         Reads `fort.21` from
+    sub_spec)                     a loen run and
+                                  returns per-site
+                                  fingerprint vectors.
+                                  Only meaningful when
+                                  `needs_loen_run` is
+                                  true.
+  compute_query(structure,        For Python-side
+    sub_spec)                     matchers, computes
+                                  per-atom fingerprint
+                                  vectors from
+                                  `StructureControl`.
+                                  For loen-side
+                                  matchers, this is
+                                  the outer entry
+                                  point that triggers
+                                  the bootstrap of
+                                  DESIGN 5.10 and
+                                  returns the parsed
+                                  vectors.
+  distance(vec_a, vec_b)          Symmetric scalar
+                                  distance in the
+                                  matcher's descriptor
+                                  space, used for both
+                                  species bucketing
+                                  and manifest-entry
+                                  selection.
+  representative(members)         Reduces a list of
+                                  member-atom
+                                  fingerprints into one
+                                  representative
+                                  fingerprint per
+                                  species (DESIGN
+                                  5.6.5 step 2).
+                                  `BispecMatcher`
+                                  returns the
+                                  element-wise mean;
+                                  `ReduceMatcher`
+                                  returns the first
+                                  member's shell-code;
+                                  future matchers may
+                                  use a medoid or any
+                                  scheme appropriate
+                                  to their descriptor
+                                  space.  The protocol
+                                  does not pin the
+                                  choice, only the
+                                  shape (members in,
+                                  one fingerprint
+                                  out).
+
+**Registry.**  `makeinput.py` maintains a module-level
+dict mapping matcher names to matcher classes:
+
+```python
+MATCHERS = {
+    "reduce":     ReduceMatcher,
+    "bispectrum": BispecMatcher,
+}
+```
+
+Adding a new descriptor family (e.g., element-aware
+bispectrum, SOAP) is a new class plus a new dict
+entry; no other code needs to change.  The
+`initial_potential_db.load()` validator consults
+`MATCHERS.keys()` to enforce per-element-database
+rule 9 (unknown `method` is a hard error).
+
+**Concrete Phase-2 matchers.**
+
+- `ReduceMatcher` (`needs_loen_run = false`).  Wraps
+  the existing reduce algorithm (DESIGN 5.6.4); the
+  current in-place implementation in `group_reduce`
+  is refactored to live behind this class so producer
+  and consumer reach it through the same surface.
+- `BispecMatcher` (`needs_loen_run = true`).  Maps
+  `sub_spec = {twoj1, twoj2}` to the LOEN input
+  block; parses `fort.21` rows into vectors of length
+  `2 * twoj2 + 1`.  Element-aware mode is gated by an
+  optional `by_element` key in `sub_spec`, currently
+  ignored (Phase-2 follow-up; DESIGN 5.9 and
+  TODO).
+
+**Why this is architectural, not just design.**  The
+matcher abstraction is what isolates the Imago Fortran
+side from the manifest schema's growth.  Adding a
+descriptor family does not touch `imago.f90` unless
+the family needs new loen capability; conversely,
+adding loen capability (element-aware bispectrum, a
+SOAP path) does not touch the manifest schema or the
+selection algorithm.  Listing the protocol here pins
+that contract down before code lands.
