@@ -21,12 +21,12 @@ src/
   scripts/             Python tools: flat .py files are CLI
                        entry points; subdirectories are Python
                        packages
-    imago.py          Imago driver (also a callable API; 9.4)
+    imago.py           Imago driver: CLI and callable API (9.2)
     makeinput.py       Input file orchestrator
-    imago/             The `imago` Python package (Section 9)
-      run.py           Callable API for one Imago calculation
-      ase.py           ASE Calculator (ImagoCalculator)
-      campaign/        Parsl-based campaign helpers
+    ase_imago.py       ASE Calculator, ImagoCalculator (9.3)
+    cod_fish.py        COD acquisition front-end -> CIF (9.5)
+    cif2skl.py         CIF -> imago.skl converter (9.5)
+    kaleidoscope/      Parsl campaign runner, "kaleidoscope" (9.4)
   kinds.f90            Shared precision kinds
   constants.f90        Shared physical/mathematical constants
 dev/
@@ -930,3 +930,353 @@ adding loen capability (element-aware bispectrum, a
 SOAP path) does not touch the manifest schema or the
 selection algorithm.  Listing the protocol here pins
 that contract down before code lands.
+
+---
+
+## 9. High-Throughput Calculation Campaigns
+
+This section specifies the infrastructure of VISION
+Goal 4: shared machinery for submitting, tracking, and
+harvesting batches of Imago calculations.  Its purpose
+is that the scripts which decide *what* to compute --
+the initial-potential database build (Section 8.5),
+convergence sweeps, validation harnesses, and future
+ab-initio molecular dynamics and high-throughput
+screening -- do not each reinvent *how* to submit and
+watch jobs on a cluster.  The campaign runner is named
+**kaleidoscope**.
+
+The layers and the four scripts/packages that realize
+them:
+
+- `imago.py` -- runs one calculation per invocation;
+  both a CLI and a callable Python API (9.2).
+- `ase_imago.py` -- an ASE Calculator,
+  `ImagoCalculator`, adapting Imago to the
+  materials-simulation community (9.3).
+- `kaleidoscope/` -- a Parsl-based campaign runner that
+  drives many calculations in parallel and/or series
+  batches (9.4).
+- `cod_fish.py` + `cif2skl.py` -- the structure-
+  acquisition front-end: pull CIFs from the
+  Crystallography Open Database, convert them to
+  `imago.skl` (9.5).
+
+Three VISION principles are the load-bearing
+constraints.  Principle 8 (decouple adapter from
+orchestrator) keeps 9.3 and 9.4 independent.  Principle
+9 (domain-specific machinery lives at the adapter
+layer; the campaign layer is ordinary scientific
+Python) keeps kaleidoscope free of materials-specific
+coupling.  Principle 10 (complete-and-report at the
+campaign level) means one failed calculation never
+fails the whole campaign by default.
+
+### 9.1 Layering and dependency direction
+
+The dependency arrows point in one direction only, so
+each layer can be replaced without disturbing the
+others:
+
+```
+cod_fish.py --> cif2skl.py --> imago.skl
+                                   |
+   kaleidoscope/  --drives-->  makeinput.py --> inputs
+        |                                          |
+        +----------------- calls ---------> imago.py (API)
+                                                   ^
+                                                   |
+                                   ase_imago.py (ImagoCalculator)
+```
+
+`imago.py` is the foundation: it has no dependency on
+ASE, on Parsl, or on the campaign layer.  The ASE
+adapter and kaleidoscope both sit *above* it and call
+*down* into it.  This is what lets the cluster jobs and
+kaleidoscope run without ASE installed, and lets a
+future orchestrator (Snakemake on top, a different
+dispatch backend) slot in without touching `imago.py`
+or the adapter.
+
+### 9.2 imago.py: CLI and callable API
+
+Today `imago.py` is a command-line driver: it stages
+prepared input files, selects the gamma vs. non-gamma
+executable, runs the Fortran binaries, collects and
+renames outputs, checkpoints completed work, and
+manages a lock file.  `imago.py` on its own performs a
+plain SCF.
+
+The refactor exposes that same orchestration as a
+callable Python API, with the existing CLI reduced to a
+thin wrapper over it.  The name stays `imago.py` (not a
+separate `run.py`): the module is new, so there is no
+namespace collision to avoid, and one obvious name for
+"run an Imago calculation" is better than two.
+
+The API offers two entry granularities, so a caller can
+join at whichever level it already has inputs for:
+
+- *Prepared-directory mode* -- given a run directory
+  that already holds the Imago inputs (`imago.dat`,
+  `structure.dat`, `scfV.dat`, kp files), run it as-is.
+  No makeinput call; the caller (or a prior step)
+  produced the inputs.
+- *Structure-and-options mode* -- given a structure and
+  a set of makeinput options, drive `makeinput.py` to
+  build the run directory first, then run it.
+
+Both return the same small result object
+(success/failure, SCF iteration count, paths to the
+output files such as the converged
+`gs_scfV-<basis>.dat`).  Input *preparation* still lives
+in `makeinput.py`; structure-and-options mode simply
+calls it on the caller's behalf.
+
+This API is the single seam every higher layer reaches
+through, so its contract is deliberately Imago-native
+and dependency-free.
+
+### 9.3 ase_imago.py: the ASE Calculator adapter
+
+`ImagoCalculator` subclasses ASE's `Calculator`.  It
+translates between ASE conventions (an `Atoms` object,
+a results dict keyed by ASE property names, eV/Angstrom
+units) and Imago's native world (an `imago.skl`
+structure, makeinput options, Hartree/Bohr), and runs
+the calculation by calling the 9.2 API.
+
+It is a *separate* module, not folded into `imago.py`,
+for three reasons.  (1) Dependency isolation: `ase` is
+a third-party package; keeping it out of `imago.py`
+means the callable API, the cluster jobs, and
+kaleidoscope do not require ASE to be installed.  (2)
+VISION Principles 8 and 9 treat ASE as a swappable
+adapter, with domain-specific machinery confined to
+this layer.  (3) Contract mismatch: the native API is
+Imago-shaped while a `Calculator` must be ASE-shaped;
+separating them lets each stay clean.
+
+The module is named `ase_imago.py`, *not* `ase.py`: a
+flat module named `ase.py` on the scripts path would
+shadow the real `ase` package on import.  It stays a
+single flat module: `ImagoCalculator` is one class that
+exposes many ASE properties (energy, forces, stress,
+charges, dipole, and Imago specialties such as DOS,
+bands, and bond order as custom result keys) and plugs
+into ASE's optimizer, MD, and analysis ecosystem -- all
+of which is *one* calculator, not many entry points.
+It would be promoted to an `imago_ase/` package only if
+auxiliary adapter modules later accrete (a dedicated
+DOS/bands adapter, an `ase.db` writer), the same
+trigger-based split policy as Section 7.
+
+Committing to ASE buys the materials-community
+interoperability VISION Goal 4 describes -- LAMMPS,
+ASE's MD integrators for future AIMD, and acceptance by
+ASE-consuming workflow tools.
+
+The `Atoms` -> Imago structure translation splits along
+the ASE boundary, so that no ASE dependency leaks into
+the core:
+
+- `structure_control.py` gains an **ASE-free factory**
+  that builds a `StructureControl` from plain arrays
+  (lattice vectors, fractional coordinates, element
+  symbols).  This is the genuinely shared, broadly
+  reused primitive; it has no knowledge of ASE.
+- The small **ASE-specific step** -- reading those
+  arrays off an `Atoms` object -- stays here at the
+  adapter layer.
+
+This matters because `structure_control.py` is imported
+by nearly every script (Section 7); putting ASE-domain
+machinery there would risk making the whole toolchain
+ASE-dependent the first time someone added an `import
+ase` for an `isinstance` check or to *construct* an
+`Atoms`.  Keeping the factory ASE-free and the
+`Atoms`-reading glue at the adapter layer honors
+Principle 9 and keeps `import ase` confined to the
+modules that genuinely need it.  `cif2skl.py` (9.5)
+reuses the same factory.
+
+### 9.4 kaleidoscope: the campaign runner
+
+`kaleidoscope/` is a Parsl-based package that drives a
+*set* of calculations.  Given a campaign specification
+(which structures, with which makeinput options), it
+dispatches the per-structure work -- makeinput to build
+inputs, then the 9.2 `imago.py` API to run -- across
+SLURM via Parsl, handling both embarrassingly parallel
+sweeps (thousands of independent SCFs) and tightly
+iterative inner loops (adaptive convergence, future
+AIMD) under one model.
+
+Kaleidoscope dispatches a *unit of work* through a
+pluggable runner seam.  The default runner is the
+`imago.py` API directly -- the campaign layer is
+ordinary scientific Python (Principle 9), and most
+campaigns (the database build, convergence sweeps) need
+nothing more.  But a unit may also be dispatched
+*through the ASE adapter* (for ASE-MD or ASE relaxation
+semantics), or through a future adapter, and a single
+campaign may blend runners -- some units plain Imago
+SCF, others adapter-wrapped -- so that Imago
+calculations can be mixed with other ASE-compatible
+calculations and dispatch activities under one campaign.
+Keeping the runner pluggable is what lets new adapters
+and new blends slot in without changing kaleidoscope's
+dispatch core (Principle 8).
+
+Per Principle 10, kaleidoscope records and surfaces
+per-job outcomes (converged, non-converged,
+cluster-side loss, post-processing error) but does not
+abort the campaign on a single failure; the client
+script decides whether the aggregate result is
+acceptable for its scientific purpose.  It is a package
+(not a flat module) because it carries real substance:
+dispatch, status tracking, harvest hooks, and workspace
+management (9.6).
+
+### 9.5 Structure acquisition: cod_fish.py + cif2skl.py
+
+Structure acquisition is a front-end, separate from the
+campaign runner, in two small CLI tools:
+
+- `cod_fish.py` pulls a structure from the
+  Crystallography Open Database by `cod_id` at a pinned
+  `cod_revision` and writes a CIF.  It uses `urllib`
+  (no `requests` dependency) and is strict on failure
+  (network down, revision missing) -- it errors rather
+  than silently substituting a different revision,
+  matching the COD-fetch contract in DESIGN 5.7.
+- `cif2skl.py` converts a CIF to an `imago.skl`.  It
+  reads the CIF with ASE (reusing ASE's CIF parser
+  rather than reinventing CIF symmetry/loop handling),
+  reads the lattice / fractional coordinates / element
+  symbols off the resulting `Atoms`, builds a
+  `StructureControl` through the ASE-free factory in
+  `structure_control.py` (9.3), and writes the skl with
+  `StructureControl`'s existing skeleton writer.  Only
+  the trivial `Atoms`-to-arrays read touches `ase`; the
+  factory itself is ASE-free, so `structure_control.py`
+  gains no ASE dependency.
+
+Splitting acquisition from kaleidoscope keeps the
+campaign layer agnostic about *where* a structure came
+from: kaleidoscope consumes `imago.skl` files, whether
+they came from COD via this front-end, from a
+hand-authored `structure_path`, or from any other
+source.
+
+### 9.6 Organizational layout (campaign workspace)
+
+A campaign that touches hundreds or thousands of
+structures needs a directory and naming scheme so the
+inputs and outputs do not become an unnavigable mess.
+A campaign owns a workspace rooted at a single
+directory, keyed throughout by a stable per-structure
+id (e.g., a COD id or a curation `reference_id`).
+Strawman layout (to be finalized; see 9.8):
+
+```
+<campaign_root>/
+  campaign.toml          What to run + global options.
+  structures/<id>/       Acquired inputs.
+      <id>.cif
+      <id>.skl
+  runs/<id>[/<calc>]/     One working dir per calculation:
+      <makeinput inputs: imago.dat, structure.dat,
+       scfV.dat, kp-*>
+      <run outputs: gs_scfV-<basis>.dat, imago.out>
+      status.toml         Queued / running / done / failed,
+                          iteration count, timings.
+  results/               Harvested / aggregated outputs.
+  logs/
+```
+
+A single structure may host more than one calculation
+(e.g., different bases or property runs), hence the
+optional `<calc>` level under `runs/<id>/`.
+
+This layout also subsumes the producer's content-keyed
+SCF cache (DESIGN 5.7's
+`share/atomicBDB/cache/scf/<reference_id>/`): a
+kaleidoscope `runs/<id>/` directory *is* a cached run,
+so cache-hit/miss logic becomes "is there a completed
+run directory for this id whose inputs still match?"
+
+The cache is a **general kaleidoscope feature**, split
+into mechanism and policy so that generality does not
+cost correctness:
+
+- *Mechanism (kaleidoscope).*  Write a key snapshot into
+  the run directory, compare it on the hit-test, skip a
+  run whose snapshot still matches, and resume a
+  campaign over already-completed runs.
+- *Policy (client).*  The client supplies the *key
+  fields* -- only it knows which inputs define identity
+  for its calculations.  The database producer, for
+  instance, declares its key as `kpoint_spec` +
+  `convergence_threshold` + `imago_commit` + the
+  structure bytes (DESIGN 5.7).
+
+This keeps kaleidoscope from guessing input identity (a
+too-broad key risks false hits and wrong results; a
+too-narrow key risks needless re-runs) while still
+giving every campaign one cache implementation.  The
+boundary with `imago.py`'s existing checkpointing is
+clean: `imago.py` resumes *within* a run directory;
+kaleidoscope decides whether to *launch* the run
+directory at all.
+
+### 9.7 Clients, and the producer relationship
+
+Kaleidoscope's clients are the *what-to-compute*
+scripts: `build_initial_potentials.py` (the
+initial-potential producer, C48),
+`bench_initial_potential.py` (the validation harness,
+C50), and the future AIMD and screening campaigns.
+
+This reshapes the producer.  As currently written,
+DESIGN 5.7 / PSEUDOCODE 11.4 / ARCHITECTURE 8.5 have
+`build_initial_potentials.py` run reference SCFs itself,
+with its own COD fetch and its own per-solid cache.
+Under this section the producer instead becomes a
+kaleidoscope *client*: it hands kaleidoscope the curated
+structures and the makeinput options, lets kaleidoscope
+run and track the batch, and then harvests the converged
+potentials from the run directories (the harvest format
+is settled -- the converged `scfV` matches the input
+`scfV`; see DESIGN 5.7 / PSEUDOCODE 11.4).  Those three
+producer sections will be revised to delegate to
+kaleidoscope once this section stabilizes; that
+revision is tracked as follow-up work, not performed
+here.
+
+### 9.8 Open architectural questions
+
+Most of the early questions are resolved and recorded
+in the subsections above: the callable API offers both
+a prepared-directory and a structure-and-options entry
+(9.2); the run-reuse cache is a general kaleidoscope
+*mechanism* with client-supplied *key fields* (9.6);
+the ASE adapter stays a flat `ase_imago.py` (9.3); the
+`Atoms`-to-`StructureControl` translation splits into
+an ASE-free factory in `structure_control.py` plus
+adapter-layer glue (9.3, 9.5); and kaleidoscope
+dispatches through a pluggable runner seam, defaulting
+to `imago.py` but able to use the ASE adapter or future
+adapters (9.4).
+
+What remains open:
+
+- **Workspace scheme (9.6).**  The layout is a strawman.
+  The stable-id convention, the `<calc>` tag format, and
+  the `status.toml` schema need to be pinned -- deferred
+  by agreement to a later discussion.
+- **Producer-section revisions (9.7).**  DESIGN 5.7,
+  PSEUDOCODE 11.4, and ARCHITECTURE 8.5 still describe
+  the producer running SCFs itself; they must be revised
+  to delegate to kaleidoscope.  Tracked as follow-up,
+  not an architectural unknown.
