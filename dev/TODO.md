@@ -889,14 +889,44 @@ keeps the common case branch-free.
   tests covering all six validation rules, emitter
   alignment/format/escapes, %.16e bit-exact
   round-trip, and save idempotency.
-- [ ] C47. Add -pot CLI argument to makeinput.py and
-  integrate emitInitialPotentials per PSEUDOCODE 11.3:
-  load augmented per-element database when present;
-  fall back to "isolated" on missing label (with
-  warning); fall back to legacy pot1/coeff1 when no
-  augmented file exists (with info-level message);
-  emit Imago input block in the current on-the-wire
-  format
+- [x] C47. Add -pot CLI argument to makeinput.py and
+  integrate the augmented per-element potential database
+  per PSEUDOCODE 11.3.0 (reduced flow): load augmented
+  per-element database when present; pick the entry via
+  -pot LABEL override (FATAL on a missing label) else the
+  default-tagged entry; fall back to legacy pot1/coeff1
+  when no augmented file exists; emit the potential in the
+  current on-the-wire format.
+
+  Done 2026-05-20.  NOTE the original task text above said
+  "fall back to 'isolated' on missing label (with
+  warning)" -- that was the stale Phase-1 wording.  The
+  reconciled spec (PSEUDOCODE 11.3.0, written this session)
+  and the programmer's decisions superseded it:
+  * Activation: the augmented db is used whenever
+    share/atomicPDB/<elem>/s_gaussian_pot.toml is present
+    (no files exist yet, so behavior is unchanged until
+    curation in C49).
+  * -pot LABEL missing from a present db is FATAL (not a
+    silent fall-back).  -pot requested for an element with
+    NO db warns and uses legacy.
+  * Precedence per (element, species): -subpot target wins
+    (legacy pot<N>); else augmented db; else legacy pot1.
+  Implementation: rather than branch the imago.dat writer
+  / Imago's scfV.dat reader, the augmented path
+  materializes legacy-format pot/coeff files in
+  .inputTemp/ from the chosen PotentialEntry
+  (_write_legacy_pot_files_from_entry) and the reduced
+  entry pick lives in _select_augmented_pot_entry; both in
+  makeinput.py, both behind _obtain_pot_info.  Imago's
+  scfV reader consumes only coeff column 1, so the
+  generated term lines carry 5 columns with cols 2-5
+  harmless (alpha + zeros).  6 new helper tests in
+  src/tests/test_makeinput_pot.py; smoke-tested the full
+  _obtain_pot_info wiring (default pick, -pot override,
+  legacy fallback, -subpot precedence).  Library load
+  passes known_methods=None (rule 9 registry arrives with
+  C54).
 - [ ] C48. Implement src/scripts/build_initial_potentials.py
   per PSEUDOCODE 11.4: manifest reader (depends on
   D8); refresh every element's "isolated" entry from

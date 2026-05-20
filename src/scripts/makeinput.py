@@ -252,6 +252,12 @@ class ScriptSettings:
         self.pot_sub_out = []
         self.pot_sub_in = []
 
+        # Manual override for the augmented per-element potential
+        # database (-pot LABEL, DESIGN 5.6).  None means "no
+        # override": each element's database default-tagged entry
+        # is used.  Set from the command line below.
+        self.pot_override = None
+
         # Grouping methods -- accumulated from CLI, each entry is a dict.
         self.methods = []       # ordered list of ("reduce"|"target"|"block", idx)
         self.reduces = []       # list of dicts, one per -reduce invocation
@@ -322,6 +328,20 @@ OPTIONS EXPLANATIONS
 
 -subpot     Same behavior as -subbasis except that the potential is
             substituted instead of the basis.  This option is repeatable.
+            A -subpot substitution takes precedence over the augmented
+            potential database for the element/species it targets.
+
+-pot        Manual override for the augmented per-element potential
+            database (DESIGN 5.6).  When an element carries an
+            s_gaussian_pot.toml database, LABEL names which entry to
+            apply uniformly across the structure (e.g. "default_solid"
+            or "isolated").  Without -pot, each database's
+            default-tagged entry is used.  LABEL must exist in every
+            augmented database it applies to; a missing label is a
+            hard error rather than a silent fall-back, because a manual
+            override expresses deliberate intent.  Elements that have
+            no augmented database fall back to the legacy pot1/coeff1
+            files (with a warning when -pot was requested).
 
 -modpot     Modify the potential for the element specified by ELEM so that
             the minimum value is MIN, the maximum value is MAX, and the
@@ -613,6 +633,22 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
                             default=None,
                             help="Substitute potential: replace OUT with IN.  "
                                  "Same semantics as -subbasis.  Repeatable.")
+        # The -pot option is the manual override for the augmented
+        # per-element potential database (DESIGN 5.6).  When an
+        # element carries an s_gaussian_pot.toml file, LABEL selects
+        # which named entry to use uniformly across the structure;
+        # without -pot the database's default-tagged entry is used.
+        # LABEL must exist in every augmented database it is applied
+        # to (a missing label is a hard error -- a deliberate
+        # override must not silently fall back).  See PSEUDOCODE
+        # 11.3.0 for the reduced (no-matcher) selection flow.
+        parser.add_argument("-pot", dest="pot", type=str,
+                            default=None, metavar="LABEL",
+                            help="Manual potential-entry override.  Apply "
+                                 "the named entry LABEL from each element's "
+                                 "augmented potential database uniformly "
+                                 "across the structure.  Optional; defaults "
+                                 "to each database's default-tagged entry.")
 
         # ---- K-points ----
         # The -scfkp option specifies the k-point mesh for SCF calculations.
@@ -916,6 +952,10 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             for out_val, in_val in args.subpot:
                 self.pot_sub_out.append(out_val)
                 self.pot_sub_in.append(in_val)
+
+        # Augmented potential-database override (-pot LABEL).
+        if args.pot is not None:
+            self.pot_override = args.pot
 
         # K-points -- density mode vs. explicit mesh mode.
         # Check whether any density option was given.
@@ -4096,17 +4136,131 @@ def _contract_basis(settings, sc):
     os.chdir(orig_dir)
 
 
+def _select_augmented_pot_entry(ipdb, db, pot_override, elem_name):
+    """Pick one ``PotentialEntry`` from an element's augmented db.
+
+    Implements the reduced (no-environment-matcher) selection flow
+    of PSEUDOCODE 11.3.0:
+
+    * **Precedence 1 -- manual override.**  When ``pot_override``
+      (the ``-pot LABEL`` value) is given, return the entry with
+      that label.  A label that is absent from this element's
+      database is a *hard error*: the program prints a clear
+      message naming the element and label, then exits.  A
+      deliberate override must never silently fall back to a
+      different potential.
+    * **Precedence 3 -- default tag.**  With no override, return
+      the database's default-tagged entry, guaranteed to exist and
+      be unique by validation rule 7.
+
+    Precedence 2 (fingerprint matching) never applies in the
+    reduced flow, because no environment matcher is active; it
+    arrives with the Phase-2 matcher chain (C54+).
+
+    Parameters
+    ----------
+    ipdb : module
+        The imported ``initial_potential_db`` library module.
+    db : ipdb.ElementDatabase
+        The element's loaded database.
+    pot_override : str or None
+        The ``-pot LABEL`` value, or None for the default entry.
+    elem_name : str
+        Element symbol, used only in the error message.
+    """
+
+    if pot_override is not None:
+        try:
+            return ipdb.lookup(db, pot_override)
+        except KeyError:
+            print(f"ERROR: -pot {pot_override!r} was not found in "
+                  f"the augmented potential database for element "
+                  f"{elem_name!r}.  A manual -pot override must "
+                  f"name an entry that exists in the database for "
+                  f"every element it applies to.")
+            sys.exit(1)
+    return ipdb.default_entry(db)
+
+
+def _write_legacy_pot_files_from_entry(db, entry, pot_path,
+                                       coeff_path):
+    """Render a ``PotentialEntry`` into legacy pot/coeff files.
+
+    The augmented database stores potentials in the TOML schema of
+    DESIGN 5.2, but the downstream imago.dat writer
+    (:func:`_print_scf_pot`) and Imago's ``scfV.dat`` reader both
+    expect the historical fixed-line ``pot``/``coeff`` text format.
+    Rather than branch those consumers, the augmented path
+    materializes an equivalent pair of legacy files in
+    ``.inputTemp/`` from the chosen entry; everything downstream is
+    then the byte-for-byte same code path as a legacy-database
+    element.
+
+    The ``pot`` file is the eight-line block the writer reads
+    positionally: a header tag, the nuclear charge ``Z`` and the
+    nuclear-potential alpha, the covalent radius, the Gaussian
+    count, and the ALPHAS min/max range.  The ``coeff`` file is a
+    count line followed by one line per Gaussian term.
+
+    Imago's ``scfV.dat`` reader consumes only column 1 (the
+    coefficient) of each term line; the alpha in column 2 and the
+    trailing three columns are read into placeholders and ignored
+    (the authoritative alphas come from imago.dat).  Columns 2-5
+    are therefore filled with the entry's alpha and zeros, purely
+    to preserve the five-value line shape that the list-directed
+    Fortran read expects.
+    """
+
+    with open(pot_path, "w", newline="\n") as pot_fh:
+        pot_fh.write("NUCLEAR_CHARGE__ALPHA\n")
+        pot_fh.write(f"{float(db.nuclear_z):f} "
+                     f"{db.nuclear_alpha:f}\n")
+        pot_fh.write("COVALENT_RADIUS\n")
+        pot_fh.write(f"{db.covalent_radius:f}\n")
+        pot_fh.write("NUM_ALPHAS\n")
+        pot_fh.write(f"{entry.num_gaussians}\n")
+        pot_fh.write("ALPHAS\n")
+        pot_fh.write(f"{entry.alpha_min:.6e} "
+                     f"{entry.alpha_max:.6e}\n")
+
+    with open(coeff_path, "w", newline="\n") as coeff_fh:
+        coeff_fh.write(f"   {entry.num_gaussians}\n")
+        for coefficient, alpha in zip(entry.coefficients,
+                                      entry.alphas):
+            coeff_fh.write(
+                f" {coefficient:.10E} {alpha:.10E}"
+                f" 0.000000E+00 0.000000E+00 0.000000E+00\n")
+
+
 def _obtain_pot_info(settings, sc):
-    """Copy potential and coefficient files from the atomic potential database.
+    """Provide each element/species with its pot/coeff files.
 
-    For each element/species pair, the appropriate ``pot<N>_<elem>`` and
-    ``coeff<N>_<elem>`` files are copied from ``$IMAGO_DATA/atomicPDB/<elem>/``
-    into ``.inputTemp/``.  Substitutions from the ``-subpot`` command-line
-    option are honoured (same element/species matching logic as for basis
-    substitutions).
+    For every element/species pair this records, in
+    ``settings.pot_files`` and ``settings.coeff_files``, the name
+    of a ``pot``/``coeff`` file pair living in ``.inputTemp/`` that
+    the imago.dat writer (:func:`_print_scf_pot`) later consumes.
+    The file pair is produced by one of three paths, in precedence
+    order (DESIGN 5.6; PSEUDOCODE 11.3.0):
 
-    The resulting file names for each element/species are recorded in
-    ``settings.pot_files`` and ``settings.coeff_files``.
+    1. **-subpot substitution wins.**  If a ``-subpot`` option
+       targets this element/species, the legacy ``pot<N>``/
+       ``coeff<N>`` files are copied as before.  A ``-subpot``
+       target overrides the augmented database for the atoms it
+       names.
+    2. **Augmented database.**  Otherwise, if the element carries
+       an ``s_gaussian_pot.toml`` database, the chosen entry
+       (``-pot LABEL`` override, else the default-tagged entry --
+       see :func:`_select_augmented_pot_entry`) is materialized
+       into legacy-format files via
+       :func:`_write_legacy_pot_files_from_entry`.
+    3. **Legacy default.**  Otherwise the historical
+       ``pot1``/``coeff1`` files are copied.  If ``-pot`` was
+       requested but this element has no database, a warning is
+       emitted and the legacy default is used for that element.
+
+    No augmented database files exist on disk until elements are
+    curated (C49), so until then every element takes path 1 or 3
+    and behavior is unchanged from the legacy pipeline.
 
     Parameters
     ----------
@@ -4114,8 +4268,11 @@ def _obtain_pot_info(settings, sc):
     sc : StructureControl
     """
     import re
+    import initial_potential_db as ipdb
 
-    # Parse potential substitutions.
+    # Parse potential substitutions (-subpot).  A -subpot target
+    # takes precedence over the augmented database for the
+    # element/species it names.
     pot_sub_element = []
     pot_sub_species = []
     for out_val in settings.pot_sub_out:
@@ -4133,10 +4290,38 @@ def _obtain_pot_info(settings, sc):
         elem_pots = [None]
         elem_coeffs = [None]
         elem_name = settings.element_list[element]
+        db_dir = os.path.join(settings.atomic_pdb, elem_name)
+
+        # Per-element augmented-database preflight (PSEUDOCODE
+        # 11.3.b).  Load the element's s_gaussian_pot.toml once if
+        # present and pick its entry once -- the reduced-flow pick
+        # is per element, not per species.  known_methods is None:
+        # the matcher registry (rule 9) arrives with C54, and the
+        # reduced flow activates no matcher.
+        aug_path = os.path.join(
+            settings.atomic_pdb, elem_name.lower(),
+            "s_gaussian_pot.toml")
+        aug_db = None
+        aug_entry = None
+        if os.path.exists(aug_path):
+            aug_db = ipdb.load(aug_path)
+            aug_entry = _select_augmented_pot_entry(
+                ipdb, aug_db, settings.pot_override, elem_name)
+        elif settings.pot_override is not None:
+            # The user asked for a database entry, but this element
+            # has none; fall back to the legacy files rather than
+            # abort, and say so.
+            print(f"WARNING: -pot {settings.pot_override!r} was "
+                  f"requested, but element {elem_name!r} has no "
+                  f"augmented potential database ({aug_path}); "
+                  f"using legacy pot1/coeff1 for this element.")
+
         for species in range(1, settings.num_species[element] + 1):
+            # Does a -subpot substitution target this
+            # element/species?  If so it wins outright.
             curr_pot = "pot1"
             curr_coeff = "coeff1"
-
+            subpot_hit = False
             for s_idx in range(len(settings.pot_sub_out)):
                 if (pot_sub_element[s_idx].lower() == elem_name.lower() and
                         (pot_sub_species[s_idx] == species or
@@ -4144,16 +4329,35 @@ def _obtain_pot_info(settings, sc):
                     in_num = settings.pot_sub_in[s_idx]
                     curr_pot = f"pot{in_num}"
                     curr_coeff = f"coeff{in_num}"
+                    subpot_hit = True
 
-            # Copy files if they haven't been copied yet.
-            pot_tagged = f"{curr_pot}_{elem_name}"
-            coeff_tagged = f"{curr_coeff}_{elem_name}"
-            pot_dst = os.path.join(INPUT_TEMP, pot_tagged)
-            if not os.path.exists(pot_dst):
-                db_dir = os.path.join(settings.atomic_pdb, elem_name)
-                shutil.copy2(os.path.join(db_dir, curr_pot), pot_dst)
-                shutil.copy2(os.path.join(db_dir, curr_coeff),
-                             os.path.join(INPUT_TEMP, coeff_tagged))
+            if aug_entry is not None and not subpot_hit:
+                # ---- Augmented path: materialize legacy-format
+                #      files from the chosen database entry.  The
+                #      pick is per element, so one generated pair
+                #      serves every species of this element.
+                pot_tagged = f"pot_aug_{elem_name}"
+                coeff_tagged = f"coeff_aug_{elem_name}"
+                pot_dst = os.path.join(INPUT_TEMP, pot_tagged)
+                coeff_dst = os.path.join(INPUT_TEMP, coeff_tagged)
+                if not os.path.exists(pot_dst):
+                    _write_legacy_pot_files_from_entry(
+                        aug_db, aug_entry, pot_dst, coeff_dst)
+                    print(f"INFO: using augmented potential entry "
+                          f"{aug_entry.label!r} for element "
+                          f"{elem_name!r}.")
+            else:
+                # ---- Legacy path: copy pot<N>/coeff<N> as before
+                #      (the default pot1, or the -subpot target).
+                pot_tagged = f"{curr_pot}_{elem_name}"
+                coeff_tagged = f"{curr_coeff}_{elem_name}"
+                pot_dst = os.path.join(INPUT_TEMP, pot_tagged)
+                if not os.path.exists(pot_dst):
+                    shutil.copy2(
+                        os.path.join(db_dir, curr_pot), pot_dst)
+                    shutil.copy2(
+                        os.path.join(db_dir, curr_coeff),
+                        os.path.join(INPUT_TEMP, coeff_tagged))
 
             elem_pots.append(pot_tagged)
             elem_coeffs.append(coeff_tagged)
