@@ -2217,7 +2217,9 @@ function load(path, known_methods = None):
     db = ElementDatabase(
         schema_version  = raw["schema_version"],
         element_symbol  = raw["element_symbol"],
-        nuclear_z       = raw["nuclear_z"],
+        # Z is coerced to a real: nominally integral, but
+        # Imago consumes it as a real number.
+        nuclear_z       = float(raw["nuclear_z"]),
         nuclear_alpha   = raw["nuclear_alpha"],
         covalent_radius = raw["covalent_radius"],
         potentials      = [])

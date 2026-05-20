@@ -76,7 +76,7 @@ def _au_db() -> ElementDatabase:
     db = ElementDatabase(
         schema_version  = 2,
         element_symbol  = "Au",
-        nuclear_z       = 79,
+        nuclear_z       = 79.0,
         nuclear_alpha   = 20.0,
         covalent_radius = 1.0,
     )

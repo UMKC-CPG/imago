@@ -157,7 +157,7 @@ def _valid_db(symbol: str = "Au") -> ElementDatabase:
     db = ElementDatabase(
         schema_version  = 2,
         element_symbol  = symbol,
-        nuclear_z       = 79,
+        nuclear_z       = 79.0,
         nuclear_alpha   = 4.0e-01,
         covalent_radius = 1.0,
     )
@@ -215,7 +215,10 @@ class TestLoadHappyPath:
         db = load(path)
         assert db.schema_version  == 2
         assert db.element_symbol  == "Au"
-        assert db.nuclear_z       == 79
+        # nuclear_z is a real (Imago uses Z as a real number);
+        # load coerces it to float regardless of on-disk spelling.
+        assert db.nuclear_z       == pytest.approx(79.0)
+        assert isinstance(db.nuclear_z, float)
         assert db.nuclear_alpha   == pytest.approx(0.4)
         assert db.covalent_radius == pytest.approx(1.0)
 
@@ -452,7 +455,7 @@ class TestRule6IsolatedBaselinePresent:
         db = ElementDatabase(
             schema_version  = 2,
             element_symbol  = "Au",
-            nuclear_z       = 79,
+            nuclear_z       = 79.0,
             nuclear_alpha   = 4.0e-01,
             covalent_radius = 1.0,
         )

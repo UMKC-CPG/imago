@@ -2265,7 +2265,11 @@ declares.
                            rejects any other value.
   element_symbol   string  E.g., "Au".  Must match the
                            parent directory name.
-  nuclear_z        int     Atomic number Z.
+  nuclear_z        real    Atomic number Z.  Nominally an
+                           integer, but stored and emitted as a
+                           real: Imago consumes Z as a real
+                           number, and the legacy pot1 file
+                           already records it as one.
   nuclear_alpha    float   Alpha in the nuclear potential
                            form Z * exp(-alpha * r^2).
                            Per-element constant; the same
@@ -2461,7 +2465,7 @@ request either parameter pair.
 ```toml
 schema_version  = 2
 element_symbol  = "Au"
-nuclear_z       = 79
+nuclear_z       = 7.9e+01
 nuclear_alpha   = 4.0e-01
 covalent_radius = 1.0e+00
 
@@ -2590,7 +2594,7 @@ class PotentialEntry:
 class ElementDatabase:
     schema_version: int
     element_symbol: str
-    nuclear_z:      int
+    nuclear_z:      float    # real: Z used as a real number
     nuclear_alpha:  float
     covalent_radius: float
     potentials:     list[PotentialEntry]
@@ -3291,7 +3295,7 @@ Explicitly excluded from the cache comparison:
 
 **Procedure:**
 
-1. Load and validate the manifest (six rules above).
+1. Load and validate the manifest (nine rules above).
 2. For every element with a directory in `share/atomicPDB/`,
    refresh (or create) the `"isolated"` entry of that element's
    `s_gaussian_pot.toml` directly from the current `pot1` and

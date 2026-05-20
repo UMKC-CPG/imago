@@ -215,11 +215,18 @@ class ElementDatabase:
     guarantees that any database returned by :func:`load`
     includes at least one entry whose ``label`` is
     ``"isolated"``.
+
+    ``nuclear_z`` is the atomic number Z.  It is nominally an
+    integer, but is stored and emitted as a real because Imago
+    consumes Z as a real number (and the legacy ``pot1`` file
+    already records it as one).  :func:`load` coerces it to
+    ``float`` so the in-memory value is a real regardless of
+    whether the on-disk file spells it ``79`` or ``7.9e+01``.
     """
 
     schema_version: int
     element_symbol: str
-    nuclear_z: int
+    nuclear_z: float
     nuclear_alpha: float
     covalent_radius: float
     potentials: list[PotentialEntry] = field(
@@ -313,7 +320,10 @@ def load(path: str,
     db = ElementDatabase(
         schema_version  = raw["schema_version"],
         element_symbol  = raw["element_symbol"],
-        nuclear_z       = raw["nuclear_z"],
+        # Coerce Z to a real: nominally integral, but Imago uses
+        # it as a real number, so the in-memory value is always
+        # a float regardless of how the file spells it.
+        nuclear_z       = float(raw["nuclear_z"]),
         nuclear_alpha   = raw["nuclear_alpha"],
         covalent_radius = raw["covalent_radius"],
     )
