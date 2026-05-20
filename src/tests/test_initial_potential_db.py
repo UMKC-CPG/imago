@@ -8,23 +8,33 @@ and nothing else.  These tests exercise that contract by
 building synthetic byte strings and synthetic in-memory
 databases, without ever invoking a real SCF run.
 
+The library implements schema **version 2** (DESIGN 5.2): each
+entry carries a ``default`` flag (rule 7) and an optional
+``[[potential.fingerprint]]`` array (rules 8 and 9).  These
+tests cover the v2 surface.
+
 Coverage map
 ------------
-* DESIGN 5.2 / PSEUDOCODE 11.1 -- the six load-time validation
+* DESIGN 5.2 / PSEUDOCODE 11.1 -- the nine load-time validation
   rules each have at least one dedicated test that fires the
   rule with the expected field/label in the error message.
+  Rule 7 (exactly one default), rule 8 ((method, sub_spec)
+  uniqueness), and rule 9 (registered method) are the v2
+  additions.
 * DESIGN 5.5 / PSEUDOCODE 11.2 -- the deterministic emitter has
   tests for bit-level repeatability, %.16e float formatting,
   per-block ``=`` alignment, TOML basic-string escaping, the
   canonical provenance key order (with and without the Imago
   extras), the multi-line array layout (one value per line,
-  three-space indent, trailing comma), and the single-newline
-  EOF rule.
-* PSEUDOCODE 11.1 lookup helpers -- :func:`lookup` and
-  :func:`baseline` are covered for both success and KeyError
-  paths.
+  three-space indent, trailing comma), the single-newline EOF
+  rule, and the ``[[potential.fingerprint]]`` block layout
+  (method, sub_spec inline table, multi-line payload vector).
+* PSEUDOCODE 11.1 lookup helpers -- :func:`lookup`,
+  :func:`baseline`, :func:`default_entry`, and
+  :func:`find_fingerprint` are covered for both success and
+  miss paths, including canonical sub-spec equality.
 * Round-trip -- ``load(save(db))`` is checked to preserve every
-  numerical and provenance field exactly.
+  numerical, provenance, and fingerprint field exactly.
 
 Why a separate test file (not folded into one of the existing
 ``test_structure_control_*`` modules): ``initial_potential_db``
@@ -40,12 +50,16 @@ import os
 import pytest
 
 from initial_potential_db import (
+    FingerprintRecord,
     PotentialEntry,
     ElementDatabase,
     load,
     save,
     lookup,
     baseline,
+    default_entry,
+    find_fingerprint,
+    canonicalize_sub_spec,
     require_provenance,
 )
 
@@ -90,10 +104,16 @@ def _imago_provenance() -> dict:
 
 
 def _isolated_entry() -> PotentialEntry:
-    """Return a valid 'isolated' PotentialEntry."""
+    """Return a valid 'isolated' PotentialEntry (not default).
+
+    In the canonical two-entry fixture the curated bulk entry
+    is the default, so the isolated baseline carries
+    ``default = False``.
+    """
 
     return PotentialEntry(
         label         = "isolated",
+        default       = False,
         description   = "Isolated Au atom from atomSCF.",
         num_gaussians = 3,
         alpha_min     = 1.0e-3,
@@ -105,10 +125,15 @@ def _isolated_entry() -> PotentialEntry:
 
 
 def _default_solid_entry() -> PotentialEntry:
-    """Return a valid 'default_solid' PotentialEntry."""
+    """Return a valid 'default_solid' PotentialEntry (default).
+
+    Carries ``default = True`` so the canonical fixture
+    satisfies rule 7 (exactly one default per file).
+    """
 
     return PotentialEntry(
         label         = "default_solid",
+        default       = True,
         description   = "Au in fcc bulk (Fm-3m).",
         num_gaussians = 3,
         alpha_min     = 1.0e-3,
@@ -120,10 +145,17 @@ def _default_solid_entry() -> PotentialEntry:
 
 
 def _valid_db(symbol: str = "Au") -> ElementDatabase:
-    """Return a fully-populated valid ElementDatabase."""
+    """Return a fully-populated valid schema-v2 ElementDatabase.
+
+    Two entries: the atomSCF ``isolated`` baseline (not
+    default) and the Imago-source ``default_solid`` entry
+    (default).  Neither carries fingerprints, so the byte-level
+    emitter fixtures stay stable; fingerprint behavior is
+    exercised by the dedicated tests below.
+    """
 
     db = ElementDatabase(
-        schema_version  = 1,
+        schema_version  = 2,
         element_symbol  = symbol,
         nuclear_z       = 79,
         nuclear_alpha   = 4.0e-01,
@@ -132,6 +164,20 @@ def _valid_db(symbol: str = "Au") -> ElementDatabase:
     db.potentials.append(_isolated_entry())
     db.potentials.append(_default_solid_entry())
     return db
+
+
+def _bispectrum_fingerprint() -> FingerprintRecord:
+    """Return a bispectrum FingerprintRecord for emitter and
+    lookup tests.  The payload carries a real-valued ``values``
+    vector of length ``2 * twoj2 + 1 = 5`` for the sub-spec
+    ``{twoj1 = 6, twoj2 = 2}``.
+    """
+
+    return FingerprintRecord(
+        method   = "bispectrum",
+        sub_spec = {"twoj1": 6, "twoj2": 2},
+        payload  = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]},
+    )
 
 
 def _path_for(tmp_path, elem: str) -> str:
@@ -167,7 +213,7 @@ class TestLoadHappyPath:
         path = _path_for(tmp_path, "Au")
         save(_valid_db("Au"), path)
         db = load(path)
-        assert db.schema_version  == 1
+        assert db.schema_version  == 2
         assert db.element_symbol  == "Au"
         assert db.nuclear_z       == 79
         assert db.nuclear_alpha   == pytest.approx(0.4)
@@ -201,15 +247,17 @@ class TestLoadHappyPath:
 # ============================================================
 
 class TestRule1SchemaVersion:
-    """Rule 1: schema_version must equal 1."""
+    """Rule 1: schema_version must equal 2."""
 
     def test_wrong_schema_version_raises(self, tmp_path):
         path = _path_for(tmp_path, "Au")
         save(_valid_db("Au"), path)
-        # Substitute a different schema_version in the file.
+        # Substitute a non-v2 schema_version in the file.  A v1
+        # value must be rejected too -- there is no on-disk
+        # back-compatibility (DESIGN 5.2).
         text = open(path).read().replace(
-            "schema_version  = 1\n",
-            "schema_version  = 2\n")
+            "schema_version  = 2\n",
+            "schema_version  = 1\n")
         _write_toml(path, text)
         with pytest.raises(
                 ValueError, match="unsupported schema_version"):
@@ -261,13 +309,14 @@ class TestRule3RequiredFieldsPresent:
         # missing field explicitly.
         path = _path_for(tmp_path, "Au")
         text = (
-            "schema_version  = 1\n"
+            "schema_version  = 2\n"
             "element_symbol  = \"Au\"\n"
             "nuclear_z       = 79\n"
             "nuclear_alpha   = 0.4\n"
             "covalent_radius = 1.0\n"
             "\n"
             "[[potential]]\n"
+            "default       = true\n"
             "description   = \"x\"\n"
             "num_gaussians = 1\n"
             "alpha_min     = 1.0e-3\n"
@@ -401,7 +450,7 @@ class TestRule6IsolatedBaselinePresent:
         # Build a file that has only the 'default_solid' entry.
         path = _path_for(tmp_path, "Au")
         db = ElementDatabase(
-            schema_version  = 1,
+            schema_version  = 2,
             element_symbol  = "Au",
             nuclear_z       = 79,
             nuclear_alpha   = 4.0e-01,
@@ -547,7 +596,7 @@ class TestEmitterFormat:
         # name, "covalent_radius" (15 chars).  "schema_version"
         # is 14 chars so it gets one space of padding before
         # the " = ".
-        assert "schema_version  = 1\n" in text
+        assert "schema_version  = 2\n" in text
         assert "covalent_radius = " in text
 
     def test_entry_body_alignment(self, tmp_path):
@@ -558,6 +607,9 @@ class TestEmitterFormat:
         # two array keys: max(5, 11, 13, 9, 9, 12, 6) = 13.
         # "label" (5) -> 8 spaces of padding before " = ".
         assert "label         = \"isolated\"\n" in text
+        # The v2 `default` flag slots right after the label and
+        # aligns at the same width; isolated is not the default.
+        assert "default       = false\n" in text
         # "num_gaussians" (13) -> no padding before " = ".
         assert "num_gaussians = 3\n" in text
         # The array openers align with the rest of the body.
@@ -741,5 +793,346 @@ class TestRoundTrip:
         save(_valid_db("Au"), path_a)
         re = load(path_a)
         save(re, path_b)
+        with open(path_a, "rb") as h_a, open(path_b, "rb") as h_b:
+            assert h_a.read() == h_b.read()
+
+
+# ============================================================
+#  Rule 7 -- exactly one default entry (DESIGN 5.2, v2)
+# ============================================================
+
+class TestRule7DefaultTag:
+    """Rule 7: exactly one entry per file carries
+    ``default = true``.  Zero and multiple are both hard
+    errors -- selection must be declared explicitly, with no
+    implicit fallback to the 'isolated' baseline.
+    """
+
+    def test_zero_defaults_raises(self, tmp_path):
+        # Clear the one default flag so no entry is default.
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        db.potentials[1].default = False
+        save(db, path)
+        with pytest.raises(ValueError) as excinfo:
+            load(path)
+        msg = str(excinfo.value)
+        assert "exactly one" in msg
+        assert "found 0" in msg
+
+    def test_multiple_defaults_raises(self, tmp_path):
+        # Flag both entries default; the count is now two.
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        db.potentials[0].default = True
+        save(db, path)
+        with pytest.raises(ValueError) as excinfo:
+            load(path)
+        msg = str(excinfo.value)
+        assert "exactly one" in msg
+        assert "found 2" in msg
+
+    def test_missing_default_field_raises(self, tmp_path):
+        # `default` is a required per-entry field (rule 3): drop
+        # it from the isolated entry and expect a missing-field
+        # error that names the entry and the field.
+        path = _path_for(tmp_path, "Au")
+        save(_valid_db("Au"), path)
+        text = open(path).read().replace(
+            "default       = false\n", "", 1)
+        _write_toml(path, text)
+        with pytest.raises(ValueError) as excinfo:
+            load(path)
+        msg = str(excinfo.value)
+        assert "isolated" in msg
+        assert "default" in msg
+
+
+# ============================================================
+#  Rule 8 -- per-entry fingerprint uniqueness (DESIGN 5.2)
+# ============================================================
+
+class TestRule8FingerprintUniqueness:
+    """Rule 8: within one entry, the pair (method, sub_spec)
+    must be unique.  Two records with the same method *and* the
+    same sub-spec keys-and-values are a hard error; the same
+    method with a differing sub-spec is allowed.
+    """
+
+    def test_duplicate_method_subspec_raises(self, tmp_path):
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        # Two fingerprints with the identical (method, sub_spec).
+        db.potentials[1].fingerprints = [
+            FingerprintRecord(
+                method   = "bispectrum",
+                sub_spec = {"twoj1": 6, "twoj2": 2},
+                payload  = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]}),
+            FingerprintRecord(
+                method   = "bispectrum",
+                sub_spec = {"twoj1": 6, "twoj2": 2},
+                payload  = {"values": [0.6, 0.7, 0.8, 0.9, 1.0]}),
+        ]
+        save(db, path)
+        # known_methods=None -> rule 9 skipped, so rule 8 is the
+        # rule under test here.
+        with pytest.raises(
+                ValueError, match="duplicate fingerprint"):
+            load(path)
+
+    def test_same_method_different_subspec_ok(self, tmp_path):
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        # Same method, different sub-spec -> both records coexist.
+        db.potentials[1].fingerprints = [
+            FingerprintRecord(
+                method   = "bispectrum",
+                sub_spec = {"twoj1": 6, "twoj2": 2},
+                payload  = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]}),
+            FingerprintRecord(
+                method   = "bispectrum",
+                sub_spec = {"twoj1": 8, "twoj2": 4},
+                payload  = {"values": [0.1, 0.2, 0.3, 0.4, 0.5,
+                                       0.6, 0.7, 0.8, 0.9]}),
+        ]
+        save(db, path)
+        re = load(path)
+        entry = lookup(re, "default_solid")
+        assert len(entry.fingerprints) == 2
+
+
+# ============================================================
+#  Rule 9 -- fingerprint method must be registered (DESIGN 5.2)
+# ============================================================
+
+class TestRule9FingerprintMethodRegistered:
+    """Rule 9: a fingerprint ``method`` must be a registered
+    matcher name -- but only when the caller supplies the
+    registry via ``known_methods``.  A ``None`` registry skips
+    the rule, which is how isolated unit tests load files
+    without importing makeinput.py's matcher table.
+    """
+
+    def _db_with_unknown_method(self):
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [
+            FingerprintRecord(
+                method   = "nonsense",
+                sub_spec = {"twoj1": 6, "twoj2": 2},
+                payload  = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]}),
+        ]
+        return db
+
+    def test_unknown_method_raises_with_registry(
+            self, tmp_path):
+        path = _path_for(tmp_path, "Au")
+        save(self._db_with_unknown_method(), path)
+        with pytest.raises(ValueError) as excinfo:
+            load(path, known_methods={"bispectrum", "reduce"})
+        msg = str(excinfo.value)
+        assert "nonsense" in msg
+        assert "registered matcher" in msg
+
+    def test_unknown_method_skipped_without_registry(
+            self, tmp_path):
+        # With no registry the method string is not policed, so
+        # the file loads cleanly.
+        path = _path_for(tmp_path, "Au")
+        save(self._db_with_unknown_method(), path)
+        re = load(path)
+        entry = lookup(re, "default_solid")
+        assert entry.fingerprints[0].method == "nonsense"
+
+    def test_known_method_accepted_with_registry(
+            self, tmp_path):
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [_bispectrum_fingerprint()]
+        save(db, path)
+        re = load(path, known_methods={"bispectrum", "reduce"})
+        entry = lookup(re, "default_solid")
+        assert entry.fingerprints[0].method == "bispectrum"
+
+
+# ============================================================
+#  default_entry()
+# ============================================================
+
+class TestDefaultEntry:
+    """default_entry returns the single default-tagged entry,
+    which is distinct from baseline() unless the curator marks
+    the isolated entry itself as the default.
+    """
+
+    def test_returns_default_tagged_entry(self):
+        db = _valid_db("Au")
+        assert default_entry(db).label == "default_solid"
+
+    def test_distinct_from_baseline_when_different(self):
+        db = _valid_db("Au")
+        # In the canonical fixture the bulk entry is default and
+        # the isolated entry is the baseline -- different objects.
+        assert default_entry(db) is not baseline(db)
+        assert default_entry(db).label != baseline(db).label
+
+    def test_same_as_baseline_when_isolated_is_default(self):
+        # A curator may flag the isolated baseline as default;
+        # then the two helpers return the same object.
+        db = _valid_db("Au")
+        db.potentials[0].default = True   # isolated
+        db.potentials[1].default = False  # default_solid
+        assert default_entry(db) is baseline(db)
+
+
+# ============================================================
+#  find_fingerprint() and canonicalize_sub_spec()
+# ============================================================
+
+class TestFindFingerprint:
+    """find_fingerprint matches on method plus canonical
+    sub-spec equality, and raises KeyError when no record
+    matches.
+    """
+
+    def _entry_with_fp(self):
+        entry = _default_solid_entry()
+        entry.fingerprints = [_bispectrum_fingerprint()]
+        return entry
+
+    def test_finds_matching_record(self):
+        entry = self._entry_with_fp()
+        fp = find_fingerprint(
+            entry, "bispectrum", {"twoj1": 6, "twoj2": 2})
+        assert fp.payload["values"][0] == pytest.approx(0.1)
+
+    def test_match_ignores_subspec_key_order(self):
+        entry = self._entry_with_fp()
+        # Same keys, reversed insertion order -> still a match.
+        fp = find_fingerprint(
+            entry, "bispectrum", {"twoj2": 2, "twoj1": 6})
+        assert fp.method == "bispectrum"
+
+    def test_match_treats_int_and_float_equal(self):
+        entry = self._entry_with_fp()
+        # 6 == 6.0 and 2 == 2.0 under canonical equality.
+        fp = find_fingerprint(
+            entry, "bispectrum", {"twoj1": 6.0, "twoj2": 2.0})
+        assert fp.method == "bispectrum"
+
+    def test_missing_method_raises_keyerror(self):
+        entry = self._entry_with_fp()
+        with pytest.raises(KeyError):
+            find_fingerprint(
+                entry, "reduce", {"twoj1": 6, "twoj2": 2})
+
+    def test_missing_subspec_raises_keyerror(self):
+        entry = self._entry_with_fp()
+        with pytest.raises(KeyError):
+            find_fingerprint(
+                entry, "bispectrum", {"twoj1": 8, "twoj2": 8})
+
+
+class TestCanonicalizeSubSpec:
+    """The canonical form underpins both rule-8 uniqueness and
+    find_fingerprint equality, so its key properties are pinned
+    directly: key-order independence, int/float normalization,
+    bool kept distinct from the integers it subclasses, and
+    hashability.
+    """
+
+    def test_key_order_independent(self):
+        a = canonicalize_sub_spec({"twoj1": 6, "twoj2": 2})
+        b = canonicalize_sub_spec({"twoj2": 2, "twoj1": 6})
+        assert a == b
+
+    def test_int_and_float_equal(self):
+        a = canonicalize_sub_spec({"twoj1": 6})
+        b = canonicalize_sub_spec({"twoj1": 6.0})
+        assert a == b
+
+    def test_bool_distinct_from_int(self):
+        # bool is a subclass of int; the canonical form must not
+        # collapse True onto the integer 1.
+        a = canonicalize_sub_spec({"flag": True})
+        b = canonicalize_sub_spec({"flag": 1})
+        assert a != b
+
+    def test_string_distinct_from_number(self):
+        a = canonicalize_sub_spec({"x": 1.0})
+        b = canonicalize_sub_spec({"x": "1.0"})
+        assert a != b
+
+    def test_result_is_hashable(self):
+        # Must be usable as a set member (rule-8 dedup relies on
+        # this) and as a nested value.
+        canon = canonicalize_sub_spec(
+            {"twoj1": 6, "nested": {"a": 1}, "vec": [1.0, 2.0]})
+        assert len({canon}) == 1
+
+
+# ============================================================
+#  Emitter -- fingerprint sub-blocks (DESIGN 5.5, v2)
+# ============================================================
+
+class TestEmitterFingerprintBlock:
+    """The emitter writes [[potential.fingerprint]] blocks with
+    method and sub_spec first, the sub_spec as a deterministic
+    inline table, and a real-valued payload vector laid out as
+    a multi-line array.  Entries with no fingerprints emit no
+    such block.
+    """
+
+    def _db_with_fingerprint(self):
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [_bispectrum_fingerprint()]
+        return db
+
+    def test_no_block_when_no_fingerprints(self, tmp_path):
+        path = _path_for(tmp_path, "Au")
+        save(_valid_db("Au"), path)
+        text = open(path).read()
+        assert "[[potential.fingerprint]]" not in text
+
+    def test_block_header_and_fields(self, tmp_path):
+        path = _path_for(tmp_path, "Au")
+        save(self._db_with_fingerprint(), path)
+        text = open(path).read()
+        assert "[[potential.fingerprint]]\n" in text
+        # Block width spans method/sub_spec/values; "sub_spec"
+        # (8 chars) is the widest, so "method" (6) gets two
+        # spaces of padding before " = ".
+        assert "method   = \"bispectrum\"\n" in text
+        # sub_spec is a deterministic inline table with keys in
+        # sorted order and one space inside the braces.
+        assert ("sub_spec = { twoj1 = 6, twoj2 = 2 }\n"
+                in text)
+        # The payload vector is a multi-line %.16e array.  0.1
+        # is not exactly representable, so it round-trips as
+        # ...0001; 0.5 is exact and ends in zeros.
+        assert "values   = [\n" in text
+        assert "   1.0000000000000001e-01,\n" in text
+        assert "   5.0000000000000000e-01,\n" in text
+
+    def test_round_trip_preserves_fingerprint(self, tmp_path):
+        path = _path_for(tmp_path, "Au")
+        save(self._db_with_fingerprint(), path)
+        re = load(path)
+        entry = lookup(re, "default_solid")
+        assert len(entry.fingerprints) == 1
+        fp = find_fingerprint(
+            entry, "bispectrum", {"twoj1": 6, "twoj2": 2})
+        # sub_spec ints survive as ints; payload floats survive
+        # bit-exact through the %.16e round trip.
+        assert fp.sub_spec == {"twoj1": 6, "twoj2": 2}
+        assert fp.payload["values"] == [0.1, 0.2, 0.3, 0.4, 0.5]
+
+    def test_fingerprint_emit_is_deterministic(self, tmp_path):
+        # Two saves of the same fingerprinted database produce
+        # byte-identical files, including the inline-table key
+        # ordering and the payload array layout.
+        path_a = _path_for(tmp_path / "a", "Au")
+        path_b = _path_for(tmp_path / "b", "Au")
+        save(self._db_with_fingerprint(), path_a)
+        save(self._db_with_fingerprint(), path_b)
         with open(path_a, "rb") as h_a, open(path_b, "rb") as h_b:
             assert h_a.read() == h_b.read()

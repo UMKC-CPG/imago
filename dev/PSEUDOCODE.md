@@ -2616,6 +2616,14 @@ seven concerns, one per sub-section below.  The driver
 pass and the entry pick stay agnostic of which
 descriptor family is in play.
 
+Most runs exercise only a reduced subset of this flow.
+Sub-section 11.3.0 pins that subset -- the path active
+when no environment-based matcher (`-reduce` / `-bispec`)
+is selected.  It is the path the first consumer milestone
+(C47) implements before C54 onward layer in the matcher
+machinery; reading it first makes the seven full-flow
+sub-sections easier to place.
+
 The mapping from DESIGN to PSEUDOCODE here is one-to-
 one:
 
@@ -2636,6 +2644,81 @@ one:
                              bootstrap)
   11.3.g       5.6.7        (driver and on-the-wire
                              emit)
+
+---
+
+#### 11.3.0 Reduced Flow (no environment matcher; DESIGN 5.6)
+
+The seven sub-sections above specify the full Phase-2
+selection flow.  Most runs -- and the first consumer
+milestone (C47) -- travel only the reduced path taken
+when the CLI selects no environment-based matcher
+(`-reduce` / `-bispec`).  This sub-section names which
+branches are live in that path so the reduced consumer
+has a self-contained spec, separate from the matcher
+machinery that C54 and onward layer in.
+
+When `first_environment_matcher` (11.3.g) returns None:
+
+  - The nested-makeinput bootstrap (11.3.f) never fires;
+    it is gated on a matcher whose `needs_loen_run` is
+    true, and here there is no matcher at all.
+  - The preflight (11.3.b) still loads each element's
+    database and still marks missing ones for the legacy
+    path, but skips `require_coverage` -- that check is
+    meaningful only while a matcher is active.
+  - The species pass (11.3.c) returns an empty
+    `env_species_ids` set; only the position-based flags
+    (`-target`, `-block`, `-xanes`) and the default
+    one-species-per-element grouping remain.
+  - The entry pick (11.3.d) loses its precedence-2
+    fingerprint branch: that branch is gated on both
+    `active_matcher is not None` and `species_id in
+    env_species_ids`, and the latter set is now empty.
+    Only precedence 1 (`-pot LABEL`) and precedence 3
+    (`default_entry`) survive.
+
+An element whose augmented file is absent is handled the
+same way as in the full flow: the preflight marks
+`databases[elem] = None` and the driver (11.3.g, steps 5
+and 7) emits it via the legacy `pot1`/`coeff1` path, with
+no library entry consulted.  There is no schema-v1 case
+to consider here -- the reader rejects any
+`schema_version != 2` (DESIGN 5.2), and the producer
+(11.4) regenerates every on-disk file as v2, so a loaded
+database is always v2 and always carries a `default` tag.
+
+The reduced entry pick is the `active_matcher = None`
+restriction of 11.3.d:
+
+```
+function pickEntryReduced(db, pot_override):
+    # Precedence 1: manual -pot override.  A KeyError
+    # here is fatal, exactly as in 11.3.d -- a
+    # deliberate user choice must never silently fall
+    # back to a different potential.
+    if pot_override is not None:
+        try:
+            return lookup(db, pot_override)
+        except KeyError:
+            error("-pot " + pot_override + " not found"
+                + " in this element's database; a"
+                + " manual override must match a label")
+
+    # Precedence 3: the default-tagged entry, guaranteed
+    # to exist and be unique by validation rule 7.  With
+    # no active environment matcher there is no
+    # precedence-2 fingerprint match to attempt first.
+    return default_entry(db)
+```
+
+**Carry-forward to the full flow.**  When C54 onward turn
+the matcher machinery on, this reduced pick is subsumed by
+the full 11.3.d: precedence 2 slots back in between the
+override and the default, gated on the now-non-empty
+`env_species_ids`.  No branch written for the reduced flow
+is rewritten -- the full flow only inserts the middle
+precedence.
 
 ---
 

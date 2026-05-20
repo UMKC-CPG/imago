@@ -932,7 +932,7 @@ internally.  The chain may be developed in parallel
 with Phase 1 but cannot ship until Phase 1 has
 shipped.
 
-- [ ] C53. initial_potential_db.py: bump schema
+- [x] C53. initial_potential_db.py: bump schema
   validation from v1 to v2.  Add `default: bool` to
   `PotentialEntry`; add `FingerprintRecord` dataclass
   with `method` / `sub_spec` / `payload`; add
@@ -947,6 +947,30 @@ shipped.
   out-of-tree at the moment (C47 not yet shipped); the
   v1-to-v2 migration is handled by C60 regenerating
   them through the producer.
+
+  Done 2026-05-20.  Library now schema v2: reader
+  rejects `schema_version != 2`, requires per-entry
+  `default`, enforces rule 7 (exactly one default),
+  parses `[[potential.fingerprint]]` records under
+  rules 8 (per-entry `(method, sub_spec)` uniqueness
+  via the new `canonicalize_sub_spec` freeze) and 9
+  (`method` in the optional `known_methods` registry
+  arg, skipped when None).  Emitter slots `default`
+  after `label` and emits fingerprint sub-blocks
+  (`method`, `sub_spec` inline table, payload float-
+  vectors as multi-line arrays) via
+  `_emit_fingerprint_block` + `_format_inline_table`.
+  Added `default_entry` and `find_fingerprint`.  Tests
+  grew 37 -> 62 (rules 7/8/9, default_entry,
+  find_fingerprint, canonicalize_sub_spec, fingerprint
+  emit + round-trip); all green.  Confirmed no on-disk
+  augmented db files exist yet, so nothing to migrate.
+  Doc reconciliation done in the same session:
+  PSEUDOCODE 11.3.0 "Reduced Flow" added (the
+  no-environment-matcher path C47 will target), and a
+  stale memory claim that "v1 files still load" was
+  corrected against DESIGN 5.2's no-v1-compatibility
+  rule.
 - [ ] C54. makeinput.py: introduce the Matcher
   protocol (ARCHITECTURE 8.9) and the `MATCHERS`
   registry.  Refactor the existing `group_reduce`
