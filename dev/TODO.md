@@ -40,6 +40,19 @@
 - [ ] A6. GPU offload of restructured integral compute
   phase via OpenACC, CUDA Fortran, or OpenMP target
   (ARCHITECTURE 6.3)
+- [x] A7. Write ARCHITECTURE §9 (high-throughput
+  calculation campaigns / "kaleidoscope", VISION Goal
+  4).  Layers + one-directional dependency graph (9.1);
+  imago.py CLI+callable API with two entry modes (9.2);
+  ase_imago.py ASE Calculator kept separate, with the
+  ASE-free StructureControl factory / adapter-glue split
+  (9.3); kaleidoscope/ Parsl runner with a pluggable
+  runner seam (9.4); cod_fish.py + cif2skl.py
+  acquisition front-end (9.5); workspace layout +
+  general run-reuse cache (mechanism in kaleidoscope,
+  key fields per client) (9.6); clients +
+  producer-as-client reframing (9.7).  Done 2026-05-20
+  (commit 2dc5b30).  Open: workspace scheme (9.8).
 
 ---
 
@@ -128,6 +141,33 @@
   DESIGN 5 (proposed 5.11) and updates DESIGN 5.9 to
   fold this back in.  Must land before C62
   implementation begins.
+
+### Kaleidoscope prong (VISION Goal 4, ARCHITECTURE 9)
+
+- [ ] D11. Design the imago.py callable API (ARCH 9.2):
+  the result object, the two entry granularities
+  (prepared run dir; structure+options driving
+  makeinput), the CLI-as-thin-wrapper refactor, and how
+  the existing checkpoint and lock-file behavior is
+  preserved.  Foundation for D12/D13.
+- [ ] D12. Design ase_imago.py ImagoCalculator (ARCH
+  9.3): implemented_properties (energy / forces / stress
+  / charges / ... plus Imago specialties as custom
+  result keys), unit conversions, and the ASE-free
+  StructureControl factory in structure_control.py plus
+  the adapter-layer Atoms-reading glue.
+- [ ] D13. Design the kaleidoscope campaign runner (ARCH
+  9.4, 9.6): the Parsl dispatch model, the pluggable
+  runner seam, complete-and-report status tracking, the
+  workspace layout + id / <calc> tag / status.toml
+  scheme (resolves the ARCH 9.8 open item), and the
+  run-reuse cache mechanism with client-supplied key
+  fields.
+- [ ] D14. Design structure acquisition (ARCH 9.5):
+  cod_fish.py COD-fetch contract (urllib, pinned
+  cod_revision, strict on failure) and cif2skl.py (ASE
+  CIF read -> StructureControl factory -> skl write).
+  PSEUDOCODE for D11-D14 follows once each design lands.
 
 ---
 
@@ -928,12 +968,27 @@ keeps the common case branch-free.
   passes known_methods=None (rule 9 registry arrives with
   C54).
 - [ ] C48. Implement src/scripts/build_initial_potentials.py
-  per PSEUDOCODE 11.4: manifest reader (depends on
-  D8); refresh every element's "isolated" entry from
-  current pot1/coeff1; run reference SCFs with
-  content-keyed cache; write databases via save();
-  emit share/curation/run_log.toml.  --force,
-  --manifest, and --element flags per DESIGN 5.7
+  per PSEUDOCODE 11.4.  Split into sub-steps:
+  - [x] C48.1. Manifest reader: load_manifest_v2 +
+    dataclasses (CurationManifest / ReferenceSolid /
+    ReferenceEntry / ManifestFingerprint); DESIGN 5.7
+    rules 1-8, rule 9 gated on known_methods; missing
+    manifest fatal.  Done 2026-05-20 (commit abcccae).
+  - [x] C48.2. "isolated" baseline refresh from current
+    pot1/coeff1: _parse_pot_file / _parse_coeff_file,
+    build_isolated_entry, is_isolated_default_for,
+    element_path, refresh_isolated_entries (step 1),
+    save_databases (step 3).  Working producer->consumer
+    loop with no SCF.  Done 2026-05-20 (commit abcccae).
+  - [ ] C48.3. RE-SCOPED by ARCH §9: the producer no
+    longer runs SCFs itself.  It becomes a kaleidoscope
+    client -- hands kaleidoscope the curated structures
+    plus makeinput options, lets it run and track the
+    batch, then harvests converged potentials from the
+    run dirs (converged scfV matches input scfV; alphas
+    from input min/max/number; coeffs and alphas taken
+    together).  BLOCKED on a usable kaleidoscope slice
+    (C63 + C68).  Carries the C69 doc revisions.
 - [ ] C49. Curate the first reference solid (e.g.,
   Au fcc) and add its manifest entry; populate the
   first non-trivial "default_solid" potential at
@@ -1108,6 +1163,43 @@ shipped.
   D10's payload shape requires it.  Parked pending
   both (a) Phase-2 base chain (C53-C61) landing
   first and (b) D10 design landing.
+
+### Phase J -- kaleidoscope campaign infrastructure (VISION 4, ARCH 9)
+
+The shared submit / track / harvest infrastructure.
+Its first client is the C48 potential-DB producer
+(C48.3 is blocked on a usable slice of this phase),
+but it is general -- convergence sweeps, the C50 bench
+harness, and future AIMD / high-throughput screening
+are all clients.  Each task wants its DESIGN (D11-D14)
+and PSEUDOCODE landed before code.
+
+- [ ] C63. Refactor imago.py to expose the callable API
+  (ARCH 9.2, D11): the CLI becomes a thin wrapper;
+  support both entry modes (prepared dir; structure +
+  options); preserve checkpoint and lock behavior.
+  Foundation for C65 and C68.
+- [ ] C64. Add the ASE-free StructureControl factory to
+  structure_control.py (ARCH 9.3, D12): build a
+  StructureControl from (lattice, fractional coords,
+  element symbols).  No ASE import; shared by C65 and
+  C67.
+- [ ] C65. Implement ase_imago.py ImagoCalculator (ARCH
+  9.3, D12): calls the C63 API; the Atoms-reading glue
+  uses the C64 factory.  Stays a flat module.
+- [ ] C66. Implement cod_fish.py (ARCH 9.5, D14): COD
+  structure fetch via urllib at a pinned cod_revision;
+  strict on failure (no silent revision substitution).
+- [ ] C67. Implement cif2skl.py (ARCH 9.5, D14): read
+  CIF with ASE -> C64 factory -> skl write.
+- [ ] C68. Implement kaleidoscope/ (ARCH 9.4, 9.6, D13):
+  Parsl dispatch, the pluggable runner seam, status
+  tracking (complete-and-report), the campaign
+  workspace, and the run-reuse cache mechanism.
+- [ ] C69. Revise DESIGN 5.7 / PSEUDOCODE 11.4 /
+  ARCHITECTURE 8.5 so the producer delegates SCF running
+  to kaleidoscope (drops the bespoke run_imago_scf, COD
+  fetch, and per-solid cache).  Pairs with C48.3.
 
 ---
 
