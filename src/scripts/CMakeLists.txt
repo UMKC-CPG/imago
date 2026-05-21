@@ -46,6 +46,17 @@ set (RC_FILES
 
 install (PROGRAMS ${SCRIPTS} DESTINATION bin)
 
+# Install the kaleidoscope campaign-runner package (DESIGN 6.2)
+# as a directory under bin/.  Unlike the flat scripts above it is
+# a Python *package*, so the whole directory is copied; it becomes
+# importable as `kaleidoscope` by any script run out of bin/
+# (bin/ is the script's sys.path[0]) and by a Parsl worker whose
+# PYTHONPATH includes bin/.  Only the .py sources are installed --
+# FILES_MATCHING excludes __pycache__ and any other stray files.
+install (DIRECTORY kaleidoscope
+         DESTINATION bin
+         FILES_MATCHING PATTERN "*.py")
+
 # SPECIAL PROCESS FOR RC FILES: #################################
 # Install RC files only if they do not already exist, so that user
 # edits made after the initial install are preserved across future
