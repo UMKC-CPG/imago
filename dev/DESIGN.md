@@ -3844,6 +3844,21 @@ campaign layer can branch on outcome without parsing
   already complete (6.1.5).  `success` is True;
   `outputs` point at the pre-existing files.
 
+The `CONVERGED`-vs-`NOT_CONVERGED` verdict needs a signal
+the current driver does not produce: today it checks only
+the `fort.2` success file, which certifies the binary ran
+without an abortive error, *not* that the SCF converged.
+The P6 pseudocode pass surfaced this gap and resolved it
+with no new Fortran signal (PSEUDOCODE 12.5): read the
+iteration file's last data row and compare its
+convergence metric (column 4) against the
+`CONVERGENCE_TEST` criterion in the run's own `imago.dat`;
+converged iff it is below the criterion.  The same row
+also yields the last iteration's total energy (column 5)
+and -- because column 1 is a per-run cycle counter that
+resets each SCF invocation -- the `scf_iterations` count
+robust to the file's append-on-rerun behavior.
+
 The boundary on error handling is deliberate and
 important for Principle 10.  *Run-level* failures
 (non-convergence, a Fortran abort, a missing input
