@@ -4417,6 +4417,239 @@ changes the contracts above.
   client reads it back) is that runner's contract, set
   when the runner is added, not here.
 
+### 6.3 makeinput callable build API
+
+This subsection designs the makeinput counterpart of the
+imago callable API of 6.1.  It is the makeinput-side twin
+of D11/C63: it turns `makeinput.py` from a command-line-
+and-cwd-bound script into a script that *also* exposes a
+callable "build a run directory" function, with the CLI
+reduced to a thin wrapper over it.  It exists to resolve
+the one piece 6.1.3 deferred: `run_structure`'s
+*structure-and-options* mode promises to "drive makeinput
+to build `run_dir`, then call `run_prepared`," but there
+is no in-process makeinput entry point to drive.  6.3
+supplies it.  The work was folded into C68 as item (a) of
+the kaleidoscope prong; this design rung was missing, so
+it is captured here before the code lands.
+
+#### 6.3.1 Why a callable build API
+
+The default kaleidoscope runner (`ImagoRunner`, 6.2.2)
+calls `imago.run_structure(structure, options, run_dir)`
+on any unit whose run directory is not already prepared.
+`run_structure` in turn must build that directory from a
+structure plus a set of makeinput options.  Today the only
+way to run makeinput is to invoke its `main()`, which
+parses `sys.argv`, operates on the current working
+directory, and -- on a missing `$IMAGO_RC` -- calls
+`sys.exit`.  None of those is acceptable inside a long-
+lived kaleidoscope Parsl worker driving thousands of
+builds: a worker has no per-build `argv`, must place
+inputs in an arbitrary `run_dir` rather than its own cwd,
+and must never be terminated by a `sys.exit` raised deep
+in a build (the same hazard 6.1.2 designs against on the
+run side).  6.3 therefore mirrors 6.1's split: a callable
+core that takes its inputs as arguments and reports
+contract faults by raising, wrapped by a thin CLI that is
+the only layer touching `argv` or exiting the process.
+
+The boundary on error handling matches 6.1.2 exactly.
+*Build-level* faults that are normal outcomes of real
+input (a malformed `imago.skl`, an element with no basis
+in the database, an unsatisfiable grouping request) are
+the script's existing behavior and are unchanged.
+*Contract* faults -- the environment is not configured
+(`$IMAGO_RC`/`$IMAGO_DATA` unset), the named structure
+file does not exist, the target `run_dir` cannot be
+created -- raise a `MakeinputError` in the API path
+instead of calling `sys.exit`.  `MakeinputError` is the
+makeinput analog of `ImagoError`: a programmer- or
+environment-level fault that no per-unit retry can fix, so
+it propagates out of the worker's runner where the
+campaign records the unit `failed` and continues
+(Principle 10).  The CLI wrapper keeps today's user-facing
+behavior: it prints the message and exits non-zero.
+
+#### 6.3.2 The build entry point
+
+The API offers a single entry point, because makeinput has
+only one granularity of input (a structure plus options);
+there is no prepared-directory analog to short-circuit.
+
+- **`build_run_dir(structure, options, run_dir, *,
+  settings=None) -> str`** -- given a structure and a set
+  of makeinput options, stage the structure into `run_dir`
+  and run the full makeinput workflow there, producing the
+  staged Imago inputs (`imago.dat`, `structure.dat`,
+  `scfV.dat`, the kp files, the `inputs/` tree) that
+  `imago.run_prepared` then consumes.  Returns the
+  `run_dir` it built (absolute), so a caller can chain
+  directly into `run_prepared`.  `structure` is, at this
+  design stage, a path to an `imago.skl` -- the same
+  commitment 6.1.3 makes for `run_structure`; whether it
+  may also be an in-memory `StructureControl` is deferred
+  to the ASE-free factory of D12/C64 and is *not* fixed
+  here (6.3.7).  When `settings` is omitted it is built
+  from `options` via the resolution path of 6.3.3; a
+  caller that already holds a reconciled settings object
+  (the CLI does) may pass it to avoid rebuilding.
+
+The **CLI wrapper** (`main()`) becomes the outermost layer
+and the only one that touches `sys.argv` or exits.  Its
+three responsibilities mirror 6.1.3's CLI split:
+
+1. Parse `sys.argv` into makeinput options (the existing
+   argparse surface and `reconcile` logic, unchanged in
+   meaning).
+2. Build the run directory.  A bare `makeinput ...`
+   operates on the current working directory, which holds
+   `imago.skl` -- today's only behavior -- so the CLI
+   calls `build_run_dir` with `run_dir = os.getcwd()` and
+   `structure = "imago.skl"`.  No new CLI surface is
+   required by this design; the CLI keeps doing exactly
+   what it does today, now through the API.
+3. On a raised `MakeinputError`, print the message and
+   exit non-zero, preserving today's diagnostics.
+
+#### 6.3.3 ScriptSettings split (mirrors C63)
+
+makeinput's `ScriptSettings.__init__` today performs four
+steps in the constructor: load the rc defaults, parse
+`sys.argv` (`parse_command_line`), `reconcile` the parsed
+namespace against the defaults, and `record_clp` (append
+the literal `sys.argv` to a `command` file).  Only the
+middle two carry meaning the API needs; the first and last
+are CLI couplings.  The refactor splits construction the
+same way C63 split imago's:
+
+- The constructor loads the rc defaults only and leaves the
+  job-type/edge/basis fields unset.
+- **`from_command_line()`** -- the CLI path: parse `argv`
+  into an `args` namespace, then `reconcile(args)`.
+- **`from_options(options)`** -- the API path: turn the
+  `options` mapping into the same kind of `args` namespace
+  the argparse parser would have produced (every key absent
+  from `options` takes its argparse default), then
+  `reconcile(args)`.  The keys of `options` are exactly the
+  argparse `dest` names (`job`, `edge`, `basis`, `scfkp`,
+  `pscfkp`, `reduce`, `target`, `block`, `xanes`, `potdb`,
+  `basisdb`, ...), so a client and the CLI describe a run
+  identically -- one through a dict, one through flags.
+
+`reconcile` is unchanged: it already takes an `args`
+namespace and contains all the option-resolution logic, so
+both paths share it verbatim.  This is the single change
+that lets settings stop being constructed from `argv`
+unconditionally.
+
+#### 6.3.4 cwd discipline and structure staging
+
+makeinput is thoroughly current-working-directory bound:
+`initialize_cell` reads the skeleton from the relative name
+`imago.skl`, and every file and directory it writes
+(`inputs/`, `.inputTemp/`, `imago.dat`, `structure.dat`,
+the kp files) is a cwd-relative name.  The API keeps that
+internal convention -- rewriting hundreds of relative
+paths to be `run_dir`-relative would be invasive and
+error-prone -- and instead adopts the **same cwd
+discipline 6.1.4 designs for the run core**: `build_run_dir`
+treats the cwd as a resource to acquire and release.  It
+
+1. resolves `run_dir` to an absolute path and creates it;
+2. stages the structure into it as `run_dir/imago.skl`
+   (a copy when `structure` is some other path; a no-op
+   when it already *is* `run_dir/imago.skl`);
+3. `os.chdir(run_dir)`, runs the workflow, and
+4. **restores the original cwd in a `finally`, including on
+   failure.**
+
+Without step 4 a single failed build would strand a
+campaign worker in a stale directory and corrupt every
+subsequent build's relative-path resolution -- the same
+reentrancy hazard 6.1.4 calls the most important
+correctness difference between the one-shot CLI and the
+reentrant API.  Because the lock-free makeinput build and
+the locked imago run each acquire and release the cwd
+around their own scope, the two compose cleanly when
+`run_structure` calls them in sequence.
+
+The workflow itself -- the body of today's `main()`:
+`setup_environment` -> `initialize_cell` -> `assign_group`
+(species, then types) -> optional XANES/EMU passes ->
+`print_imago` -> `print_summary` -- is factored out of
+`main()` into a callable `build_inputs(settings, sc)` that
+both `build_run_dir` and the CLI invoke, so the build
+sequence has exactly one definition and the CLI and API
+cannot drift apart.  The progress `print`s that `main()`
+interleaves are retained (they are harmless and useful in
+both modes); only `argv`/exit handling moves to the CLI.
+
+#### 6.3.5 Call provenance and worker-safe errors
+
+Two CLI couplings are retired from the API path:
+
+- **`record_clp`** appends the literal `sys.argv` to a
+  `command` file.  In API mode there is no meaningful
+  `argv`, so -- exactly as 6.1.3 resolves for imago's
+  `recordCLP` -- this becomes CLI-only.  The build records
+  the equivalent provenance (the resolved options and the
+  `run_dir`) or skips the `command` file entirely; the
+  precise choice is an implementation detail with no
+  bearing on the produced inputs (6.3.7).
+- **`sys.exit` in `_load_rc`** on a missing `$IMAGO_RC`
+  becomes a raised `MakeinputError` so it cannot kill a
+  worker.  The CLI wrapper catches it and exits non-zero.
+
+#### 6.3.6 Relationship to run_structure (closes 6.1.3)
+
+With 6.3 in place, `imago.run_structure` is finally
+implementable as 6.1.3 always intended: stage nothing
+itself, delegate the build to makeinput, then run the
+prepared directory.
+
+```
+function run_structure(structure, options, run_dir,
+                       settings=None):
+    import makeinput
+    makeinput.build_run_dir(structure, options, run_dir)
+    return run_prepared(run_dir, settings=settings)
+```
+
+The import is local, so `imago.py` keeps importing without
+makeinput's environment loaded -- the same lazy-import
+courtesy `ImagoRunner` already extends to `imago` (6.2.2).
+This is the seam that lets a kaleidoscope campaign hand a
+bare `imago.skl` plus options to the default runner and
+have the run directory built and run in one worker call,
+which is exactly the dependency the C48.3 potential-DB
+producer is waiting on.
+
+#### 6.3.7 Open details (for PSEUDOCODE / implementation)
+
+Deferred to the PSEUDOCODE pass (§14) or to implementation;
+none changes the contracts above.
+
+- **`options` dict shape.**  The mapping is keyed by the
+  argparse `dest` names, but the exact normalization of
+  multi-valued options (`reduce`/`target`/`block`/`xanes`,
+  which the CLI accepts as repeatable token lists) into
+  dict values must be pinned in pseudocode so a client and
+  the CLI produce identical settings.
+- **`structure` type.**  Whether `structure` may be an
+  in-memory `StructureControl` in addition to an skl path
+  depends on the ASE-free factory of D12/C64; 6.3 commits
+  only to the skl-path form, matching 6.1.3.
+- **Nested-makeinput bootstrap.**  The Fortran-side-matcher
+  bootstrap of 5.10 re-invokes makeinput as a *subprocess*.
+  A child process's `sys.exit` cannot kill the parent
+  worker, so the bootstrap is safe as-is; whether it should
+  eventually call `build_inputs` in-process instead is a
+  later cleanup, not required here.
+- **Call-provenance recording.**  What replaces
+  `record_clp` in API mode (record the resolved options, or
+  skip the `command` file) is an implementation detail.
+
 ---
 
 ## References

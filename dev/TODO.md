@@ -222,6 +222,37 @@
   cod_revision, strict on failure) and cif2skl.py (ASE
   CIF read -> StructureControl factory -> skl write).
   PSEUDOCODE for D11-D14 follows once each design lands.
+- [x] D15. Design the makeinput callable build API (the
+  makeinput-side twin of D11/C63): turn makeinput.py from
+  an argv-and-cwd-bound script into one that also exposes a
+  callable `build_run_dir(structure, options, run_dir)`,
+  with the CLI a thin wrapper.  This is the design rung
+  that was missing under C68 item (a): DESIGN 6.1.3 deferred
+  `run_structure`'s structure-and-options mode to "drive
+  makeinput," but no in-process makeinput entry point
+  existed to drive.
+
+  Done 2026-05-21.  Landed as DESIGN section 6.3 (sibling
+  to 6.1 imago API and 6.2 kaleidoscope): 6.3.1 why a
+  callable build API + the contract/build error boundary
+  (new `MakeinputError`, analog of `ImagoError`); 6.3.2 the
+  single `build_run_dir` entry point (skl-path structure for
+  now) + CLI-as-thin-wrapper; 6.3.3 the `ScriptSettings`
+  split (from_command_line / from_options sharing
+  reconcile), mirroring C63; 6.3.4 cwd discipline -- stage
+  the skl into run_dir, chdir in, restore cwd in finally
+  (reuse the 6.1.4 pattern rather than rewrite makeinput's
+  cwd-relative paths) + factor main()'s body into a callable
+  build_inputs(settings, sc); 6.3.5 record_clp and the
+  _load_rc sys.exit become CLI-only / worker-safe; 6.3.6
+  run_structure becomes build_run_dir -> run_prepared,
+  closing 6.1.3; 6.3.7 open details for PSEUDOCODE §14
+  (options-dict normalization of multi-valued flags,
+  StructureControl structure type per C64, nested-makeinput
+  bootstrap left as a subprocess).  Key judgment: cwd
+  discipline over path-rewriting -- safe because
+  kaleidoscope parallelism is across separate workers, each
+  with its own cwd.  PSEUDOCODE follows as P8.
 
 ---
 
@@ -344,6 +375,21 @@
   D11/D13 design + pseudocode chain is complete and
   consistent.  Next: code -- C63 (imago.py API, P6/§12)
   then C68 (kaleidoscope, P7/§13), then C69 + C48.3.
+- [ ] P8. Write PSEUDOCODE for the makeinput callable build
+  API (DESIGN 6.3, D15): the `ScriptSettings`
+  from_command_line / from_options split sharing reconcile
+  (6.3.3); `build_run_dir(structure, options, run_dir)` with
+  skl staging and the chdir / restore-in-finally cwd
+  discipline (6.3.4); `build_inputs(settings, sc)` factored
+  out of main() so CLI and API share one build sequence;
+  the CLI wrapper's parse-argv / build / translate-error
+  split and the `MakeinputError` raise-vs-sys.exit boundary
+  (6.3.2, 6.3.5); and `imago.run_structure` as build_run_dir
+  -> run_prepared (6.3.6).  Resolve the 6.3.7 open details
+  pseudocode forces: the options-dict normalization of the
+  multi-valued flags (reduce / target / block / xanes) into
+  the args namespace reconcile expects.  Foundation for
+  C68(a).
 
 ---
 
@@ -1383,10 +1429,13 @@ and PSEUDOCODE landed before code.
   complete-and-report (one failure does not abort), status
   lifecycle, and ImagoRunner mapping.
   REMAINING for C68: (a) run_structure -> makeinput wiring
-  in imago.py (the C63 deferral); (b) HighThroughputExecutor
-  /SLURM config validation on a real cluster (only the
-  thread-pool path is exercised here); (c) lost-vs-failed
-  fine-graining under a real worker loss.
+  in imago.py (the C63 deferral) -- now gated on the
+  makeinput callable build API designed in D15 (DESIGN 6.3)
+  and pseudocoded in P8 (PSEUDOCODE §14); imago.run_structure
+  becomes build_run_dir -> run_prepared; (b)
+  HighThroughputExecutor/SLURM config validation on a real
+  cluster (only the thread-pool path is exercised here); (c)
+  lost-vs-failed fine-graining under a real worker loss.
 - [ ] C69. Revise DESIGN 5.7 / PSEUDOCODE 11.4 /
   ARCHITECTURE 8.5 so the producer delegates SCF running
   to kaleidoscope (drops the bespoke run_imago_scf, COD
