@@ -1467,14 +1467,19 @@ and PSEUDOCODE landed before code.
   build-then-run delegation test; updated test_makeinput_pot's
   missing-label test (SystemExit -> MakeinputError).  All 55
   affected tests pass.
-  DESIGN-SPIRIT NOTE (for a refine): 6.3.5 named only the
-  _load_rc sys.exit, but implementation found two more in the
-  build path (an unsupported reduce op; a -pot override naming
-  an absent db entry).  Both would kill a worker on a single
-  bad unit, so all three were converted to MakeinputError.
-  A refine should generalize DESIGN 6.3.5 to "all sys.exit in
-  the build path become MakeinputError" rather than just
-  _load_rc.
+  WORKER-SAFETY NOTE (refine landed 2026-05-21): 6.3.5
+  originally named only the _load_rc sys.exit, but the build
+  path held two more (an unsupported reduce op; a -pot override
+  naming an absent db entry), each able to kill a worker on one
+  bad unit because SystemExit bypasses the dispatcher's
+  `except Exception`.  All three were converted to
+  MakeinputError.  The refine generalized DESIGN 6.3.5 to "no
+  sys.exit may remain on the build path" and tightened 6.3.1's
+  fault taxonomy to make the SystemExit-vs-Exception mechanism
+  explicit.  The residual helper-module audit came back clean:
+  structure_control / initial_potential_db / element_data
+  (every in-process module the build reaches) have no sys.exit;
+  subprocess execs are exempt.
   REMAINING for C68: (b) HighThroughputExecutor/SLURM config
   validation on a real cluster (only the thread-pool path is
   exercised here); (c) lost-vs-failed fine-graining under a

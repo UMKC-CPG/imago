@@ -4457,19 +4457,34 @@ the only layer touching `argv` or exiting the process.
 The boundary on error handling matches 6.1.2 exactly.
 *Build-level* faults that are normal outcomes of real
 input (a malformed `imago.skl`, an element with no basis
-in the database, an unsatisfiable grouping request) are
-the script's existing behavior and are unchanged.
+in the database) keep their existing diagnostic *meaning*.
 *Contract* faults -- the environment is not configured
 (`$IMAGO_RC`/`$IMAGO_DATA` unset), the named structure
 file does not exist, the target `run_dir` cannot be
-created -- raise a `MakeinputError` in the API path
-instead of calling `sys.exit`.  `MakeinputError` is the
-makeinput analog of `ImagoError`: a programmer- or
+created, or a build is unsupported (an unimplemented
+grouping op, a `-pot` override naming an absent database
+entry) -- raise a `MakeinputError`.  `MakeinputError` is
+the makeinput analog of `ImagoError`: a programmer- or
 environment-level fault that no per-unit retry can fix, so
 it propagates out of the worker's runner where the
 campaign records the unit `failed` and continues
-(Principle 10).  The CLI wrapper keeps today's user-facing
-behavior: it prints the message and exits non-zero.
+(Principle 10).
+
+The one behavior that must change regardless of a fault's
+category is **process exit**.  The historical script
+signals several faults with `sys.exit`, but `sys.exit`
+raises `SystemExit`, which derives from `BaseException`,
+*not* `Exception` -- so it slips past the dispatch core's
+per-future `except Exception` (6.2.3) and would abort the
+campaign (the in-process executor) or kill the worker (a
+Parsl executor) rather than failing one unit.  Therefore
+**no `sys.exit` may remain on the build path**: each
+becomes a raised exception -- a `MakeinputError` when no
+retry can help, a natural `Exception` otherwise (which the
+dispatcher likewise catches) -- and the thin CLI wrapper
+is the only layer that exits the process, printing the
+message and exiting non-zero.  6.3.5 records the specific
+conversions and the audit that the rule is complete.
 
 #### 6.3.2 The build entry point
 
@@ -4597,9 +4612,21 @@ Two CLI couplings are retired from the API path:
   `run_dir`) or skips the `command` file entirely; the
   precise choice is an implementation detail with no
   bearing on the produced inputs (6.3.7).
-- **`sys.exit` in `_load_rc`** on a missing `$IMAGO_RC`
-  becomes a raised `MakeinputError` so it cannot kill a
-  worker.  The CLI wrapper catches it and exits non-zero.
+- **Every `sys.exit` on the build path** becomes a raised
+  exception, because `SystemExit` is not caught by the
+  dispatcher's `except Exception` (6.3.1, 6.2.3).  The three
+  in `makeinput.py` are converted to `MakeinputError`: the
+  `_load_rc` missing-`$IMAGO_RC` check, the unsupported
+  reduce-grouping op, and the `-pot` override naming an
+  absent database entry.  The CLI wrapper catches
+  `MakeinputError` and exits non-zero, so the only `sys.exit`
+  that remains is its own `sys.exit(main())`.  The in-process
+  modules the build reaches (`structure_control`,
+  `initial_potential_db`, `element_data`) were audited and
+  contain no `sys.exit`; the subprocess execs it spawns
+  (`makeKPoints`, `contract`) are exempt, because a child
+  process's exit cannot kill the parent worker -- exactly as
+  the nested-makeinput bootstrap is exempt (6.3.7).
 
 #### 6.3.6 Relationship to run_structure (closes 6.1.3)
 
