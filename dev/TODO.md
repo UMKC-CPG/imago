@@ -310,7 +310,7 @@
   but a refine may want to record in DESIGN 6.1.2 that
   NOT_CONVERGED is now backed by the col-4/CONVERGENCE_TEST
   mechanism.
-- [ ] P7. Write PSEUDOCODE for the kaleidoscope campaign
+- [x] P7. Write PSEUDOCODE for the kaleidoscope campaign
   runner (DESIGN 6.2, D13): the `CalcUnit` / `Campaign`
   data model and `campaign.toml` serialization (6.2.1);
   the `Runner` protocol and `RunOutcome`, with
@@ -322,6 +322,28 @@
   compare + key-file byte-compare) and resume-as-re-run
   (6.2.5); the `CampaignReport` and client-side harvest
   handoff (6.2.6).  Foundation for C68.
+
+  Done 2026-05-21.  Landed as PSEUDOCODE section 13,
+  helpers-first then driver: 13.1 data model
+  (CalcUnit/KeyFields/Campaign) + serialize_campaign;
+  13.2 Runner protocol + RunOutcome + ImagoRunner (calls
+  the §12 API, persists result.toml, maps status ->
+  ok/detail); 13.3 unit_run_dir + validate_campaign (slug
+  rule, <calc> derivation, collision abort) + status.toml
+  read/write; 13.4 is_cache_hit / cache_key_matches
+  (verbatim scalar compare + key-file byte-compare, no
+  hashing) / write_cache_key; 13.5 run_campaign +
+  dispatch_unit (hit -> completed_future; miss -> queued
+  + python_app) + run_unit_app + collect_future (the
+  ParslTaskLost -> "lost" vs worker-exception -> "failed"
+  split, per-future capture); 13.6 ReportEntry /
+  CampaignReport / report_entry_from_status + the
+  client-side harvest_converged_potentials example fixing
+  the C48.3 producer contract.  All five PSEUDOCODE items
+  for the kaleidoscope prong (with §12) now done; the
+  D11/D13 design + pseudocode chain is complete and
+  consistent.  Next: code -- C63 (imago.py API, P6/§12)
+  then C68 (kaleidoscope, P7/§13), then C69 + C48.3.
 
 ---
 
