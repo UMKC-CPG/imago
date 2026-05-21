@@ -1177,7 +1177,9 @@ inputs and outputs do not become an unnavigable mess.
 A campaign owns a workspace rooted at a single
 directory, keyed throughout by a stable per-structure
 id (e.g., a COD id or a curation `reference_id`).
-Strawman layout (to be finalized; see 9.8):
+The layout is pinned in DESIGN 6.2.4 (the id
+charset/uniqueness rule, the `<calc>` tag format, and
+the `status.toml` schema); the shape is:
 
 ```
 <campaign_root>/
@@ -1189,8 +1191,10 @@ Strawman layout (to be finalized; see 9.8):
       <makeinput inputs: imago.dat, structure.dat,
        scfV.dat, kp-*>
       <run outputs: gs_scfV-<basis>.dat, imago.out>
-      status.toml         Queued / running / done / failed,
-                          iteration count, timings.
+      cache_key.toml      Cache identity snapshot.
+      result.toml         Runner-persisted native result.
+      status.toml         queued / running / done / failed /
+                          lost, plus detail and timings.
   results/               Harvested / aggregated outputs.
   logs/
 ```
@@ -1269,14 +1273,17 @@ dispatches through a pluggable runner seam, defaulting
 to `imago.py` but able to use the ASE adapter or future
 adapters (9.4).
 
+The **workspace scheme (9.6)** was deferred here and is
+now resolved: the stable-id convention, the `<calc>`
+tag format, and the `status.toml` schema are pinned in
+DESIGN 6.2.4 (with each `runs/<id>[/<calc>]/` cache
+directory carrying `cache_key.toml`, `result.toml`, and
+`status.toml`).
+
 What remains open:
 
-- **Workspace scheme (9.6).**  The layout is a strawman.
-  The stable-id convention, the `<calc>` tag format, and
-  the `status.toml` schema need to be pinned -- deferred
-  by agreement to a later discussion.
 - **Producer-section revisions (9.7).**  DESIGN 5.7,
   PSEUDOCODE 11.4, and ARCHITECTURE 8.5 still describe
   the producer running SCFs itself; they must be revised
-  to delegate to kaleidoscope.  Tracked as follow-up,
-  not an architectural unknown.
+  to delegate to kaleidoscope.  Tracked as follow-up
+  (TODO C69), not an architectural unknown.

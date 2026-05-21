@@ -52,7 +52,9 @@
   general run-reuse cache (mechanism in kaleidoscope,
   key fields per client) (9.6); clients +
   producer-as-client reframing (9.7).  Done 2026-05-20
-  (commit 2dc5b30).  Open: workspace scheme (9.8).
+  (commit 2dc5b30).  The workspace scheme (9.8), left
+  open then, is now resolved by D13 / DESIGN 6.2.4 and
+  ARCH 9.6/9.8 updated to match (2026-05-21).
 
 ---
 
@@ -212,10 +214,9 @@
   lifecycle status and records but never interprets the
   runner's `detail`; all harvest is client-side.
 
-  NOTE for the /refine pass: ARCH 9.8's "Workspace scheme"
-  open item is now resolved by DESIGN 6.2.4 and ARCH 9.8
-  should be updated to point at it (deferred to refine per
-  the agreed plan).
+  Refined 2026-05-21: ARCH 9.6/9.8 updated to mark the
+  workspace scheme resolved by DESIGN 6.2.4 (the open
+  item under A7).  PSEUDOCODE follows as P6/P7.
 - [ ] D14. Design structure acquisition (ARCH 9.5):
   cod_fish.py COD-fetch contract (urllib, pinned
   cod_revision, strict on failure) and cif2skl.py (ASE
@@ -267,6 +268,35 @@
   byte-compare, fingerprint harvest split between
   Python-side and Fortran-side matchers, default tag
   carried into PotentialEntry).
+
+### Kaleidoscope prong (VISION Goal 4, ARCHITECTURE 9)
+
+- [ ] P6. Write PSEUDOCODE for the imago.py callable API
+  (DESIGN 6.1, D11): the `ImagoResult` dataclass and
+  `RunStatus` enum (6.1.2); the `run_prepared` and
+  `run_structure` entry points and the CLI wrapper's
+  parse-argv / pick-mode / translate-result-to-exit-code
+  split (6.1.3); the private run core with cwd-restore
+  discipline and the returned-status-vs-raised-error
+  boundary (6.1.4); the per-run-dir lock lifecycle and
+  the within-run-dir checkpoint short-circuit yielding
+  SKIPPED (6.1.5).  Resolve the 6.1.6 open details where
+  pseudocode forces the choice: the per-job-type
+  `outputs{}` key enumeration factored out of the
+  `_manage_*_output` helpers, and the iteration/energy
+  parse sources.  Foundation for C63.
+- [ ] P7. Write PSEUDOCODE for the kaleidoscope campaign
+  runner (DESIGN 6.2, D13): the `CalcUnit` / `Campaign`
+  data model and `campaign.toml` serialization (6.2.1);
+  the `Runner` protocol and `RunOutcome`, with
+  `ImagoRunner` mapping `ImagoResult` and persisting
+  `result.toml` (6.2.2); the Parsl per-unit dispatch with
+  per-future exception capture for complete-and-report
+  (6.2.3); the workspace id/`<calc>`/`status.toml`
+  scheme (6.2.4); the cache hit-test (scalar-field
+  compare + key-file byte-compare) and resume-as-re-run
+  (6.2.5); the `CampaignReport` and client-side harvest
+  handoff (6.2.6).  Foundation for C68.
 
 ---
 
