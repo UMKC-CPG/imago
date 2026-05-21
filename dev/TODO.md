@@ -1309,6 +1309,36 @@ and PSEUDOCODE landed before code.
   support both entry modes (prepared dir; structure +
   options); preserve checkpoint and lock behavior.
   Foundation for C65 and C68.
+
+  Progress 2026-05-21 (core landed; one mode deferred):
+  Implemented PSEUDOCODE §12 in imago.py -- RunStatus /
+  ImagoError / JobIdentity / ImagoResult (12.1); the
+  ScriptSettings split into from_command_line /
+  from_options sharing reconcile(), with parse_command_line
+  taking optional argv (12.3); project_home_outputs (12.2);
+  the harvest helpers _read_convergence_threshold /
+  _last_data_row / _harvest_result reading the iteration
+  file's last row for verdict/energy/count (12.5); the
+  reentrant _run_core with the per-run-dir lock, cwd
+  restore in finally, and the SystemExit->FAILED /
+  ImagoError contract boundary (12.4); run_prepared; and
+  main() rewritten as the thin CLI wrapper.  15 new tests
+  in src/tests/test_imago_api.py; full unit suite green
+  (224 passed).
+  DEFERRED -- run_structure (structure-and-options mode) is
+  an explicit stub that raises: it needs a makeinput
+  "build a run dir" API that does not exist yet, which
+  lands with C64 (ASE-free StructureControl factory) and
+  C68 (kaleidoscope's makeinput->API dispatch, ARCH 9.4).
+  Proposal: fold the run_structure wiring into C68 and
+  treat the rest of C63 as done.
+  Two intentional changes to record: (1) the CLI now exits
+  non-zero on SCF NON-convergence (the old driver checked
+  only fort.2 = ran-without-abort and exited 0); (2)
+  reused_checkpoint / SKIPPED are not yet surfaced (the
+  Fortran's within-run-dir checkpointing is preserved
+  unchanged, but no Python-visible completion marker exists
+  to report it), so they stay False/absent for now.
 - [ ] C64. Add the ASE-free StructureControl factory to
   structure_control.py (ARCH 9.3, D12): build a
   StructureControl from (lattice, fractional coords,

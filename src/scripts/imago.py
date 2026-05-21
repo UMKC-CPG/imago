@@ -43,7 +43,9 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 
 
 # ------------------------------------------------------------------ #
@@ -211,6 +213,75 @@ BASIS_CODE_MAP = {"mb": 1, "fb": 2, "eb": 3}
 
 
 # ------------------------------------------------------------------ #
+#                  Callable API: Result and Errors                    #
+# ------------------------------------------------------------------ #
+
+# These types make imago.py callable as a library, not only
+#   as a CLI (DESIGN 6.1; PSEUDOCODE 12.1). A run returns an
+#   ImagoResult describing its outcome, and the CLI (main,
+#   below) becomes a thin wrapper that translates that result
+#   into a process exit code. Higher layers -- the ASE adapter
+#   and the kaleidoscope campaign runner -- call the API
+#   directly and must never be killed by a sys.exit from deep
+#   inside a run, so run-level failures come back as a status
+#   while only environment/programmer faults raise ImagoError.
+
+class RunStatus(Enum):
+    """Outcome of a single Imago run (DESIGN 6.1.2)."""
+    CONVERGED = "converged"          # ran; SCF met threshold
+    NOT_CONVERGED = "not_converged"  # ran; hit iter ceiling
+    FAILED = "failed"                # did not complete
+    SKIPPED = "skipped"              # checkpoint: nothing to do
+
+
+class ImagoError(Exception):
+    """A contract-level fault that no per-job retry can fix:
+    the environment is unconfigured ($IMAGO_RC / $IMAGO_TEMP /
+    $IMAGO_BIN unset), the run directory is missing or holds no
+    inputs, or the per-run-dir lock is already held by another
+    process. Run-level failures (non-convergence, a Fortran
+    abort, a missing-at-run-time input) are NOT raised; they
+    come back as a FAILED / NOT_CONVERGED ImagoResult so a
+    campaign can record-and-continue (VISION Principle 10)."""
+    pass
+
+
+@dataclass
+class JobIdentity:
+    """Echo of which calculation ran, carried on the result."""
+    edge: str
+    job_name: str
+    basis_scf: str
+    basis_pscf: str
+
+
+@dataclass
+class ImagoResult:
+    """The outcome of one Imago run (DESIGN 6.1.2). Returned by
+    both API entry points and consumed by the CLI wrapper and
+    higher layers. `outputs` maps a logical key (e.g. "scfV",
+    "energy", "iteration") to an absolute path; the database
+    producer harvests outputs["scfV"], trustworthy only when
+    status is CONVERGED."""
+    status: RunStatus
+    run_dir: str
+    temp_dir: str
+    job: JobIdentity
+    runtime_seconds: float
+    outputs: dict = field(default_factory=dict)
+    scf_iterations: int | None = None
+    converged: bool = False
+    reused_checkpoint: bool = False
+    total_energy: float | None = None
+    message: str = ""
+
+    @property
+    def success(self):
+        """True iff the SCF converged (DESIGN 6.1.2)."""
+        return self.status is RunStatus.CONVERGED
+
+
+# ------------------------------------------------------------------ #
 #                       Script Settings                               #
 # ------------------------------------------------------------------ #
 
@@ -222,17 +293,24 @@ class ScriptSettings():
 
 
     def __init__(self):
-        """Define default values for the parameters by pulling
-        them from the resource control file in the default
-        location: $IMAGO_RC/imagorc.py or from the current
-        working directory if a local copy of imagorc.py is
-        present."""
+        """Load default values from the resource control file
+        only. The job-type, edge, and basis fields stay unset
+        until reconcile() runs -- invoked by from_command_line()
+        (the CLI path) or from_options() (the callable-API
+        path). Splitting construction this way is what lets the
+        API build settings without a command line (DESIGN
+        6.1.3). The rc file is read from $IMAGO_RC/imagorc.py."""
 
-        # Read default variables from the resource control file.
+        # Read default variables from the resource control
+        #   file in $IMAGO_RC. A missing $IMAGO_RC is a contract
+        #   fault -- it cannot be fixed by retrying a job -- so
+        #   it raises rather than calling sys.exit, which would
+        #   kill a long-lived kaleidoscope worker (DESIGN
+        #   6.1.2).
         rc_dir = os.getenv('IMAGO_RC')
         if not rc_dir:
-            sys.exit(
-                "Error: $IMAGO_RC is not set. See instructions."
+            raise ImagoError(
+                "$IMAGO_RC is not set. See instructions."
             )
         sys.path.insert(1, rc_dir)
         from imagorc import parameters_and_defaults
@@ -241,14 +319,60 @@ class ScriptSettings():
         # Assign values to the settings from the rc defaults.
         self.assign_rc_defaults(default_rc)
 
-        # Parse the command line.
-        args = self.parse_command_line()
 
-        # Reconcile the command line arguments with the rc file.
-        self.reconcile(args)
+    @classmethod
+    def from_command_line(cls, argv=None):
+        """Build settings from the command line (the CLI path).
+        Parse argv (or sys.argv when None), reconcile against
+        the rc defaults, and record the invocation to the
+        `command` file. This is the historical behavior, now
+        behind a named constructor (DESIGN 6.1.3)."""
+        settings = cls()
+        args = settings.parse_command_line(argv)
+        settings.reconcile(args)
+        settings.recordCLP()
+        return settings
 
-        # Record the command line parameters that were used.
-        self.recordCLP()
+
+    @classmethod
+    def from_options(cls, options):
+        """Build settings from a plain options mapping (the
+        callable-API path). No argv and no `command`-file side
+        effect, so it is safe to call in-process many times.
+        Recognized keys: 'job' (a JOB_DEFS key, or omitted for
+        a plain SCF), 'edge' (default 'gs'), 'scf_basis',
+        'pscf_basis', 'serialxyz', 'valgrind' (DESIGN
+        6.1.3)."""
+        settings = cls()
+        args = settings._args_from_options(options or {})
+        settings.reconcile(args)
+        return settings
+
+
+    def _args_from_options(self, options):
+        """Translate an options mapping into the same argparse
+        namespace shape that reconcile() consumes, so a single
+        reconcile() serves both entry paths. Every job-type
+        dest defaults to None (the plain-SCF case); at most one
+        is set, from the optional 'job' key."""
+        args = ap.Namespace()
+        args.scf_basis = options.get('scf_basis')
+        args.pscf_basis = options.get('pscf_basis')
+        args.serialxyz = options.get('serialxyz',
+                                     self.serialxyz)
+        args.valgrind = options.get('valgrind', self.valgrind)
+
+        # reconcile() scans these dests to find the chosen
+        #   job; all-None means a default SCF-only run.
+        for job_name in JOB_DEFS:
+            setattr(args, job_name, None)
+
+        job = options.get('job')
+        if job is not None:
+            if job not in JOB_DEFS:
+                raise ImagoError(f"unknown job type: {job}")
+            setattr(args, job, options.get('edge', 'gs'))
+        return args
 
 
     def assign_rc_defaults(self, default_rc):
@@ -260,7 +384,7 @@ class ScriptSettings():
         self.valgrind = default_rc["valgrind"]
 
 
-    def parse_command_line(self):
+    def parse_command_line(self, argv=None):
 
         # Create the parser tool.
         prog_name = "imago"
@@ -362,8 +486,10 @@ Defaults are given in ./imagorc.py or $IMAGO_RC/imagorc.py.
         # Add arguments to the parser.
         self.add_parser_arguments(parser)
 
-        # Parse the arguments and return the results.
-        return parser.parse_args()
+        # Parse the arguments and return the results. When argv
+        #   is None argparse falls back to sys.argv, preserving
+        #   the CLI's behavior; the API passes an explicit list.
+        return parser.parse_args(argv)
 
 
     def add_parser_arguments(self, parser):
@@ -2308,115 +2434,422 @@ def clean_up(temp, fn, runtime_fh):
 
 
 # ------------------------------------------------------------------ #
+#                  Callable API: Output Naming                        #
+# ------------------------------------------------------------------ #
+
+def project_home_outputs(settings):
+    """Return {logical_key: filename} for the project-home
+    output files this job produces (PSEUDOCODE 12.2). The
+    filenames are relative to the run directory. This is the
+    single source of truth for the result object's `outputs`
+    map; it mirrors the names manage_output writes, and the two
+    must stay in step.
+
+    The SCF-always keys ("scfV", "energy", "iteration") are the
+    ones the database producer harvests; the property key lets
+    later clients reach their primary output through the same
+    contract. Filenames here echo manage_output's tag logic
+    (edge_, basis) and the FileNames tokens."""
+    fn = FileNames()
+    edge = settings.edge
+    job_name = settings.job_name
+    job_id = settings.job_id
+
+    # The basis tag mirrors manage_output exactly.
+    if job_id < 200:
+        basis = f"-{settings.basis_scf}"
+    elif job_id < 300:
+        basis = f"-{settings.basis_pscf}"
+    else:
+        basis = "-fb"
+
+    outputs = {}
+
+    # SCF-always block: written whenever an SCF ran (an SCF
+    #   job, or a post-SCF job whose SCF basis is not "no").
+    if job_id < 200 or settings.basis_scf != "no":
+        outputs["scfV"] = f"{edge}_{fn.init_pot}{basis}{fn.dat}"
+        outputs["energy"] = f"{edge}_{fn.energy}{basis}{fn.dat}"
+        outputs["iteration"] = (
+            f"{edge}_{fn.iteration}{basis}{fn.dat}"
+        )
+
+    # All-tasks block: the main combined output ("imago.out").
+    outputs["out"] = f"{edge}_{job_name}{basis}{fn.out}"
+
+    # Property-specific block: the primary "total" file each
+    #   property helper writes to the project home, keyed by
+    #   the property tag. Spin-polarized runs also emit
+    #   ".up"/".dn" variants; the collector keeps whichever
+    #   files exist on disk. Full per-property enumeration is
+    #   deferred (PSEUDOCODE 12.2 property_outputs note).
+    prop_tag = {
+        1: fn.dos, 2: fn.bond, 3: fn.dimo, 4: fn.optc,
+        5: fn.pacs, 6: fn.optc, 7: fn.sige, 8: fn.sybd,
+        9: fn.force, 10: fn.field, 11: fn.mtop,
+    }.get(job_id % 100)
+    if prop_tag is not None:
+        outputs["property"] = (
+            f"{edge}_{prop_tag}{basis}{fn.tot}"
+        )
+    if job_id == 311:
+        outputs["loen"] = f"{edge}_{fn.loen}{basis}{fn.plot}"
+
+    return outputs
+
+
+# ------------------------------------------------------------------ #
+#                 Callable API: Result Harvesting                     #
+# ------------------------------------------------------------------ #
+
+def _read_convergence_threshold(imago_dat_path):
+    """Return the SCF convergence criterion: the value on the
+    line immediately following the CONVERGENCE_TEST label in
+    imago.dat (PSEUDOCODE 12.5), so the verdict uses the same
+    criterion the run was held to. Reads imago.dat the same way
+    xc_code_spin reads XC_CODE."""
+    with open(imago_dat_path, 'r') as f:
+        for line in f:
+            if "CONVERGENCE_TEST" in line:
+                return float(next(f).split()[0])
+    raise ImagoError(
+        f"CONVERGENCE_TEST not found in {imago_dat_path}"
+    )
+
+
+def _last_data_row(path):
+    """Return the whitespace-split fields of the last non-empty
+    line of a file, or None if the file has no data lines."""
+    last_line = None
+    with open(path, 'r') as f:
+        for line in f:
+            if line.strip():
+                last_line = line
+    return last_line.split() if last_line is not None else None
+
+
+def _job_identity(settings):
+    """Build the JobIdentity echo for a result."""
+    return JobIdentity(
+        settings.edge, settings.job_name,
+        settings.basis_scf, settings.basis_pscf,
+    )
+
+
+def _build_result(status, run_dir, temp, settings, seconds,
+                  reused=False, message=""):
+    """Construct a minimal ImagoResult for the early-exit paths
+    (SKIPPED, FAILED) that do not harvest output files."""
+    return ImagoResult(
+        status=status, run_dir=run_dir, temp_dir=temp,
+        job=_job_identity(settings), runtime_seconds=seconds,
+        reused_checkpoint=reused,
+        message=message or status.value,
+    )
+
+
+def _harvest_result(run_dir, temp, settings, seconds, reused):
+    """Build the ImagoResult of a completed run by reading the
+    settled output files (PSEUDOCODE 12.5). The convergence
+    verdict, total energy, and per-run iteration count all come
+    from one read of the iteration file's last data row."""
+    fn = FileNames()
+    names = project_home_outputs(settings)
+    outputs = {}
+    for key, fname in names.items():
+        full_path = os.path.join(run_dir, fname)
+        if os.path.exists(full_path):
+            outputs[key] = full_path
+
+    iterations = None
+    total_energy = None
+    converged = False
+    if "iteration" in outputs:
+        # One read of the last data row yields everything: the
+        #   convergence metric, the total energy, and the
+        #   iteration count (all 1-based columns).
+        row = _last_data_row(outputs["iteration"])
+        threshold = _read_convergence_threshold(
+            os.path.join(run_dir, f"{fn.imago}{fn.dat}")
+        )
+        # Column 4 is the SCF convergence metric: converged iff
+        #   it is below the imago.dat criterion. Column 5 is the
+        #   last iteration's total energy. Column 1 is a per-run
+        #   cycle counter that resets each SCF invocation, so it
+        #   is THIS run's iteration count even though reruns
+        #   append further rows.
+        converged = float(row[3]) < threshold
+        total_energy = float(row[4])
+        iterations = int(float(row[0]))
+
+    if iterations is None:
+        # No SCF in this run (e.g. a -scf no property pass):
+        #   nothing to converge, so a clean run is CONVERGED.
+        status = RunStatus.CONVERGED
+    elif converged:
+        status = RunStatus.CONVERGED
+    else:
+        status = RunStatus.NOT_CONVERGED
+
+    return ImagoResult(
+        status=status, run_dir=run_dir, temp_dir=temp,
+        job=_job_identity(settings), runtime_seconds=seconds,
+        outputs=outputs, scf_iterations=iterations,
+        converged=converged, reused_checkpoint=reused,
+        total_energy=total_energy, message=status.value,
+    )
+
+
+# ------------------------------------------------------------------ #
+#                  Callable API: The Run Core                         #
+# ------------------------------------------------------------------ #
+
+def _run_core(run_dir, settings):
+    """Run one Imago calculation in run_dir and return an
+    ImagoResult. This is the reentrant heart of the callable
+    API: it performs the same sequence as the historical main()
+    -- resolve dirs, lock, stage inputs, run the Fortran binary
+    (plus immediate secondary jobs), collect outputs -- but it
+    RETURNS a result instead of exiting, and it restores the
+    working directory on the way out so a long-lived caller can
+    drive many runs (DESIGN 6.1.4).
+
+    Contract faults (unconfigured environment, missing inputs,
+    a held lock) raise ImagoError. Run-level failures come back
+    as a FAILED ImagoResult: helpers that signal trouble with
+    sys.exit are intercepted here and converted, so a deep
+    failure never kills the caller's process (DESIGN 6.1.2;
+    VISION Principle 10)."""
+    start_clock = datetime.now()
+    original_cwd = os.getcwd()
+    fn = FileNames()
+
+    # Contract checks (raise): the environment must be
+    #   configured and the run directory must exist.
+    if not os.environ.get('IMAGO_TEMP'):
+        raise ImagoError("$IMAGO_TEMP is not set.")
+    if not os.environ.get('IMAGO_BIN'):
+        raise ImagoError("$IMAGO_BIN is not set.")
+    if not os.path.isdir(run_dir):
+        raise ImagoError(
+            f"run directory does not exist: {run_dir}"
+        )
+
+    # Work from the run directory so init_directories treats it
+    #   as the project home; the original cwd is restored in the
+    #   finally below, no matter how the run ends.
+    os.chdir(run_dir)
+    temp = None
+    runtime_fh = None
+    lock_path = None
+    try:
+        proj_home, inputs, temp = init_directories(fn)
+
+        # The run directory (or its inputs/ dir) must hold the
+        #   primary imago.dat; otherwise there is nothing to run
+        #   -- a contract fault.
+        imago_dat = f"{fn.imago}{fn.dat}"
+        if not (os.path.exists(
+                    os.path.join(proj_home, imago_dat))
+                or os.path.exists(
+                    os.path.join(inputs, imago_dat))):
+            raise ImagoError(
+                f"run directory holds no {imago_dat}: {run_dir}"
+            )
+
+        # Per-run-dir lock. Because temp mirrors run_dir, two
+        #   different run dirs take two different locks, so a
+        #   campaign of parallel runs never collides. A lock
+        #   already held means another process owns this run
+        #   directory -- a contract fault (DESIGN 6.1.5).
+        lock_path = os.path.join(temp, fn.imago_lock)
+        if os.path.exists(lock_path):
+            raise ImagoError(
+                f"lock already held in {temp}; another run "
+                f"may own this directory."
+            )
+        with open(lock_path, 'w'):
+            pass
+
+        runtime_fh = init_io(proj_home, fn)
+        executable, exe_mechanism, sub_mechanism = init_exes(
+            settings, fn, inputs
+        )
+        bin_dir = os.environ.get('IMAGO_BIN', '')
+        spin_pol = xc_code_spin(proj_home, inputs, fn)
+
+        # Run from the intermediate directory, where the Fortran
+        #   binary expects to find its fort.* files.
+        os.chdir(temp)
+
+        output_label = (
+            f"{settings.edge}_{settings.job_name}"
+            f"-{settings.basis_scf}-{settings.basis_pscf}"
+        )
+        runtime_fh.write(
+            f"{output_label}----spin={spin_pol}"
+            f"-----------------------------\n"
+        )
+        runtime_fh.write(f"Start:  {datetime.now()}\n")
+        with open(lock_path, 'w') as lock_file:
+            lock_file.write(f"{output_label}\n")
+
+        # Stage inputs, build the job command line, run.
+        manage_input(
+            settings, fn, proj_home, inputs, temp, runtime_fh
+        )
+        serial_flag = 1 if settings.serialxyz else 0
+        job_clp = (
+            f"{settings.basis_code_scf} "
+            f"{settings.basis_code_pscf} "
+            f"{settings.qn_n} {settings.qn_l} "
+            f"{settings.job_id} {serial_flag}"
+        )
+        execute_program(
+            job_clp, settings, fn, bin_dir,
+            executable, exe_mechanism, sub_mechanism,
+            spin_pol, runtime_fh,
+        )
+        manage_output(
+            settings, fn, proj_home, spin_pol, runtime_fh
+        )
+        runtime_fh.write(f"End:  {datetime.now()}\n")
+
+        seconds = (datetime.now()
+                   - start_clock).total_seconds()
+        # Within-run-dir checkpointing is unchanged (the Fortran
+        #   still skips completed work on restart); surfacing it
+        #   as reused_checkpoint / SKIPPED awaits a Python-visible
+        #   marker, so it stays False here for now (DESIGN
+        #   6.1.5).
+        return _harvest_result(
+            proj_home, temp, settings, seconds, reused=False
+        )
+
+    except ImagoError:
+        # Contract faults propagate unchanged.
+        raise
+    except SystemExit as exit_signal:
+        # A helper used sys.exit() as its error path (e.g. a
+        #   missing fort.2 success file via imago_exit, or a
+        #   failed file copy). In API mode that must not kill
+        #   the caller; convert it to a FAILED result.
+        seconds = (datetime.now()
+                   - start_clock).total_seconds()
+        return _build_result(
+            RunStatus.FAILED, run_dir,
+            temp or get_temp_dir(), settings, seconds,
+            message=str(exit_signal.code),
+        )
+    except Exception as err:
+        seconds = (datetime.now()
+                   - start_clock).total_seconds()
+        return _build_result(
+            RunStatus.FAILED, run_dir,
+            temp or get_temp_dir(), settings, seconds,
+            message=f"unexpected error: {err}",
+        )
+    finally:
+        # Always release the lock, close the runtime log, and
+        #   restore the working directory -- even on failure.
+        #   The cwd restore is the key reentrancy guarantee: a
+        #   long-lived kaleidoscope worker must not be left
+        #   stranded in a stale temp directory (DESIGN 6.1.4).
+        if lock_path and os.path.exists(lock_path):
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
+        if runtime_fh is not None and not runtime_fh.closed:
+            runtime_fh.write("Program Sequence Complete.\n")
+            runtime_fh.close()
+        os.chdir(original_cwd)
+
+
+# ------------------------------------------------------------------ #
+#                  Callable API: Entry Points                         #
+# ------------------------------------------------------------------ #
+
+def run_prepared(run_dir, settings=None):
+    """Run a prepared run directory (DESIGN 6.1.3,
+    prepared-directory mode). run_dir already holds the staged
+    Imago inputs (imago.dat, structure.dat, scfV.dat, kp
+    files). When settings is None the resource-control defaults
+    apply, exactly as for a bare CLI `imago` invocation (a
+    plain SCF). Returns an ImagoResult."""
+    if settings is None:
+        settings = ScriptSettings.from_options({})
+    run_dir = os.path.abspath(run_dir)
+    if not os.path.isdir(run_dir):
+        raise ImagoError(
+            f"run directory does not exist: {run_dir}"
+        )
+    return _run_core(run_dir, settings)
+
+
+def run_structure(structure, options, run_dir, settings=None):
+    """Build a run directory from a structure plus makeinput
+    options, then run it (DESIGN 6.1.3, structure-and-options
+    mode). `structure` is a path to an imago.skl; `options` are
+    the makeinput options. Input preparation still lives in
+    makeinput; this entry point simply calls it on the caller's
+    behalf, then defers to run_prepared.
+
+    NOTE (C63 scope): the makeinput-driven build relies on a
+    makeinput "build a run directory" API that does not yet
+    exist; it lands with the ASE-free StructureControl factory
+    and the kaleidoscope runner (C64 / C68). Until then this
+    raises rather than silently doing nothing, so callers use
+    run_prepared on a directory makeinput has already built."""
+    raise ImagoError(
+        "run_structure (structure-and-options mode) is not yet "
+        "wired; build the run directory with makeinput and call "
+        "run_prepared instead. Tracked with C64 / C68."
+    )
+
+
+# ------------------------------------------------------------------ #
 #                         Main Program                                #
 # ------------------------------------------------------------------ #
 
 def main():
+    """Thin CLI wrapper over the callable API (DESIGN 6.1.3).
+    This is the only layer that touches sys.argv or exits the
+    process. It parses the command line, runs the current
+    working directory as a prepared run directory (today's sole
+    CLI behavior), and translates the returned ImagoResult into
+    a process exit code.
 
-    # Get script settings from a combination of the resource
-    #   control file and parameters given by the user on the
-    #   command line.
-    settings = ScriptSettings()
+    The actual orchestration -- staging inputs, locking, running
+    the Fortran binary, collecting outputs -- now lives in the
+    callable API (_run_core, run_prepared) so that the cluster
+    jobs, the ASE adapter, and the kaleidoscope campaign runner
+    can reach it without a command line.
 
-    # Initialize file name components.
-    fn = FileNames()
+    Note: with the convergence verdict now available (PSEUDOCODE
+    12.5), the CLI exits non-zero on SCF non-convergence, where
+    the historical driver -- which checked only the fort.2
+    success file -- exited zero. A FAILED run still exits
+    non-zero as before."""
 
-    # Set up the execution environment.
-    # Initialize the directories to be used.
-    proj_home, inputs, temp = init_directories(fn)
+    # Contract faults (e.g. an unconfigured environment) raise
+    #   ImagoError; surface the message and exit non-zero, the
+    #   same outward behavior as the historical sys.exit paths.
+    try:
+        settings = ScriptSettings.from_command_line()
+        result = run_prepared(os.getcwd(), settings)
+    except ImagoError as err:
+        sys.stderr.write(f"imago: {err}\n")
+        sys.exit(1)
 
-    # Initialize the IO for storing results to RUNTIME.
-    runtime_fh = init_io(proj_home, fn)
+    if result.status in (RunStatus.CONVERGED,
+                         RunStatus.SKIPPED):
+        sys.exit(0)
 
-    # Initialize the executables and execution method.
-    executable, exe_mechanism, sub_mechanism = init_exes(
-        settings, fn, inputs
-    )
-    bin_dir = os.environ.get('IMAGO_BIN', '')
-
-    # Determine the XC Code and if the calculation is spin
-    #   polarized. Use 1 for non-spinpol; use 2 for spinpol.
-    spin_pol = xc_code_spin(proj_home, inputs, fn)
-
-    # Check that a lock file does not exist blocking
-    #   execution. If it doesn't, then make one so we can
-    #   start running the job.
-    lock_path = os.path.join(temp, fn.imago_lock)
-    if os.path.exists(lock_path):
-        imago_exit(
-            f"Lock file found in {temp}.\n"
-            f"Is another imago script running?\n"
-            f"Did an imago script die badly?\n",
-            runtime_fh,
-        )
-    else:
-        # Create the lock file.
-        with open(lock_path, 'w') as f:
-            pass
-
-    # --- Run the requested job --- #
-
-    # Change the working directory to the intermediate
-    #   location.
-    os.chdir(temp)
-
-    # Mark the date and time of the beginning of this run.
-    output_label = (
-        f"{settings.edge}_{settings.job_name}"
-        f"-{settings.basis_scf}-{settings.basis_pscf}"
-    )
-    runtime_fh.write(
-        f"{output_label}----spin={spin_pol}"
-        f"-----------------------------\n"
-    )
-    runtime_fh.write(
-        f"Start:  {datetime.now()}\n"
-    )
-
-    # Mark the lock file with the current executable.
-    with open(lock_path, 'w') as f:
-        f.write(f"{output_label}\n")
-
-    # Check for and stage the necessary input files.
-    manage_input(
-        settings, fn, proj_home, inputs, temp, runtime_fh
-    )
-
-    # Create the proper command line parameters (CLP) for
-    #   this job.
-    serial_flag = 1 if settings.serialxyz else 0
-    job_clp = (
-        f"{settings.basis_code_scf} "
-        f"{settings.basis_code_pscf} "
-        f"{settings.qn_n} {settings.qn_l} "
-        f"{settings.job_id} {serial_flag}"
-    )
-
-    # Execute the requested task program and save the
-    #   runtime data.
-    execute_program(
-        job_clp, settings, fn, bin_dir,
-        executable, exe_mechanism, sub_mechanism,
-        spin_pol, runtime_fh,
-    )
-
-    # Manage the output files.
-    manage_output(
-        settings, fn, proj_home, spin_pol, runtime_fh
-    )
-
-    # Mark the date and time of the ending of this task.
-    runtime_fh.write(
-        f"End:  {datetime.now()}\n"
-    )
-
-    # Check for a kill file request.
-    if os.path.exists(fn.imago_kill):
-        runtime_fh.close()
-        sys.exit()
-
-    # Clean up any leftovers and tie up loose ends.
-    clean_up(temp, fn, runtime_fh)
+    # NOT_CONVERGED or FAILED: report the reason and exit
+    #   non-zero.
+    sys.stderr.write(f"imago: {result.message}\n")
+    sys.exit(1)
 
 
 if __name__ == '__main__':
