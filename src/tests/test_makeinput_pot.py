@@ -126,17 +126,19 @@ class TestSelectAugmentedPotEntry:
             ipdb, db, "isolated", "au")
         assert entry.label == "isolated"
 
-    def test_missing_override_label_is_fatal(self, capsys):
-        # A -pot label absent from the database aborts the run
-        # (SystemExit) rather than falling back -- a deliberate
-        # override must not silently pick a different potential.
+    def test_missing_override_label_is_fatal(self):
+        # A -pot label absent from the database aborts the build
+        # rather than falling back -- a deliberate override must
+        # not silently pick a different potential.  It now raises
+        # MakeinputError instead of calling sys.exit, so the fault
+        # propagates out of a kaleidoscope worker as a failed unit
+        # instead of killing the worker (DESIGN 6.3.1, 6.3.5).
         db = _au_db()
-        with pytest.raises(SystemExit) as excinfo:
+        with pytest.raises(makeinput.MakeinputError) as excinfo:
             makeinput._select_augmented_pot_entry(
                 ipdb, db, "no_such_label", "au")
-        assert excinfo.value.code == 1
         # The message names both the bad label and the element.
-        msg = capsys.readouterr().out
+        msg = str(excinfo.value)
         assert "no_such_label" in msg
         assert "au" in msg
 

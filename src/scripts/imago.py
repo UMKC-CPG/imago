@@ -2789,23 +2789,31 @@ def run_prepared(run_dir, settings=None):
 
 def run_structure(structure, options, run_dir, settings=None):
     """Build a run directory from a structure plus makeinput
-    options, then run it (DESIGN 6.1.3, structure-and-options
-    mode). `structure` is a path to an imago.skl; `options` are
-    the makeinput options. Input preparation still lives in
-    makeinput; this entry point simply calls it on the caller's
-    behalf, then defers to run_prepared.
+    options, then run it (DESIGN 6.1.3 + 6.3.6,
+    structure-and-options mode). `structure` is a path to an
+    imago.skl; `options` are the makeinput options (keyed by
+    makeinput's argparse dest names) used to build the run
+    directory. Input preparation lives in makeinput's callable
+    build API (DESIGN 6.3); this entry point drives it, then
+    defers to run_prepared.
 
-    NOTE (C63 scope): the makeinput-driven build relies on a
-    makeinput "build a run directory" API that does not yet
-    exist; it lands with the ASE-free StructureControl factory
-    and the kaleidoscope runner (C64 / C68). Until then this
-    raises rather than silently doing nothing, so callers use
-    run_prepared on a directory makeinput has already built."""
-    raise ImagoError(
-        "run_structure (structure-and-options mode) is not yet "
-        "wired; build the run directory with makeinput and call "
-        "run_prepared instead. Tracked with C64 / C68."
-    )
+    makeinput is imported lazily, so imago.py keeps importing
+    without makeinput's environment loaded -- the same courtesy
+    ImagoRunner extends to imago (DESIGN 6.2.2). The run
+    `settings` (job type, edge, bases) default from `options`
+    via from_options, which reads the keys it recognizes (job,
+    edge, ...) and ignores the rest; a caller that already holds
+    a reconciled settings object may pass it.
+
+    A makeinput contract fault (a missing structure file, an
+    unsupported build) raises MakeinputError, which propagates
+    to the campaign as a failed unit (VISION Principle 10), just
+    as an ImagoError from the run does."""
+    import makeinput
+    if settings is None:
+        settings = ScriptSettings.from_options(options)
+    makeinput.build_run_dir(structure, options, run_dir)
+    return run_prepared(run_dir, settings=settings)
 
 
 # ------------------------------------------------------------------ #

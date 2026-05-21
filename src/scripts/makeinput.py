@@ -85,32 +85,123 @@ from datetime import datetime
 
 
 # ---------------------------------------------------------------------------
+# Error type for the callable build API
+# ---------------------------------------------------------------------------
+
+class MakeinputError(Exception):
+    """A contract-level fault in makeinput that no per-unit retry can fix:
+    the environment is unconfigured (no ``$IMAGO_RC`` and no local
+    ``makeinputrc.py``), the named structure file is missing, the target run
+    directory cannot be created, or the requested build is unsupported (an
+    unimplemented grouping op, a ``-pot`` override naming an absent database
+    entry).
+
+    It is the makeinput analog of ``imago.ImagoError`` (DESIGN 6.3.1).  The
+    callable build API raises it instead of calling ``sys.exit``, because a
+    bare ``sys.exit`` deep inside a build would terminate a long-lived
+    kaleidoscope Parsl worker driving thousands of builds.  By raising
+    instead, the exception propagates out of the worker's runner, the
+    campaign records that unit as ``failed``, and the rest of the batch
+    continues (VISION Principle 10).  The thin CLI wrapper (``main``) is the
+    only layer that catches it and translates it into a non-zero process
+    exit, preserving today's user-facing diagnostics.
+    """
+    pass
+
+
+# ---------------------------------------------------------------------------
 # ScriptSettings -- command-line parameters and rc-file defaults
 # ---------------------------------------------------------------------------
 
 class ScriptSettings:
     """Holds all user-controllable parameters for makeinput.
 
-    On construction the object:
-      1. Reads defaults from makeinputrc.py.
-      2. Parses the command line (argparse).
-      3. Reconciles CLI values with rc defaults.
-      4. Records the command line to the ``command`` file.
+    Construction is split so that settings can be built either from the
+    command line (the CLI path) or from a plain options mapping (the
+    callable-API path), mirroring the imago.py refactor of C63 (DESIGN
+    6.3.3).  The bare constructor loads only the rc-file defaults; the
+    job/edge/basis and grouping fields stay at their defaults until
+    ``reconcile()`` runs.  Two named constructors supply the parsed
+    ``args`` namespace that ``reconcile()`` consumes:
+
+      * ``from_command_line(argv)`` -- the CLI path: parse argv with
+        argparse, then reconcile.  This is the historical behavior.
+      * ``from_options(options)`` -- the callable-API path: turn a plain
+        dict into the same args namespace argparse would have produced,
+        then reconcile.  No argv and no ``command``-file side effect, so
+        it is safe to call in-process many times (a kaleidoscope worker).
+
+    Because both paths share the unchanged ``reconcile()``, a run described
+    by CLI flags and the same run described by an options dict produce
+    byte-identical settings.
     """
 
     def __init__(self):
-        # Read default variables from the resource control file.
+        """Load the rc-file defaults only (DESIGN 6.3.3).
+
+        The command-line parse, the reconcile, and the ``command``-file
+        record that the script historically did here have moved into the
+        named constructors and the CLI wrapper, so that an in-process
+        caller can build settings without a command line.
+        """
         rc = self._load_rc()
         self.assign_rc_defaults(rc)
 
-        # Parse the command line.
-        args = self.parse_command_line()
+    @classmethod
+    def from_command_line(cls, argv=None):
+        """Build settings from the command line (the CLI path).
 
-        # Reconcile the command line arguments with the rc defaults.
-        self.reconcile(args)
+        Parse ``argv`` (or ``sys.argv`` when None) with argparse and
+        reconcile it against the rc defaults.  The ``command``-file record
+        is left to the CLI wrapper (``main``), keeping this constructor
+        free of that argv-only side effect (DESIGN 6.3.3, 6.3.5).
+        """
+        settings = cls()
+        args = settings.parse_command_line(argv)
+        settings.reconcile(args)
+        return settings
 
-        # Record the command line that was used.
-        self.record_clp()
+    @classmethod
+    def from_options(cls, options):
+        """Build settings from a plain options mapping (the API path).
+
+        ``options`` is keyed by the argparse ``dest`` names (``job``,
+        ``edge``, ``basis``, ``scfkp``, ``pscfkp``, ``reduce``,
+        ``target``, ``block``, ``xanes``, ``potdb``, ``basisdb``, ...);
+        absent keys take their argparse defaults, so an empty mapping
+        reproduces a bare ``makeinput`` invocation.  No argv and no
+        ``command``-file side effect (DESIGN 6.3.3).
+        """
+        settings = cls()
+        args = settings._args_from_options(options or {})
+        settings.reconcile(args)
+        return settings
+
+    def _args_from_options(self, options):
+        """Turn an options mapping into the args namespace ``reconcile``
+        expects (DESIGN 6.3.3 / PSEUDOCODE 14.1).
+
+        Rather than re-enumerate makeinput's ~40 argparse ``dest`` names
+        and their defaults here (which would drift from the parser), the
+        parser itself is asked to parse an empty argument list.  That
+        yields a namespace pre-filled with exactly the defaults a bare
+        ``makeinput`` invocation would see; the caller's options are then
+        overlaid on top.
+
+        The multi-valued flags (``reduce`` / ``target`` / ``block``,
+        which the CLI accepts as repeatable token lists via
+        ``action="append"``, and ``xanes`` via ``nargs=REMAINDER``) must
+        be supplied in the same list-of-token-lists shape argparse yields,
+        because ``reconcile`` parses them through ``_parse_reduce`` and its
+        siblings.  An unrecognized key is a contract fault and raises.
+        """
+        args = self._build_parser().parse_args([])
+        for key, value in options.items():
+            if not hasattr(args, key):
+                raise MakeinputError(
+                    f"unknown makeinput option: {key!r}")
+            setattr(args, key, value)
+        return args
 
     # ------------------------------------------------------------------
     # RC loading
@@ -129,8 +220,14 @@ class ScriptSettings:
         else:
             rc_dir = os.getenv("IMAGO_RC")
             if not rc_dir:
-                sys.exit("Error: $IMAGO_RC is not set and no local "
-                         "makeinputrc.py found. See instructions.")
+                # A missing rc is a contract fault: it cannot be fixed by
+                #   retrying a build, so it raises rather than calling
+                #   sys.exit, which would kill a long-lived kaleidoscope
+                #   worker (DESIGN 6.3.1, 6.3.5).  The CLI wrapper catches
+                #   this and exits non-zero with the message.
+                raise MakeinputError(
+                    "$IMAGO_RC is not set and no local makeinputrc.py "
+                    "found. See instructions.")
             sys.path.insert(0, rc_dir)
 
         from makeinputrc import parameters_and_defaults
@@ -288,8 +385,25 @@ class ScriptSettings:
     # Command-line parsing
     # ------------------------------------------------------------------
 
-    def parse_command_line(self):
-        """Build the argparse parser, add all arguments, and parse."""
+    def parse_command_line(self, argv=None):
+        """Parse argv into an args namespace (DESIGN 6.3.3).
+
+        Builds the parser and parses ``argv`` (or ``sys.argv`` when None).
+        Kept separate from ``_build_parser`` so the API path
+        (``_args_from_options``) can reuse the very same parser to obtain
+        the default namespace without parsing a real command line.
+        """
+        return self._build_parser().parse_args(argv)
+
+    def _build_parser(self):
+        """Build and return the argparse parser (DESIGN 6.3.3).
+
+        This holds the entire CLI surface -- the description, the epilog,
+        and every flag registered by ``_add_parser_arguments`` -- but does
+        not parse, so both the CLI path (``parse_command_line``) and the
+        API path (``_args_from_options``, via ``parse_args([])``) share one
+        definition of makeinput's options.
+        """
 
         prog_name = "makeinput"
 
@@ -576,7 +690,7 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
         )
 
         self._add_parser_arguments(parser)
-        return parser.parse_args()
+        return parser
 
     def _add_parser_arguments(self, parser):
         """Register every CLI flag with argparse.
@@ -1264,14 +1378,22 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
     # Record keeping
     # ------------------------------------------------------------------
 
-    def record_clp(self):
-        """Append the command line used to the ``command`` file."""
+    def record_clp(self, argv=None):
+        """Append the command line used to the ``command`` file.
+
+        This is a CLI-only side effect (DESIGN 6.3.5): it records the
+        literal invocation for the user's later reference and is therefore
+        called by the CLI wrapper (``main``), never by the API path, which
+        has no meaningful argv.  ``argv`` defaults to ``sys.argv``.
+        """
+        if argv is None:
+            argv = sys.argv
         with open("command", "a") as cmd:
             now = datetime.now()
             formatted_dt = now.strftime("%b. %d, %Y: %H:%M:%S")
             cmd.write(f"Date: {formatted_dt}\n")
             cmd.write("Cmnd:")
-            for arg in sys.argv:
+            for arg in argv:
                 cmd.write(f" {arg}")
             cmd.write("\n\n")
 
@@ -2382,10 +2504,14 @@ def group_reduce(settings, sc, reduce_idx):
     tolerance  = r["tolerance"]
     op         = r["op"]
 
-    # The reduce method currently only supports species grouping.
+    # The reduce method currently only supports species grouping.  An
+    #   unsupported op is a contract fault no retry can fix, so it raises
+    #   MakeinputError rather than calling sys.exit, which would kill a
+    #   kaleidoscope worker mid-build (DESIGN 6.3.1, 6.3.5).
     if op != "species":
-        print("Only can reduce species now.  Aborting")
-        sys.exit(1)
+        raise MakeinputError(
+            "the reduce method currently supports only species "
+            "grouping (got op=%r)" % op)
 
     # Open the diagnostic summary file.
     reduce_fh = open("reduceSummary", "w")
@@ -4173,12 +4299,15 @@ def _select_augmented_pot_entry(ipdb, db, pot_override, elem_name):
         try:
             return ipdb.lookup(db, pot_override)
         except KeyError:
-            print(f"ERROR: -pot {pot_override!r} was not found in "
-                  f"the augmented potential database for element "
-                  f"{elem_name!r}.  A manual -pot override must "
-                  f"name an entry that exists in the database for "
-                  f"every element it applies to.")
-            sys.exit(1)
+            # A -pot override that names no existing entry is a contract
+            #   fault no retry can fix, so it raises MakeinputError rather
+            #   than calling sys.exit, which would kill a kaleidoscope
+            #   worker mid-build (DESIGN 6.3.1, 6.3.5).
+            raise MakeinputError(
+                f"-pot {pot_override!r} was not found in the augmented "
+                f"potential database for element {elem_name!r}.  A "
+                f"manual -pot override must name an entry that exists "
+                f"in the database for every element it applies to.")
     return ipdb.default_entry(db)
 
 
@@ -6152,62 +6281,162 @@ def print_summary(settings, sc):
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
+def build_inputs(settings, sc):
+    """Run the full makeinput workflow in the current working directory.
+
+    This is the body of the historical ``main()``, factored out so the CLI
+    wrapper and the callable ``build_run_dir`` share exactly one definition
+    of the build sequence and cannot drift apart (DESIGN 6.3.4 / PSEUDOCODE
+    14.2).  It expects the current directory to hold ``imago.skl`` and
+    writes the staged Imago inputs (``inputs/``, ``imago.dat``,
+    ``structure.dat``, the kp files, ...) into it.
+
+    The progress prints are retained deliberately: they are useful in both
+    modes -- on the terminal for a CLI user, and in the worker log for a
+    kaleidoscope run.  ``settings`` is a reconciled ScriptSettings; ``sc``
+    is a fresh StructureControl the workflow populates from the skeleton.
+    """
     print("\n\nmakeinput.py script executing.\n")
 
-    # Parse command line and load defaults.
-    ts = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
-    print(f"\nStarting environment setup at................{ts}.")
-    settings = ScriptSettings()
-
     # Set up the execution environment.
+    time_stamp = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
+    print(f"\nStarting environment setup at................{time_stamp}.")
     setup_environment(settings)
 
-    # Create the StructureControl instance that will hold the structure.
-    from structure_control import StructureControl
-    sc = StructureControl()
-
     # Read the skeleton, apply space group/supercell, init default species.
-    ts = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
-    print(f"\nStarting structure initialization at.........{ts}.")
+    time_stamp = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
+    print(f"\nStarting structure initialization at.........{time_stamp}.")
     initialize_cell(settings, sc)
 
     # Assign species.
-    ts = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
-    print(f"\nStarting to assign species at................{ts}.")
+    time_stamp = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
+    print(f"\nStarting to assign species at................{time_stamp}.")
     assign_group(settings, sc, "species")
 
     # Assign types.
-    ts = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
-    print(f"\nStarting to assign general types at..........{ts}.")
+    time_stamp = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
+    print(f"\nStarting to assign general types at..........{time_stamp}.")
     assign_group(settings, sc, "types")
 
     # XANES types (if requested).
     if settings.xanes == 1:
-        ts = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
-        print(f"\nStarting to assign XANES types at............{ts}.")
+        time_stamp = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
+        print(f"\nStarting to assign XANES types at............{time_stamp}.")
         assign_xanes_types(settings, sc)
 
     # EMU configuration (if requested).
     if settings.emu == 1:
-        ts = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
-        print(f"\nStarting to print emu configuration at.......{ts}.")
+        time_stamp = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
+        print(f"\nStarting to print emu configuration at.......{time_stamp}.")
         initialize_emu(settings, sc)
 
     # Write all output files.
-    ts = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
-    print(f"\nStarting to print input files at.............{ts}.")
+    time_stamp = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
+    print(f"\nStarting to print input files at.............{time_stamp}.")
     print_imago(settings, sc)
 
     # Summary.
-    ts = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
-    print(f"\nStarting to print summary at.................{ts}.")
+    time_stamp = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
+    print(f"\nStarting to print summary at.................{time_stamp}.")
     print_summary(settings, sc)
 
     # Done.
-    ts = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
-    print(f"\nmakeinput.py script complete at...............{ts}.\n")
+    time_stamp = datetime.now().strftime("%b %d, %Y: %H:%M:%S")
+    print(f"\nmakeinput.py script complete at...............{time_stamp}.\n")
+
+
+def build_run_dir(structure, options, run_dir, settings=None):
+    """Build the staged Imago inputs in ``run_dir`` from a structure plus
+    makeinput options, then return ``run_dir`` (DESIGN 6.3.2, 6.3.4 /
+    PSEUDOCODE 14.2).
+
+    This is makeinput's callable entry point: the in-process counterpart of
+    invoking the CLI on a directory.  ``imago.run_structure`` chains its
+    result straight into ``imago.run_prepared`` (DESIGN 6.3.6), which is
+    what lets a kaleidoscope campaign hand a bare ``imago.skl`` plus options
+    to the default runner and have the run directory both built and run in
+    one worker call.
+
+    Parameters
+    ----------
+    structure : str
+        Path to an ``imago.skl`` skeleton.  (Whether this may also be an
+        in-memory StructureControl is deferred to the ASE-free factory of
+        D12/C64; this contract commits only to the skl-path form, matching
+        DESIGN 6.1.3.)
+    options : dict
+        Makeinput options keyed by the argparse ``dest`` names; used only
+        to build ``settings`` when ``settings`` is None.
+    run_dir : str
+        The directory to build into; created if absent.
+    settings : ScriptSettings, optional
+        A pre-reconciled settings object (the CLI passes its own); when
+        None it is built from ``options`` via ``from_options``.
+
+    Raises
+    ------
+    MakeinputError
+        On a contract fault: the environment is unconfigured (surfaced by
+        ScriptSettings construction), the structure file is missing, or the
+        run directory cannot be created.
+    """
+    if settings is None:
+        settings = ScriptSettings.from_options(options)
+
+    if not os.path.exists(structure):
+        raise MakeinputError(
+            f"structure file not found: {structure}")
+
+    run_dir = os.path.abspath(run_dir)
+    try:
+        os.makedirs(run_dir, exist_ok=True)
+    except OSError as err:
+        raise MakeinputError(
+            f"could not create run directory {run_dir}: {err}")
+
+    # Stage the skeleton as <run_dir>/imago.skl, because makeinput reads
+    #   the relative name "imago.skl" from the cwd (initialize_cell).  This
+    #   is a no-op when the source already IS that staged file.
+    staged_skl = os.path.join(run_dir, IMAGO_SKL)
+    if os.path.abspath(structure) != staged_skl:
+        shutil.copyfile(structure, staged_skl)
+
+    # cwd discipline (DESIGN 6.3.4): the build operates on cwd-relative
+    #   paths, so acquire the cwd for the duration and restore it on EVERY
+    #   exit, including failure.  Without the restore, one failed build
+    #   would strand a long-lived kaleidoscope worker in run_dir and
+    #   corrupt every subsequent build's relative-path resolution.
+    from structure_control import StructureControl
+    original_cwd = os.getcwd()
+    sc = StructureControl()
+    try:
+        os.chdir(run_dir)
+        build_inputs(settings, sc)
+    finally:
+        os.chdir(original_cwd)
+    return run_dir
+
+
+def main(argv=None):
+    """Thin CLI wrapper over the callable build API (DESIGN 6.3.2).
+
+    This is the only layer that touches ``sys.argv`` or exits the process.
+    It parses argv into settings, records the invocation to the ``command``
+    file (a CLI-only side effect, 6.3.5), and builds the current working
+    directory -- which holds ``imago.skl`` -- as the run directory, which
+    is makeinput's only historical behavior.  A ``MakeinputError`` is
+    translated into a non-zero exit code with its message, preserving
+    today's diagnostics.  Returns the process exit status.
+    """
+    try:
+        settings = ScriptSettings.from_command_line(argv)
+        settings.record_clp(argv)
+        build_run_dir(IMAGO_SKL, {}, os.getcwd(), settings=settings)
+    except MakeinputError as err:
+        print(f"makeinput error: {err}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

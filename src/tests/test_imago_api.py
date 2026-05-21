@@ -19,8 +19,9 @@ neither a binary nor $IMAGO_RC:
   (PSEUDOCODE 12.5).
 * ``_read_convergence_threshold`` / ``_last_data_row`` -- the
   small parse helpers behind the harvest.
-* ``run_structure`` -- confirmed to be an explicit
-  not-yet-wired stub (C64 / C68).
+* ``run_structure`` -- now wired (C68(a)): it drives
+  makeinput.build_run_dir then run_prepared (DESIGN 6.3.6),
+  verified here with both monkeypatched.
 * ``ImagoResult.success`` / ``_build_result`` -- the result
   object's derived state.
 
@@ -222,11 +223,35 @@ def test_success_only_for_converged():
                        **base).success is False
 
 
-def test_run_structure_is_stub():
-    """structure-and-options mode is an explicit not-yet-wired
-    stub (C64 / C68): it raises rather than silently failing."""
-    with pytest.raises(ImagoError):
-        imago.run_structure("x.skl", {}, "/tmp")
+def test_run_structure_builds_then_runs(tmp_path, monkeypatch):
+    """structure-and-options mode now drives makeinput to build
+    the run directory, then runs it as a prepared directory
+    (DESIGN 6.3.6, C68(a)).  run_structure must call
+    makeinput.build_run_dir and then run_prepared, in that order,
+    forwarding the result of the run."""
+    import makeinput
+    order = []
+
+    def fake_build(structure, options, run_dir):
+        order.append(("build", structure, run_dir))
+        return run_dir
+
+    def fake_run_prepared(run_dir, settings=None):
+        order.append(("run", run_dir))
+        return "the-result"
+
+    monkeypatch.setattr(makeinput, "build_run_dir", fake_build)
+    monkeypatch.setattr(imago, "run_prepared", fake_run_prepared)
+
+    # An explicit settings object is passed so the from_options
+    #   default path (which builds a real ScriptSettings, needing
+    #   $IMAGO_RC) is not exercised here.
+    result = imago.run_structure("s.skl", {}, str(tmp_path),
+                                 settings=_settings())
+    assert result == "the-result"
+    assert [step[0] for step in order] == ["build", "run"]
+    assert order[0][1] == "s.skl"           # structure forwarded
+    assert order[1][1] == str(tmp_path)     # run_dir forwarded
 
 
 def test_run_prepared_missing_dir_raises():

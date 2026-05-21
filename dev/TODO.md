@@ -1445,14 +1445,40 @@ and PSEUDOCODE landed before code.
   hit/miss/byte-compare, dispatch under BOTH executors,
   complete-and-report (one failure does not abort), status
   lifecycle, and ImagoRunner mapping.
-  REMAINING for C68: (a) run_structure -> makeinput wiring
-  in imago.py (the C63 deferral) -- now gated on the
-  makeinput callable build API designed in D15 (DESIGN 6.3)
-  and pseudocoded in P8 (PSEUDOCODE §14); imago.run_structure
-  becomes build_run_dir -> run_prepared; (b)
-  HighThroughputExecutor/SLURM config validation on a real
-  cluster (only the thread-pool path is exercised here); (c)
-  lost-vs-failed fine-graining under a real worker loss.
+  Increment 2, 2026-05-21 (item (a): makeinput callable
+  build API + run_structure wiring, per D15/P8).  Refactored
+  makeinput.py to the §14 shape: added MakeinputError;
+  ScriptSettings.__init__ now loads rc defaults only, with
+  from_command_line / from_options classmethods +
+  _args_from_options (reuses _build_parser().parse_args([])
+  for defaults, raises on unknown keys); split
+  parse_command_line into _build_parser + parse(argv);
+  record_clp takes argv and is CLI-only; factored main()'s
+  body into build_inputs(settings, sc); added
+  build_run_dir(structure, options, run_dir, settings=None)
+  with skl staging + chdir/restore-in-finally; rewrote main()
+  as the thin CLI wrapper (sys.exit(main())).  Wired
+  imago.run_structure to build_run_dir -> run_prepared
+  (DESIGN 6.3.6).  Tests: test_makeinput_build_api.py (new;
+  from_options/_args_from_options, build_run_dir staging +
+  cwd discipline on success AND failure, record_clp,
+  contract-fault raises -- build_inputs monkeypatched so no
+  binaries needed); flipped test_imago_api's stub test into a
+  build-then-run delegation test; updated test_makeinput_pot's
+  missing-label test (SystemExit -> MakeinputError).  All 55
+  affected tests pass.
+  DESIGN-SPIRIT NOTE (for a refine): 6.3.5 named only the
+  _load_rc sys.exit, but implementation found two more in the
+  build path (an unsupported reduce op; a -pot override naming
+  an absent db entry).  Both would kill a worker on a single
+  bad unit, so all three were converted to MakeinputError.
+  A refine should generalize DESIGN 6.3.5 to "all sys.exit in
+  the build path become MakeinputError" rather than just
+  _load_rc.
+  REMAINING for C68: (b) HighThroughputExecutor/SLURM config
+  validation on a real cluster (only the thread-pool path is
+  exercised here); (c) lost-vs-failed fine-graining under a
+  real worker loss.
 - [ ] C69. Revise DESIGN 5.7 / PSEUDOCODE 11.4 /
   ARCHITECTURE 8.5 so the producer delegates SCF running
   to kaleidoscope (drops the bespoke run_imago_scf, COD
