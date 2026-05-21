@@ -144,12 +144,35 @@
 
 ### Kaleidoscope prong (VISION Goal 4, ARCHITECTURE 9)
 
-- [ ] D11. Design the imago.py callable API (ARCH 9.2):
+- [x] D11. Design the imago.py callable API (ARCH 9.2):
   the result object, the two entry granularities
   (prepared run dir; structure+options driving
   makeinput), the CLI-as-thin-wrapper refactor, and how
   the existing checkpoint and lock-file behavior is
   preserved.  Foundation for D12/D13.
+
+  Done 2026-05-21.  Landed as new DESIGN section 6
+  (the kaleidoscope DESIGN home; DESIGN 6 <-> ARCH 9,
+  same offset as DESIGN 5 <-> ARCH 8).  Section 6.1
+  covers: 6.1.1 the C48.3 client requirements stated up
+  front (converge verdict, converged-scfV path, run
+  conditions, iteration count); 6.1.2 the `ImagoResult`
+  dataclass + `RunStatus` enum (CONVERGED /
+  NOT_CONVERGED / FAILED / SKIPPED); 6.1.3 the two entry
+  modes (`run_prepared`, `run_structure`) and the CLI
+  split into parse-argv / pick-mode / translate-result;
+  6.1.4 the private run core and cwd-restore discipline
+  for the long-lived kaleidoscope worker; 6.1.5
+  lock-file (already per-run-dir) and within-run-dir
+  checkpoint preservation, with the boundary against
+  kaleidoscope's coarser run-reuse cache; 6.1.6 open
+  details deferred to PSEUDOCODE/C63 (output-key
+  enumeration, iteration/energy parsing, StructureControl
+  input type, API-mode call provenance).  Key judgments:
+  run-level failures are returned as statuses while only
+  contract failures raise (Principle 10, never sys.exit
+  in the API path); cwd restored on exit.  PSEUDOCODE for
+  D11 still pending (after D13 lands, then /refine).
 - [ ] D12. Design ase_imago.py ImagoCalculator (ARCH
   9.3): implemented_properties (energy / forces / stress
   / charges / ... plus Imago specialties as custom

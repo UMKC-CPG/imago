@@ -3700,6 +3700,361 @@ and consumer aligned by construction.
 
 ---
 
+## 6. High-Throughput Calculation Campaigns
+
+This section holds the algorithm- and contract-level
+designs for VISION Goal 4, whose architecture is laid
+out in ARCHITECTURE 9 (the layering, the four
+scripts/packages, and the load-bearing VISION
+principles).  Where ARCHITECTURE 9 says *what* each
+layer is and *why* the boundaries fall where they do,
+this section says *how* each one behaves in enough
+detail to implement.
+
+The designs land incrementally, one subsection per
+TODO item, in dependency order: 6.1 is the `imago.py`
+callable API (TODO D11), the foundation every higher
+layer reaches through; the kaleidoscope runner (D13),
+the ASE adapter (D12), and structure acquisition (D14)
+follow in later subsections.  Note the section-number
+offset from ARCHITECTURE: DESIGN 6 corresponds to
+ARCHITECTURE 9, just as DESIGN 5 corresponds to
+ARCHITECTURE 8.  The mapping is by name and
+cross-reference, not by number.
+
+### 6.1 imago.py callable API
+
+This subsection designs the refactor of ARCHITECTURE
+9.2: turning today's command-line-only `imago.py`
+driver into a callable Python API, with the CLI reduced
+to a thin wrapper over it.  The API is the single seam
+every higher layer (the ASE adapter, kaleidoscope, and
+through it the database producer and the bench harness)
+reaches through, so its contract is designed first and
+deliberately Imago-native and dependency-free.
+
+#### 6.1.1 What the first client needs
+
+The API's first real client is the initial-potential
+database producer (`build_initial_potentials.py`, C48,
+running *through* kaleidoscope, ARCHITECTURE 9.7).
+Designing the result object against that client's
+concrete needs keeps the contract shaped by use rather
+than by guesswork.  The producer, per the harvest
+contract settled in 5.7 and ARCHITECTURE 9.7, needs the
+API to tell it:
+
+1. **Did the SCF converge?**  A clear converged /
+   not-converged / failed verdict.  A non-converged or
+   crashed reference run must never be harvested into
+   the database, and per VISION Principle 10 the
+   campaign must learn this as *data* (a result it can
+   record and skip), not as an exception that aborts
+   the whole batch.
+2. **Where is the converged potential?**  An absolute
+   path to the converged `scfV` output file (the
+   `<edge>_initPot-<basis>.dat` that today's
+   `manage_output` writes from `fort.8`).  The producer
+   reads the Gaussian coefficients out of that file
+   directly; the alphas it already knows, because they
+   are an *input* (the min/max/number it fed into
+   makeinput).  "Converged `scfV` matches input `scfV`"
+   (5.7) is exactly this: coefficients come from the
+   output, alphas from the input, taken together.
+3. **Under what conditions did it run?**  The SCF
+   settings actually used -- basis, k-point spec,
+   convergence threshold, Imago build commit -- so the
+   producer can fill the provenance fields of 5.2 and
+   so kaleidoscope can form its run-reuse cache key
+   (`kpoint_spec` + `convergence_threshold` +
+   `imago_commit` + structure bytes, ARCHITECTURE 9.6).
+4. **How much work did it take?**  The SCF iteration
+   count, both for the producer's run log and for the
+   20%-iteration-reduction validation harness (5.8).
+
+These four needs map directly onto the result object's
+fields (6.1.2).  Nothing here is producer-specific in a
+way that pollutes the contract: every field is a
+plain fact about an Imago run that any client (a
+convergence sweep, the ASE adapter reporting `energy`,
+a future AIMD step) would also want.
+
+#### 6.1.2 The result object
+
+A single small, immutable result object is returned by
+both entry modes (6.1.3).  It is a plain dataclass with
+no ASE, Parsl, or makeinput dependency -- an
+Imago-native record of one run's outcome.
+
+```
+ImagoResult
+  status            RunStatus enum (see below)
+  success           bool: True iff status is CONVERGED
+  run_dir           absolute path to the run directory
+                      (the project home, where named
+                       outputs are written)
+  temp_dir          absolute path to the intermediate
+                      (IMAGO_TEMP-mirrored) working dir
+  scf_iterations    int | None: SCF cycles to reach the
+                      convergence threshold; None when
+                      no SCF ran (e.g. -scf no) or when
+                      the count could not be parsed
+  converged         bool: SCF reached its threshold
+                      (distinct from "ran without
+                       crashing"; see status)
+  reused_checkpoint bool: True if within-run-dir
+                      checkpointing short-circuited some
+                      or all of the work (6.1.5)
+  total_energy      float | None: harvested total energy
+                      in Hartree, when available; the
+                      ASE adapter (D12) converts to eV
+  outputs           dict[str, str]: logical name ->
+                      absolute path for each output file
+                      produced (e.g. "scfV", "energy",
+                      "iteration", plus property-specific
+                      keys like "tdos", "bond"); the
+                      producer reads outputs["scfV"]
+  job               echo of identity: edge, job_name,
+                      basis_scf, basis_pscf
+  runtime_seconds   float: wall-clock time of the run,
+                      for kaleidoscope's status.toml
+  message           human-readable summary or error text
+```
+
+`RunStatus` is an enum with four members, chosen so the
+campaign layer can branch on outcome without parsing
+`message`:
+
+- `CONVERGED` -- the run completed and the SCF reached
+  its convergence threshold.  The only status for which
+  `success` is True and `outputs["scfV"]` is safe to
+  harvest.
+- `NOT_CONVERGED` -- the run completed (the Fortran
+  binary exited cleanly, the `fort.2` success file was
+  written) but the SCF hit its iteration ceiling
+  without converging.  Outputs exist but must not be
+  harvested as a reference potential.
+- `FAILED` -- the run did not complete: the Fortran
+  binary aborted, the `fort.2` success file was absent,
+  or a required input was missing at run time.  This is
+  an *expected* run-level failure, returned (not
+  raised) so the campaign can record-and-continue.
+- `SKIPPED` -- there was nothing to do because
+  within-run-dir checkpointing found the requested work
+  already complete (6.1.5).  `success` is True;
+  `outputs` point at the pre-existing files.
+
+The boundary on error handling is deliberate and
+important for Principle 10.  *Run-level* failures
+(non-convergence, a Fortran abort, a missing input
+file) are reported as a returned `ImagoResult` with the
+appropriate status -- they are normal outcomes of
+running real calculations and must not abort a
+campaign.  *Contract* failures (the environment is not
+configured: `$IMAGO_RC`/`$IMAGO_TEMP`/`$IMAGO_BIN`
+unset; the named run directory does not exist or holds
+no inputs; the lock file is already held by another
+process, 6.1.4) raise an `ImagoError`.  These are
+programmer or environment errors that no per-job retry
+can fix, so they propagate.  Today's `imago_exit`
+(which prints to the runtime log and calls `sys.exit`)
+is replaced inside the API path: it must never call
+`sys.exit`, because that would kill the long-lived
+kaleidoscope worker driving many runs.  The thin CLI
+wrapper (6.1.3) is the only place a process actually
+exits.
+
+#### 6.1.3 The two entry granularities
+
+The API offers two entry points, so a caller joins at
+whichever level it already has inputs for (ARCHITECTURE
+9.2).  Both funnel into one private core (6.1.4) and
+both return an `ImagoResult`.
+
+- **`run_prepared(run_dir, *, settings=None) ->
+  ImagoResult`** -- *prepared-directory mode.*  The
+  given `run_dir` already holds the staged Imago inputs
+  (`imago.dat`, `structure.dat`, `scfV.dat`, kp files),
+  produced by makeinput or a prior step.  No makeinput
+  call is made.  `settings` carries the run options
+  (job type, bases, edge) that today come off the
+  command line; when omitted, the same resource-control
+  defaults apply as for a bare CLI `imago` invocation.
+  This is the mode kaleidoscope's default runner uses,
+  because kaleidoscope (or makeinput, dispatched by it)
+  has already built the directory.
+- **`run_structure(structure, options, run_dir, *,
+  settings=None) -> ImagoResult`** --
+  *structure-and-options mode.*  Given a structure and
+  a set of makeinput options, the API drives
+  `makeinput.py` to build `run_dir` first, then calls
+  `run_prepared` on it.  Input *preparation* still
+  lives in makeinput; this mode simply calls it on the
+  caller's behalf.  `structure` is, at this design
+  stage, a path to an `imago.skl`; whether it may also
+  be an in-memory `StructureControl` is deferred to
+  D12/C64 (the ASE-free factory), so this contract does
+  not yet commit to it -- see 6.1.6.
+
+The **CLI wrapper** is the third, outermost layer and
+the only one that touches `sys.argv` or exits the
+process.  Today's `main()` (and the argv-bound
+`ScriptSettings` it constructs) is split into three
+responsibilities:
+
+1. Parse `sys.argv` into run options (the existing
+   argparse surface and `reconcile` logic, unchanged in
+   meaning).
+2. Decide the entry mode.  A bare `imago ...` on a
+   directory that already has inputs is
+   prepared-directory mode -- the overwhelmingly common
+   case and today's only behavior -- so the CLI calls
+   `run_prepared` on the current working directory.
+   (A future CLI surface for structure-and-options mode
+   is possible but is not required by D11; the CLI's
+   job here is simply to keep doing what it does today,
+   now through the API.)
+3. Translate the returned `ImagoResult` into a process
+   exit code: `CONVERGED`/`SKIPPED` -> 0;
+   `NOT_CONVERGED`/`FAILED` -> non-zero, with `message`
+   written to the runtime log; an uncaught `ImagoError`
+   -> a non-zero exit with its message.
+
+This split is what lets `ScriptSettings` stop being
+constructed from `sys.argv` unconditionally.  Its
+`reconcile` method already takes an `args` namespace
+and contains all the job-type/edge/basis resolution;
+the refactor separates *building* that namespace (from
+argv, in the CLI; or from a plain options mapping, in
+the API) from *reconciling* it into a settings object.
+The argv-only side effects in today's constructor --
+`recordCLP`, which appends the literal `sys.argv` to a
+`command` file -- become CLI-only: in API mode there is
+no meaningful argv to record, so the API instead
+records the equivalent call provenance (entry mode,
+run_dir, options) or skips the `command` file
+entirely.  This is flagged as an open detail in 6.1.6.
+
+#### 6.1.4 The private run core, and cwd discipline
+
+Both entry modes converge on one private core that
+performs the sequence today's `main()` runs inline:
+resolve directories, acquire the lock, stage inputs,
+build the job command line, execute the Fortran binary
+(plus any immediate secondary jobs -- SYBD post-pass,
+Kramers-Kronig for optical properties), collect and
+rename outputs, parse the result fields, release the
+lock, and return the `ImagoResult`.  The behavior is
+identical to today's flow; the change is that it
+returns a value instead of falling off the end of
+`main()`, and reports failure by status instead of
+`sys.exit`.
+
+One genuine behavioral difference from the CLI must be
+designed in: **current-working-directory discipline.**
+Today `imago.py` is a one-shot process: `main()` does
+`os.chdir(temp)` and never restores the cwd, which is
+harmless because the process exits immediately after.
+A kaleidoscope worker, by contrast, is a long-lived
+process that may drive many run directories in
+sequence.  The API core therefore must treat cwd as a
+resource to acquire and release: it takes `run_dir`
+explicitly (rather than implicitly trusting the
+caller's cwd), changes into the working directory for
+the duration of the run, and **restores the original
+cwd on exit, including on failure** (a `try/finally` or
+context manager).  Without this, one failed run would
+leave a campaign worker stranded in a stale temp
+directory and corrupt every subsequent run's relative
+path resolution.  This is the single most important
+correctness difference between the CLI's one-shot
+assumption and the API's reentrant requirement.
+
+#### 6.1.5 Lock-file and checkpoint behavior preserved
+
+Both existing robustness mechanisms carry over
+unchanged in *meaning*; the design only clarifies how
+they behave under concurrent, in-process use.
+
+**The lock file is already per-run-directory, so
+campaign concurrency is safe by construction.**  Today
+the lock (`imagoLock`) lives in the `temp` directory,
+which `get_temp_dir` derives by mirroring the run
+directory's path under `$IMAGO_TEMP`.  Two different run
+directories therefore mirror to two different temp
+directories and two different lock files.  A
+kaleidoscope campaign running thousands of independent
+SCFs in parallel -- each in its own run directory --
+takes thousands of independent locks that never
+collide.  The API keeps the exact same acquire / mark /
+release lifecycle (create on entry, stamp with the run
+label, remove in the cleanup step).  The one contract
+change: encountering an *already-held* lock is a
+contract failure in API mode and raises `ImagoError`
+(another process owns this run directory -- the caller
+must not have dispatched two runs into the same
+directory), whereas the CLI prints its existing
+"Is another imago script running?" message and exits
+non-zero.  The lock guards a single run directory; it
+is never a process-global or campaign-global lock.
+
+**Checkpointing stays within the run directory and is
+orthogonal to kaleidoscope's coarser cache.**  Imago's
+internal checkpointing -- skipping completed SCF
+integrals on restart, skipping a basis SCF that is
+already complete when another job needs the same basis
+-- is driven by `manage_input`'s staging logic plus the
+Fortran binaries, and is untouched by this refactor.
+The API runs the same `manage_input`, so a re-entered
+run directory resumes exactly as a re-run CLI invocation
+would.  The result object surfaces this with
+`reused_checkpoint` (some work was short-circuited) and,
+in the limiting case where *all* requested work was
+already complete, `status = SKIPPED`.  This is a
+deliberately different and finer-grained thing from
+kaleidoscope's run-reuse cache (ARCHITECTURE 9.6): the
+API/`imago.py` decides whether to redo work *within* a
+run directory; kaleidoscope decides whether to *launch*
+the run directory at all.  The clean statement of the
+boundary: `imago.py` resumes within a run; kaleidoscope
+launches or skips runs.  Designing kaleidoscope's
+side of that boundary is D13's job, not D11's.
+
+#### 6.1.6 Open details (for PSEUDOCODE / implementation)
+
+These are deliberately deferred to the PSEUDOCODE pass
+for D11 or to C63 implementation; none of them changes
+the contract above.
+
+- **Output-key enumeration.**  `manage_output` renames
+  `fort.*` files by a job-type-specific (`jobID % 100`)
+  scheme.  The exact set of logical keys in
+  `outputs{}` per job type must be enumerated in
+  pseudocode, factored out of the existing per-property
+  `_manage_*_output` helpers so the API and the file
+  layout cannot drift apart.
+- **Parsing `scf_iterations` and `total_energy`.**
+  Whether to count iterations and read the energy from
+  the named output files (`<edge>_iter<basis>.dat`,
+  `<edge>_energy<basis>.dat`) after the run, or to
+  capture them from the Fortran stdout already written
+  to the runtime log, is an implementation choice.
+  Reading the settled output files is the more robust
+  default and is the working assumption.
+- **`run_structure` structure type.**  Whether
+  `structure` may be an in-memory `StructureControl` in
+  addition to an skl path depends on the ASE-free
+  factory of D12/C64; D11 commits only to the skl-path
+  form and leaves the richer signature to land with
+  that work.
+- **Call-provenance recording in API mode.**  What
+  replaces `recordCLP`'s `command`-file append when
+  there is no `sys.argv` (record the API call shape, or
+  skip the file) is an implementation detail with no
+  bearing on the returned contract.
+
+---
+
 ## References
 
 P. E. Bloechl, O. Jepsen, O. K. Andersen, "Improved
