@@ -4186,3 +4186,404 @@ function benchInitialPotential(benchmark_path):
 
     exit(0 if verdict == "PASS" else 1)
 ```
+
+## 12. imago.py Callable API (DESIGN 6.1)
+
+The refactor of `imago.py` from a command-line-only
+driver into a callable Python API, per DESIGN 6.1.  Five
+pieces: the result object and status enum (12.1); the
+single-source-of-truth output-name table that both the
+output writer and the result collector consult (12.2,
+which resolves the DESIGN 6.1.6 open detail); the two
+entry points plus the thin CLI wrapper (12.3); the
+private run core with its lock lifecycle, cwd-restore
+discipline, and returned-status-vs-raised-error boundary
+(12.4); and the harvest helpers that read the result
+fields off the settled output files (12.5).
+
+The behavior of an actual run is unchanged from today's
+`main()`; the structural change is that the orchestration
+becomes a function that *returns a value* and reports
+failure by *status* rather than calling `sys.exit`, so a
+long-lived caller (a kaleidoscope worker, §13) can drive
+many runs in one process.
+
+### 12.1 Result object and status (DESIGN 6.1.2)
+
+```
+enum RunStatus:
+    CONVERGED       # ran; SCF reached its threshold
+    NOT_CONVERGED   # ran cleanly; hit the iteration ceiling
+    FAILED          # did not complete (abort / missing
+                    #   success file / missing input)
+    SKIPPED         # nothing to do; checkpoint found the
+                    #   requested work already complete
+
+dataclass ImagoResult:
+    status            : RunStatus
+    success           : bool      # status == CONVERGED
+    run_dir           : str       # absolute project home
+    temp_dir          : str       # absolute IMAGO_TEMP mirror
+    scf_iterations    : int|None  # None when no SCF ran
+    converged         : bool      # SCF met threshold
+    reused_checkpoint : bool      # work was short-circuited
+    total_energy      : float|None  # Hartree, when available
+    outputs           : dict      # logical key -> abs path
+    job               : JobIdentity  # edge, job_name,
+                                     #   basis_scf, basis_pscf
+    runtime_seconds   : float
+    message           : str
+```
+
+`success` is a derived convenience (`status ==
+CONVERGED`).  `outputs["scfV"]` is the converged potential
+the database producer harvests (DESIGN 6.1.1); it is only
+trustworthy when `status == CONVERGED`.
+
+A contract-level failure raises instead of returning:
+
+```
+class ImagoError(Exception):
+    # Raised for programmer/environment faults that no
+    # per-job retry can fix: $IMAGO_RC / $IMAGO_TEMP /
+    # $IMAGO_BIN unset; run_dir missing or holding no
+    # inputs; the per-run-dir lock already held by another
+    # process.  Run-level failures (non-convergence, a
+    # Fortran abort, a missing-at-run-time input) are NOT
+    # raised -- they come back as a FAILED / NOT_CONVERGED
+    # ImagoResult so a campaign can record-and-continue
+    # (VISION Principle 10).
+    pass
+```
+
+### 12.2 Output-name table (resolves DESIGN 6.1.6)
+
+The single source of truth for the project-home output
+filenames.  Today `manage_output` *moves* `fort.*` files
+to these names inline; factoring the names into one table
+means the writer and the API's result collector (12.5)
+cannot drift apart.  Both consult `project_home_outputs`.
+
+The names reuse the existing `FileNames` tokens (`scfV`,
+`enrg`, `iter`, the property tags `dos`/`bond`/...) and
+the `edge_`, `basis` tags `manage_output` already builds.
+
+```
+function project_home_outputs(settings):
+    # Returns {logical_key: filename}.  Filenames are
+    # relative to run_dir; the collector makes them
+    # absolute and keeps only those that exist (some are
+    # conditional on spin or job type).
+    edge  = settings.edge
+    jn    = settings.job_name
+    jid   = settings.job_id
+
+    # The basis tag mirrors manage_output exactly.
+    if jid < 200:        basis = "-" + settings.basis_scf
+    elif jid < 300:      basis = "-" + settings.basis_pscf
+    else:                basis = "-fb"
+
+    out = {}
+
+    # --- SCF-always block (the producer's keys) ---
+    # Written whenever an SCF ran: job_id < 200, or a
+    # post-SCF job whose basis_scf is not "no".
+    if jid < 200 or settings.basis_scf != "no":
+        out["scfV"]      = f"{edge}_scfV{basis}.dat"   # fort.8
+        out["energy"]    = f"{edge}_enrg{basis}.dat"   # fort.14
+        out["iteration"] = f"{edge}_iter{basis}.dat"   # fort.7
+        # iterTDOS plot is emitted only if fort.1000 existed.
+        out["iterTDOS"]  = f"{edge}_{jn}{basis}.iterTDOS.plot"
+
+    # --- All-tasks block ---
+    out["out"] = f"{edge}_{jn}{basis}.out"             # fort.20
+
+    # --- Property-specific block, by job_id % 100 ---
+    # Each property contributes the file family its
+    # _manage_<prop>_output helper writes to the project
+    # home.  Spin-polarized runs add ".up"/".dn" variants
+    # of the same keys; the collector keeps whichever
+    # exist.  Tag = the FileNames token for the property.
+    prop = jid % 100
+    out.update(property_outputs(prop, edge, jn, basis))
+    return out
+```
+
+```
+function property_outputs(prop, edge, jn, basis):
+    # tag -> (key family).  Compact transcription of the
+    # _manage_*_output destinations; ".t"/".p" = total/
+    # partial, ".up"/".dn" = spin, suffixes are the
+    # quantity tags (".cond", ".eps1", ...).
+    #   1  dos   : "dos"   (.t/.p tot+partial, .loci)
+    #   2  bond  : "bond"  (.raw, .3c three-center)
+    #   3  dimo  : "dimo"  (.t total moment)
+    #   4  optc  : "optc"  (.t + .p partial; .cond,
+    #               .eps1, .eps2, .elf, .nref, .kext,
+    #               .aabs, .Rref, .eps1i families)
+    #   5  pacs  : "pacs"  (.plot)
+    #   6  nlop  : "optc"  (.chi1, .chi2)
+    #   7  sige  : "sige"  (.cond)
+    #   8  sybd  : "sybd"  (.plot) + "vdim" (.raw)
+    #   9  force : "force" (.dat)
+    #  10  field : "field" (.prof profiles, .rho, .xdmf3)
+    #  11  mtop  : "mtop"  (.t total)
+    # job_id == 311 also adds loen : "loen" (.plot)
+    # Build {key: filename} for the matching tag from the
+    # FileNames tokens, exactly as the helper would name
+    # them.  (Implementation mirrors the helper bodies;
+    # the table above is the authoritative key set.)
+    ...
+```
+
+The producer (the first client) reads only `scfV`,
+`energy`, and `iteration`; the property keys exist so
+later clients (DOS sweeps, bond-order campaigns) reach
+their outputs through the same contract.
+
+### 12.3 Entry points and CLI wrapper (DESIGN 6.1.3)
+
+Two API entry points and the CLI, all funneling into the
+private core of 12.4.
+
+```
+function run_prepared(run_dir, settings = None):
+    # Prepared-directory mode: run_dir already holds the
+    # staged inputs (imago.dat, structure.dat, scfV.dat,
+    # kp files).  No makeinput call.
+    if settings is None:
+        settings = ScriptSettings.from_options({})  # rc
+                                          # defaults only
+    require_contract(is_dir(run_dir),
+        "run_dir does not exist: " + run_dir)
+    return _run_core(run_dir, settings)
+```
+
+```
+function run_structure(structure, options, run_dir,
+                       settings = None):
+    # Structure-and-options mode: build the run directory
+    # with makeinput first, then run it.  `structure` is a
+    # path to an imago.skl (a StructureControl handle is
+    # deferred to D12/C64; see DESIGN 6.1.6).
+    if settings is None:
+        settings = ScriptSettings.from_options(options)
+    makeinput.build_run_dir(structure, options, run_dir)
+    return _run_core(run_dir, settings)
+```
+
+```
+function cli_main(argv):
+    # The thin wrapper: the ONLY layer that touches argv
+    # or exits the process.
+    # 1. Parse argv into run options (today's argparse
+    #    surface + reconcile logic, unchanged in meaning).
+    settings = ScriptSettings.from_command_line(argv)
+    # 2. Pick the entry mode.  A bare `imago ...` runs the
+    #    current working directory as a prepared dir --
+    #    today's only behavior.
+    try:
+        result = run_prepared(getcwd(), settings)
+    except ImagoError as e:
+        log_runtime(e.message)
+        return 1
+    # 3. Translate the result into an exit code.
+    if result.status in (CONVERGED, SKIPPED):
+        return 0
+    log_runtime(result.message)
+    return 1   # NOT_CONVERGED or FAILED
+```
+
+`ScriptSettings` is split so argv is no longer mandatory
+(DESIGN 6.1.3): `from_command_line(argv)` keeps today's
+behavior (argparse -> `reconcile`), while
+`from_options(mapping)` builds the same reconciled
+settings from a plain dict with no argv and no
+`command`-file side effect.  Both share the existing
+`reconcile()`; only the source of the `args` namespace
+differs.
+
+### 12.4 The private run core (DESIGN 6.1.4, 6.1.5)
+
+One core performs today's `main()` sequence, but
+returns an `ImagoResult` and is reentrant.
+
+```
+function _run_core(run_dir, settings):
+    start_clock = now()
+    original_cwd = getcwd()           # for the finally
+    temp = mirror_under_imago_temp(run_dir)  # get_temp_dir
+    fn = FileNames()
+
+    # Contract checks raise (not return); they are
+    # environment/programmer faults (DESIGN 6.1.2).
+    require_contract(env("IMAGO_RC") and env("IMAGO_TEMP")
+                     and env("IMAGO_BIN"),
+        "Imago environment not configured")
+
+    makedirs(temp, exist_ok = True)
+    lock_path = join(temp, fn.imago_lock)
+
+    # Per-run-dir lock.  Because temp mirrors run_dir, two
+    # different run dirs take two different locks, so a
+    # campaign of parallel runs never collides (DESIGN
+    # 6.1.5).  An already-held lock is a contract fault
+    # in API mode -> raise.
+    if exists(lock_path):
+        raise ImagoError(
+            "lock already held in " + temp
+            + " (another run owns this directory)")
+    write_lock(lock_path)
+
+    try:
+        chdir(temp)                   # cwd is a resource
+
+        # Within-run-dir checkpoint assessment (DESIGN
+        # 6.1.5).  Reads the SAME completed-calculation
+        # markers the current script/Fortran already use;
+        # this surfaces their state, it does not redesign
+        # the mechanism.
+        ckpt = assess_checkpoint(temp, run_dir, settings)
+        if ckpt == COMPLETE:
+            # All requested work already done: short-
+            # circuit without invoking the binary.
+            return _build_result(
+                SKIPPED, run_dir, temp, settings,
+                reused = True,
+                seconds = now() - start_clock,
+                message = "checkpoint: already complete")
+
+        # Stage inputs, run the binary + immediate
+        # secondary jobs (SYBD post-pass, optical KK),
+        # exactly as today.  manage_input + execute mirror
+        # the current flow; execute returns whether the
+        # fort.2 success file appeared.
+        manage_input(settings, fn, run_dir, temp)
+        ran_ok = execute_program(build_job_clp(settings),
+                                 settings, fn, temp)
+
+        if not ran_ok:
+            # Fortran aborted / no success file: a run-
+            # level failure, RETURNED not raised.
+            return _build_result(
+                FAILED, run_dir, temp, settings,
+                reused = (ckpt == PARTIAL),
+                seconds = now() - start_clock,
+                message = "Fortran success file missing")
+
+        # Collect outputs into run_dir (the writer also
+        # consults project_home_outputs, 12.2) and build
+        # the result by harvesting the settled files.
+        manage_output(settings, fn, run_dir)
+        return _harvest_result(
+            run_dir, temp, settings,
+            reused  = (ckpt == PARTIAL),
+            seconds = now() - start_clock)
+
+    except ImagoError:
+        raise                          # contract fault
+    except Exception as e:
+        # Unexpected: report as FAILED, do not kill the
+        # caller's process.
+        return _build_result(
+            FAILED, run_dir, temp, settings,
+            reused = False,
+            seconds = now() - start_clock,
+            message = "unexpected error: " + str(e))
+    finally:
+        # Always release the lock and restore cwd, even on
+        # failure -- the single most important reentrancy
+        # difference from the one-shot CLI (DESIGN 6.1.4).
+        remove_if_exists(lock_path)
+        chdir(original_cwd)
+```
+
+### 12.5 Result harvesting (resolves DESIGN 6.1.6)
+
+`_harvest_result` reads the result fields off the settled
+output files (the robust default chosen in DESIGN 6.1.6,
+over scraping stdout).  The convergence verdict and the
+total energy both come from a single read of the
+iteration file's last line, which closes the DESIGN 6.1.6
+open detail with no Fortran change.
+
+**The iteration file's shape matters here.**  It is
+`fort.7` with one header line, written only when the file
+is first created (`safe_append`'s full-copy branch);
+because `safe_append`'s `skip_lines` is 1-based
+(`tail -n +N`), reruns append `fort.7` from line 2 on, so
+they contribute data rows with no extra header.  Two
+consequences: (1) there is exactly one header line, ever;
+(2) successive SCF runs in the same run directory append
+their cycles back-to-back, so the file may hold several
+runs' worth of rows.  The last data row is therefore the
+most recent SCF cycle of the most recent run -- exactly
+the row to inspect.
+
+```
+function _harvest_result(run_dir, temp, settings, reused,
+                         seconds):
+    names   = project_home_outputs(settings)      # 12.2
+    outputs = { key: join(run_dir, fname)
+                for key, fname in names.items()
+                if exists(join(run_dir, fname)) }
+
+    iters  = None
+    energy = None
+    conv   = False
+    if "iteration" in outputs:
+        # One read of the last data row yields the
+        # convergence metric, the total energy, and the
+        # iteration count together (all 1-based columns).
+        row       = last_data_row(outputs["iteration"])
+        threshold = read_convergence_threshold(
+                        join(run_dir, "imago.dat"))
+        # Column 4 is the SCF convergence metric;
+        # converged iff it is below the imago.dat criterion.
+        conv   = (column(row, 4) < threshold)
+        # Column 5 is the last iteration's total energy
+        # (converged or not).
+        energy = column(row, 5)
+        # Column 1 is a per-run cycle counter that resets
+        # to 1 each SCF invocation, so the last row's value
+        # is THIS run's iteration count -- reruns append
+        # rows but never inflate it.
+        iters  = int(column(row, 1))
+
+    status = CONVERGED if conv else NOT_CONVERGED
+    # No SCF at all (e.g. -scf no post-SCF property run):
+    # there is nothing to converge; treat a clean run as
+    # CONVERGED so success reflects "ran as asked".
+    if iters is None:
+        status = CONVERGED
+
+    return ImagoResult(
+        status = status, success = (status == CONVERGED),
+        run_dir = run_dir, temp_dir = temp,
+        scf_iterations = iters, converged = conv,
+        reused_checkpoint = reused, total_energy = energy,
+        outputs = outputs, job = job_identity(settings),
+        runtime_seconds = seconds,
+        message = status.name)
+```
+
+```
+function read_convergence_threshold(imago_dat_path):
+    # The SCF convergence criterion is the value on the
+    # line immediately following the "CONVERGENCE_TEST"
+    # label in imago.dat (the run's own input), so the
+    # verdict uses the same criterion the run was held to.
+    lines = read_lines(imago_dat_path)
+    i = index_of_line(lines, "CONVERGENCE_TEST")
+    return float(lines[i + 1])
+```
+
+This resolves the DESIGN 6.1.6 open detail in full.  The
+convergence verdict, the total energy, and the per-run
+iteration count all come from one read of the iteration
+file's last data row (columns 4, 5, and 1 respectively),
+compared against the `CONVERGENCE_TEST` criterion in
+`imago.dat` -- no new Fortran signal is needed, because
+the verdict reuses the convergence metric the SCF already
+writes per cycle.  Everything else in §12 is a faithful
+restructuring of behavior that `imago.py` already has.

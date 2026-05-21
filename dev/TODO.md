@@ -271,7 +271,7 @@
 
 ### Kaleidoscope prong (VISION Goal 4, ARCHITECTURE 9)
 
-- [ ] P6. Write PSEUDOCODE for the imago.py callable API
+- [x] P6. Write PSEUDOCODE for the imago.py callable API
   (DESIGN 6.1, D11): the `ImagoResult` dataclass and
   `RunStatus` enum (6.1.2); the `run_prepared` and
   `run_structure` entry points and the CLI wrapper's
@@ -285,6 +285,31 @@
   `outputs{}` key enumeration factored out of the
   `_manage_*_output` helpers, and the iteration/energy
   parse sources.  Foundation for C63.
+
+  Done 2026-05-21.  Landed as PSEUDOCODE section 12
+  (12.1 result/status; 12.2 the `project_home_outputs`
+  single-source-of-truth output-name table; 12.3 entry
+  points + CLI wrapper with the `ScriptSettings`
+  from_command_line/from_options split; 12.4 the
+  reentrant `_run_core` with lock lifecycle, cwd restore
+  in `finally`, and the raise-vs-return error boundary;
+  12.5 harvesting).  Two facts grounded against the code:
+  `safe_append` skip is 1-based so the iteration file has
+  ONE header line written only on first creation, and
+  reruns append data rows.  P6 surfaced a gap DESIGN
+  6.1.2 had assumed away -- the driver only checks fort.2
+  (ran-without-abort), with no converged-vs-ceiling
+  signal -- and resolved it WITHOUT a Fortran change: read
+  the iteration file's last data row once for the
+  convergence metric (col 4, vs the line after
+  CONVERGENCE_TEST in imago.dat), the total energy (col
+  5), and the per-run iteration count (col 1, a counter
+  that resets each SCF run so appends never inflate it).
+  Note for the next refine: DESIGN 6.1.6 correctly
+  pre-deferred these to the pseudocode pass (no drift),
+  but a refine may want to record in DESIGN 6.1.2 that
+  NOT_CONVERGED is now backed by the col-4/CONVERGENCE_TEST
+  mechanism.
 - [ ] P7. Write PSEUDOCODE for the kaleidoscope campaign
   runner (DESIGN 6.2, D13): the `CalcUnit` / `Campaign`
   data model and `campaign.toml` serialization (6.2.1);
