@@ -4365,11 +4365,14 @@ function run_structure(structure, options, run_dir,
     # Structure-and-options mode: build the run directory
     # with makeinput first, then run it.  `structure` is a
     # path to an imago.skl (a StructureControl handle is
-    # deferred to D12/C64; see DESIGN 6.1.6).
+    # deferred to D12/C64; see DESIGN 6.1.6).  The build API
+    # is §14; run_prepared is the run entry it chains into.
+    import makeinput              # local: imago.py imports
+                                  #   without makeinput's env
     if settings is None:
         settings = ScriptSettings.from_options(options)
     makeinput.build_run_dir(structure, options, run_dir)
-    return _run_core(run_dir, settings)
+    return run_prepared(run_dir, settings = settings)
 ```
 
 ```
@@ -4956,3 +4959,202 @@ campaign runs and tracks the batch and owns the cache;
 the client declares the units and the key, then harvests
 converged potentials from the run directories the report
 points at.
+
+## 14. makeinput Callable Build API (DESIGN 6.3)
+
+The makeinput-side twin of §12.  It turns `makeinput.py`
+from an argv-and-cwd-bound script into one that also
+exposes a callable `build_run_dir`, with the CLI a thin
+wrapper, so `imago.run_structure` (§12.3) finally has an
+in-process makeinput entry point to drive.  The pieces:
+the `ScriptSettings` split (14.1); the build orchestration
+with cwd discipline (14.2); the thin CLI wrapper (14.3);
+and the `run_structure` body it unblocks (14.4).
+
+The governing rules mirror §12.  Build-level faults
+(a malformed skl, an element with no basis) are makeinput's
+existing behavior, unchanged.  *Contract* faults (the
+environment is unconfigured, the structure file is missing,
+the run dir cannot be created) raise a `MakeinputError`
+(the analog of `ImagoError`) instead of calling `sys.exit`,
+so they cannot kill a long-lived kaleidoscope worker
+(DESIGN 6.3.1).  And the cwd is a resource acquired and
+released around the build (DESIGN 6.3.4).
+
+### 14.1 ScriptSettings split (DESIGN 6.3.3)
+
+The constructor loads rc defaults only; two builders supply
+the `args` namespace that the existing `reconcile()`
+consumes, exactly as §12.3 splits imago's settings.
+
+```
+function ScriptSettings.from_command_line(argv):
+    # The CLI path: today's behavior, unchanged in meaning.
+    s = ScriptSettings()            # rc defaults only
+    args = s.parse_command_line(argv)   # argparse surface
+    s.reconcile(args)
+    return s
+
+function ScriptSettings.from_options(options):
+    # The API path: the same reconciled settings from a
+    # plain dict, with no argv and no command-file side
+    # effect (record_clp is CLI-only, 14.3 / DESIGN 6.3.5).
+    s = ScriptSettings()            # rc defaults only
+    args = build_args_namespace(options)
+    s.reconcile(args)
+    return s
+```
+
+```
+function build_args_namespace(options):
+    # Turn the options mapping into the SAME args namespace
+    # argparse would have produced, so reconcile cannot tell
+    # which builder called it.  Keys are the argparse `dest`
+    # names (job, edge, basis, scfkp, pscfkp, kp, potdb,
+    # basisdb, reduce, target, block, xanes, ...).
+    args = empty_namespace()
+    for dest in ALL_ARGPARSE_DESTS:
+        # Absent keys take the argparse default for that
+        # dest, so an empty options dict reproduces a bare
+        # `makeinput` invocation.
+        args[dest] = options.get(dest, argparse_default(dest))
+    return args
+```
+
+The one subtlety (resolves the DESIGN 6.3.7 open detail):
+the **multi-valued flags** -- `reduce`, `target`, `block`
+(argparse `action="append"`) and `xanes` (`nargs=
+REMAINDER`) -- are repeatable token lists on the command
+line, and `reconcile` already turns each into its parsed
+form via `_parse_reduce` / `_parse_target` / `_parse_block`
+/ `_parse_xanes`.  `from_options` therefore expects the
+client to supply each as the *same list-of-token-lists
+shape argparse yields* (e.g. `options["reduce"] = [["0.3",
+"...","..."], ...]`), and `build_args_namespace` places it
+under `args.reduce` verbatim.  The default for an absent
+multi-valued flag is the argparse default (`None` or `[]`),
+so reconcile's existing "skip when empty" logic applies
+unchanged.  This keeps a dict-described run and a
+flag-described run byte-identical after reconcile.
+
+### 14.2 The build orchestration (DESIGN 6.3.2, 6.3.4)
+
+`main()`'s body becomes a callable `build_inputs`, and
+`build_run_dir` wraps it with structure staging and the
+cwd discipline.
+
+```
+function build_inputs(settings, sc):
+    # The exact sequence today's main() runs inline, minus
+    # argv/exit handling.  One definition shared by the CLI
+    # and the API so they cannot drift (DESIGN 6.3.4).
+    setup_environment(settings)
+    initialize_cell(settings, sc)        # reads imago.skl
+                                         #   from the cwd
+    assign_group(settings, sc, "species")
+    assign_group(settings, sc, "types")
+    if settings.xanes == 1:
+        assign_xanes_types(settings, sc)
+    if settings.emu == 1:
+        initialize_emu(settings, sc)
+    print_imago(settings, sc)            # writes inputs/...
+    print_summary(settings, sc)
+```
+
+```
+function build_run_dir(structure, options, run_dir,
+                       settings = None):
+    # Build the staged Imago inputs in run_dir from a
+    # structure + makeinput options, then return run_dir so
+    # a caller can chain into run_prepared (§12.3).
+    if settings is None:
+        settings = ScriptSettings.from_options(options)
+
+    # Contract checks raise (DESIGN 6.3.1), never sys.exit.
+    require_contract(env("IMAGO_RC") or local_makeinputrc(),
+        "makeinput environment not configured")
+    require_contract(exists(structure),
+        "structure file not found: " + structure)
+
+    run_dir = abspath(run_dir)
+    makedirs(run_dir, exist_ok = True)
+
+    # Stage the skeleton as run_dir/imago.skl, because
+    # makeinput reads the relative name "imago.skl" from the
+    # cwd (initialize_cell).  A no-op when structure already
+    # IS run_dir/imago.skl.
+    staged_skl = join(run_dir, "imago.skl")
+    if abspath(structure) != staged_skl:
+        copy_file(structure, staged_skl)
+
+    # cwd discipline: acquire the cwd for the build and
+    # restore it on EVERY exit, so a failed build cannot
+    # strand a campaign worker in run_dir (DESIGN 6.3.4).
+    original_cwd = getcwd()
+    sc = StructureControl()
+    try:
+        chdir(run_dir)
+        build_inputs(settings, sc)
+    finally:
+        chdir(original_cwd)
+    return run_dir
+```
+
+Note `build_run_dir` takes no lock: makeinput is a pure
+input-staging step writing only into its own `run_dir`,
+and the per-run-dir lock that guards concurrent execution
+is taken later by `_run_core` (§12.4 / DESIGN 6.1.5).  When
+`run_structure` calls the two in sequence, the lock-free
+build and the locked run each acquire and release the cwd
+around their own scope, so they compose cleanly.
+
+### 14.3 The CLI wrapper (DESIGN 6.3.2, 6.3.5)
+
+`main()` becomes the only layer that touches argv or exits.
+
+```
+function cli_main(argv):
+    # 1. Parse argv into settings (today's surface).
+    settings = ScriptSettings.from_command_line(argv)
+    settings.record_clp(argv)   # append argv to `command`;
+                                #   CLI-only (DESIGN 6.3.5)
+    # 2. Build the cwd as the run dir, holding imago.skl --
+    #    today's only behavior, now through the API.
+    try:
+        build_run_dir("imago.skl", options = {},
+                      run_dir = getcwd(), settings = settings)
+    except MakeinputError as e:
+        log_runtime(e.message)
+        return 1            # preserve today's diagnostics
+    return 0
+```
+
+`record_clp` moves out of the constructor and is called
+only here (DESIGN 6.3.5): in API mode there is no
+meaningful argv, so `from_options` records the resolved
+options as provenance or skips the `command` file -- an
+implementation detail with no bearing on the produced
+inputs.  The `_load_rc` `sys.exit` on a missing `$IMAGO_RC`
+likewise becomes a raised `MakeinputError` the wrapper
+catches.
+
+### 14.4 run_structure, completed (DESIGN 6.3.6)
+
+With 14.2 in place, `imago.run_structure` (already shown in
+§12.3) is the seam that joins the two APIs:
+
+```
+function run_structure(structure, options, run_dir,
+                       settings = None):
+    import makeinput              # local: imago.py imports
+                                  #   without makeinput's env
+    if settings is None:
+        settings = ScriptSettings.from_options(options)
+    makeinput.build_run_dir(structure, options, run_dir)
+    return run_prepared(run_dir, settings = settings)
+```
+
+This is what lets a kaleidoscope campaign hand a bare
+`imago.skl` plus options to the default runner (§13.2) and
+have the run directory built and run in one worker call --
+the dependency the C48.3 producer is waiting on.

@@ -375,7 +375,7 @@
   D11/D13 design + pseudocode chain is complete and
   consistent.  Next: code -- C63 (imago.py API, P6/§12)
   then C68 (kaleidoscope, P7/§13), then C69 + C48.3.
-- [ ] P8. Write PSEUDOCODE for the makeinput callable build
+- [x] P8. Write PSEUDOCODE for the makeinput callable build
   API (DESIGN 6.3, D15): the `ScriptSettings`
   from_command_line / from_options split sharing reconcile
   (6.3.3); `build_run_dir(structure, options, run_dir)` with
@@ -390,6 +390,23 @@
   multi-valued flags (reduce / target / block / xanes) into
   the args namespace reconcile expects.  Foundation for
   C68(a).
+
+  Done 2026-05-21.  Landed as PSEUDOCODE section 14: 14.1
+  the ScriptSettings split + build_args_namespace, with the
+  multi-valued-flag normalization pinned (client supplies
+  the same list-of-token-lists shape argparse yields, placed
+  under args.<dest> verbatim, so a dict-described and a
+  flag-described run are byte-identical after reconcile);
+  14.2 build_inputs (main()'s body, one shared definition)
+  and build_run_dir (skl staging + chdir/restore-in-finally,
+  lock-free since the per-run-dir lock is taken later by
+  _run_core); 14.3 the cli_main wrapper with record_clp
+  CLI-only and MakeinputError -> exit code; 14.4 the
+  completed run_structure.  Also reconciled §12.3's
+  run_structure (P6 wrote it calling _run_core directly) to
+  call run_prepared, matching DESIGN 6.3.6 and §14.4 -- no
+  functional change (the dir exists post-build), removes
+  chain drift.  Next: code -- C68(a).
 
 ---
 
