@@ -179,13 +179,43 @@
   result keys), unit conversions, and the ASE-free
   StructureControl factory in structure_control.py plus
   the adapter-layer Atoms-reading glue.
-- [ ] D13. Design the kaleidoscope campaign runner (ARCH
+- [x] D13. Design the kaleidoscope campaign runner (ARCH
   9.4, 9.6): the Parsl dispatch model, the pluggable
   runner seam, complete-and-report status tracking, the
   workspace layout + id / <calc> tag / status.toml
   scheme (resolves the ARCH 9.8 open item), and the
   run-reuse cache mechanism with client-supplied key
   fields.
+
+  Done 2026-05-21.  Landed as DESIGN section 6.2,
+  building on 6.1 (the default runner calls the 6.1 API
+  and persists the 6.1.2 ImagoResult).  Subsections:
+  6.2.1 the domain-agnostic data model (CalcUnit /
+  Campaign, with campaign.toml as a generated record);
+  6.2.2 the pluggable runner seam (Runner.run -> generic
+  RunOutcome with an opaque runner-supplied `detail`;
+  ImagoRunner maps ImagoResult and persists result.toml);
+  6.2.3 Parsl dispatch (one python_app per unit; both
+  sweep and tight-loop shapes; per-future exception catch
+  for Principle 10); 6.2.4 the workspace layout that
+  RESOLVES ARCH 9.8 (id charset/uniqueness rule, optional
+  <calc> tag + derivation, the five-value status.toml
+  schema with convergence carried in `detail` not
+  `status`); 6.2.5 the run-reuse cache (mechanism/policy
+  split; key = verbatim scalar fields + byte-compared key
+  files, generalizing the producer's is_cached_v2;
+  resume == re-run); 6.2.6 client-side harvest via the
+  run dir + the CampaignReport (subsumes C48.3's
+  producer-as-client shape); 6.2.7 open details for
+  PSEUDOCODE/C68.  Key judgment: kaleidoscope stays
+  domain-agnostic (Principle 9) -- it tracks generic
+  lifecycle status and records but never interprets the
+  runner's `detail`; all harvest is client-side.
+
+  NOTE for the /refine pass: ARCH 9.8's "Workspace scheme"
+  open item is now resolved by DESIGN 6.2.4 and ARCH 9.8
+  should be updated to point at it (deferred to refine per
+  the agreed plan).
 - [ ] D14. Design structure acquisition (ARCH 9.5):
   cod_fish.py COD-fetch contract (urllib, pinned
   cod_revision, strict on failure) and cif2skl.py (ASE

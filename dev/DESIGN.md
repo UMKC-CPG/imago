@@ -4053,6 +4053,355 @@ the contract above.
   skip the file) is an implementation detail with no
   bearing on the returned contract.
 
+### 6.2 kaleidoscope campaign runner
+
+This subsection designs ARCHITECTURE 9.4 and 9.6: the
+Parsl-based package that drives a *set* of Imago
+calculations, tracks their outcomes, and resumes over
+work already done.  It builds directly on 6.1 -- the
+default unit of work is an `imago.py` callable-API call,
+and the result it persists is the 6.1.2 `ImagoResult`.
+It also **resolves the workspace-scheme open question of
+ARCHITECTURE 9.8** (the stable-id convention, the
+`<calc>` tag format, and the `status.toml` schema are
+pinned in 6.2.4).
+
+The governing constraint is VISION Principle 9:
+kaleidoscope is *ordinary scientific Python* and stays
+free of materials-specific coupling.  It dispatches,
+tracks, and caches; it does not know what an SCF or a
+potential is.  Everything domain-specific lives either
+below it (the runner, 6.2.2) or above it (the client,
+6.2.6).  The two other load-bearing principles are 8
+(the runner seam keeps dispatch independent of the
+execution adapter) and 10 (complete-and-report: one
+failed unit never aborts the campaign).
+
+#### 6.2.1 The unit of work and the campaign
+
+Kaleidoscope's data model is two plain, domain-agnostic
+records.
+
+```
+CalcUnit
+  id            stable per-structure key (6.2.4); the
+                  curation reference_id for the producer,
+                  a COD id for an acquisition campaign
+  calc          optional calc-variant tag (6.2.4); None
+                  when the structure hosts one calc
+  structure     path to an imago.skl (or a structure
+                  handle the chosen runner understands)
+  options       makeinput options for this unit
+  runner        which runner executes it (6.2.2);
+                  defaults to the campaign default
+  key_fields    client-declared cache identity (6.2.5):
+                  scalar fields + names of key files
+
+Campaign
+  root          workspace root directory (6.2.4)
+  units         list[CalcUnit]
+  default_runner   runner used when a unit names none
+  parsl_config  the Parsl Config (deployment, 6.2.3)
+  on_outcome    optional per-unit callback (6.2.6)
+```
+
+A client builds a `Campaign` in process -- kaleidoscope
+is a library first (Principle 9), not a CLI -- and hands
+it to the dispatch entry point.  Kaleidoscope serializes
+the campaign to `campaign.toml` in the workspace root so
+a campaign is inspectable and a resume has an
+authoritative record of *what was asked for*, separate
+from `status.toml`'s record of *what happened* (6.2.4).
+Whether `campaign.toml` may also be hand-authored as the
+primary surface, rather than always generated from the
+in-process `Campaign`, is left open (6.2.7).
+
+The producer (C48) is the worked example throughout: it
+builds one `CalcUnit` per curated reference solid, with
+`id = reference_id`, `structure` the curated skl,
+`options` the makeinput flags from the manifest, the
+default (Imago) runner, and `key_fields` declaring
+`kpoint_spec` + `convergence_threshold` + `imago_commit`
+as scalars and the structure file as a key file (6.2.5).
+
+#### 6.2.2 The pluggable runner seam
+
+A *runner* is the seam (Principle 8) that isolates
+kaleidoscope's dispatch core from how a unit actually
+executes.  It is a small protocol:
+
+```
+Runner.run(unit, run_dir) -> RunOutcome
+```
+
+The runner receives a unit and the prepared run
+directory, executes the calculation however it likes,
+and returns a **domain-agnostic** `RunOutcome`:
+
+```
+RunOutcome
+  ok        bool: did the unit complete (not "succeed
+              scientifically" -- see detail)
+  detail    short opaque string the runner chooses and
+              kaleidoscope records but never interprets
+              (e.g. "converged", "not_converged")
+  runtime_seconds  float
+  message   human-readable text
+```
+
+The crucial layering decision: kaleidoscope tracks a
+generic lifecycle status (6.2.4) and stores `detail`
+verbatim *without interpreting it*.  ARCHITECTURE 9.4's
+list of surfaced outcomes ("converged, non-converged,
+cluster-side loss, post-processing error") is therefore
+a deliberate split -- cluster-side loss is
+kaleidoscope's own (a Parsl task that vanished, 6.2.3),
+while converged / non-converged are runner-supplied
+`detail` strings.  This is what lets kaleidoscope
+surface convergence in `status.toml` *and* stay ignorant
+of what convergence means.
+
+- The **default runner** (`ImagoRunner`) calls the 6.1
+  API: `run_structure(unit.structure, unit.options,
+  run_dir)` (or `run_prepared` when inputs are already
+  staged).  It maps the returned `ImagoResult` into a
+  `RunOutcome`: `ok = status in {CONVERGED,
+  NOT_CONVERGED, SKIPPED}` (the binary *ran*),
+  `detail = status.name.lower()`.  It also **persists
+  the full `ImagoResult` into the run directory** as
+  `result.toml` (6.2.6), so the Imago-native detail
+  survives for the client to reload without
+  kaleidoscope ever parsing it.
+- An **ASE runner** wraps `ImagoCalculator` (D12) for
+  units that need ASE-MD or ASE-relaxation semantics; it
+  too ultimately calls the 6.1 API underneath.
+- A single campaign may **blend runners** per unit, so
+  plain SCFs and adapter-wrapped calculations dispatch
+  under one campaign (ARCHITECTURE 9.4).  New adapters
+  slot in by implementing the protocol; the dispatch
+  core never changes (Principle 8).
+
+#### 6.2.3 Parsl dispatch and complete-and-report
+
+Each unit becomes one Parsl app: a `python_app` that
+runs `unit.runner.run(unit, run_dir)` on a worker.
+Kaleidoscope's `parsl_config` (a Parsl `Config`, supplied
+by the client/deployment) maps those apps onto SLURM via
+a `HighThroughputExecutor` and a SLURM provider, so the
+same dispatch code serves a laptop, an interactive node,
+and a batch allocation -- only the `Config` changes.
+
+The two workload shapes ARCHITECTURE 9.4 calls out are
+both expressed in this one model:
+
+- **Embarrassingly parallel sweeps** (thousands of
+  independent SCFs): each unit is an independent app
+  future; Parsl schedules them across the executor's
+  workers.
+- **Tightly iterative inner loops** (adaptive
+  convergence, future AIMD): the *iteration* lives
+  inside the unit's runner (it calls the 6.1 API in a
+  loop, or drives ASE's optimizer), so kaleidoscope still
+  dispatches one unit; it does not need to model the
+  inner loop as a DAG.  If a future client genuinely
+  needs cross-unit data flow, Parsl's own futures compose
+  -- but that is not required by D13.
+
+**Complete-and-report (Principle 10)** is the dispatch
+core's contract.  Kaleidoscope gathers all futures and
+**catches exceptions per future** rather than letting
+one propagate: a unit whose app raised, or whose Parsl
+task was lost cluster-side, is recorded with the
+appropriate status (6.2.4) and the campaign continues.
+No single unit failure aborts the batch.  When all
+futures have resolved, kaleidoscope returns a
+`CampaignReport` (6.2.6); deciding whether the aggregate
+is scientifically acceptable is the client's job, never
+kaleidoscope's.
+
+#### 6.2.4 Workspace layout (resolves ARCHITECTURE 9.8)
+
+This pins the strawman of ARCHITECTURE 9.6 into a
+committed scheme.
+
+```
+<root>/
+  campaign.toml          generated from the Campaign
+                           (6.2.1): what to run.
+  structures/<id>/        acquired/curated inputs.
+  runs/<id>[/<calc>]/      one working dir per calc:
+      <staged makeinput inputs + run outputs>
+      cache_key.toml      identity snapshot (6.2.5).
+      result.toml         runner-persisted native result
+                            (6.2.6); Imago for ImagoRunner.
+      status.toml         lifecycle + outcome (below).
+  results/                client-aggregated outputs.
+  logs/
+```
+
+**Stable-id convention.**  `<id>` is the client-supplied
+stable per-structure key.  Kaleidoscope requires it to
+be filesystem-safe and unique within the campaign:
+lowercased, restricted to `[a-z0-9_-]`, with any other
+character rejected at `Campaign` build time (not
+silently rewritten -- a surprising rewrite would break
+the cache hit-test, 6.2.5).  The producer uses the
+curation `reference_id`; an acquisition campaign uses the
+COD id.  Uniqueness collisions abort the build with the
+two offending units named.
+
+**`<calc>` tag format.**  The optional second level
+exists only when one structure hosts more than one
+calculation (different bases, a property run vs. its SCF).
+A unit with `calc = None` runs directly in `runs/<id>/`
+with no second level.  When present, `<calc>` obeys the
+same `[a-z0-9_-]` rule and must be unique among the calcs
+sharing an `id`.  If the client supplies no tag but an
+`id` ends up hosting multiple units, kaleidoscope derives
+a default tag from the runner's job identity (for the
+Imago runner, `"<job_name>-<basis_scf>"`, e.g.
+`"scf-mb"`), and errors only if that derived tag still
+collides.
+
+**`status.toml` schema.**  One file per run directory,
+rewritten as the unit moves through its lifecycle:
+
+```
+id               = "<id>"
+calc             = "<calc>"     # omitted when None
+status           = "queued" | "running" | "done"
+                   | "failed" | "lost"
+detail           = "<runner string>"  # e.g. "converged"
+runner           = "imago" | "ase" | ...
+submitted_at     = <iso8601>
+started_at       = <iso8601>    # omitted until running
+finished_at      = <iso8601>    # omitted until terminal
+runtime_seconds  = <float>      # omitted until terminal
+message          = "<text>"
+```
+
+The five `status` values are kaleidoscope-owned and
+generic.  `queued` / `running` are lifecycle;
+`done` / `failed` are terminal runner outcomes
+(`done` iff `RunOutcome.ok`); `lost` is the
+kaleidoscope-only category for a Parsl-side
+disappearance (worker died, allocation expired) where no
+`RunOutcome` ever came back.  Convergence does **not**
+appear as a status -- it rides in `detail`, per 6.2.2.
+
+#### 6.2.5 The run-reuse cache
+
+The cache is the general kaleidoscope mechanism of
+ARCHITECTURE 9.6, split into mechanism (kaleidoscope) and
+policy (client) so generality does not cost correctness.
+
+**Mechanism (kaleidoscope).**  Before launching a unit,
+kaleidoscope resolves its `run_dir = runs/<id>[/<calc>]/`
+and performs the hit-test:
+
+1. If the directory exists, holds a `cache_key.toml`
+   that matches the unit's *current* key (below), and
+   its `status.toml` reads `status = "done"`, the unit
+   is a **hit**: skip the launch, and report the existing
+   outcome straight from `status.toml` / `result.toml`.
+2. Otherwise (no directory, key mismatch, or a
+   non-`done` status) it is a **miss**: write a fresh
+   `cache_key.toml`, set `status = "queued"`, dispatch,
+   and update `status.toml` through the lifecycle.
+
+Resuming a campaign is therefore *nothing more than
+re-running it*: the hit-test over every unit naturally
+skips the completed ones and re-dispatches the rest.
+
+**The key has two parts**, mirroring the producer's
+existing `is_cached_v2` (DESIGN 5.7) and generalizing it:
+
+- **Scalar fields** -- written verbatim into
+  `cache_key.toml` as TOML and compared field-by-field
+  (the producer's `kpoint_spec`, `convergence_threshold`,
+  `imago_commit`).
+- **Key files** -- declared by name in `key_fields`;
+  compared by **byte-comparison against the copy already
+  staged in the run directory** (the producer's structure
+  file).  This deliberately keeps DESIGN 5.7's
+  "byte-compared structure file copies, no hashing, for
+  debuggability" property: a developer can diff the files
+  to see *why* a cache missed, which a hash would hide.
+
+**Policy (client).**  The client supplies the key fields
+in `CalcUnit.key_fields`; only it knows which inputs
+define identity for its calculations.  Kaleidoscope never
+guesses -- a too-broad key risks false hits and wrong
+science; a too-narrow key risks needless re-runs.  This
+mechanism subsumes the producer's bespoke
+`share/atomicBDB/cache/scf/<reference_id>/`; C69 folds
+that producer cache into this one.
+
+The boundary with 6.1's checkpointing is clean and worth
+restating: `imago.py` resumes *within* a run directory
+(skip completed integrals, skip an already-done basis
+SCF); kaleidoscope decides whether to *launch* the run
+directory at all.  The two never overlap.
+
+#### 6.2.6 Harvest handoff and the campaign report
+
+Kaleidoscope returns a `CampaignReport`: one entry per
+unit, each carrying `id`, `calc`, `status`, `detail`,
+`run_dir`, `runtime_seconds`, and `message` -- exactly
+the generic `status.toml` fields, nothing domain-specific.
+An optional per-unit `on_outcome` callback (6.2.1) fires
+as each unit reaches a terminal state, so a client can
+stream-process rather than wait for the whole batch.
+
+**Harvest stays on the client side.**  Kaleidoscope does
+not read domain data out of run directories (Principle
+9).  The handoff is the run directory itself: the runner
+persisted its native result there (`result.toml`), so the
+client walks the report and, for each unit it deems
+acceptable, opens `run_dir` and reads what it needs.  For
+the producer that means: keep units whose `detail ==
+"converged"`, reload the 6.1.2 `ImagoResult` from
+`result.toml`, read the converged `scfV` from
+`result.outputs["scfV"]`, and pair its coefficients with
+the input alphas (5.7 / ARCHITECTURE 9.7).  Non-converged
+or failed units are simply skipped -- recorded in the
+report, never harvested.
+
+This is the precise shape of the C48.3 producer-as-client
+relationship: kaleidoscope runs and tracks the batch and
+owns the cache; the producer declares the units and the
+key, then harvests converged potentials from the run
+dirs it is told about.
+
+#### 6.2.7 Open details (for PSEUDOCODE / implementation)
+
+Deferred to the PSEUDOCODE pass for D13 or to C68; none
+changes the contracts above.
+
+- **Parsl `Config` specifics.**  Executor type, SLURM
+  provider parameters, worker counts, and walltime are
+  deployment configuration the client supplies, not
+  design.
+- **`lost`-unit retry policy.**  Whether a `lost` unit is
+  retried automatically (Parsl's own retry, or a
+  kaleidoscope re-dispatch on the next campaign run via
+  its non-`done` status) versus left for the client to
+  re-launch.  The cache mechanism already makes a plain
+  re-run safe; the open question is only whether to
+  retry *eagerly*.
+- **`campaign.toml` as an authoring surface.**  Whether
+  it may be hand-written as the primary input rather than
+  always generated from the in-process `Campaign`.
+- **Concurrency limits for tightly-iterative units.**
+  Whether such units need a distinct executor or a
+  resource cap so a few long inner loops do not starve a
+  parallel sweep sharing the same allocation.
+- **`result.toml` for non-Imago runners.**  The Imago
+  runner persists an `ImagoResult`; what a future
+  non-Imago runner persists (and how a mixed-runner
+  client reads it back) is that runner's contract, set
+  when the runner is added, not here.
+
 ---
 
 ## References
