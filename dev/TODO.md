@@ -1480,10 +1480,32 @@ and PSEUDOCODE landed before code.
   structure_control / initial_potential_db / element_data
   (every in-process module the build reaches) have no sys.exit;
   subprocess execs are exempt.
-  REMAINING for C68: (b) HighThroughputExecutor/SLURM config
-  validation on a real cluster (only the thread-pool path is
-  exercised here); (c) lost-vs-failed fine-graining under a
-  real worker loss.
+  C68(b) progress, 2026-05-21 (local multi-process level
+  validated; recorded here, no committed test per programmer
+  call).  Three cross-process checks on parsl 2026.05.18:
+  (1) every arg ParslExecutor ships to a worker (CalcUnit with
+  nested KeyFields/KeyFile, run_dir, default_runner,
+  _run_unit_task, RunOutcome) pickles and round-trips with
+  equality; (2) a fresh interpreter auto-registers ['imago'] on
+  `import kaleidoscope` (DESIGN 6.2.2 holds cross-process);
+  (3) a 4-unit campaign run through the REAL run_campaign /
+  ParslExecutor path on HighThroughputExecutor + LocalProvider
+  (max_workers_per_node=2) came back all done+converged across
+  TWO distinct worker PIDs, both != main -- proving genuine
+  process separation, status written by the worker and
+  collected by main, and dfk cleanup.  Finding: a custom runner
+  must have its module imported in the worker (PYTHONPATH +
+  sitecustomize/worker_init); the default 'imago' auto-registers
+  so the real producer path needs nothing extra.  Note the HTEX
+  worker-count knob in this parsl is `max_workers_per_node`
+  (not `max_workers`); `worker_init` lives on the provider.
+  REMAINING for C68: (b-cont) the real SlurmProvider level --
+  submit to rulisp-lab (partition/account=rulisp-lab) with a
+  worker_init that exports $IMAGO_RC/$IMAGO_TEMP/$IMAGO_BIN +
+  PYTHONPATH=$IMAGO_BIN, validating env propagation and queue
+  behavior; needs a real allocation (deferred; overlaps the
+  full-imago end-to-end). (c) lost-vs-failed fine-graining under
+  a real worker loss.
 - [ ] C69. Revise DESIGN 5.7 / PSEUDOCODE 11.4 /
   ARCHITECTURE 8.5 so the producer delegates SCF running
   to kaleidoscope (drops the bespoke run_imago_scf, COD
