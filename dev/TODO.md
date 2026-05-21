@@ -1304,14 +1304,15 @@ harness, and future AIMD / high-throughput screening
 are all clients.  Each task wants its DESIGN (D11-D14)
 and PSEUDOCODE landed before code.
 
-- [ ] C63. Refactor imago.py to expose the callable API
+- [x] C63. Refactor imago.py to expose the callable API
   (ARCH 9.2, D11): the CLI becomes a thin wrapper;
   support both entry modes (prepared dir; structure +
   options); preserve checkpoint and lock behavior.
   Foundation for C65 and C68.
 
-  Progress 2026-05-21 (core landed; one mode deferred):
-  Implemented PSEUDOCODE §12 in imago.py -- RunStatus /
+  Done 2026-05-21 (core; run_structure wiring folded into
+  C68 per programmer decision).  Implemented PSEUDOCODE §12
+  in imago.py -- RunStatus /
   ImagoError / JobIdentity / ImagoResult (12.1); the
   ScriptSettings split into from_command_line /
   from_options sharing reconcile(), with parse_command_line
@@ -1355,7 +1356,37 @@ and PSEUDOCODE landed before code.
 - [ ] C68. Implement kaleidoscope/ (ARCH 9.4, 9.6, D13):
   Parsl dispatch, the pluggable runner seam, status
   tracking (complete-and-report), the campaign
-  workspace, and the run-reuse cache mechanism.
+  workspace, and the run-reuse cache mechanism.  Also
+  carries the C63 deferral: the run_structure ->
+  makeinput "build a run dir" wiring (ARCH 9.4).
+
+  Increment 1, 2026-05-21 (package core + both executors):
+  Created src/scripts/kaleidoscope/ implementing PSEUDOCODE
+  §13 -- model.py (KeyFields/KeyFile/CalcUnit/Campaign/
+  RunOutcome/ReportEntry/CampaignReport + KaleidoscopeError);
+  workspace.py (slug rule, unit_run_dir, <calc> derivation,
+  validate_campaign, status.toml read/merge-write,
+  serialize_campaign); cache.py (write_cache_key,
+  cache_key_matches with verbatim scalar compare + key-file
+  byte-compare, is_cache_hit); runners.py (Runner base,
+  ImagoRunner mapping ImagoResult + persisting result.toml,
+  RUNNERS registry); dispatch.py (run_campaign +
+  dispatch_unit + module-level _run_unit_task + collect,
+  the per-future capture, LocalExecutor and a real
+  ParslExecutor -- the programmer installed parsl
+  2026.05.18, so the Parsl path is implemented and tested
+  against a ThreadPoolExecutor Config).  Executor chosen by
+  campaign.parsl_config (present -> Parsl; absent -> local).
+  Tests in src/tests/test_kaleidoscope.py with a fake
+  runner (no Imago binary): validate/slug/collision, cache
+  hit/miss/byte-compare, dispatch under BOTH executors,
+  complete-and-report (one failure does not abort), status
+  lifecycle, and ImagoRunner mapping.
+  REMAINING for C68: (a) run_structure -> makeinput wiring
+  in imago.py (the C63 deferral); (b) HighThroughputExecutor
+  /SLURM config validation on a real cluster (only the
+  thread-pool path is exercised here); (c) lost-vs-failed
+  fine-graining under a real worker loss.
 - [ ] C69. Revise DESIGN 5.7 / PSEUDOCODE 11.4 /
   ARCHITECTURE 8.5 so the producer delegates SCF running
   to kaleidoscope (drops the bespoke run_imago_scf, COD
