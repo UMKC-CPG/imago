@@ -608,8 +608,11 @@ class SpaceGroupDB():
         subgroups, each gets a letter-suffixed link (e.g.
         "48_a" → "Pnnn_1", "48_b" → "Pnnn_2").
 
-        Special characters in the subgroup name (backslashes,
-        apostrophes) are escaped before creating the link.
+        The subgroup name is used verbatim as the link target.
+        Although it may contain backslashes or apostrophes,
+        ``os.symlink`` writes the target string directly (it is
+        not a shell), so the raw name -- not a shell-escaped one
+        -- is what must be stored, or the link will dangle.
 
         Parameters
         ----------
@@ -625,12 +628,14 @@ class SpaceGroupDB():
         #   (typically in the ASCII set).
         ord_a = ord("a")
 
-        # Modify the default name to include characters that
-        #   need to be escaped when making a soft link to the
-        #   file.
-        escaped_name = self.sub_group_name.replace(
-                "\\", "\\\\")
-        escaped_name = escaped_name.replace("'", "\\'")
+        # The link target is the subgroup file name used
+        #   verbatim.  os.symlink stores the target string as
+        #   given -- it does not pass through a shell -- so a
+        #   name containing a backslash or apostrophe must NOT
+        #   be shell-escaped here, or the resulting link would
+        #   point at a name that does not exist on disk.  (The
+        #   former Perl build escaped these for an "ln -s" shell
+        #   command; the Python port creates the link directly.)
 
         # In the case that there is only one subgroup, then
         #   life is easy.  We simply make a link to it with
@@ -644,7 +649,7 @@ class SpaceGroupDB():
             link_name = group_number
             if os.path.exists(link_name):
                 os.remove(link_name)
-            os.symlink(escaped_name, link_name)
+            os.symlink(self.sub_group_name, link_name)
         else:
             # Create a link name that is the group number
             #   plus a char extension.
@@ -656,7 +661,7 @@ class SpaceGroupDB():
             #   create the new link.
             if os.path.exists(link_name):
                 os.remove(link_name)
-            os.symlink(escaped_name, link_name)
+            os.symlink(self.sub_group_name, link_name)
 
 
 def main():
