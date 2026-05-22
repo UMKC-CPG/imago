@@ -662,10 +662,11 @@ O_Lattice -- full conventional or primitive reduction).
 The rotation matrices and per-operation translations
 used here are abcRealPointOps and abcRealFracTrans --
 the loaded-cell-abc forms produced by computeRealPointOps
-(section 4b below) from the Cartesian xyz operations
-that arrive on disk.  Atom Cartesian positions are
-converted to fractional using invRealVectors (=
-recipVectors / 2*pi) of the same loaded lattice.
+(section 4b below) from the conv-abc operations that
+arrive on disk.  Atom Cartesian positions are converted
+to fractional using invRealVectors (= recipVectors /
+2*pi) of the same loaded lattice, dotting its COLUMNS
+(reciprocal vectors), not its rows.
 
 ```
 function buildAtomPerm(numPointOps, abcRealPointOps,
@@ -683,10 +684,13 @@ function buildAtomPerm(numPointOps, abcRealPointOps,
     # to fractional (abc) coordinates of the loaded
     # real lattice.
     allocate abcAtomPos(3, numAtomSites)
+    # invRealVectors holds reciprocal vectors as COLUMNS,
+    #   so the fractional component along axis i is the
+    #   dot with column i, not row i.
     for A = 1 to numAtomSites:
         for i = 1 to 3:
             abcAtomPos(i, A) =
-                sum(invRealVectors(i,:)
+                sum(invRealVectors(:,i)
                     * atomSites(A)%cartPos(:))
 
     # For each operation and atom, apply {R|t} in the
@@ -894,88 +898,75 @@ function computeRealPointOps(numPointOps,
                              convAbcPointOps,
                              convAbcFracTrans,
                              cellMode, convLattice,
-                             realVectors,
-                             invRealVectors):
+                             realVectors):
     # Conjugate conv-abc operations into the basis of
     # the loaded real lattice for use by buildAtomPerm.
-    #
-    #   C          = M_loaded^{-1} * M_conv
-    #              = invRealVectors^T * convLattice
-    #   R_real_abc = C * R_conv_abc * C^{-1}
-    #   t_real_abc = C * t_conv_abc
-    #
-    # invRealVectors^T equals realVectors^{-1} by the
-    # orthogonality identity
-    #   realVectors^T * recipVectors = 2*pi*I,
-    # so the formula uses pre-computed O_Lattice matrices
-    # and never re-inverts realVectors at runtime.
+    # Let L (= realVectors) and Lc be the loaded and
+    # conventional lattices with vectors as COLUMNS.
+    # convLattice stores Lc's vectors as ROWS, so
+    # Lc = transpose(convLattice).  The change of basis
+    # carrying loaded fractional to conv fractional is
+    #   T          = Lc^{-1} * L         (r_conv = T r_loaded)
+    # Direct-space coordinates are covariant, so:
+    #   R_loaded   = T^{-1} * R_conv * T
+    #   t_loaded   = T^{-1} * t_conv
     allocate abcRealPointOps(3, 3, numPointOps)
     allocate abcRealFracTrans(3, numPointOps)
 
     if cellMode == 'full':
-        # Identity shortcut: M_loaded == M_conv, so
-        # C = I and the conjugation collapses to a copy
-        # from the on-disk arrays into the runtime
-        # arrays.  Saves the inverse and the per-op
-        # similarity kernel for the most common mode.
+        # Identity shortcut: L == Lc, so T = I and the
+        # conjugation collapses to a copy.  Also serves
+        # style 0, whose convLattice is a column-layout
+        # copy of realVectors the T path must not touch.
         for i = 1 to numPointOps:
             abcRealPointOps(:,:,i) =
                 convAbcPointOps(:,:,i)
             abcRealFracTrans(:,i) =
                 convAbcFracTrans(:,i)
     else:
-        # Full conjugation path: form C once, then
-        # apply the similarity transform per operation.
-        C     = invRealVectors^T * convLattice
-        C_inv = inverse_3x3(C)
+        # Prim path: form T once, then conjugate per op.
+        T     = inverse_3x3(transpose(convLattice)) * realVectors
+        T_inv = inverse_3x3(T)
         for i = 1 to numPointOps:
             abcRealPointOps(:,:,i) =
-                C * convAbcPointOps(:,:,i) * C_inv
+                T_inv * convAbcPointOps(:,:,i) * T
             abcRealFracTrans(:,i) =
-                C * convAbcFracTrans(:,i)
+                T_inv * convAbcFracTrans(:,i)
 
     return (abcRealPointOps, abcRealFracTrans)
 ```
 
 ```
 function computeRecipPointOps(numPointOps,
-                              convAbcPointOps,
-                              cellMode, convLattice,
-                              realVectors,
-                              invRealVectors):
-    # Conjugate conv-abc operations into the basis of
-    # the loaded reciprocal lattice for use by
-    # initializeKPointMesh (IBZ folding).
-    #
-    # Point group rotations transform identically under
-    # the dual abc bases, so the similarity uses the
-    # same change-of-basis matrix C as the real-space
-    # sibling.  No translation field -- reciprocal-space
-    # operations have no translation.
+                              abcRealPointOps):
+    # Build the reciprocal-space operations for IBZ
+    # folding.  k-point (reciprocal) coordinates are
+    # contravariant -- the dual of the covariant direct
+    # coordinates -- so the reciprocal representation of
+    # an operation is the INVERSE TRANSPOSE of its
+    # direct-space representation:
+    #   R_recip = (R_real)^{-T}
+    # This consumes the abcRealPointOps already built by
+    # computeRealPointOps (which therefore must run
+    # first) and needs no lattice matrices of its own.
     allocate abcRecipPointOps(3, 3, numPointOps)
 
-    if cellMode == 'full':
-        # Same identity shortcut as the real-space side.
-        for i = 1 to numPointOps:
-            abcRecipPointOps(:,:,i) =
-                convAbcPointOps(:,:,i)
-    else:
-        C     = invRealVectors^T * convLattice
-        C_inv = inverse_3x3(C)
-        for i = 1 to numPointOps:
-            abcRecipPointOps(:,:,i) =
-                C * convAbcPointOps(:,:,i) * C_inv
+    for i = 1 to numPointOps:
+        abcRecipPointOps(:,:,i) =
+            transpose(inverse_3x3(abcRealPointOps(:,:,i)))
 
     return abcRecipPointOps
 ```
 
-Both routines run unconditionally in every style-code
-branch (style 0 sets up trivial identity operations as
-before; styles 1 and 2 read real symmetry from the kp
-file).  The `cellMode` flag selects the identity
-shortcut versus the full conjugation path -- no other
-`full`-vs-`prim` branching exists outside these two
-routines.
+`computeRealPointOps` runs in every style-code branch
+(style 0 sets up a trivial identity op; styles 1 and 2
+read real symmetry from the kp file).
+`computeRecipPointOps` runs only for styles 1 and 2
+(IBZ folding) and must be called AFTER
+`computeRealPointOps`.  The `cellMode` flag selects the
+identity shortcut versus the full conjugation path in
+the real-space routine -- no other `full`-vs-`prim`
+branching exists outside these two routines.
 
 ---
 

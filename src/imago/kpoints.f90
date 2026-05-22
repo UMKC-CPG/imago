@@ -92,15 +92,16 @@ module O_KPoints
          !   group operations (translations stripped).
    real (kind=double), allocatable, dimension (:,:,:) :: convAbcPointOps
          !   The 3x3 rotation matrices for each point group operation,
-         !   stored in their on-disk conventional-cell-abc fractional
-         !   form -- byte-identical to the entries in
-         !   share/spaceDB/<sg>.  The kp file carries them verbatim;
-         !   makeinput.py applies no producer-side similarity transform.
-         !   computeRealPointOps and computeRecipPointOps rebase them at
-         !   runtime via the change-of-basis matrix
-         !   C = invRealVectors^T * convLattice (full conjugation in
-         !   prim mode, identity-shortcut copy in full mode).
-         !   Dimensions: (3, 3, numPointOps).  See DESIGN 2.7.
+         !   in their conventional-cell-abc fractional form as written
+         !   in share/spaceDB/<sg> and carried verbatim by the kp file
+         !   (makeinput.py applies no producer-side transform). Each
+         !   file row is read into the matching array ROW, so the array
+         !   holds the standard crystallographic R (acting as r' = R*r),
+         !   NOT its transpose. computeRealPointOps conjugates these
+         !   into the loaded direct basis (R_loaded = T^{-1} R T,
+         !   T = Lc^{-1} L) and computeRecipPointOps takes the inverse
+         !   transpose for the reciprocal basis. Dimensions:
+         !   (3, 3, numPointOps).  See DESIGN 2.7.
    real (kind=double), allocatable, dimension (:,:) :: convAbcFracTrans
          !   The translation vector for each point group operation, in
          !   the same on-disk conventional-cell-abc fractional form as
@@ -113,15 +114,15 @@ module O_KPoints
          !   r_B = R * r_A + t.  Dimensions: (3, numPointOps).
    real (kind=double), dimension (3, 3) :: convLattice
          !   The conventional-cell matrix in Bohr, read from the kp
-         !   file's CONV_LATTICE block.  Rows are conventional lattice
-         !   vectors, columns are xyz, matching the row layout of
-         !   O_Lattice's realVectors.  Required by computeRealPointOps
-         !   and computeRecipPointOps to form the change-of-basis
-         !   matrix C = invRealVectors^T * convLattice that carries
-         !   conv-abc operations into the basis of the loaded cell.
-         !   For style code 0 (explicit kpoint list) this defaults to
-         !   realVectors so the identity shortcut applies trivially.
-         !   See DESIGN 2.7.
+         !   file's CONV_LATTICE block.  Each CONV_LATTICE line is one
+         !   conventional lattice vector, so the ROWS are the vectors
+         !   (the transpose of the column-vector matrix Lc that
+         !   computeRealPointOps builds the change of basis T = Lc^{-1}
+         !   L from). Note this row layout is the TRANSPOSE of
+         !   O_Lattice's realVectors, whose columns are the vectors.
+         !   Used only on the prim conjugation path; for style code 0
+         !   and full mode the identity shortcut leaves it untouched
+         !   (style 0 defaults it to realVectors). See DESIGN 2.7.
    character (len=4) :: cellMode
          !   Cell-mode flag read from the kp file's CELL_MODE block --
          !   either 'full' (the loaded cell IS the conventional cell:
@@ -291,13 +292,17 @@ subroutine readKPoints(readUnit, writeUnit)
          !   operation has no blank line before it, but subsequent
          !   ones do.
          if (i > 1) read (readUnit,*)
-         ! Read each row of the matrix from one file line. Each
-         !   line fills one column of the Fortran array (column-major
-         !   storage); see computeRealPointOps in this file for the
-         !   downstream consumer that depends on this convention.
-         read (readUnit,*) convAbcPointOps(:,1,i)
-         read (readUnit,*) convAbcPointOps(:,2,i)
-         read (readUnit,*) convAbcPointOps(:,3,i)
+         ! Read each file row of the matrix into the matching ROW of
+         !   the Fortran array, so convAbcPointOps(:,:,i) holds the
+         !   standard crystallographic rotation R exactly as written
+         !   in share/spaceDB (column-vector convention: a position
+         !   transforms as r' = R*r). The translator routines
+         !   computeRealPointOps / computeRecipPointOps then conjugate
+         !   this R into the loaded direct and reciprocal bases; see
+         !   DESIGN 2.7 for the single, un-transposed op convention.
+         read (readUnit,*) convAbcPointOps(1,:,i)
+         read (readUnit,*) convAbcPointOps(2,:,i)
+         read (readUnit,*) convAbcPointOps(3,:,i)
          ! Read the per-operation conv-abc fractional translation.
          !   Symmorphic groups carry all-zero translations; non-
          !   symmorphic groups (e.g. Fd-3m) carry non-zero values
@@ -305,7 +310,7 @@ subroutine readKPoints(readUnit, writeUnit)
          read (readUnit,*) convAbcFracTrans(:,i)
          do counter = 1, 3
             write (writeUnit,fmt="(3f14.8)") &
-                  & convAbcPointOps(:,counter,i)
+                  & convAbcPointOps(counter,:,i)
          enddo
          write (writeUnit,fmt="(3f14.8)") &
                & convAbcFracTrans(:,i)
@@ -381,16 +386,18 @@ subroutine readKPoints(readUnit, writeUnit)
          ! Skip any blank line before this operation. The first operation has
          !   no blank line before it, but subsequent ones do.
          if (i > 1) read (readUnit,*)
-         ! Read each row of the matrix from one file line. Each line fills
-         !   one column of the Fortran array (column-major storage).
-         read (readUnit,*) convAbcPointOps(:,1,i)
-         read (readUnit,*) convAbcPointOps(:,2,i)
-         read (readUnit,*) convAbcPointOps(:,3,i)
+         ! Read each file row of the matrix into the matching ROW of
+         !   the Fortran array, so convAbcPointOps(:,:,i) holds the
+         !   standard crystallographic rotation R as written in
+         !   share/spaceDB (acting as r' = R*r). See DESIGN 2.7.
+         read (readUnit,*) convAbcPointOps(1,:,i)
+         read (readUnit,*) convAbcPointOps(2,:,i)
+         read (readUnit,*) convAbcPointOps(3,:,i)
          ! Read the conv-abc fractional translation for this operation.
          read (readUnit,*) convAbcFracTrans(:,i)
          do counter = 1, 3
             write (writeUnit,fmt="(3f14.8)") &
-                  & convAbcPointOps(:,counter,i)
+                  & convAbcPointOps(counter,:,i)
          enddo
          write (writeUnit,fmt="(3f14.8)") &
                & convAbcFracTrans(:,i)
@@ -1185,14 +1192,17 @@ subroutine initializeKPoints (inSCF)
          fullKPToIBZOpMap(i) = 1
       enddo
    elseif (kPointStyleCode == 1) then
-      call computeRecipPointOps
+      ! Real first: computeRecipPointOps derives the reciprocal ops
+      !   as the inverse transpose of the direct (real) ops.
       call computeRealPointOps
+      call computeRecipPointOps
       call initializeKPointMesh(1) ! Apply symmetry.
       call convertKPointsToXYZ
    elseif (kPointStyleCode == 2) then
       call computeAxialKPoints
-      call computeRecipPointOps
+      ! Real first (see above).
       call computeRealPointOps
+      call computeRecipPointOps
       call initializeKPointMesh(1) ! Apply symmetry.
       call convertKPointsToXYZ
    endif
@@ -1483,103 +1493,68 @@ subroutine computeTetraVol
 end subroutine computeTetraVol
 
 
-! Convert the on-disk point group operations (read into
-!   convAbcPointOps from the kp file in their native conventional-
-!   cell-abc fractional form) into the basis of the reciprocal
-!   lattice currently held in O_Lattice. The resulting
-!   abcRecipPointOps act directly on kpoints expressed in
-!   fractional reciprocal coordinates of that lattice and are used
-!   by initializeKPointMesh for runtime IBZ symmetry reduction.
+! Build the reciprocal-space point group operations
+!   (abcRecipPointOps) used by initializeKPointMesh for runtime IBZ
+!   symmetry reduction. They act on kpoints expressed in fractional
+!   reciprocal coordinates of whichever cell is loaded in O_Lattice.
 !
-! Input convention. The operations arrive here byte-identical to
-!   share/spaceDB/<sg>: each rotation matrix is in the natural
-!   axes of the conventional crystallographic setting and acts on
-!   conv-abc fractional vectors directly. No producer-side
-!   similarity transform has been applied; the entire basis change
-!   happens here on the consumer side. See DESIGN 2.7 for the
-!   motivation behind locating the conjugation here.
+! Method. computeRealPointOps has already conjugated each operation
+!   into the loaded cell's DIRECT (real-space) fractional basis,
+!   storing R_loaded in abcRealPointOps. The reciprocal-space
+!   representation of the same operation is its INVERSE TRANSPOSE,
 !
-! Output convention. Whichever cell ended up in O_Lattice after
-!   the input pipeline (the full conventional cell when the
-!   skeleton's flag is `full`, a primitive reduction when it is
-!   `prim`), the conjugation below uses realVectors and
-!   invRealVectors as they currently stand together with the
-!   conventional cell read from the kp file's CONV_LATTICE block.
-!   The result is correct for any cell imago can describe.
+!     R_recip = (R_real)^{-T},
 !
-! Mathematics. The change-of-basis matrix that carries a vector
-!   from the conv-abc basis to the loaded-cell abc basis is
+!   because a reciprocal (k-point) fractional vector is contravariant
+!   while a direct fractional vector is covariant: if a direct vector
+!   transforms as r' = R r, the dual reciprocal vector transforms as
+!   g' = R^{-T} g. This routine therefore depends on
+!   computeRealPointOps having run first (the caller orders them so),
+!   and needs no lattice matrices of its own.
 !
-!     C = M_loaded^{-1} * M_conv
-!       = invRealVectors^T * convLattice,
-!
-!   where the equality uses the orthogonality identity
-!   realVectors^T * recipVectors = 2*pi*I, which makes
-!   realVectors^{-1} equal to invRealVectors^T (no extra
-!   inversion of realVectors at runtime).  The point-group
-!   rotation transforms by the similarity
-!
-!     R_recip_abc = C * R_conv_abc * C^{-1}.
-!
-!   Point-group rotations transform identically under the dual
-!   real- and reciprocal-space abc bases, so this matches the
-!   real-space transform in computeRealPointOps below.  There is
-!   no translation field to transform on the reciprocal side.
-!
-! Identity shortcut. In `full` mode the loaded cell IS the
-!   conventional cell, so M_loaded == M_conv and C = I; the
-!   conjugation collapses to a copy.  The cellMode flag (read
-!   from the kp file's CELL_MODE block) selects between the
-!   shortcut and the full conjugation path.
+! Why this replaced the old code. The previous version conjugated
+!   the conv-abc operation by the SAME change-of-basis used for the
+!   real-space ops and asserted the two reps were identical. That is
+!   true only for cubic-like cells, whose abc rotations are signed
+!   permutation matrices satisfying R = R^{-T}; for hexagonal,
+!   trigonal, and other non-orthogonal cells the two reps genuinely
+!   differ, and the old code folded the wrong star of kpoints. See
+!   DESIGN 2.7.
 subroutine computeRecipPointOps
 
    ! Import necessary modules.
    use O_Kinds
-   use O_Lattice, only: invRealVectors
 
    ! Make sure no funny variables are defined.
    implicit none
 
    ! Define local variables.
    integer :: i ! Loop index over point group operations.
-   real (kind=double), dimension (3,3) :: changeBasis
-         !   Composed change-of-basis matrix C = invRealVectors^T
-         !   * convLattice.  Computed once before the per-op loop;
-         !   acts as the conjugating factor on the left of each
-         !   similarity transform.
-   real (kind=double), dimension (3,3) :: changeBasisInv
-         !   Inverse of changeBasis (C^{-1}), used on the right
-         !   of each similarity transform.  Computed once before
-         !   the per-op loop.
+   real (kind=double), dimension (3,3) :: invDirectOp
+         !   The inverse of one loaded-basis direct (real) operation.
+         !   Its transpose is the matching reciprocal-space operation.
 
    ! Allocate storage for the reciprocal-space operations.
    allocate (abcRecipPointOps(3,3,numPointOps))
 
-   if (cellMode == 'full') then
-      ! Identity shortcut: M_loaded == M_conv, so C = I and the
-      !   conjugation collapses to a copy from the on-disk array
-      !   into the runtime array.  Skips the matrix inverse and
-      !   the per-op kernel for the most common cell mode.
-      do i = 1, numPointOps
-         abcRecipPointOps(:,:,i) = convAbcPointOps(:,:,i)
-      enddo
-   else
-      ! Full conjugation path.  Form C once, then apply the
-      !   similarity R_recip_abc = C * R_conv_abc * C^{-1} per
-      !   operation.  invRealVectors^T equals realVectors^{-1}
-      !   by the orthogonality identity (see header), so the
-      !   factor on the left of C uses pre-computed O_Lattice
-      !   state without a runtime inversion of realVectors.
-      changeBasis = matmul(transpose(invRealVectors), convLattice)
-      call invert3x3(changeBasis, changeBasisInv)
-
-      do i = 1, numPointOps
-         abcRecipPointOps(:,:,i) = matmul( &
-               & changeBasis, &
-               & matmul(convAbcPointOps(:,:,i), &
-               &        changeBasisInv))
-      enddo
-   endif
+   ! The reciprocal-space representation of a point operation is the
+   !   INVERSE TRANSPOSE of its direct-space representation: k-point
+   !   (reciprocal) fractional coordinates transform contravariantly,
+   !   while direct-space fractional coordinates transform
+   !   covariantly. abcRealPointOps already holds the direct-space
+   !   operations in the loaded cell's basis, so for each operation
+   !     R_recip = (R_real)^{-T}.
+   !   This requires computeRealPointOps to have run first (the
+   !   caller orders them so). It supersedes the former assumption
+   !   that the direct and reciprocal abc reps are identical -- true
+   !   only for cubic-like cells, where the abc rotations are signed
+   !   permutation matrices and equal their own inverse transpose,
+   !   but false for hexagonal/trigonal and other non-orthogonal
+   !   cells. See DESIGN 2.7.
+   do i = 1, numPointOps
+      call invert3x3(abcRealPointOps(:,:,i), invDirectOp)
+      abcRecipPointOps(:,:,i) = transpose(invDirectOp)
+   enddo
 
 end subroutine computeRecipPointOps
 
@@ -1605,64 +1580,70 @@ end subroutine computeRecipPointOps
 ! Output convention. Whichever cell ended up in O_Lattice after
 !   the input pipeline (the full conventional cell when the
 !   skeleton's flag is `full`, a primitive reduction when it is
-!   `prim`), the conjugation below uses realVectors and
-!   invRealVectors as they currently stand together with the
-!   conventional cell read from the kp file's CONV_LATTICE block.
-!   The result is correct for any cell imago can describe.
+!   `prim`), the conjugation below uses realVectors together with
+!   the conventional cell read from the kp file's CONV_LATTICE
+!   block. The result is correct for any cell imago can describe.
 !
-! Mathematics. The change-of-basis matrix that carries a vector
-!   from the conv-abc basis to the loaded-cell abc basis is
+! Mathematics. Let the loaded and conventional lattice vectors be
+!   the COLUMNS of L (= realVectors) and Lc respectively. A
+!   Cartesian point x has loaded fractional coordinates L^{-1} x and
+!   conventional fractional coordinates Lc^{-1} x, so the change of
+!   basis carrying loaded fractional to conventional fractional is
 !
-!     C = M_loaded^{-1} * M_conv
-!       = invRealVectors^T * convLattice,
+!     T = Lc^{-1} * L   (r_conv = T * r_loaded).
 !
-!   where the equality uses the orthogonality identity
-!   realVectors^T * recipVectors = 2*pi*I, which makes
-!   realVectors^{-1} equal to invRealVectors^T (no extra
-!   inversion of realVectors at runtime).  The rotation and the
-!   translation then transform as
+!   convLattice stores Lc's vectors as ROWS (one per CONV_LATTICE
+!   line), so Lc = transpose(convLattice). A direct-space operation
+!   acting as r' = R r is covariant, so it conjugates as
 !
-!     R_real_abc = C * R_conv_abc * C^{-1},
-!     t_real_abc = C * t_conv_abc.
+!     R_loaded = T^{-1} * R_conv * T,
+!     t_loaded = T^{-1} * t_conv.
 !
-!   Both identities hold for any non-singular realVectors and
-!   convLattice; no cell-shape, centering, or symmetry assumption
-!   is built into the derivation, and the routine is therefore
-!   correct for every cell type imago can describe.
+!   No cell-shape, centering, or symmetry assumption enters, so the
+!   routine is correct for every cell type imago can describe. (The
+!   former code used C = invRealVectors^T * convLattice, which is
+!   not this T and was correct only for cubic-like cells; see
+!   DESIGN 2.7.)
 !
 ! Identity shortcut. In `full` mode the loaded cell IS the
-!   conventional cell, so M_loaded == M_conv and C = I; the
-!   conjugation collapses to a copy of both the rotation matrices
-!   and the translation vectors.  The cellMode flag (read from
-!   the kp file's CELL_MODE block) selects between the shortcut
-!   and the full conjugation path.
+!   conventional cell, so L == Lc and T = I; the conjugation
+!   collapses to a copy of both the rotation matrices and the
+!   translation vectors.  The cellMode flag (read from the kp
+!   file's CELL_MODE block) selects between the shortcut and the
+!   full conjugation path.
 !
-! Relationship to computeRecipPointOps above. That routine
-!   performs the matching transform for the reciprocal-space side
-!   using the same change-of-basis matrix C, so kpoint folding
-!   via abcRecipPointOps and atom permutation via abcRealPointOps
-!   descend from a single source of operations and a single
-!   change-of-basis step.
+! Relationship to computeRecipPointOps above. This routine produces
+!   the direct-space (real) operations; computeRecipPointOps then
+!   takes their inverse transpose to get the reciprocal-space twin,
+!   so kpoint folding via abcRecipPointOps and atom permutation via
+!   abcRealPointOps descend from a single source of operations and a
+!   single change-of-basis step T.
 subroutine computeRealPointOps
 
    ! Import necessary modules.
    use O_Kinds
-   use O_Lattice, only: invRealVectors
+   use O_Lattice, only: realVectors
 
    ! Make sure no funny variables are defined.
    implicit none
 
    ! Define local variables.
    integer :: i ! Loop index over point group operations.
-   real (kind=double), dimension (3,3) :: changeBasis
-         !   Composed change-of-basis matrix C = invRealVectors^T
-         !   * convLattice.  Computed once before the per-op loop;
-         !   acts as the conjugating factor on the left of each
-         !   similarity transform and as the multiplier on each
-         !   conv-abc translation.
-   real (kind=double), dimension (3,3) :: changeBasisInv
-         !   Inverse of changeBasis (C^{-1}), used on the right
-         !   of each rotation's similarity transform.
+   real (kind=double), dimension (3,3) :: convVecCols
+         !   The conventional lattice with its vectors as COLUMNS
+         !   (Lc). convLattice stores those vectors as ROWS (each kp
+         !   file CONV_LATTICE line is one vector), so Lc is its
+         !   transpose. realVectors already stores the loaded
+         !   vectors as columns (L).
+   real (kind=double), dimension (3,3) :: convVecColsInv
+         !   Lc^{-1}, used to build the change-of-basis matrix.
+   real (kind=double), dimension (3,3) :: loadedToConv
+         !   T = Lc^{-1} * L. Carries a loaded-cell fractional vector
+         !   to a conventional-cell fractional vector: r_conv =
+         !   T * r_loaded.
+   real (kind=double), dimension (3,3) :: convToLoaded
+         !   T^{-1}, the conjugating factor that carries a conv-abc
+         !   operation into the loaded-cell basis.
 
    ! Allocate storage for both transformed quantities. The arrays
    !   are freed in cleanUpKPoints alongside the other point-group
@@ -1671,33 +1652,39 @@ subroutine computeRealPointOps
    allocate (abcRealFracTrans(3, numPointOps))
 
    if (cellMode == 'full') then
-      ! Identity shortcut: M_loaded == M_conv, so C = I and the
-      !   conjugation collapses to a copy from the on-disk arrays
-      !   into the runtime arrays.  Skips the matrix inverse and
-      !   the per-op kernel for the most common cell mode.
+      ! Identity shortcut: the loaded cell IS the conventional cell,
+      !   so T = I and each operation passes through unchanged. This
+      !   path also serves style code 0, whose convLattice is a
+      !   column-layout copy of realVectors that the conjugation
+      !   below (which reads convLattice as rows) must not touch.
       do i = 1, numPointOps
          abcRealPointOps(:,:,i)  = convAbcPointOps(:,:,i)
          abcRealFracTrans(:,i)   = convAbcFracTrans(:,i)
       enddo
    else
-      ! Full conjugation path.  Form C once, then apply the
-      !   similarity per operation:
-      !     R_real_abc = C * R_conv_abc * C^{-1}
-      !     t_real_abc = C * t_conv_abc
-      !   invRealVectors^T equals realVectors^{-1} by the
-      !   orthogonality identity (see header), so the factor on
-      !   the left of C uses pre-computed O_Lattice state without
-      !   a runtime inversion of realVectors.
-      changeBasis = matmul(transpose(invRealVectors), convLattice)
-      call invert3x3(changeBasis, changeBasisInv)
+      ! Prim mode: the loaded cell is a primitive reduction of the
+      !   conventional cell. Form the loaded<->conv change of basis
+      !   T once, then conjugate each operation into the loaded
+      !   cell's fractional basis:
+      !     R_loaded = T^{-1} * R_conv * T
+      !     t_loaded = T^{-1} * t_conv
+      !   Direct-space fractional coordinates are covariant, so this
+      !   ordinary similarity is the correct transform for an
+      !   operation acting as r' = R*r. The reciprocal twin (the
+      !   inverse transpose) is built in computeRecipPointOps. See
+      !   DESIGN 2.7.
+      convVecCols = transpose(convLattice)
+      call invert3x3(convVecCols, convVecColsInv)
+      loadedToConv = matmul(convVecColsInv, realVectors)
+      call invert3x3(loadedToConv, convToLoaded)
 
       do i = 1, numPointOps
          abcRealPointOps(:,:,i) = matmul( &
-               & changeBasis, &
+               & convToLoaded, &
                & matmul(convAbcPointOps(:,:,i), &
-               &        changeBasisInv))
+               &        loadedToConv))
          abcRealFracTrans(:,i) = matmul( &
-               & changeBasis, convAbcFracTrans(:,i))
+               & convToLoaded, convAbcFracTrans(:,i))
       enddo
    endif
 

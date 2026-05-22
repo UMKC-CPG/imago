@@ -1048,84 +1048,124 @@ from the skeleton.
 
 **Consumer-side math.**  At runtime, imago reads the
 spaceDB operations into `convAbcPointOps` and
-`convAbcFracTrans`, reads the `CONV_LATTICE` block as
-`M_conv`, takes `M_loaded = realVectors`, and forms a
-single change-of-basis matrix
+`convAbcFracTrans`.  Each `POINT_OPS` file row is read
+into the matching array *row*, so `convAbcPointOps`
+holds the standard crystallographic rotation `R`
+acting as `r' = R*r` -- not its transpose.  Let `L`
+(`= realVectors`) and `Lc` be the loaded and
+conventional lattices with their vectors as *columns*.
+The `CONV_LATTICE` block stores `Lc`'s vectors as
+*rows*, so `Lc = transpose(convLattice)`.  A Cartesian
+point `x` has loaded fractional coordinates
+`L^{-1} x` and conventional fractional coordinates
+`Lc^{-1} x`, so the change of basis carrying loaded
+fractional to conventional fractional is
 
 ```
-C = M_loaded^{-1} * M_conv = invRealVectors^T * M_conv
+T = Lc^{-1} * L          (r_conv = T * r_loaded)
 ```
 
-once, before the per-operation loop.
-`computeRealPointOps` then transforms each operation
-as
+formed once before the per-operation loop.
+
+`computeRealPointOps` conjugates each operation into
+the loaded direct-space basis.  Direct-space
+fractional coordinates are *covariant*, so an
+operation acting as `r' = R*r` transforms by the
+ordinary similarity
 
 ```
-R_real_abc = C * R_conv_abc * C^{-1}
-t_real_abc = C * t_conv_abc
+R_loaded = T^{-1} * R_conv * T
+t_loaded = T^{-1} * t_conv
 ```
 
 producing `abcRealPointOps` and `abcRealFracTrans` in
 the basis of whichever cell `O_Lattice` holds -- which
 is exactly the basis `buildAtomPerm` uses for atom
-positions.  In `full` mode the `CELL_MODE` flag tells
-the routine that `M_loaded == M_conv`, so `C = I` and
-the loop collapses to a copy from the on-disk arrays
-into the runtime arrays without invoking the
-conjugation kernel.  In `prim` mode the flag selects
-the full conjugation path.  Both identities hold for
-any non-singular `M_loaded` and `M_conv`; no cell-
-shape, centering, or symmetry assumption is built
-into the math.
+positions (themselves built as `L^{-1} x`, i.e. a dot
+with the *columns* of `invRealVectors`).  In `full`
+mode the `CELL_MODE` flag tells the routine that
+`L == Lc`, so `T = I` and the loop collapses to a copy
+of the on-disk arrays.  In `prim` mode the flag
+selects the full conjugation path.  No cell-shape,
+centering, or symmetry assumption is built into the
+math.
 
-`computeRecipPointOps` does the matching reciprocal-
-space transform with the same change-of-basis matrix
-`C`, so kpoint folding via `abcRecipPointOps` and atom
-permutation via `abcRealPointOps` continue to descend
-from a single source of operations.  No full/prim
-branching exists anywhere outside the two transform
-routines, where the `CELL_MODE` flag selects identity
-versus full conjugation.
+`computeRecipPointOps` then builds the reciprocal-
+space twin.  k-point (reciprocal) fractional
+coordinates are *contravariant*, the dual of the
+covariant direct coordinates, so the reciprocal
+representation of an operation is the **inverse
+transpose** of the direct one:
 
-**Generality.**  This design works for every cell type
-imago describes.  Old uolcao had a latent version of
-the same basis-mismatch bug for non-cubic systems:
-`makeKPoints` used a Cartesian-assumed conjugation but
-consumed conv-abc input that was only equivalent to
-Cartesian for cubic-aligned conventional axes.  The
-pre-`buildAtomPerm` pipeline never propagated the bug
-because the SCF binary received pre-folded explicit
-k-points and never saw a rotation matrix, so the
-wrongness silently cancelled.  Imago carries
-operations all the way to the SCF binary and uses them
-for both reciprocal-space folding and real-space atom
-permutation, so the consumer-side conjugation is
-necessary for correctness across cell types.
+```
+R_recip = (R_loaded)^{-T}
+```
 
-**Diagnostic history.** The issue surfaced when
-diamond/prim (SG 227 Fd-3m reduced to its primitive
-rhombohedral cell) stopped at `buildAtomPerm: no atom
-match found` after the new IBZ-correctness machinery
-landed.  The Fd-3m mirror perpendicular to cubic x,
-applied directly to the primitive-cell atom positions,
-sent atom 2 from `(0.25, 0.25, 0.25)` to
-`(0.25, -0.25, -0.25)`, wrapped to
-`(0.25, 0.75, 0.75)` -- a vacancy.  The non-symmorphic
-translation `(0.25, 0.25, 0.25)` happens to round-trip
-through the transform with the same numerical value
-(the body-diagonal-of-conv-cube coincidence shared
-with the primitive-cell body diagonal), but rotations
-like the cubic-x mirror require the actual conjugation
-to produce the right primitive-basis matrix.  An
-earlier iteration of this section moved the
-conjugation onto the producer side via a Cartesian-xyz
-intermediate; the current design relocates it to the
-consumer with `C = M_loaded^{-1} * M_conv` and keeps
-the on-disk values tied to the spaceDB entries.  Under
-either form the same operation maps atom 2 to itself
-(a self-image fixed point of the mirror), and
-diamond/prim runs cleanly through `buildAtomPerm` and
-the rest of the SCF.
+It is computed directly from `abcRealPointOps` (so
+`computeRealPointOps` runs first), and needs no lattice
+matrices of its own.  kpoint folding via
+`abcRecipPointOps` and atom permutation via
+`abcRealPointOps` thus descend from a single source of
+operations and a single change-of-basis step `T`.  No
+full/prim branching exists anywhere outside the two
+transform routines.
+
+**Generality.**  `R_loaded` and `R_recip` come out as
+integer matrices with determinant +/-1 that close the
+point group -- the defining property of valid lattice
+automorphisms -- for every cell type imago describes
+(verified numerically for cubic, hexagonal, and
+trigonal cells).  The earlier `C = M_loaded^{-1} *
+M_conv = invRealVectors^T * M_conv` form is **not**
+this `T`: it transposes the cell matrix incorrectly
+and was correct only for cubic-like cells, whose abc
+rotations are signed permutation matrices for which
+the transpose error and the inverse-transpose
+distinction both vanish.  The reciprocal side
+compounded the problem by reusing `C` *and* assuming
+the direct and reciprocal reps were identical.
+
+**Diagnostic history.**  The bug surfaced when a
+kaleidoscope SLURM campaign ran graphite (SG 186,
+hexagonal) and silica (SG 152, trigonal) alongside
+silicon and diamond (cubic).  The cubic cells
+converged; both 120-degree cells stopped at
+`buildAtomPerm: no atom match found`.  For silica,
+operation 2 (the 3-fold screw) sent Si site 1 at
+`(0.465, 0, 1/3)` to `(0.633, 0.537, 2/3)` -- a
+vacancy -- when the true image is the existing atom at
+`(0, 0.465, 2/3)`.  Reproducing the reported value to
+1e-9 pinned down two compounding transpose errors that
+cancel only for cubic: the atom Cartesian-to-
+fractional conversion dotted the *row* of
+`invRealVectors` instead of the column, and the
+rotation was applied as `R^T` because the operations
+were stored column-major.  The fix un-flips the op
+storage, replaces `C` with the correct `T` conjugation
+(real) and its inverse transpose (reciprocal), and
+dots the `invRealVectors` column in `buildAtomPerm`.
+Validation: `R_loaded`/`R_recip` integer + group-
+closed for all four structures, the atom permutation
+closes for every operation and atom, and all four runs
+converge through `buildAtomPerm` and the SCF.
+
+**Input-precision gate.**  The conjugation is now exact,
+but a *second*, independent precision hazard remains: a
+fractional coordinate written as a short truncation of
+a repeating decimal (e.g. `0.66667` for 2/3) is not
+symmetry-exact, so a rotation maps it ~1e-5 off its true
+image -- right at `buildAtomPerm`'s match tolerance.
+This is an input-quality problem, not a math problem, so
+it is caught at the source: `StructureControl.
+_check_repeating_fraction` (called from `read_imago_skl`)
+rejects any fractional coordinate that matches a third
+or sixth (1/3, 2/3, 1/6, 5/6 -- the only non-terminating
+decimals reachable by crystallographic 3- and 6-fold
+axes) to fewer than 8 decimal places, naming the atom
+and the suspected fraction.  Only thirds and sixths are
+checked; denominators with no crystallographic basis
+(7, 9, 11, ...) are excluded so a general-position
+coordinate near, say, 2/9 is never falsely rejected.
 
 ---
 

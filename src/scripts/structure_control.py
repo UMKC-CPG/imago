@@ -56,6 +56,8 @@ from element_data import ElementData
 
 PI = 3.1415926535897932384626433832795
 EPSILON = 0.00001           # Numerical tolerance for coordinate comparisons
+REQUIRED_FRACTION_DIGITS = 8  # Min decimal places for a fractional coordinate
+                              #   that matches a repeating decimal (1/3, ...)
 BIG_INT = 1_000_000_000     # Large integer sentinel value
 BIG_REAL = 1_000_000_000.0  # Large float sentinel value
 BOHR_RAD = 0.5291772180     # Bohr radius in Angstroms
@@ -1017,6 +1019,84 @@ class StructureControl:
     # Section: File I/O -- Read
     # ======================================================================
 
+    @staticmethod
+    def _check_repeating_fraction(token, atom_index, axis_name):
+        """Reject a fractional coordinate written as a short
+        truncation of a common non-terminating ("repeating")
+        decimal fraction such as 1/3, 2/3, 1/6, or 5/6.
+
+        Why this matters.  Hexagonal and trigonal Wyckoff sites
+        routinely sit at exact thirds and sixths, whose decimal
+        expansions never terminate (0.3333..., 0.6666...,
+        0.16666..., 0.83333...).  Truncating such a value to a few
+        digits (e.g. ``0.66667`` for 2/3) makes the atom no longer
+        symmetry-exact: a point-group rotation maps the truncated
+        atom up to ~1e-5 away from its true image, just past the
+        match tolerance in the Fortran ``buildAtomPerm``, which then
+        aborts the SCF with "no atom match found" far from any clue
+        about the cause.  Catching it here, at the source, names the
+        offending value and demands enough precision that the
+        residual error is negligible.
+
+        Detection.  ``token`` is the coordinate exactly as written,
+        so its decimal-place count is the user's stated precision.
+        A token with at least ``REQUIRED_FRACTION_DIGITS`` places is
+        always accepted -- at 8 places even a true 1/3 is within
+        ~3e-9, far below any tolerance.  A shorter token is rejected
+        only if its value lands within one unit in the last place of
+        a non-terminating fraction p/q AND sits genuinely close to
+        it (within 5e-3), so a deliberately coarse value like
+        ``0.30`` is not mistaken for 1/3.  Both forms of short input
+        are caught: a rounded ``0.66667`` and a chopped ``0.66666``.
+
+        Only thirds and sixths are checked (q in 3, 6).  Crystals
+        admit just 1-, 2-, 3-, 4-, and 6-fold rotations; of these
+        only the 3- and 6-fold axes place sites at non-terminating
+        decimals (thirds and sixths -- 1/3, 2/3, 1/6, 5/6).  Halves
+        and quarters terminate and are exact at any length.
+        Denominators with no crystallographic basis (7, 9, 11, ...)
+        are deliberately excluded: a general-position coordinate
+        such as ``0.222`` sits near 2/9 only by coincidence and must
+        not be rejected.
+
+        Raises ``ValueError`` (consistent with the rest of
+        ``read_imago_skl``) so the fault propagates as an input
+        error rather than terminating a long-lived process.
+        """
+        # No decimal point, or scientific notation, means the user
+        #   was explicit about precision; accept as written.
+        if '.' not in token or 'e' in token or 'E' in token:
+            return
+        num_places = len(token.split('.')[1])
+        if num_places >= REQUIRED_FRACTION_DIGITS:
+            return
+
+        value = float(token)
+        frac = value - math.floor(value)        # bring into [0, 1)
+        one_ulp = 10.0 ** (-num_places)         # last-place error band
+
+        # The only non-terminating decimals reachable by 3- and
+        #   6-fold crystallographic axes: thirds and sixths.
+        for denom in (3, 6):
+            numer = round(frac * denom)
+            if numer <= 0 or numer >= denom:
+                continue                        # 0 and 1 are exact
+            if math.gcd(numer, denom) != 1:
+                continue                        # e.g. 2/6 reduces to 1/3
+            residual = abs(frac - numer / denom)
+            if residual < one_ulp and residual < 5.0e-3:
+                raise ValueError(
+                    f"read_imago_skl: atom {atom_index} coordinate "
+                    f"{axis_name} = {token!r} appears to be the "
+                    f"fraction {numer}/{denom} truncated to "
+                    f"{num_places} decimal places.  Repeating "
+                    f"decimals such as 1/3 and 2/3 never terminate, "
+                    f"so a short form breaks the exact crystal "
+                    f"symmetry and aborts buildAtomPerm downstream.  "
+                    f"Give at least {REQUIRED_FRACTION_DIGITS} "
+                    f"decimal places (e.g. {numer / denom:.10f}) or "
+                    f"the symmetry-exact value you intend.")
+
     def read_imago_skl(self, filename=None, use_file_species=True):
         """Read the imago skeleton (.skl) input file.
 
@@ -1378,6 +1458,15 @@ class StructureControl:
                     self.connection_tag.append(av[4].lower() if len(av) > 4 else '')
 
                     if coord_type.startswith('frac'):
+                        # Gate: reject a coordinate written as a short
+                        #   truncation of a repeating decimal fraction
+                        #   (1/3, 2/3, ...), which silently breaks the
+                        #   crystal symmetry downstream.  See the
+                        #   _check_repeating_fraction docstring.
+                        for axis_name, token in zip(('a', 'b', 'c'),
+                                                    av[1:4]):
+                            self._check_repeating_fraction(
+                                    token, atom, axis_name)
                         fa = float(av[1])
                         fb = float(av[2])
                         fc = float(av[3])

@@ -1499,13 +1499,33 @@ and PSEUDOCODE landed before code.
   so the real producer path needs nothing extra.  Note the HTEX
   worker-count knob in this parsl is `max_workers_per_node`
   (not `max_workers`); `worker_init` lives on the provider.
-  REMAINING for C68: (b-cont) the real SlurmProvider level --
-  submit to rulisp-lab (partition/account=rulisp-lab) with a
-  worker_init that exports $IMAGO_RC/$IMAGO_TEMP/$IMAGO_BIN +
-  PYTHONPATH=$IMAGO_BIN, validating env propagation and queue
-  behavior; needs a real allocation (deferred; overlaps the
-  full-imago end-to-end). (c) lost-vs-failed fine-graining under
-  a real worker loss.
+  C68(b-cont) DONE -- real SlurmProvider VALIDATED 2026-05-22.
+  Hands-on 4-unit campaign (silicon/diamond/graphite/silica) from
+  jobs/kaleido_slurm/ via HTEX + SlurmProvider(rulisp-lab,
+  nodes_per_block=1, cores_per_node=2, exclusive=False,
+  max_workers_per_node=2). Proven: submission; worker_init env
+  propagation (imago ran, HDF5 from the cpg conda env lib,
+  makeinput built inputs); CROSS-NODE TCP (interchange on driver
+  c159 <-> worker pool on c083); 2-worker parallelism;
+  complete-and-report (2 failures isolated, 2 successes kept);
+  status.toml lifecycle worker->main; CACHE HITS on re-run
+  (silicon/diamond skipped, only misses re-dispatched). Verified
+  worker_init: source conda.sh; conda activate cpg; export
+  LD_LIBRARY_PATH=.../mamba/envs/cpg/lib; source the imago venv
+  activate; THEN source imagorc (the venv activate clobbers
+  PYTHONPATH, so imagorc must come after); OMP_NUM_THREADS=1.
+  TWO defects surfaced (kaleidoscope isolated both as failed):
+  (1) FIXED makeSGDB.py Perl->Python symlink escaping -- it
+  shell-escaped os.symlink targets, leaving 314 broken spaceDB
+  links (special-char space groups); now raw name -> 0 broken.
+  Committed as bdb5b14. (2) OPEN buildAtomPerm Fortran
+  STOP "no atom match found" for hexagonal/trigonal (gamma=120)
+  graphite(186)+silica(152); cubic converges. Next-session task.
+  REMAINING for C68: (c) lost-vs-failed fine-graining under a
+  real worker loss (validate dispatch._is_lost vs this parsl's
+  ManagerLost/WorkerLost/BadState names). Plus a diversity-of-
+  options study (multi-node, workers/node, exclusive, launcher)
+  per the user goal -- off critical path, later cluster session.
 - [ ] C69. Revise DESIGN 5.7 / PSEUDOCODE 11.4 /
   ARCHITECTURE 8.5 so the producer delegates SCF running
   to kaleidoscope (drops the bespoke run_imago_scf, COD

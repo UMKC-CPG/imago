@@ -264,16 +264,16 @@ subroutine buildAtomPerm
    !   translation vectors needed for real-space atom mapping. We
    !   pull in the *real-space-abc* forms (abcRealPointOps and
    !   abcRealFracTrans) -- the operations that have already been
-   !   conjugated by computeRealPointOps from the Cartesian xyz form
-   !   on disk into the basis of the real-space lattice currently held
-   !   in O_Lattice, the same basis we use for the atom positions
+   !   conjugated by computeRealPointOps from their conventional-cell
+   !   abc form into the basis of the real-space lattice currently
+   !   held in O_Lattice, the same basis we use for the atom positions
    !   below. See computeRealPointOps in kpoints.f90 for the
-   !   transform itself and the on-disk Cartesian convention it
-   !   assumes about its inputs.
+   !   conjugation T^{-1} R_conv T and the conv-abc input convention.
    use O_KPoints, only: numPointOps, abcRealPointOps, abcRealFracTrans
 
-   ! Import the inverse real-space lattice vectors for the Cartesian-to-
-   !   fractional coordinate conversion: abc = invRealVectors * xyz.
+   ! Import the inverse real-space lattice vectors for the Cartesian-
+   !   to-fractional conversion. invRealVectors has reciprocal vectors
+   !   as COLUMNS, so abc(i) = sum_j invRealVectors(j,i) * xyz(j).
    use O_Lattice, only: invRealVectors
 
    ! Make sure no accidental variables are defined.
@@ -294,11 +294,15 @@ subroutine buildAtomPerm
    ! Fractional (abc) coordinates of every atom site, converted from the
    !   Cartesian positions stored in atomSites(:)%cartPos. The conversion
    !   uses the same convention as computeIonicMoment: abc(i) = sum_j
-   !   invRealVectors(i,j) * xyz(j). Dimensions: (3, numAtomSites).
+   !   invRealVectors(j,i) * xyz(j) -- a dot product with COLUMN i of
+   !   invRealVectors (reciprocal vector i). Dimensions: (3, numAtomSites).
    real (kind=double), allocatable, dimension (:,:) :: abcAtomPos
 
    ! The fractional position of atom A after the full space group
-   !   operation {R|t} expressed in the loaded-lattice abc basis:
+   !   operation {R|t} expressed in the loaded-lattice abc basis.
+   !   abcRealPointOps stores the loaded-basis rotation R in the
+   !   ordinary row-major sense (computeRealPointOps emits it that
+   !   way), so the matrix-vector product is the straightforward
    !   rotPos(i) = sum_j abcRealPointOps(i,j,R) * abcAtomPos(j,A) +
    !   abcRealFracTrans(i,R).
    real (kind=double), dimension (dim3) :: rotPos
@@ -310,9 +314,20 @@ subroutine buildAtomPerm
 
    ! -----------------------------------------------------------------
    ! Step 1: Convert all atom positions from Cartesian (xyz) to
-   !   fractional (abc) coordinates. The transformation is:
-   !     abcAtomPos(i, A) = sum_j invRealVectors(i,j) * cartPos(j)
-   !   This is the same convention used in computeIonicMoment.
+   !   fractional (abc) coordinates. invRealVectors holds the
+   !   reciprocal lattice vectors (divided by 2*pi) as its COLUMNS:
+   !   lattice.f90 documents its first index as x,y,z and its second
+   !   as a,b,c, so invRealVectors(:,i) is reciprocal vector i. The
+   !   fractional component along axis i is the projection of the
+   !   Cartesian position onto that reciprocal vector:
+   !     abcAtomPos(i, A) = sum_j invRealVectors(j,i) * cartPos(j)
+   !   That is a dot product with COLUMN i, NOT row i. This matches
+   !   computeIonicMoment (which sums invRealVectors(k,j) over k) and
+   !   the exactAxisCell projection in lattice.f90. Dotting the row
+   !   instead silently transposes the inverse-cell matrix; the two
+   !   forms agree only for an orthogonal cell, so the row form
+   !   corrupts the fractional coordinates of any non-orthogonal
+   !   (e.g. hexagonal 120-degree) lattice.
    ! -----------------------------------------------------------------
 
    allocate (abcAtomPos(dim3, numAtomSites))
@@ -320,7 +335,7 @@ subroutine buildAtomPerm
    do atomA = 1, numAtomSites
       do axis = 1, dim3
          abcAtomPos(axis, atomA) = &
-               & sum(invRealVectors(axis,:) &
+               & sum(invRealVectors(:,axis) &
                &     * atomSites(atomA)%cartPos(:))
       enddo
    enddo
@@ -348,9 +363,11 @@ subroutine buildAtomPerm
          !   coordinates of the loaded-lattice abc basis:
          !     rotPos = R * abc + t
          !   where both R (= abcRealPointOps) and t (= abcRealFracTrans)
-         !   have already been transformed into that basis by
-         !   computeRealPointOps -- see the use-statement comment at the
-         !   top of the routine.
+         !   have already been conjugated into that basis by
+         !   computeRealPointOps (R_loaded = T^{-1} R_conv T) -- see the
+         !   use-statement comment at the top of the routine. R is
+         !   stored in ordinary row-major form, so the product dots
+         !   abc with each ROW: rotPos(i) = sum_j R(i,j)*abc(j) + t(i).
          do axis = 1, dim3
             rotPos(axis) = &
                   & sum(abcRealPointOps(axis,:,opIdx) &
