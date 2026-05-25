@@ -1518,9 +1518,13 @@ and PSEUDOCODE landed before code.
   (1) FIXED makeSGDB.py Perl->Python symlink escaping -- it
   shell-escaped os.symlink targets, leaving 314 broken spaceDB
   links (special-char space groups); now raw name -> 0 broken.
-  Committed as bdb5b14. (2) OPEN buildAtomPerm Fortran
+  Committed as bdb5b14. (2) FIXED buildAtomPerm Fortran
   STOP "no atom match found" for hexagonal/trigonal (gamma=120)
-  graphite(186)+silica(152); cubic converges. Next-session task.
+  graphite(186)+silica(152); cubic converged all along. Root
+  cause was point-op conjugation done in the wrong basis;
+  redesigned to T^-1 R_c T with a reciprocal inverse-transpose,
+  plus a repeating-decimal input gate.  All 4 demo structures
+  now converge.  Committed as ff33f5c.
   REMAINING for C68: (c) lost-vs-failed fine-graining under a
   real worker loss (validate dispatch._is_lost vs this parsl's
   ManagerLost/WorkerLost/BadState names). Plus a diversity-of-

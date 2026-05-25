@@ -4274,6 +4274,32 @@ futures have resolved, kaleidoscope returns a
 is scientifically acceptable is the client's job, never
 kaleidoscope's.
 
+**No error correction in the core -- the custodian
+boundary.**  A natural question is whether kaleidoscope
+should auto-correct a failing run the way custodian (the
+pymatgen job-babysitter for VASP and friends) does:
+detect a known error signature, edit the inputs, and
+rerun the job in place until it succeeds or hits a retry
+ceiling.  It must not.  custodian's value *is* its
+embedded domain knowledge -- it knows what a given solver
+error means and how to repair it -- which is exactly the
+coupling Principle 9 keeps out of the dispatch core (the
+same reason `detail` is opaque, 6.2.2).  So a failure
+here is terminal (`failed` or `lost`, 6.2.4): kaleidoscope
+records it and the client decides acceptance.  Where
+custodian-style correction *does* belong is one layer
+down -- inside imago.py's own iterate-to-convergence
+logic, or inside a smarter runner that loops on the 6.1
+API, precisely the "tightly iterative inner loop" shape
+above.  In that arrangement custodian's true analog is
+the runner plus imago.py's intra-run resume, not
+kaleidoscope: the layering mirrors VASP's own
+`FireWorks/jobflow -> custodian -> VASP` as `kaleidoscope
+-> runner -> imago.py`.  kaleidoscope still dispatches one
+unit and sees one outcome; recovery within a run lives
+below it, and whole-run reuse on resume lives in the
+cache (6.2.5).
+
 #### 6.2.4 Workspace layout (resolves ARCHITECTURE 9.8)
 
 This pins the strawman of ARCHITECTURE 9.6 into a
