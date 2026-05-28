@@ -10,6 +10,17 @@
 
 - [ ] V1. Confirm design principles against additional test
   cases beyond KNbO3 (VISION Principles.1)
+- [x] V2. Add Goal 5 (historical-guidance database) and
+  Principle 11 (experience as a curated artifact, not tribal
+  knowledge) to VISION.  Done 2026-05-28 as part of the
+  DESIGN 7 / ARCH 10 chain landing: the new prong frames an
+  artifact that records which convergence settings have
+  worked on which families of systems and that future
+  calculations consult via predict-then-verify, with
+  per-campaign harvest into a staging area and curator
+  promotion.  Principle 11 generalises this same discipline
+  back to the initial-potential DB (Goal 3) so both Goals
+  share one curation philosophy.
 
 ---
 
@@ -40,6 +51,24 @@
 - [ ] A6. GPU offload of restructured integral compute
   phase via OpenACC, CUDA Fortran, or OpenMP target
   (ARCHITECTURE 6.3)
+- [x] A8. Write ARCHITECTURE §10 (historical guidance
+  database, VISION Goal 5).  Mirrors §8: layout under
+  share/historicalGuidanceDB/ with `entries/` (canonical)
+  and `staging/` (auto-harvested awaiting curator review),
+  one TOML per entry; TOML format choice with same
+  rationale as §8.2; data-flow diagram showing predict ->
+  build verification grid -> kaleidoscope -> harvest hook
+  -> staged TOML -> curator promotion; signature keying by
+  element set + stoichiometry + optional structural-class
+  soft filter; curation/regeneration split into
+  harvest_guidance.py (producer-side) and
+  promote_guidance.py (curator helper); module/script
+  impact (new historical_guidance_db.py library; new
+  kaleidoscope campaign-builder helper consuming a
+  guidance entry); explicit relationship-with-other-prongs
+  section that closes the no-cross-reference decision
+  against DESIGN 5.  Done 2026-05-28 alongside DESIGN 7
+  and the VISION update.
 - [x] A7. Write ARCHITECTURE §9 (high-throughput
   calculation campaigns / "kaleidoscope", VISION Goal
   4).  Layers + one-directional dependency graph (9.1);
@@ -222,6 +251,62 @@
   cod_revision, strict on failure) and cif2skl.py (ASE
   CIF read -> StructureControl factory -> skl write).
   PSEUDOCODE for D11-D14 follows once each design lands.
+- [x] D16. Design the historical-guidance database
+  (VISION Goal 5, ARCHITECTURE §10).  The predict-then-
+  verify workflow: future calculations consult the DB for
+  the closest matching historical entry, use its k-density
+  as the predicted converged operating point, and run a
+  small verification grid around the prediction instead of
+  a wide convergence scan.  Subsections: 7.1 motivation +
+  why a separate DB from DESIGN 5 + why it accelerates
+  C48.3; 7.2 TOML schema v1 (per-entry signature with
+  element set + stoichiometry + optional structural class,
+  provenance, and one-or-more `[[entry.parameter]]` blocks
+  as the extensibility seam; day-1 ships only
+  `name = "kpoint_density"`); 7.3 worked gold sketch;
+  7.4 in-memory dataclasses (Signature, Parameter,
+  Verification, Provenance, GuidanceEntry,
+  HistoricalGuidanceDatabase) + the public surface
+  (load, save_entry, signature_of, predict); 7.5 hand-
+  formatted deterministic TOML emitter + the slug
+  derivation that uses a short SHA over campaign / source
+  / generated_at as a collision guard; 7.6 Jaccard +
+  stoichiometry-penalty similarity metric, structural-
+  class soft filter, minimum-match floor 0.3, and
+  tiebreakers; 7.7 predict-then-verify campaign
+  construction + the verification-grid widening function
+  (width scales with 1-similarity); 7.8 harvest pipeline
+  (harvest_guidance.py writes to staging; promote_guidance.py
+  is the curator's tool); 7.9 bootstrap behavior + the
+  wide-grid default for an empty DB or a no-match query;
+  7.10 open questions (cell-size guidance, multi-metric
+  verification, stoichiometry weight magnitude, staleness)
+  + the closed-by-decision record that the two databases
+  do NOT cross-reference each other.  Done 2026-05-28.
+- [ ] D17. Patch DESIGN 6.2 for the kaleidoscope <-> guidance
+  DB seam.  Four small writes that fall out once D16 lands:
+  (a) DESIGN 6.2.4 `<calc>`-tag rule (currently
+  `<job_name>-<basis_scf>`, e.g. `scf-mb`) is insufficient
+  for k-point / target-atom / supercell sweeps that all
+  collide under it.  Extend the tag rule to encode the
+  swept axis + value (e.g. `runs/graphite/kpt-density-200/`,
+  `runs/graphite/xanes-C12/`,
+  `cell-3x3x3_kpt-density-200_basis-fb/`).  (b) DB-producer
+  worked example in DESIGN 6.2.1 / 5.7 grows from "one unit
+  per reference solid" to "one sub-grid per solid, judged
+  to converged point, then harvest potential."  (c) A new
+  DESIGN 6.2 sub-section on the campaign-builder helper
+  that consumes a guidance entry and lays out the
+  verification grid; cross-references DESIGN 7.7.  (d)
+  Cross-reference VISION Principle 12 (the campaign layer
+  stays dumb; description lives in Python) and the
+  builder-split between kaleidoscope (option-axis sweeps)
+  and structure_control / acquisition (structure-axis
+  sweeps), so DESIGN 6.2 reflects the 2026-05-27 strategic
+  decisions that currently live only in memory.  None of
+  these is large; they are bundled here so they land in one
+  refine pass before the kaleidoscope/builder code work
+  (C71).
 - [x] D15. Design the makeinput callable build API (the
   makeinput-side twin of D11/C63): turn makeinput.py from
   an argv-and-cwd-bound script into one that also exposes a
@@ -407,6 +492,28 @@
   call run_prepared, matching DESIGN 6.3.6 and §14.4 -- no
   functional change (the dir exists post-build), removes
   chain drift.  Next: code -- C68(a).
+
+### Historical guidance database (VISION 5, ARCH 10)
+
+- [ ] P9. Write PSEUDOCODE for the historical-guidance
+  database library and the campaign-builder helper that
+  consumes it (DESIGN 7, D16).  Three blocks: (a) the
+  library -- load(), signature_of(),
+  predict() with the Jaccard + stoichiometry-penalty
+  metric and the structural-class soft filter, save_entry()
+  with the deterministic hand-formatted emitter and the
+  short-SHA slug derivation; (b) the campaign-builder
+  helper in src/scripts/kaleidoscope/ -- consume a
+  predict() result, lay out the verification grid via
+  build_verification_grid(center, similarity), attach the
+  prediction record to the campaign for the harvest hook
+  to recover, fall back to the wide-grid default when
+  predict() returns None; (c) harvest_guidance.py --
+  given a finished campaign's workspace, identify each
+  structure's verification grid, pick the converged point,
+  build a GuidanceEntry with verification provenance, and
+  write it via save_entry() into the staging directory.
+  Foundation for C70/C71/C72.
 
 ---
 
@@ -1180,8 +1287,23 @@ keeps the common case branch-free.
     batch, then harvests converged potentials from the
     run dirs (converged scfV matches input scfV; alphas
     from input min/max/number; coeffs and alphas taken
-    together).  BLOCKED on a usable kaleidoscope slice
-    (C63 + C68).  Carries the C69 doc revisions.
+    together).  Carries the C69 doc revisions.
+    DEPENDENCY UPDATE 2026-05-28: the original "BLOCKED on
+    a usable kaleidoscope slice (C63 + C68)" is satisfied
+    -- C63 done, C68(a)+(b)+(b-cont) done and validated
+    against real SlurmProvider; only C68(c) lost-vs-failed
+    remains and is off the critical path.  NEW dependencies
+    in priority order: C69 (DESIGN 5.7 / PSEUDOCODE 11.4 /
+    ARCH 8.5 revisions for producer-delegates-SCF); C70
+    (historical_guidance_db.py library); C71 (kaleidoscope
+    campaign-builder helper consuming a guidance entry);
+    and -- to actually deliver the acceleration -- C75
+    (seed run populating share/historicalGuidanceDB/entries/
+    so the producer's predict() calls return useful priors
+    rather than the wide-grid fallback).  Without C75 the
+    producer still works correctly; it just runs every
+    reference solid through the wide-grid sweep, doing as
+    much work as if predict-then-verify were not wired in.
 - [ ] C49. Curate the first reference solid (e.g.,
   Au fcc) and add its manifest entry; populate the
   first non-trivial "default_solid" potential at
@@ -1534,6 +1656,112 @@ and PSEUDOCODE landed before code.
   ARCHITECTURE 8.5 so the producer delegates SCF running
   to kaleidoscope (drops the bespoke run_imago_scf, COD
   fetch, and per-solid cache).  Pairs with C48.3.
+
+### Phase K -- historical guidance database (VISION 5, ARCH 10, DESIGN 7)
+
+The accumulation prong.  Each task wants D17 patched, P9
+landed, and the relevant DESIGN 7 subsection consulted
+before code lands.  The library (C70) is foundational; the
+campaign-builder helper (C71) is what makes predict-then-
+verify a real workflow; the harvest hook (C72) closes the
+loop back into the DB; the curator helper (C73) gates
+staging into canonical entries; the C48.3 wiring (C74) is
+the first major consumer that proves the artifact's
+payoff; the seed run (C75) populates the DB with its first
+real entries.
+
+- [ ] C70. Implement `src/scripts/historical_guidance_db.py`
+  per DESIGN 7.2 / 7.4 / 7.5 / 7.6 and PSEUDOCODE P9(a).
+  The library: HistoricalGuidanceError; dataclasses
+  (Signature, Verification, Parameter, Provenance,
+  GuidanceEntry, HistoricalGuidanceDatabase); load() with
+  validation rules 1-9 (each rule cites its violating
+  filename and field in the message); save_entry() using
+  the deterministic hand-formatted emitter (16-significant-
+  digit floats, fixed key order, blank-line block
+  separators, comma-trailing per-line array layout); the
+  slug derivation that uses a short SHA over
+  (campaign_id || source_structure || generated_at);
+  signature_of(StructureControl, structural_class="");
+  predict(db, target) returning (entry, similarity) or
+  None when below the 0.3 floor.  Tests cover every
+  validation rule firing with the expected message; the
+  emitter is bit-deterministic for a fixed in-memory
+  database; round-trip load(save_entry(...)) preserves all
+  fields; the Jaccard + stoichiometry-penalty metric
+  produces the expected scores on a handful of curated
+  pairs (Au-O vs Au-O = 1.0; Au-O vs Si-O = 0.33; Au:O 1:2
+  vs Au:O 1:1 = 0.67); the structural-class soft filter
+  demotes mismatches by 0.75; ties are broken by
+  generated_at recency then by source=="manual" then by
+  entry_id.  Library load passes known_methods=None at the
+  module boundary just like initial_potential_db.py.
+- [ ] C71. Implement the campaign-builder helper inside
+  `src/scripts/kaleidoscope/` per DESIGN 7.7 / D17(c) and
+  PSEUDOCODE P9(b).  predict_settings(structure, options,
+  structural_class, db) returns a Campaign of CalcUnits and
+  attaches a prediction record (predicted_from entry_id,
+  similarity, policy tag) to the campaign so the harvest
+  hook can later recover it.  build_verification_grid(center,
+  similarity) lays out the logspace grid whose width and
+  point count scale inversely with similarity per the
+  starting heuristics in DESIGN 7.7.  Empty-DB and
+  predict()==None cases fall through to
+  default_wide_kpoint_density_grid() (the 8-point bracket
+  list in DESIGN 7.9).  Tests cover: the prediction record
+  shape; that high-similarity returns a 3-point tight grid
+  and low-similarity returns a 6-point wider grid; that
+  log-spacing is centered on the predicted value; that an
+  empty DB returns the wide-grid default with policy =
+  "wide_grid_no_prior".
+- [ ] C72. Implement `src/scripts/harvest_guidance.py` per
+  DESIGN 7.8 (harvest half) and PSEUDOCODE P9(c).  Given a
+  finished campaign workspace, walks each structure's
+  verification grid, picks the converged k-density (the
+  smallest grid value at which the consecutive-grid
+  energy change falls below metric_threshold), and emits
+  one staged TOML per structure under
+  `share/historicalGuidanceDB/staging/`.  Non-converged
+  sweeps log a warning and SKIP -- a non-converged sweep
+  does not earn an entry.  Recovers the prediction record
+  attached by C71 so the staged entry's
+  `similarity_at_predict` carries the right value.  Tests
+  on a synthetic campaign workspace fake (no real Imago
+  runs needed) covering the converged-path, skip-path, and
+  prediction-record-recovery cases.
+- [ ] C73. Implement `src/scripts/promote_guidance.py` per
+  DESIGN 7.8 (curator half).  Interactive review mode is
+  default: list every file in `staging/`, print signature
+  + provenance + parameter values, prompt curator to
+  PROMOTE / SKIP / DELETE; promoted files move to
+  `entries/`.  `--all` batch-promotes without prompting
+  (for trusted automated campaigns).  `--dry-run` lists
+  what would happen without moving anything.  Tests
+  exercise each mode against a synthetic staging
+  directory.
+- [ ] C74. Wire the kaleidoscope campaign-builder helper
+  (C71) into the C48.3 producer.  Replaces the current
+  "user picks settings up front" pattern with predict-
+  then-verify: for each reference solid in the curation
+  manifest, signature_of() the structure, predict() against
+  the guidance DB, lay out the verification grid via C71,
+  dispatch through kaleidoscope.  Bundled with C48.3 once
+  C68(b) (the kaleidoscope+SLURM seam) is solid and C70+C71
+  are in place.
+- [ ] C75. Seed `share/historicalGuidanceDB/entries/` with
+  the first real entries: run a few representative
+  reference solids (likely from the DESIGN 5.7 curation
+  manifest) with a wide-grid sweep (no prior), harvest via
+  C72, curator-promote via C73.  This is the bootstrap run
+  per DESIGN 7.9; it makes the database non-empty for the
+  first time and from then on later C48.3 reference solids
+  in similar chemical families inherit predictions.  Seed
+  candidates: silicon (Si, the diamond-structure baseline),
+  rocksalt MgO (an ionic baseline), fcc Au (a metallic
+  baseline), graphite/diamond C (a covalent baseline);
+  picked to cover four reasonably orthogonal chemistry
+  classes so partial-Jaccard matches resolve meaningfully
+  on day 2.
 
 ---
 

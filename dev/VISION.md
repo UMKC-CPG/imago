@@ -10,7 +10,7 @@ range of material systems: crystals, amorphous solids,
 nanoparticles, molecules, interfaces, and grain boundaries.
 It is an academic code used for research and student training.
 
-The current development focus comprises four concurrent prongs.
+The current development focus comprises five concurrent prongs.
 Two of them address Brillouin-zone integration: implementing the
 Linear Analytic Tetrahedral (LAT) method, and correcting the
 treatment of eigenvector-dependent quantities under IBZ symmetry
@@ -23,6 +23,12 @@ tracking, and harvesting batches of Imago calculations on an
 HPC cluster, supporting both near-term needs (the database
 build, convergence sweeps, validation harnesses) and longer-term
 goals (ab-initio molecular dynamics, high-throughput screening).
+The fifth is an accumulation prong that knits the previous two
+together: a curated historical-guidance database that records
+which convergence settings worked on which families of systems,
+so that future calculations can predict a converged operating
+point from past experience and verify it with a small targeted
+campaign instead of an exhaustive grid search.
 
 ## Goals
 
@@ -83,6 +89,23 @@ goals (ab-initio molecular dynamics, high-throughput screening).
    optics chains spanning many structures -- become a regular
    need; in that scenario the inner Parsl logic is unchanged
    and Snakemake is additive rather than a replacement.
+5. **Accumulate historical convergence guidance.** Build a
+   curated database that records, for each family of systems
+   imago has converged on before, the convergence settings
+   that worked (initially: k-point density in points per
+   reciprocal angstrom; later: cell size, basis size, and
+   other knobs).  New calculations consult the database to
+   *predict* a converged operating point and run a small
+   verification grid around it, rather than scanning a wide
+   convergence surface from scratch.  Each successful
+   campaign appends its result back into the database (via a
+   staging step that a curator promotes), so the artifact
+   grows monotonically with use.  The database makes the
+   initial-potential-database build (Goal 3) faster because
+   the producer becomes a predict-then-verify client of this
+   prong rather than a guesser of settings, and it makes
+   routine convergence work on new systems vastly cheaper
+   than today's full-grid sweeps.
 
 ## Design Principles
 
@@ -163,3 +186,41 @@ goals (ab-initio molecular dynamics, high-throughput screening).
     acceptable for its scientific purpose. This applies whether
     the cause is convergence non-attainment, cluster-side job
     loss, or post-processing error.
+11. **Experience as a curated artifact, not tribal knowledge.**
+    Hard-won operating knowledge -- which k-point density a
+    family of oxides converges at, which supercell size a defect
+    chemistry needs, which initial potential worked for which
+    coordination environment -- belongs in a checked-in, schema-
+    governed, regeneratable database, not embedded in scripts or
+    held in researchers' heads.  Tools consult that database to
+    predict; campaigns verify the prediction; the verified
+    result feeds back into the database through a deliberate
+    curation step.  This applies equally to the initial-
+    potential database (Goal 3) and the historical-guidance
+    database (Goal 5); both share the same curate/regenerate/
+    consult discipline.  The implication for code: scripts must
+    never silently encode "experience" as hardcoded constants;
+    anything tunable enough to need empirical justification
+    belongs in a database that future readers can audit and
+    future campaigns can update.
+12. **The campaign layer stays dumb; description lives in
+    Python.**  The kaleidoscope runner is a thin dispatcher
+    over a flat list of independent `CalcUnit` records.  It
+    does not interpret per-calculation options, has no notion
+    of "this calc depends on that calc," and does not grow a
+    campaign description language (no campaign DSL, no
+    YAML/TOML workflow grammar, no DAG engine).  Higher-order
+    campaign shape -- multi-axis sweeps, dependent phases,
+    per-unit internal iteration -- lives in ordinary client-
+    side Python that *builds* the flat list before handing it
+    off, or in custom runners that own the iteration for one
+    unit.  This is the deliberate design choice that
+    distinguishes kaleidoscope from workflow engines like
+    Snakemake or LAMMPS' input language: by refusing to grow
+    a domain language, kaleidoscope stays open to every
+    campaign shape its clients invent, and the skills a
+    student picks up while building campaigns are ordinary
+    Python rather than a one-off DSL.  Principle 9 says
+    "domain-specific machinery lives at the adapter layer";
+    Principle 12 says specifically what the campaign layer
+    refuses to absorb.

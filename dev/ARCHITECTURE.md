@@ -1287,3 +1287,254 @@ What remains open:
   the producer running SCFs itself; they must be revised
   to delegate to kaleidoscope.  Tracked as follow-up
   (TODO C69), not an architectural unknown.
+
+## 10. Historical Guidance Database
+
+The fifth prong (VISION Goal 5) accumulates an artifact of
+"what convergence settings have worked, on which families of
+systems."  New calculations consult it to predict a converged
+operating point and run a small verification grid around the
+prediction, instead of scanning a wide convergence surface
+from scratch.  This section covers on-disk layout, file
+format choice, the lookup path through kaleidoscope's
+campaign builder, the harvest pipeline, and the module
+boundaries.  Algorithmic details (similarity metric, grid
+widening, prediction algorithm) are deferred to DESIGN
+section 7.
+
+### 10.1 Layout
+
+The historical-guidance database lives under a new top-level
+directory in `share/`, parallel to `share/atomicPDB/` (Goal 3)
+and `share/atomicBDB/` (curation manifest cache):
+
+```
+share/
+  historicalGuidanceDB/
+    entries/                Canonical entries.  One TOML
+                            file per entry, named with a
+                            deterministic slug derived from
+                            its signature plus a short hash:
+                            `au-1_o-2_<short_sha>.toml`.
+    staging/                Auto-harvested entries awaiting
+                            curator review.  Same file
+                            format as `entries/`.  Once
+                            promoted, files move into
+                            `entries/`; the staging area
+                            is not consumed by lookup.
+    SCHEMA_VERSION          Single line.  Bumped on schema
+                            change.  Readers refuse files
+                            whose `schema_version` mismatches
+                            this top-level marker.
+```
+
+One-file-per-entry rather than one big file: easy append, easy
+diff under version control, no atomic-write contortions during
+parallel harvest, and a slow-growing directory of small files
+remains tractable into the thousands.
+
+### 10.2 File Format
+
+TOML, same rationale as ARCHITECTURE 8.2: small files, human
+inspection a hard requirement, Python stdlib `tomllib` for
+reads, hand-formatted emitter for writes.  The full schema,
+deterministic emitter contract, and worked sketch live in
+DESIGN sections 7.2, 7.3, and 7.5.  Architectural invariants:
+
+- **`schema_version` on every file.**  Lets the reader refuse
+  unknown versions; lets future schema additions remain
+  additive.  Day-1 ships v1.
+- **Signature first.**  Every entry carries an `[entry.signature]`
+  block (element set, stoichiometry, optional structural class)
+  as its identifying header.  The lookup algorithm (7.6) keys
+  exclusively on this block.
+- **Parameter blocks are repeatable.**  The guidance content
+  is a list of `[[entry.parameter]]` sub-blocks, each carrying
+  a `name`, a `value`, a `unit`, and an optional
+  `[entry.parameter.verification]` record of the grid that
+  validated it.  Day-1 ships only `name = "kpoint_density"`;
+  adding `cell_size`, `basis`, or `pot_label` later is a new
+  sub-block type, not a schema rewrite.
+- **Provenance is required.**  Every entry carries the
+  campaign id, the source structure, the Imago commit, and a
+  UTC timestamp.  Non-negotiable per VISION Principle 11.
+
+### 10.3 Data Flow
+
+```
+new calculation (structure, options)
+    |
+    | Campaign builder asks the lookup module:
+    |    "given this structure, predict
+    |     the converged operating point."
+    v
+historical_guidance_db.predict(structure)
+    |   1. Compute signature(structure).
+    |   2. Scan all entries in
+    |      share/historicalGuidanceDB/entries/.
+    |   3. Score each by signature similarity
+    |      (Jaccard + stoichiometry + optional
+    |      structural-class soft filter).
+    |   4. Return (best_entry, similarity_score).
+    v
+Campaign builder uses the prediction to lay out a small
+verification grid: width and density determined by the
+similarity score (high similarity -> tight grid; low
+similarity -> wider grid).
+    |
+    | Kaleidoscope runs the verification grid
+    | (DESIGN 6.2).
+    v
+campaign harvest hook (10.5)
+    |
+    | Examines the verification grid, picks the
+    | converged point, writes a new entry to
+    | share/historicalGuidanceDB/staging/.
+    v
+curator review (manual or scripted) promotes a
+staging entry into share/historicalGuidanceDB/entries/.
+    |
+    v
+The promoted entry is visible to all future predict() calls.
+```
+
+The lookup path runs at campaign-construction time -- well
+before any Imago run.  The harvest path runs at campaign-
+completion time, after the verification grid has converged
+or has been judged inconclusive.  Imago itself is unaware of
+the database.  All format awareness lives in the new helper
+module (10.6).
+
+### 10.4 Signature Keying and Matching
+
+The signature has two mandatory components and one optional:
+
+- `elements`: the sorted set of element symbols present in
+  the structure.
+- `stoichiometry`: the integer multiplicities of those
+  elements, normalized to the smallest integer ratio.
+- `structural_class` (optional): a short string tag the user
+  may supply at predict time, e.g. `"rutile"`, `"metallic"`,
+  `"molecular_crystal"`.  When given, it acts as a soft
+  filter: matches that share the class are preferred, but
+  no match falls back to ignoring the class.
+
+The match metric is a Jaccard-style similarity over elements,
+combined with a stoichiometry-distance penalty.  Full formula
+in DESIGN 7.6.  The matching deliberately does not include
+structural detail (Bravais lattice, point group) by default --
+the cost of being too fine (every new lattice misses) outweighs
+the benefit when the verification grid is doing the safety
+work.  Users who *know* a structural class can supply it to
+narrow the search.
+
+### 10.5 Curation, Regeneration, and Harvest
+
+The historical-guidance database is a build product like the
+initial-potential database (ARCHITECTURE 8.5), but with one
+key difference: every successful campaign is a *potential
+contributor* to it, not just a hand-curated reference set.
+This makes the harvest hook the central piece of machinery:
+
+```
+src/scripts/
+  historical_guidance_db.py          Library: read, lookup,
+                                     emit.  No orchestration.
+  harvest_guidance.py                Producer-side helper:
+                                     given a finished
+                                     campaign, examine the
+                                     verification grids,
+                                     write staged entries.
+  promote_guidance.py                Curator helper:
+                                     review and promote
+                                     staging entries into
+                                     the canonical entries
+                                     directory.
+```
+
+- `harvest_guidance.py` is invoked at campaign-completion time
+  (either as a post-step the campaign driver calls, or as a
+  standalone CLI run after the fact).  It reads the campaign's
+  workspace, identifies each verification grid, picks the
+  converged point per structure, and emits one staged TOML per
+  structure into `share/historicalGuidanceDB/staging/`.
+- `promote_guidance.py` is the curator's tool.  It lists
+  staged entries, displays the relevant provenance, and
+  promotes selected entries into `entries/`.  Manual
+  curation is the default; a `--all` flag for trusted
+  campaigns is the escape hatch.
+- Unlike the initial-potential DB, there is no manifest of
+  reference solids that drives full regeneration: the
+  historical-guidance DB grows monotonically with use.  Old
+  entries are not deleted on schema bumps; a migration tool
+  rewrites them in place.
+
+### 10.6 Module and Script Impact
+
+Python:
+- `src/scripts/historical_guidance_db.py`: new library.
+  Reader, signature computation, similarity matching, lookup,
+  hand-formatted emitter.  Imports only `tomllib`.
+- `src/scripts/kaleidoscope/`: gains a campaign-builder helper
+  that consumes a guidance entry and lays out the verification
+  grid.  This is the "option-axis sweep" half of the builder
+  split (per the 2026-05-27 strategic decision); the
+  structure-axis half remains domain-specific and stays out
+  of kaleidoscope.
+- `src/scripts/harvest_guidance.py`: new producer helper.
+- `src/scripts/promote_guidance.py`: new curator helper.
+
+Fortran: no changes.  The database is consulted before any
+Imago run starts and harvested after every Imago run finishes;
+Imago itself has no awareness of it.
+
+The library / producer / consumer split mirrors DESIGN 5's
+discipline: the library knows the format, the producer (harvest
++ promote) writes entries, the consumers (kaleidoscope builder
+and any future client) read entries.
+
+### 10.7 Relationship to Other Prongs
+
+- **DESIGN 5 (initial potential database):** the historical-
+  guidance DB stores convergence *settings*; the initial-
+  potential DB stores converged *potentials*.  They share the
+  same library/producer/consumer discipline (Principle 11) and
+  the same `share/` shape (per-element-or-signature TOML), but
+  they are independent artifacts with independent lifetimes
+  and no cross-references.  A guidance entry never names a
+  potential-DB entry, and vice versa; the two artifacts share
+  only the curation discipline, not their contents.  This was
+  considered and rejected in DESIGN 7.10 ("Closed by
+  decision"): the two serve different audiences and update
+  cadences, and entangling their schemas would couple their
+  lifetimes unnecessarily.
+- **DESIGN 6 (kaleidoscope):** kaleidoscope is the dispatch
+  layer that runs the verification grid the guidance DB
+  predicts.  The dependency goes one way: kaleidoscope's
+  campaign builder reads the guidance DB; the guidance DB
+  does not depend on kaleidoscope.  Kaleidoscope still works
+  without the guidance DB -- callers can pass an explicit
+  CalcUnit list, the old way.
+- **C48.3 producer (initial-potential database build):** the
+  first major consumer.  Today C48.3 is blocked on a usable
+  kaleidoscope slice; it becomes much cheaper once the
+  guidance DB is populated with even a few reference-solid
+  entries, because each reference solid's convergence cost
+  drops from a grid search to a small verification sweep.
+
+### 10.8 Open Architectural Questions
+
+- **File naming uniqueness under parallel harvest.**  Two
+  campaigns finishing nearly simultaneously could collide on
+  the same slug if both produce an entry for the same
+  signature within the same second.  Plan: include a short
+  random suffix in the filename, generated at write time.
+  Final decision deferred to DESIGN 7.5 (emitter contract).
+- **Signature normalization across polytypes.**  If alpha-
+  Au2O3 and beta-Au2O3 both converge at similar k-densities
+  but the curator wants them as separate entries, the
+  `structural_class` soft filter is the intended mechanism.
+  If the user never supplies a structural class, the lookup
+  returns the latest of the two arbitrarily.  Whether the
+  lookup should prefer a "richest provenance" tiebreaker
+  instead is open and deferred to DESIGN 7.6.
