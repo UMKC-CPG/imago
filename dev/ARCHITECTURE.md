@@ -1288,253 +1288,441 @@ What remains open:
   to delegate to kaleidoscope.  Tracked as follow-up
   (TODO C69), not an architectural unknown.
 
-## 10. Historical Guidance Database
+## 10. Historical Guidance Dataspace
 
-The fifth prong (VISION Goal 5) accumulates an artifact of
-"what convergence settings have worked, on which families of
-systems."  New calculations consult it to predict a converged
-operating point and run a small verification grid around the
-prediction, instead of scanning a wide convergence surface
-from scratch.  This section covers on-disk layout, file
-format choice, the lookup path through kaleidoscope's
-campaign builder, the harvest pipeline, and the module
-boundaries.  Algorithmic details (similarity metric, grid
-widening, prediction algorithm) are deferred to DESIGN
-section 7.
+The fifth prong (VISION Goal 5) accumulates a curated
+**dataspace** of converged calculations and a small
+**predictor** trained on it.  Each entry is a datapoint:
+the chemistry-and-structure signature of a converged
+system, the resulting electronic-structure character (band
+gap, spin polarization), and the convergence settings
+(initially k-point density) that worked.  The predictor is
+a two-stage k-nearest-neighbor regression: first it
+predicts the electronic character from chemistry, then it
+predicts the k-density from the electronic character.  New
+calculations query the predictor, get a predicted operating
+point plus an uncertainty, and run a verification grid
+whose width is set by the uncertainty.  Each successful
+campaign appends back into the dataspace, so the predictor
+gets better as it accumulates evidence.
+
+This section covers on-disk layout, file format choice,
+the data-flow through kaleidoscope's campaign builder, the
+harvest pipeline, and the module boundaries.
+Algorithmic details (feature-vector definition, k-NN
+metric, predictor stages, confidence measure, grid
+widening) live in DESIGN section 7.
 
 ### 10.1 Layout
 
-The historical-guidance database lives under a new top-level
-directory in `share/`, parallel to `share/atomicPDB/` (Goal 3)
-and `share/atomicBDB/` (curation manifest cache):
+The dataspace lives under a new top-level directory in
+`share/`, parallel to `share/atomicPDB/` (Goal 3) and
+`share/atomicBDB/` (curation manifest cache):
 
 ```
 share/
   historicalGuidanceDB/
     entries/                Canonical entries.  One TOML
-                            file per entry, named with a
-                            deterministic slug derived from
-                            its signature plus a short hash:
-                            `au-1_o-2_<short_sha>.toml`.
-    staging/                Auto-harvested entries awaiting
-                            curator review.  Same file
-                            format as `entries/`.  Once
-                            promoted, files move into
-                            `entries/`; the staging area
-                            is not consumed by lookup.
-    SCHEMA_VERSION          Single line.  Bumped on schema
-                            change.  Readers refuse files
-                            whose `schema_version` mismatches
-                            this top-level marker.
+                            file per entry.  Two-level
+                            partition by system_type:
+                            crystalline/, amorphous/,
+                            nanostructure/, molecular/.
+                            File slug:
+                            `<system_type>-<short_sha>.toml`.
+    staging/                Auto-harvested entries
+                            awaiting curator review.
+                            Mirrors `entries/`s system_type
+                            partition.  Once promoted,
+                            files move from staging/ into
+                            entries/; the staging area is
+                            not consumed by the predictor.
+    SCHEMA_VERSION          Single line containing a bare
+                            decimal integer (e.g. `1\n`).
+                            Bumped on schema change.
+                            Readers refuse files whose
+                            `schema_version` mismatches.
+    gap_groups.toml         Element-group classification
+                            table (alkali / alkali-earth /
+                            halide / chalcogen / ... / H).
+                            Loaded by the library at init
+                            to compute composition
+                            vectors.  Checked-in data,
+                            not code, per Principle 11.
 ```
 
-One-file-per-entry rather than one big file: easy append, easy
-diff under version control, no atomic-write contortions during
-parallel harvest, and a slow-growing directory of small files
-remains tractable into the thousands.
+**Why partition only by system_type, not by gap or
+chemistry.**  The predictor operates on a continuous
+feature space (composition vector + lattice family +
+measured gap and spin-polarization); the only *categorical*
+axis is system_type, because the predictor's stage-2
+relationship (gap+spin → k-density) is qualitatively
+different across system_types (a crystalline insulator's
+k-density depends on chemistry; an amorphous insulator's
+is set by cell size via the density convention; a
+molecular cluster is always Γ-only).  Partitioning by
+system_type lets the predictor switch sub-models cleanly;
+partitioning further by gap or chemistry would force a
+continuous variable into bins prematurely.
+
+**One file per entry, not one big file.**  Easy append,
+easy git diff, no atomic-write contortions during a
+500-entry parallel seed run, and a directory of 500-5000
+small files stays tractable.  The predictor loads all
+entries into an in-memory dataspace at init time -- TOML
+parsing of a few thousand small files takes well under a
+second on commodity hardware.
 
 ### 10.2 File Format
 
-TOML, same rationale as ARCHITECTURE 8.2: small files, human
-inspection a hard requirement, Python stdlib `tomllib` for
-reads, hand-formatted emitter for writes.  The full schema,
-deterministic emitter contract, and worked sketch live in
-DESIGN sections 7.2, 7.3, and 7.5.  Architectural invariants:
+TOML, same rationale as ARCHITECTURE 8.2: small files,
+human inspection a hard requirement, Python stdlib
+`tomllib` for reads, hand-formatted emitter for writes.
+The full schema, deterministic emitter contract, and
+worked sketch live in DESIGN 7.2 / 7.3 / 7.5.
+Architectural invariants:
 
-- **`schema_version` on every file.**  Lets the reader refuse
-  unknown versions; lets future schema additions remain
-  additive.  Day-1 ships v1.
-- **Signature first.**  Every entry carries an `[entry.signature]`
-  block (element set, stoichiometry, optional structural class)
-  as its identifying header.  The lookup algorithm (7.6) keys
-  exclusively on this block.
-- **Parameter blocks are repeatable.**  The guidance content
-  is a list of `[[entry.parameter]]` sub-blocks, each carrying
-  a `name`, a `value`, a `unit`, and an optional
-  `[entry.parameter.verification]` record of the grid that
-  validated it.  Day-1 ships only `name = "kpoint_density"`;
-  adding `cell_size`, `basis`, or `pot_label` later is a new
-  sub-block type, not a schema rewrite.
+- **`schema_version` on every file.**  Lets the reader
+  refuse unknown versions; lets future schema additions
+  remain additive.  Day-1 ships v1.
+- **Signature block first.**  Every entry carries an
+  `[entry.signature]` block declaring `system_type`,
+  the 13-dimensional `composition_vector` keyed by
+  element-group, and (for crystalline only) the 6-axis
+  one-hot `lattice_family`.  This is the predictor's
+  feature input.
+- **Measured-quantities block.**  `[entry.measured]`
+  carries the quantities harvested from the converged
+  calculation: `gap_ev`, `gap_kind`
+  (`direct`/`indirect`/`none`), `spin_polarization`,
+  `total_magnetization`, and the converged
+  `kpoint_density` (the target the predictor learns to
+  produce).
+- **Context block.**  `[entry.context]` carries
+  parameters that influenced the measurement: `basis`
+  (`mb`/`fb`/`eb`), `functional`, and
+  `convergence_threshold`.  Future predictors may use
+  these as additional regression features; v1's
+  predictor conditions on `basis` and `functional`
+  (separate sub-models) and ignores the rest.
+- **Optional extras.**
+  `dos_at_fermi` is recorded for metals when available
+  (a better metal-density predictor than `gap_ev = 0`)
+  but is permitted to be missing.
 - **Provenance is required.**  Every entry carries the
-  campaign id, the source structure, the Imago commit, and a
-  UTC timestamp.  Non-negotiable per VISION Principle 11.
+  campaign id, the source structure id, the imago
+  commit, and a UTC timestamp.  Non-negotiable per
+  Principle 11.
 
 ### 10.3 Data Flow
 
 ```
-new calculation (structure, options)
+new calculation (structure, options, system_type)
     |
-    | Campaign builder asks the lookup module:
-    |    "given this structure, predict
-    |     the converged operating point."
+    | The kaleidoscope campaign-builder helper
+    | (DESIGN 6.2.8) asks the predictor:
+    |    "given this structure, predict the converged
+    |     k-density and tell me how confident you are."
     v
-historical_guidance_db.predict(structure)
-    |   1. Compute signature(structure).
-    |   2. Scan all entries in
-    |      share/historicalGuidanceDB/entries/.
-    |   3. Score each by signature similarity
-    |      (Jaccard + stoichiometry + optional
-    |      structural-class soft filter).
-    |   4. Return (best_entry, similarity_score).
+guidance_db.predict(feature_vector, system_type)
+    |   1. Switch on system_type:
+    |      - amorphous, nanostructure, molecular:
+    |        consult the small dedicated sub-model
+    |        (typically returns "use the density
+    |        convention floor", i.e. ~Gamma-only for
+    |        large cells), and return.
+    |      - crystalline: run the two-stage regression
+    |        below.
+    |   2. Stage 1 (chemistry -> electronic character):
+    |      k-NN regression in composition+lattice
+    |      feature space, predicting (gap, spin_pol).
+    |   3. Stage 2 (electronic character -> k-density):
+    |      k-NN regression in (gap, spin_pol) space,
+    |      predicting kpoint_density.
+    |   4. Confidence: variance over the k nearest
+    |      neighbors at each stage, combined into one
+    |      uncertainty score in [0.0, 1.0].
+    |   5. Return PredictionResult(
+    |        predicted_kpoint_density, confidence,
+    |        neighbor_entry_ids, predicted_gap,
+    |        predicted_spin_pol,
+    |        is_under_trained,
+    |      ).
     v
-Campaign builder uses the prediction to lay out a small
-verification grid: width and density determined by the
-similarity score (high similarity -> tight grid; low
-similarity -> wider grid).
+The helper builds the verification grid using the
+variance-aware widening function (DESIGN 7.7): narrow
+when confidence is high, wide when low, wide-grid
+fallback when `is_under_trained` is set.
     |
-    | Kaleidoscope runs the verification grid
-    | (DESIGN 6.2).
+    | Kaleidoscope dispatches the grid (DESIGN 6.2).
     v
 campaign harvest hook (10.5)
     |
-    | Examines the verification grid, picks the
-    | converged point, writes a new entry to
-    | share/historicalGuidanceDB/staging/.
+    | 1. Pick the converged grid point per structure
+    |    (smallest density where consecutive grid
+    |    points' energy delta < threshold).
+    | 2. Read measured gap, spin, dos_at_fermi from
+    |    the converged calc's result.toml.
+    | 3. Build a richly-populated GuidanceEntry and
+    |    emit it to staging/<system_type>/.
     v
-curator review (manual or scripted) promotes a
-staging entry into share/historicalGuidanceDB/entries/.
+Curator promotion (manual one-at-a-time, batch-promote
+for trusted automated campaigns, or dry-run preview)
+moves staging entries into entries/<system_type>/.
     |
     v
-The promoted entry is visible to all future predict() calls.
+The promoted entry joins the in-memory dataspace on
+the next library load and is visible to all future
+predict() calls.
 ```
 
-The lookup path runs at campaign-construction time -- well
-before any Imago run.  The harvest path runs at campaign-
-completion time, after the verification grid has converged
-or has been judged inconclusive.  Imago itself is unaware of
-the database.  All format awareness lives in the new helper
+The predictor runs at campaign-construction time -- well
+before any Imago run.  The harvest runs at campaign-
+completion time.  Imago itself is unaware of the
+dataspace.  All format awareness lives in the new helper
 module (10.6).
 
-### 10.4 Signature Keying and Matching
+### 10.4 Feature Space and the Predictor
 
-The signature has two mandatory components and one optional:
+The predictor operates on a **feature space** that
+combines a chemistry vector with a lattice-family vector
+(crystalline only) and a coarse system-type partition:
 
-- `elements`: the sorted set of element symbols present in
-  the structure.
-- `stoichiometry`: the integer multiplicities of those
-  elements, normalized to the smallest integer ratio.
-- `structural_class` (optional): a short string tag the user
-  may supply at predict time, e.g. `"rutile"`, `"metallic"`,
-  `"molecular_crystal"`.  When given, it acts as a soft
-  filter: matches that share the class are preferred, but
-  no match falls back to ignoring the class.
+- **Composition vector** (13-dim): atom-fraction weight
+  in each of 13 element-group buckets -- alkali,
+  alkali-earth, halide, chalcogen, pnictogen, group-IV,
+  group-III, transition-metal (lumped 3d/4d/5d),
+  lanthanide, actinide, metalloid, noble-gas, hydrogen.
+  The group classification table (`gap_groups.toml`,
+  10.1) is a checked-in data file; Principle 11
+  requires the chemistry knowledge to be auditable,
+  not buried in code.
+- **Lattice family** (6-axis one-hot, crystalline
+  only): cubic / hex / tet / ortho / mono / tri.
+  Cheap-to-extract from the structure file via
+  StructureControl.  Mitigates the gap-vs-polymorph
+  smoothness risk (DESIGN 7.6).
+- **System type partition** (4-way): crystalline,
+  amorphous, nanostructure, molecular.  Hard switch
+  for which sub-model runs.
 
-The match metric is a Jaccard-style similarity over elements,
-combined with a stoichiometry-distance penalty.  Full formula
-in DESIGN 7.6.  The matching deliberately does not include
-structural detail (Bravais lattice, point group) by default --
-the cost of being too fine (every new lattice misses) outweighs
-the benefit when the verification grid is doing the safety
-work.  Users who *know* a structural class can supply it to
-narrow the search.
+The predictor is **k-nearest-neighbor with inverse-
+distance weighting**, in two stages for crystalline:
+stage 1 maps composition+lattice → (gap, spin_pol);
+stage 2 maps (gap, spin_pol) → k-density.  The split
+exploits transferability: stage 1 is chemistry-heavy and
+needs broad chemistry coverage; stage 2 is physics-heavy
+and is roughly material-independent.  Each stage carries
+its own confidence (variance of the k neighbors); the
+two combine into one uncertainty for the verification
+grid.
+
+For non-crystalline system types (amorphous,
+nanostructure, molecular), the predictor returns a
+canonical result driven by the density convention plus
+any system_type-specific corrections; chemistry plays
+little role.  The implementation is correspondingly
+simpler.
+
+Full algorithm (k value, distance metric, normalization,
+confidence formula, weighting under sparse data) is in
+DESIGN 7.6.  The exact bootstrap behavior when the
+dataspace is too thin for stage 1 to be trustable is in
+DESIGN 7.9.
 
 ### 10.5 Curation, Regeneration, and Harvest
 
-The historical-guidance database is a build product like the
-initial-potential database (ARCHITECTURE 8.5), but with one
-key difference: every successful campaign is a *potential
-contributor* to it, not just a hand-curated reference set.
-This makes the harvest hook the central piece of machinery:
+The dataspace is a build product like the initial-
+potential database (8.5), but with one key difference:
+every successful campaign is a *potential contributor*,
+not just a hand-curated reference set.  This makes the
+harvest hook central machinery:
 
 ```
 src/scripts/
-  historical_guidance_db.py          Library: read, lookup,
-                                     emit.  No orchestration.
-  harvest_guidance.py                Producer-side helper:
-                                     given a finished
-                                     campaign, examine the
-                                     verification grids,
-                                     write staged entries.
-  promote_guidance.py                Curator helper:
+  guidance_db.py          Library: read,
+                                     compute composition
+                                     vectors, run the
+                                     predictor, emit
+                                     entries.  No
+                                     orchestration.
+  guidance_harvest.py                Producer-side
+                                     helper: given a
+                                     finished campaign,
+                                     examine each
+                                     structure's
+                                     verification grid,
+                                     read measured
+                                     quantities from
+                                     each result.toml,
+                                     write staged
+                                     entries.
+  guidance_promote.py                Curator helper:
                                      review and promote
-                                     staging entries into
-                                     the canonical entries
-                                     directory.
+                                     staging entries
+                                     into the canonical
+                                     entries directory.
 ```
 
-- `harvest_guidance.py` is invoked at campaign-completion time
-  (either as a post-step the campaign driver calls, or as a
-  standalone CLI run after the fact).  It reads the campaign's
-  workspace, identifies each verification grid, picks the
-  converged point per structure, and emits one staged TOML per
-  structure into `share/historicalGuidanceDB/staging/`.
-- `promote_guidance.py` is the curator's tool.  It lists
-  staged entries, displays the relevant provenance, and
-  promotes selected entries into `entries/`.  Manual
-  curation is the default; a `--all` flag for trusted
-  campaigns is the escape hatch.
-- Unlike the initial-potential DB, there is no manifest of
-  reference solids that drives full regeneration: the
-  historical-guidance DB grows monotonically with use.  Old
-  entries are not deleted on schema bumps; a migration tool
-  rewrites them in place.
+- `guidance_harvest.py` is invoked at campaign-completion
+  time (either as a post-step the campaign driver calls,
+  or as a standalone CLI run after the fact).  It reads
+  the campaign's workspace, identifies each verification
+  grid, picks the converged point per structure, reads
+  the measured electronic-structure quantities from the
+  converged calc's result.toml, and emits one staged
+  TOML per structure into the appropriate
+  `share/historicalGuidanceDB/staging/<system_type>/`
+  subdirectory.
+- `guidance_promote.py` is the curator's tool.  Three
+  modes: interactive one-at-a-time review (default);
+  batch `--auto-promote` for trusted automated campaigns
+  meeting an objective acceptance rule (the converged
+  k-density landed in the middle 60% of the verification
+  grid AND the top three grid points' total-energy
+  variance is below threshold); `--dry-run` preview.
+  The auto-promotion rule lets a 500-entry seed campaign
+  promote ~80% of entries unattended, with the curator
+  reviewing only the ~20% outliers.
+- Unlike the initial-potential DB, there is no manifest
+  of reference solids that drives full regeneration:
+  the dataspace grows monotonically with use.  Old
+  entries are not deleted on schema bumps; a migration
+  tool (`guidance_migrate.py`) rewrites them in place.
+
+The **seed campaign** (TODO C75) is what populates the
+initial dataspace.  It is a one-time stratified sweep
+across element-group pairs and common stoichiometry
+patterns (~150-250 calculations covering the chemistry
+surface representatively rather than at random) feeding
+the auto-promotion rule above.  After the seed lands,
+ongoing campaigns (the C48.3 producer, future
+characterization runs, etc.) contribute additional
+entries as they finish.
 
 ### 10.6 Module and Script Impact
 
 Python:
-- `src/scripts/historical_guidance_db.py`: new library.
-  Reader, signature computation, similarity matching, lookup,
-  hand-formatted emitter.  Imports only `tomllib`.
-- `src/scripts/kaleidoscope/`: gains a campaign-builder helper
-  that consumes a guidance entry and lays out the verification
-  grid.  This is the "option-axis sweep" half of the builder
-  split (per the 2026-05-27 strategic decision); the
-  structure-axis half remains domain-specific and stays out
-  of kaleidoscope.
-- `src/scripts/harvest_guidance.py`: new producer helper.
-- `src/scripts/promote_guidance.py`: new curator helper.
 
-Fortran: no changes.  The database is consulted before any
-Imago run starts and harvested after every Imago run finishes;
-Imago itself has no awareness of it.
+- `src/scripts/guidance_db.py`: new library.
+  TOML reader + validation; element-group classifier
+  (loads `gap_groups.toml`); composition-vector and
+  lattice-family computation from a StructureControl;
+  the in-memory dataspace; the two-stage k-NN
+  predictor; the deterministic hand-formatted emitter.
+  Imports only `tomllib`, `math`, and the existing
+  `structure_control.py`.  Module-level docstring
+  describes its role as the **library** half of the
+  library/producer/consumer split (10.5).
+- `src/scripts/kaleidoscope/` campaign-builder helper
+  (DESIGN 6.2.8): consumes a `PredictionResult` and
+  builds a `Campaign` of `CalcUnit`s laid out per the
+  tag convention of DESIGN 6.2.4.  This is the
+  option-axis half of the builder split per VISION
+  Principle 12; the structure-axis half remains
+  domain-specific and lives in `structure_control` /
+  acquisition.
+- `src/scripts/guidance_harvest.py`: new producer
+  helper.
+- `src/scripts/guidance_promote.py`: new curator
+  helper.
+- `src/scripts/guidance_migrate.py`: future schema-
+  migration tool.  Not in day-1 scope.
 
-The library / producer / consumer split mirrors DESIGN 5's
-discipline: the library knows the format, the producer (harvest
-+ promote) writes entries, the consumers (kaleidoscope builder
-and any future client) read entries.
+Fortran:
+
+- A small extension to imago.py's harvest path so that
+  `result.toml` carries `gap_ev`, `gap_kind`,
+  `total_magnetization`, and (for metals)
+  `dos_at_fermi`.  These quantities are computable
+  from existing SCF output (eigenvalue spectrum +
+  density of states); the change is to expose them via
+  the callable API (DESIGN 6.1).  Tracked as TODO C76
+  (new under Phase K).
+
+The library / producer / consumer split mirrors DESIGN 5:
+the library knows the format and runs the predictor; the
+producer (harvest + promote) writes entries; the
+consumers (kaleidoscope builder and any future client)
+read entries.
 
 ### 10.7 Relationship to Other Prongs
 
-- **DESIGN 5 (initial potential database):** the historical-
-  guidance DB stores convergence *settings*; the initial-
-  potential DB stores converged *potentials*.  They share the
-  same library/producer/consumer discipline (Principle 11) and
-  the same `share/` shape (per-element-or-signature TOML), but
-  they are independent artifacts with independent lifetimes
-  and no cross-references.  A guidance entry never names a
-  potential-DB entry, and vice versa; the two artifacts share
-  only the curation discipline, not their contents.  This was
-  considered and rejected in DESIGN 7.10 ("Closed by
-  decision"): the two serve different audiences and update
-  cadences, and entangling their schemas would couple their
-  lifetimes unnecessarily.
-- **DESIGN 6 (kaleidoscope):** kaleidoscope is the dispatch
-  layer that runs the verification grid the guidance DB
-  predicts.  The dependency goes one way: kaleidoscope's
-  campaign builder reads the guidance DB; the guidance DB
-  does not depend on kaleidoscope.  Kaleidoscope still works
-  without the guidance DB -- callers can pass an explicit
-  CalcUnit list, the old way.
-- **C48.3 producer (initial-potential database build):** the
-  first major consumer.  Today C48.3 is blocked on a usable
-  kaleidoscope slice; it becomes much cheaper once the
-  guidance DB is populated with even a few reference-solid
-  entries, because each reference solid's convergence cost
-  drops from a grid search to a small verification sweep.
+- **DESIGN 5 (initial potential database):** the
+  guidance dataspace stores convergence *settings* +
+  electronic-structure character; the potential DB
+  stores converged *potentials*.  They share the
+  library/producer/consumer discipline (Principle 11)
+  and the same `share/` shape (per-element or
+  per-signature TOML), but they are independent
+  artifacts with independent lifetimes and no
+  cross-references.  A guidance entry never names a
+  potential-DB entry, and vice versa; the two share
+  only the curation discipline, not their contents.
+  Considered and rejected in DESIGN 7.10 ("Closed by
+  decision"): the two serve different audiences and
+  update cadences, and entangling their schemas would
+  couple their lifetimes unnecessarily.
+- **DESIGN 6 (kaleidoscope):** kaleidoscope is the
+  dispatch layer that runs the verification grid the
+  predictor produces.  The dependency goes one way:
+  the kaleidoscope campaign-builder helper (6.2.8)
+  reads the dataspace; the dataspace does not depend
+  on kaleidoscope.  Kaleidoscope still works without
+  the dataspace -- callers can construct `CalcUnit`s
+  directly without going through the helper.
+- **C48.3 producer (initial-potential database
+  build):** the **first major consumer**.  Its
+  workflow under the new prong: for each curated
+  reference solid in the potential-DB manifest, the
+  producer queries the guidance predictor (system_type
+  = crystalline; structure file already known),
+  receives a predicted k-density and confidence, lets
+  the kaleidoscope helper build a verification sub-
+  grid around the prediction, dispatches the sub-grid,
+  and harvests the converged potential from the run
+  dir whose grid point converged.  Without the
+  dataspace seeded, this would run as a wide-grid
+  sweep per solid; with the seed in place, the sub-
+  grid shrinks to 3-5 points per solid (predict-then-
+  verify acceleration).  The seed campaign (C75)
+  therefore directly accelerates Goal 3.
 
 ### 10.8 Open Architectural Questions
 
-- **File naming uniqueness under parallel harvest.**  Two
-  campaigns finishing nearly simultaneously could collide on
-  the same slug if both produce an entry for the same
-  signature within the same second.  Plan: include a short
-  random suffix in the filename, generated at write time.
-  Final decision deferred to DESIGN 7.5 (emitter contract).
-- **Signature normalization across polytypes.**  If alpha-
-  Au2O3 and beta-Au2O3 both converge at similar k-densities
-  but the curator wants them as separate entries, the
-  `structural_class` soft filter is the intended mechanism.
-  If the user never supplies a structural class, the lookup
-  returns the latest of the two arbitrarily.  Whether the
-  lookup should prefer a "richest provenance" tiebreaker
-  instead is open and deferred to DESIGN 7.6.
+- **File naming uniqueness under parallel harvest.**
+  Two campaigns finishing nearly simultaneously could
+  collide on a slug.  Plan: include a short SHA over
+  (campaign_id, source_structure, generated_at) in the
+  filename; the campaign+structure pair is unique by
+  construction, so collisions only occur if two threads
+  in the same campaign harvest the same structure at
+  the same instant.  Detailed slug algorithm in DESIGN
+  7.5.
+- **Polytype confusion within the predictor.**  Two
+  polymorphs of the same compound at the same composition
+  vector but different lattice family currently produce
+  two entries with the same chemistry features but
+  different lattice features.  The k-NN distance metric
+  weights these features; whether the default weights
+  separate polytypes cleanly enough is an empirical
+  question that won't be settled until the seed campaign
+  lands.  Open knob: the relative weight of composition
+  vs lattice in the stage-1 distance metric.  Reasonable
+  default in DESIGN 7.6; calibration after seed.
+- **Spin polarization unit and interpretation.**
+  Recorded as `total_magnetization` (Bohr magnetons per
+  formula unit); but for antiferromagnets the net
+  magnetization can be zero while the magnetic ordering
+  is non-trivial.  A future schema bump may add a
+  separate `local_moment_per_atom` field.  Day-1 we
+  document the limitation and proceed.
+- **Functional / basis as sub-model dimensions vs
+  features.**  The predictor conditions on basis and
+  functional by running separate sub-models per
+  (basis, functional) combination.  Alternative: treat
+  them as additional regression features.  The split
+  approach is cleaner (no spurious cross-functional
+  interpolation) but proliferates sub-models.  Open;
+  default approach in DESIGN 7.6 is sub-models per
+  combination, with fallback to the most-similar
+  combination when the queried one is empty.

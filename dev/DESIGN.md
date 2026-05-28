@@ -4127,10 +4127,34 @@ free of materials-specific coupling.  It dispatches,
 tracks, and caches; it does not know what an SCF or a
 potential is.  Everything domain-specific lives either
 below it (the runner, 6.2.2) or above it (the client,
-6.2.6).  The two other load-bearing principles are 8
-(the runner seam keeps dispatch independent of the
-execution adapter) and 10 (complete-and-report: one
-failed unit never aborts the campaign).
+6.2.6).  Three other load-bearing principles shape this
+design.  Principle 8 keeps the runner seam independent of
+the execution adapter.  Principle 10 (complete-and-report)
+ensures one failed unit never aborts the campaign.  And
+Principle 12 (the campaign layer stays dumb; campaign
+description lives in Python) is the choice that
+kaleidoscope never grows a campaign description language
+-- no DSL, no workflow grammar, no DAG engine.  The
+`Campaign` data model (6.2.1) is a flat list of
+independent units; higher-order campaign shape (multi-axis
+sweeps, dependent phases, per-unit iteration) is composed
+in client Python that builds the flat list, or absorbed
+inside a custom runner that owns one unit's internal
+iteration (6.2.2).
+
+A practical corollary of Principle 12 is the
+**campaign-builder split**.  Domain-agnostic *option-axis*
+sweeps (sweep k-density values, sweep target atoms for
+XANES, sweep basis sizes) live as helpers inside
+kaleidoscope -- 6.2.8 is the first such helper, the
+predict-then-verify constructor for DESIGN 7.  Domain-aware
+*structure-axis* sweeps (supercell expansion, LAMMPS-
+snapshot per-frame splitting, defect-site enumeration)
+generate skl files and therefore live in
+`structure_control` and acquisition; kaleidoscope only
+consumes the resulting structure paths.  Both halves
+ultimately produce flat lists of `CalcUnit`s; neither
+grows a DSL.
 
 #### 6.2.1 The unit of work and the campaign
 
@@ -4171,13 +4195,57 @@ Whether `campaign.toml` may also be hand-authored as the
 primary surface, rather than always generated from the
 in-process `Campaign`, is left open (6.2.7).
 
-The producer (C48) is the worked example throughout: it
-builds one `CalcUnit` per curated reference solid, with
-`id = reference_id`, `structure` the curated skl,
-`options` the makeinput flags from the manifest, the
-default (Imago) runner, and `key_fields` declaring
-`kpoint_spec` + `convergence_threshold` + `imago_commit`
-as scalars and the structure file as a key file (6.2.5).
+The producer (C48.3) is the worked example throughout the
+rest of 6.2.  Under DESIGN 7's predict-then-verify
+workflow, the producer's relationship to kaleidoscope
+changes shape: rather than launching one `CalcUnit` per
+curated reference solid, the producer asks the
+campaign-builder helper (6.2.8) to expand each reference
+solid into a small **verification sub-grid** of
+`CalcUnit`s -- one per k-density value chosen by the
+predict-then-verify algorithm of 7.7.  Every unit in that
+sub-grid shares `id = reference_id`, the curated skl as
+`structure`, the default (Imago) runner, and the same
+`key_fields` (scalar `convergence_threshold` and
+`imago_commit`; the structure file as a key file); they
+differ in `calc` (the per-grid-point tag per 6.2.4) and in
+the swept k-density value carried in `options`.
+
+The harvest step (6.2.6) then walks each reference solid's
+sub-grid, picks the converged grid point per 7.8 (the
+smallest k-density at which consecutive grid points'
+energy delta falls below a threshold), and reads its
+converged potential from that one run dir.  A reference
+solid whose sub-grid fails to converge at the top of the
+range is skipped -- no potential harvested, no guidance
+entry staged -- per 7.9's non-convergence recovery.  This
+is the shape that replaces the single-`CalcUnit`-per-solid
+sketch the earlier draft of 6.2 carried: the producer is
+now a **predict-then-verify client** of both kaleidoscope
+and the historical-guidance DB.
+
+**Trust mode for nearly-identical families.**  Not every
+campaign warrants the verification sub-grid.  When the
+curator already knows -- from prior work, from a recent
+seed campaign on a sibling solid, or from a high-similarity
+match they trust -- that a particular k-density value is
+the right operating point for an entire family of
+nearly-identical reference solids, requiring every solid
+to re-verify it is wasted compute.  The campaign-builder
+helper (6.2.8) therefore exposes a `verify=False` mode
+that collapses the sub-grid to a single `CalcUnit` at the
+trusted predicted k-density.  In that mode the producer
+still harvests the converged potential from the one run
+dir, but does *not* auto-stage a new guidance entry: a
+single converged calculation is weaker evidence than a
+converged grid (it confirms the value works, but does not
+demonstrate that smaller values would not have worked
+too), so the harvest path treats trusted runs as
+contributing potentials but not new guidance.  A curator
+who wants the trusted value reinforced into the DB can
+stage it manually via a `source = "manual"` entry per
+7.4 / 7.8.  This is a deliberate asymmetry: trust mode
+*consumes* the guidance DB without *amending* it.
 
 #### 6.2.2 The pluggable runner seam
 
@@ -4331,18 +4399,104 @@ curation `reference_id`; an acquisition campaign uses the
 COD id.  Uniqueness collisions abort the build with the
 two offending units named.
 
-**`<calc>` tag format.**  The optional second level
+**`<calc>` slot format.**  The optional second level
 exists only when one structure hosts more than one
-calculation (different bases, a property run vs. its SCF).
-A unit with `calc = None` runs directly in `runs/<id>/`
-with no second level.  When present, `<calc>` obeys the
-same `[a-z0-9_-]` rule and must be unique among the calcs
-sharing an `id`.  If the client supplies no tag but an
-`id` ends up hosting multiple units, kaleidoscope derives
-a default tag from the runner's job identity (for the
-Imago runner, `"<job_name>-<basis_scf>"`, e.g.
-`"scf-mb"`), and errors only if that derived tag still
-collides.
+calculation (different bases, a property run vs. its SCF,
+a sweep over a varied axis).  A unit with no calc tags
+runs directly in `runs/<id>/` with no second level.  When
+present, every directory component obeys the
+`[a-z0-9_-]` rule and must be unique among the calcs
+sharing an `id`.  For the legacy single-calc-per-id case,
+kaleidoscope derives a default tag from the runner's job
+identity (for the Imago runner,
+`"<job_name>-<basis_scf>"`, e.g. `"scf-mb"`), and errors
+only if that derived tag still collides.
+
+**Sweep campaigns: one directory level per varied axis.**
+A *sweep* campaign -- the Principle-12 shape where one
+structure hosts a list of units that differ only by one
+or more swept option values -- needs more than the
+single-string tag above.  The convention is a **directory
+tree, one level per varied axis**, in a stable order the
+campaign-builder helper (6.2.8) declares.  Concrete
+examples for a graphite host with successive levels of
+sweep complexity:
+
+```
+Single-axis (k-density sweep over 3 values):
+  runs/graphite/kpt-density-100/
+  runs/graphite/kpt-density-150/
+  runs/graphite/kpt-density-200/
+
+Two-axis (cell x k-density):
+  runs/graphite/cell-2x2x2/kpt-density-100/
+  runs/graphite/cell-2x2x2/kpt-density-150/
+  runs/graphite/cell-2x2x2/kpt-density-200/
+  runs/graphite/cell-3x3x3/kpt-density-100/
+  runs/graphite/cell-3x3x3/kpt-density-150/
+  runs/graphite/cell-3x3x3/kpt-density-200/
+
+Three-axis (basis x cell x k-density):
+  runs/graphite/basis-mb/cell-2x2x2/kpt-density-100/
+  ...
+```
+
+The campaign's `campaign.toml` records the axis ordering
+and the *fixed* axes (axes that take the same value for
+every unit), so harvest and re-judging do not have to
+recover them from the path:
+
+```toml
+[campaign.sweep]
+varied_axes = ["basis", "cell", "kpt-density"]
+fixed_axes  = { functional = "lda" }
+```
+
+**Naming rules** that keep the convention bidirectional
+(tags are recoverable into `(axis, value)` pairs by
+parsing the path):
+
+1. Every axis name and every value uses only
+   `[a-z0-9-]` (lower-case, digits, hyphen); underscores
+   are reserved for future use and are not permitted
+   inside a level.
+2. The first hyphen of a level splits axis from value:
+   `kpt-density-200` parses as
+   `("kpt-density", "200")`.  Multi-token axis names
+   (`kpt-density`) are therefore allowed; multi-token
+   values are not.
+3. Decimal points in numeric values become `p`:
+   `200.5` is recorded as `200p5`, parsed back as the
+   real number `200.5`.  Negative numbers prefix `m`:
+   `-0.3` becomes `m0p3`.
+4. The campaign's chosen `varied_axes` order is
+   authoritative -- all units in the campaign produce
+   the same tree shape (no missing levels mid-tree),
+   even when one unit happens to share a value with
+   another at some level.
+
+**Why a tree rather than one flat tag.**  Two reasons.
+First, flat tags balloon: a 4-axis sweep at typical value
+widths produces 60-80 character names that wrap and
+break tab-completion.  Second, the tree mirrors how
+humans actually navigate the data -- `ls
+runs/graphite/cell-3x3x3/` shows every k-density value
+swept at that cell size, a natural slice.  `find runs
+-name 'kpt-density-200' -type d` finds the same
+swept-value across cell sizes, the orthogonal slice.
+Neither slice is convenient under a flat string.
+
+**Kaleidoscope itself stays domain-agnostic about the
+convention.**  Its dispatch core stores whatever string
+(or sequence of strings, walked as nested directories) the
+client set on the unit and only validates against the
+`[a-z0-9_-]` rule.  The convention lives in the
+campaign-builder helper (6.2.8) so domain knowledge stays
+out of kaleidoscope (Principle 9).  A sweep client that
+bypasses the helper is responsible for setting the
+per-axis directory components per these rules; the
+legacy single-string fallback will collide and abort if
+it does not, surfacing the mistake loudly.
 
 **`status.toml` schema.**  One file per run directory,
 rewritten as the unit moves through its lifecycle:
@@ -4482,6 +4636,179 @@ changes the contracts above.
   non-Imago runner persists (and how a mixed-runner
   client reads it back) is that runner's contract, set
   when the runner is added, not here.
+
+#### 6.2.8 Campaign-builder helper for predict-then-verify
+
+This subsection designs the **first option-axis builder
+helper** living inside `src/scripts/kaleidoscope/`: a
+small factory function that turns "a structure plus an
+options dict plus a `HistoricalGuidanceDatabase`" into a
+campaign of `CalcUnit`s laid out as a verification grid
+around the predictor's predicted operating point.  It is
+the corollary-of-Principle-12 builder split mentioned in
+the 6.2 intro: option-axis sweeps live here, and this is
+the first.  Structure-axis sweeps live elsewhere
+(`structure_control`, acquisition) and are not in
+kaleidoscope's scope.
+
+**Why this helper is in kaleidoscope's package and not
+upstream.**  Domain awareness creeps in along three axes
+when building such a campaign: which guidance entry to
+consume, how wide to make the verification grid, and how
+to spell the per-grid-point `<calc>` tag (6.2.4).  The
+first two are the historical-guidance DB's contract
+(DESIGN 7), the third is kaleidoscope's tag convention
+(6.2.4).  Placing the helper inside
+`src/scripts/kaleidoscope/` keeps Principle 12 honest:
+the dispatch *core* (6.2.1-6.2.7) is dumb and stays so;
+the *helper* is a separate optional convenience that
+domain-aware clients can call.  A client building
+sweeps without using the DB skips the helper and
+constructs `CalcUnit`s directly.
+
+**Inputs and outputs.**
+
+```
+predict_settings(
+    structure,                 # StructureControl or skl path
+    options,                   # dict of non-swept makeinput
+                               #   options (e.g. functional,
+                               #   basis, scf_tolerance, ...)
+    db,                        # HistoricalGuidanceDatabase
+                               #   loaded from share/
+                               #   historicalGuidanceDB/
+    system_type,               # "crystalline" / "amorphous"
+                               #   / "nanostructure" /
+                               #   "molecular" (DESIGN 7.2)
+    verify       = True,       # False -> trust mode (see
+                               #   6.2.1 trust-mode note)
+    id           = None,       # campaign-level unit id; if
+                               #   None, derived from
+                               #   structure path
+    extra_axes   = None,       # optional list of additional
+                               #   sweep axes the caller
+                               #   wants on top of k-density
+)  ->  (Campaign, PredictionRecord)
+```
+
+**Algorithm sketch.**
+
+```
+1.  Compute the feature vector for the structure per
+    DESIGN 7.4 (composition vector + lattice family for
+    crystalline; system_type fixed by argument).
+
+2.  Query the predictor:
+        result = db.predict(feature_vector, system_type)
+
+    `result` carries the predicted converged k-density,
+    a confidence score (variance over the k nearest
+    neighbors, DESIGN 7.6), and the neighbor entries
+    that produced the prediction.
+
+3.  Decide the verification grid:
+
+      if not verify:
+          # trust mode: one CalcUnit at the predicted
+          #   value, no widening.
+          grid_values = [result.predicted_kpoint_density]
+          policy      = "trust_no_verify"
+
+      elif result.is_under_trained:
+          # no useful prior; wide-grid fallback
+          #   (DESIGN 7.9).
+          grid_values = default_wide_kpoint_density_grid()
+          policy      = "wide_grid_no_prior"
+
+      else:
+          # predict-then-verify with variance-aware
+          #   widening (DESIGN 7.7).
+          grid_values = build_verification_grid(
+                          result.predicted_kpoint_density,
+                          result.confidence,
+                       )
+          policy      = "verify_around_prediction"
+
+4.  Build one CalcUnit per grid value:
+
+      units = []
+      for v in grid_values:
+          unit_options = dict(options)
+          unit_options["kpoint_density"] = v
+          calc_axes = {"kpt-density": v}
+          if extra_axes is not None:
+              calc_axes.update(extra_axes)
+          units.append(CalcUnit(
+              id        = id,
+              calc      = build_calc_tag(calc_axes),
+              structure = structure,
+              options   = unit_options,
+              runner    = "imago",
+              key_fields = standard_key_fields(),
+          ))
+
+    `build_calc_tag(calc_axes)` produces the nested
+    `<axis>-<value>/...` tag per 6.2.4 ("Sweep
+    campaigns: one directory level per varied axis").
+
+5.  Assemble the PredictionRecord:
+
+      prediction_record = PredictionRecord(
+          policy           = policy,
+          predicted_value  = (result.predicted_kpoint_density
+                              if result is not None
+                              else None),
+          confidence       = (result.confidence
+                              if result is not None
+                              else None),
+          neighbor_ids     = (result.neighbor_entry_ids
+                              if result is not None
+                              else []),
+          system_type      = system_type,
+          feature_vector   = feature_vector,
+      )
+
+6.  Return (Campaign(units=units, ...), prediction_record).
+    The caller attaches `prediction_record` to the
+    Campaign's metadata so the harvest hook (DESIGN 7.8)
+    can recover it.
+```
+
+**Trust mode and the harvest contract.**  When
+`verify=False` the helper builds a single-unit campaign.
+The producer (or any caller) still harvests the
+converged potential or other deliverables from that one
+run.  Per 6.2.1, trust-mode harvest does *not* auto-stage
+a new guidance entry -- a single converged calculation
+is weaker evidence than a converged grid, and the user
+asked for trust, not for new evidence.  A curator who
+wants the trusted value reinforced into the dataspace
+can stage it manually per DESIGN 7.4 / 7.8.
+
+**Cross-references.**  The pieces this helper coordinates:
+
+- DESIGN 7.4 -- feature-vector computation
+  (`feature_vector_from_structure`).
+- DESIGN 7.6 -- `db.predict()` (k-NN regression over
+  the dataspace, with the variance-aware confidence).
+- DESIGN 7.7 -- `build_verification_grid` widening
+  function.
+- DESIGN 7.9 -- `default_wide_kpoint_density_grid` and
+  the under-trained / no-prior fallback path.
+- 6.2.4 -- the `<calc>` tag convention this helper's
+  `build_calc_tag` emits.
+- 6.2.6 -- the harvest handoff that consumes the
+  `PredictionRecord` to write back into the dataspace.
+
+**Future option-axis builder helpers** will live alongside
+this one (XANES-target sweeps, basis-size sweeps), each
+following the same shape: an upstream domain-aware library
+plus a small helper that turns its query result into a
+`Campaign` with the right tag convention.  None of those
+helpers belongs inside the dispatch core; all of them
+will share the path conventions and the
+`PredictionRecord` mechanism this first helper
+establishes.
 
 ### 6.3 makeinput callable build API
 
@@ -4745,101 +5072,130 @@ none changes the contracts above.
 
 ---
 
-## 7. Historical Guidance Database
+## 7. Historical Guidance Dataspace
 
 ### 7.1 Overview and Motivation
 
 This section pins down the schema, data structures, and
-algorithms for the historical-guidance database introduced in
-VISION Goal 5 and architected in ARCHITECTURE section 10.
-The database records, per family of systems, the convergence
-settings (initially: k-point density) that have worked on
-prior calculations.  New calculations consult the database to
-*predict* a converged operating point and run a small
-verification grid around it, rather than scanning a wide
-convergence surface from scratch.
+algorithms for the historical-guidance dataspace introduced
+in VISION Goal 5 and architected in ARCHITECTURE section 10.
+The dataspace records, for each converged calculation imago
+has run, a feature vector describing the system's chemistry
+and structure, the electronic-structure character that
+resulted (band gap, spin polarization), and the convergence
+settings that worked (initially: k-point density).  A small
+two-stage k-nearest-neighbor predictor learns from this
+dataspace: given a new system's feature vector, it predicts
+the converged operating point and an uncertainty.  New
+calculations then run a verification grid around the
+prediction whose width tracks the predictor's uncertainty.
 
-**The motivating workflow.**  Today, converging a new system
-means deciding on a set of candidate k-point densities (say
-5-7 values), running them all (with all other knobs fixed at
-sensible guesses), inspecting the resulting energy-vs-density
-curve, and picking the cheapest density at which the energy
-has stopped moving.  If the curve has not converged at the
-top of the range, the user extends the range and re-runs.
-This is correct, but wasteful: most systems within a chemical
-family converge at similar densities, and a researcher who
-has worked with the family for years carries that knowledge in
-their head.  When a new student takes over -- or when an
-automated pipeline (like the C48.3 initial-potential-database
-build) tries to converge many systems unattended -- the
-embodied knowledge is lost and the wasteful full scan returns.
+**The motivating workflow.**  Today, converging a new
+system means deciding on a set of candidate k-point
+densities (say 5-7 values), running them all (with all
+other knobs fixed at sensible guesses), inspecting the
+resulting energy-vs-density curve, and picking the
+cheapest density at which the energy has stopped moving.
+If the curve has not converged at the top of the range,
+the user extends the range and re-runs.  This is correct,
+but wasteful: most systems within a chemical family
+converge at similar densities, and a researcher who has
+worked with the family for years carries that knowledge
+in their head.  When a new student takes over -- or when
+an automated pipeline (like the C48.3 initial-potential-
+database build) tries to converge many systems unattended
+-- the embodied knowledge is lost and the wasteful full
+scan returns.
 
-**The predict-then-verify workflow.**  Given a new structure:
+**Why a dataspace and a predictor, not a categorical
+lookup.**  The first instinct is a categorical database
+keyed on the system's elements, stoichiometry, or some
+discrete classification (insulator / semiconductor /
+metal).  We considered and rejected that shape (DESIGN
+7.10).  The driver of converged k-density is *electronic-
+structure character* -- gap width, spin polarization,
+Fermi-surface complexity -- which is a continuous
+quantity, not a category, and which depends on chemistry
+in ways smooth enough that a regression / nearest-
+neighbor predictor can learn it.  Binning gap into
+discrete classes loses signal at the boundaries (a 0.1 eV
+narrow-gap semiconductor binned as "metal" predicts wrong
+densities); k-NN over a continuous feature space does not.
 
-  1.  Consult the historical-guidance database for the closest
-      matching entry (by element-set similarity).
-  2.  Use the matched entry's k-density as the *predicted*
-      converged operating point.
-  3.  Build a small verification grid around the predicted
-      point.  Width depends on how confident the prediction
-      is (a high-similarity match -> tight grid; a low-
-      similarity match -> wider grid).
-  4.  Run the verification grid through kaleidoscope (DESIGN
-      6.2).
-  5.  Inspect the result: did the predicted point converge?
-      If yes, the prediction is confirmed.  If no, the user
-      either accepts the new converged point (and the harvest
-      hook stages it for future use) or widens the grid and
-      tries again.
+**The predict-then-verify workflow.**  Given a new
+structure:
 
-**Why this is a separate database from the initial-potential
-database (DESIGN 5).**  Both are "experience as a curated
-artifact" (VISION Principle 11), and both share the same
+  1.  Compute the structure's feature vector: composition
+      (atom-fraction weighted across 13 element groups),
+      lattice family (one-hot, crystalline only), and the
+      4-way system_type (crystalline / amorphous /
+      nanostructure / molecular) declared by the user.
+  2.  Query the predictor for the predicted converged
+      k-density and an uncertainty measure (variance of
+      the k nearest neighbors at each stage).
+  3.  Build a verification grid around the predicted
+      point.  Width scales inversely with the predictor's
+      confidence: high confidence -> tight 3-point grid;
+      low confidence -> wider 5-7 point grid; an
+      under-trained predictor -> wide-grid fallback
+      (7.9).
+  4.  Dispatch the grid through kaleidoscope (DESIGN 6.2)
+      using the campaign-builder helper (DESIGN 6.2.8).
+  5.  Harvest the converged grid point and the measured
+      electronic-structure quantities back into the
+      dataspace through staging + curator promotion
+      (7.8).
+
+**Why a separate artifact from the initial-potential
+database (DESIGN 5).**  Both honor Principle 11
+(experience as a curated artifact), and both share the
 library/producer/consumer discipline.  But they store
-different *kinds* of experience -- one stores numerical
-potential coefficients per element, the other stores
-convergence-settings advice per family of systems -- with
-different lifetimes (the initial-potential DB grows entry-by-
-entry under deliberate curation; the guidance DB accumulates
-from every successful campaign) and different consumers (the
-initial-potential DB feeds `makeinput.py`; the guidance DB
-feeds kaleidoscope's campaign builder).  Coupling the two
-would mean cross-contaminating their schemas and their
-update cadences.  Keeping them separate, with an explicit
-cross-reference field (a future `pot_label` parameter type
-inside a guidance entry) for the cases where they should
-talk, is cleaner.
+different *kinds* of experience -- DESIGN 5 stores
+numerical potential coefficients per element; DESIGN 7
+stores convergence-settings advice plus the electronic-
+structure character that produced it -- with different
+lifetimes (DESIGN 5 grows entry-by-entry under
+deliberate curation; DESIGN 7 accumulates from every
+successful campaign) and different consumers (DESIGN 5
+feeds `makeinput.py`; DESIGN 7 feeds kaleidoscope's
+campaign builder).  The two artifacts share only the
+curation discipline, not their contents.  Considered and
+rejected: cross-referencing them via a `pot_label`
+parameter (closed by decision, 7.10).
 
-**Why a separate database from kaleidoscope itself.**
-Kaleidoscope (DESIGN 6.2) is the dispatch layer that runs
-campaigns; it is domain-agnostic.  The guidance database is
-domain-aware (it understands elements, stoichiometries, and
-later cell sizes and basis sets).  Putting the guidance DB
-inside kaleidoscope would violate Principle 9 (kaleidoscope
-stays dumb) and would couple two artifacts with very
-different rates of change.  The clean separation is:
-kaleidoscope dispatches; the guidance DB advises; the
-client glues them together.
+**Why a separate artifact from kaleidoscope itself.**
+Kaleidoscope (DESIGN 6.2) is the dispatch layer that
+runs campaigns; it is domain-agnostic.  The guidance
+dataspace is domain-aware (it understands element
+groups, lattice families, electronic-structure
+characters).  Putting the dataspace inside kaleidoscope
+would violate Principle 9 (kaleidoscope stays dumb) and
+would couple two artifacts with very different rates of
+change.  The clean separation: kaleidoscope dispatches;
+the dataspace + predictor advise; the client glues them
+together via the campaign-builder helper (DESIGN 6.2.8).
 
-**Why this accelerates the initial-potential-database build
-(Goal 3).**  The C48.3 producer is itself a kaleidoscope
-client.  It must converge SCF calculations on many reference
-solids.  Without the guidance DB, every reference solid
-requires a from-scratch convergence study, multiplying the
-cost of populating the potential DB.  With even a small
-guidance DB seeded by the first few reference solids,
-subsequent solids in similar chemical families inherit the
-predicted operating point and need only a verification sweep.
-The accelerator compounds: every reference solid the producer
-converges contributes back to the guidance DB, making the
-next solid cheaper.
+**Why this accelerates the initial-potential-database
+build (Goal 3).**  The C48.3 producer is itself a
+kaleidoscope client.  It must converge SCF calculations
+on many reference solids.  Without the dataspace, every
+reference solid requires a from-scratch convergence
+study, multiplying the cost of populating the potential
+DB.  With a seeded dataspace, every reference solid in a
+chemistry family the predictor has trained on inherits a
+predicted operating point and needs only a small
+verification grid.  The accelerator compounds: every
+reference solid the producer converges contributes back
+into the dataspace, sharpening the predictor for the
+next.
 
 ### 7.2 TOML Schema (version 1)
 
-The database is a directory of TOML files, one per entry.
-The top-level marker file `SCHEMA_VERSION` records the
-current schema version; readers refuse files whose
-`schema_version` field disagrees with the marker.
+The dataspace is a directory of TOML files, one per
+converged calculation, partitioned by `system_type`
+(ARCH 10.1).  The top-level marker file `SCHEMA_VERSION`
+records the current schema version; readers refuse files
+whose `schema_version` field disagrees with the marker.
 
 **Per-entry top-level keys (required):**
 
@@ -4847,13 +5203,12 @@ current schema version; readers refuse files whose
   --------------------------------------------------------
   schema_version  int     Currently 1.  Must equal the
                           top-level marker file's
-                          contents.  The reader rejects
-                          any other value.
-  entry_id        string  Unique within the entries
-                          directory.  Conventionally the
-                          slug used in the filename (see
-                          7.5 emitter contract), e.g.
-                          `"au-1_o-2_a1b2c3"`.
+                          contents.
+  entry_id        string  Unique within entries/.
+                          Conventionally the slug used
+                          in the filename (7.5 emitter
+                          contract), e.g.
+                          `"crystalline-a1b2c3"`.
   generated_at    string  ISO-8601 UTC timestamp of the
                           campaign that produced this
                           entry.
@@ -4864,34 +5219,201 @@ current schema version; readers refuse files whose
 
 **Signature block, under `[entry.signature]` (required):**
 
+This is the predictor's feature input.
+
+  Field                Type    Description
+  --------------------------------------------------------
+  system_type          string  One of `"crystalline"`,
+                               `"amorphous"`,
+                               `"nanostructure"`,
+                               `"molecular"`.  Hard
+                               partition: the predictor
+                               uses a separate sub-model
+                               per system_type.
+  composition_vector   inline  13-key inline table.  Each
+                       table   key is one of the element-
+                               group names listed below;
+                               each value is the
+                               atom-fraction of that
+                               group in the system, in
+                               [0.0, 1.0].  The 13
+                               values sum to 1.0
+                               (rule 4).
+  lattice_family       string  REQUIRED iff
+                               `system_type ==
+                               "crystalline"`.  One of
+                               `"cubic"`, `"hex"`,
+                               `"tet"`, `"ortho"`,
+                               `"mono"`, `"tri"`.  Forbidden
+                               otherwise.
+
+The 13 element-group names that key
+`composition_vector` (lower-case, underscore-separated):
+
+```
+alkali           Li, Na, K, Rb, Cs, Fr
+alkali_earth     Be, Mg, Ca, Sr, Ba, Ra
+halide           F, Cl, Br, I, At
+chalcogen        O, S, Se, Te, Po
+pnictogen        N, P, As, Sb, Bi
+group_iv         C, Si, Ge, Sn, Pb
+group_iii        B, Al, Ga, In, Tl
+transition_metal Sc..Zn, Y..Cd, Hf..Hg  (lumped 3d/4d/5d)
+lanthanide       La..Lu
+actinide         Ac..Lr
+metalloid        Si and B already in group_iv/iii;
+                 metalloid covers the diagonal -- Ge, As,
+                 Sb, Te (the canonical metalloids).
+                 Si and B are NOT double-counted here;
+                 see 7.4 for the assignment rules.
+noble_gas        He, Ne, Ar, Kr, Xe, Rn
+hydrogen         H  (its own bucket per discussion)
+```
+
+The exact element-to-group assignment table lives in
+`share/historicalGuidanceDB/gap_groups.toml` (a checked-
+in data file, not code -- Principle 11).  7.4 describes
+its layout and how the library consumes it; 7.10 records
+the open ambiguity around metalloids and how it is
+resolved.
+
+**Measured-quantities block, under `[entry.measured]`
+(required):**
+
+These are the values harvested from the converged
+calculation -- both the target the predictor learns to
+produce (`kpoint_density`) and the intermediate
+electronic-structure quantities that drive it (`gap_ev`,
+`spin_polarization`).
+
   Field              Type    Description
   --------------------------------------------------------
-  elements           array   Sorted list of element
-                             symbols, lower-case.  E.g.
-                             `["au", "o"]`.
-  stoichiometry      array   Parallel to `elements`.
-                             Integer multiplicities,
-                             normalized to the smallest
-                             whole-number ratio.  E.g.
-                             `[1, 2]` for AuO2.
-  structural_class   string  Optional soft filter.
-                             Curator-supplied tag such
-                             as `"rutile"`, `"metallic"`,
-                             `"molecular_crystal"`.  An
-                             empty string is allowed and
-                             means "unclassified".
+  gap_ev             real    Band gap in electron volts.
+                             >= 0.  0.0 indicates a metal
+                             (no gap).
+  gap_kind           string  One of `"direct"`,
+                             `"indirect"`, `"none"`.
+                             `"none"` if and only if
+                             `gap_ev == 0.0` (a metal).
+  spin_polarization  real    Dimensionless fractional
+                             polarization at the Fermi
+                             level (relevant for
+                             metals); 0.0 for closed-
+                             shell non-magnetic systems.
+  total_magnetization  real  Total magnetic moment in
+                             Bohr magnetons per formula
+                             unit.  Signed real (negative
+                             for the opposite spin
+                             convention).  0.0 for
+                             non-magnetic systems.
+  kpoint_density     real    The converged k-point
+                             density that produced this
+                             entry.  Units: k-points per
+                             Bohr^-3 of reciprocal-cell
+                             volume (matching the
+                             DESIGN 3 convention).
+                             This is the predictor's
+                             target.
+  dos_at_fermi       real    Density of states at the
+                             Fermi level (per eV per
+                             formula unit).  Optional;
+                             recorded for metals when
+                             available.  Better metal-
+                             density predictor than
+                             `gap_ev = 0`.  May be
+                             absent.
 
-**Provenance block, under `[entry.provenance]` (required):**
+**Context block, under `[entry.context]` (required):**
+
+  Field                       Type    Description
+  --------------------------------------------------------
+  basis                       string  `"mb"`, `"fb"`, or
+                                      `"eb"`.
+  functional                  string  The DFT functional
+                                      under which the
+                                      calculation was
+                                      converged (e.g.
+                                      `"lda"`, `"gga-
+                                      pbe"`).  Free-form
+                                      string; the
+                                      predictor groups by
+                                      this value into
+                                      sub-models.
+  convergence_threshold       real    The SCF threshold
+                                      used (e.g.
+                                      `1.0e-6`).
+  cell_atom_count             int     Number of atoms in
+                                      the unit cell that
+                                      was converged.
+  cell_volume_per_formula_unit  real  Cell volume divided
+                                      by formula units
+                                      per cell, in Bohr^3.
+
+**Verification block, under `[entry.verification]`
+(required for `source = "campaign"`, optional for
+`source = "manual"`):**
+
+Records the verification grid that produced the converged
+kpoint_density.  Distinct from the parameter-blocks shape
+the earlier draft used (one verification per parameter);
+v1 has exactly one verified target (kpoint_density), so
+the verification block sits at the entry level.
+
+  Field                        Type    Description
+  --------------------------------------------------------
+  grid_values                  array   The full list of
+                                       k-density values
+                                       swept by the
+                                       verification grid,
+                                       sorted ascending.
+  converged_at                 real    The value at which
+                                       the convergence
+                                       metric was first
+                                       satisfied.  Must
+                                       equal
+                                       `measured.kpoint_density`.
+  metric                       string  Currently
+                                       `"total_energy"`.
+                                       Reserved:
+                                       `"forces"`,
+                                       `"density_change"`.
+  metric_threshold             real    The threshold the
+                                       metric had to cross
+                                       to count as
+                                       converged.
+  predictor_confidence         real    The confidence
+                                       score in [0.0, 1.0]
+                                       the predictor
+                                       returned at the
+                                       time this campaign
+                                       was launched, or
+                                       0.0 if launched
+                                       without a
+                                       prediction (e.g.,
+                                       seed campaign).
+                                       Records the
+                                       strength of the
+                                       prior that
+                                       produced this
+                                       verification.
+  predictor_neighbor_ids       array   List of entry_id
+                                       strings of the
+                                       k nearest neighbors
+                                       the predictor used,
+                                       empty if no
+                                       prediction was
+                                       made.
+
+**Provenance block, under `[entry.provenance]`
+(required):**
 
   Field             Type    Description
   --------------------------------------------------------
   campaign_id       string  The kaleidoscope campaign
                             identifier that produced
-                            this entry, e.g.
-                            `"potential_db_seed_2026_05_28"`.
-                            For `source = "manual"`, the
-                            curator records a free-form
-                            tag.
+                            this entry.  For `source =
+                            "manual"`, the curator
+                            records a free-form tag.
   source_structure  string  The structure that the
                             campaign converged.  Free-
                             form: a COD id, a Materials
@@ -4905,84 +5427,11 @@ current schema version; readers refuse files whose
                             "campaign"`: the name of
                             the harvest script.
 
-**Parameter blocks, under `[[entry.parameter]]` (one or
-more required):**
-
-Each parameter block carries one guidance value -- the
-extensibility seam.  Day-1 ships only `name =
-"kpoint_density"`; later parameter types are added as new
-`name` values without schema changes.
-
-  Field             Type    Description
-  --------------------------------------------------------
-  name              string  The parameter family.
-                            Currently the only registered
-                            value is `"kpoint_density"`.
-                            Future values reserved:
-                            `"cell_size"`, `"basis"`,
-                            `"scf_tol"`.
-                            An unknown `name` is a hard
-                            error at load time (rule 5).
-  value             real    The guidance value.  For
-                            `kpoint_density`, the units
-                            are reciprocal angstroms
-                            (k-points per inverse
-                            angstrom of reciprocal-
-                            lattice-vector length).
-  unit              string  The unit string for `value`.
-                            Documented but also
-                            validated against the
-                            registered name's expected
-                            unit (rule 6).  For
-                            `kpoint_density`, the
-                            expected unit is
-                            `"1/angstrom"`.
-
-**Optional verification block, under
-`[entry.parameter.verification]`:**
-
-When the entry came from an automated harvest, this records
-the verification grid that produced the converged value.
-Manual entries may omit it.
-
-  Field                  Type    Description
-  --------------------------------------------------------
-  grid_values            array   The full list of values
-                                 swept by the verification
-                                 grid, sorted ascending.
-                                 E.g.
-                                 `[100.0, 150.0, 200.0,
-                                   250.0, 300.0]`.
-  converged_at           real    The value at which the
-                                 metric crossed the
-                                 threshold.  Must equal
-                                 `entry.parameter.value`.
-  metric                 string  The convergence
-                                 metric.  Currently
-                                 `"total_energy"`.
-                                 Reserved: `"forces"`,
-                                 `"density_change"`.
-  metric_threshold       real    The threshold the metric
-                                 had to cross to count as
-                                 converged.  E.g.
-                                 `1.0e-4`.
-  similarity_at_predict  real    The similarity score
-                                 (per 7.6) that the
-                                 *predicting* lookup
-                                 returned at the time
-                                 the campaign was
-                                 launched, or 0.0 if the
-                                 campaign was launched
-                                 without a prediction.
-                                 Records the strength of
-                                 the prior that produced
-                                 this verification.
-
-**The top-level `SCHEMA_VERSION` marker file format.**  The
-marker is a single line containing a bare decimal integer
-followed by a newline (e.g., `1\n`).  No TOML, no key, no
-surrounding whitespace.  The simplest possible form was
-chosen so the reader does not need a TOML parser just to
+**The top-level `SCHEMA_VERSION` marker file format.**
+The marker is a single line containing a bare decimal
+integer followed by a newline (e.g., `1\n`).  No TOML,
+no key, no surrounding whitespace.  Simplest possible
+form so the reader does not need a TOML parser just to
 decide whether to refuse a file.  Day-1 contents:
 
 ```
@@ -4992,145 +5441,277 @@ decide whether to refuse a file.  Day-1 contents:
 **Validation rules** (enforced at load time):
 
 1. `schema_version` must equal 1, and must agree with the
-   top-level `SCHEMA_VERSION` marker file (parsed as a bare
-   decimal integer per the format above).
-2. `entry_id` must be unique across all entry files in the
-   entries directory.  Collisions are a hard error with
-   both filenames listed.
-3. `elements` and `stoichiometry` must have equal length;
-   `elements` must be sorted and lower-case; every entry
-   in `stoichiometry` must be a positive integer; the
-   stoichiometry must be in smallest-whole-number form
-   (no common divisor greater than 1).
-4. At least one `[[entry.parameter]]` block is required.
-5. Every `[[entry.parameter]]` block's `name` must appear
-   in the parameter-type registry (initially:
-   `{"kpoint_density"}`).  Unknown names are a hard error
-   at load time so a typo fails loudly rather than
-   silently omitting guidance.
-6. The `unit` of each `[[entry.parameter]]` must match the
-   expected unit registered for that `name`.
-7. If `[entry.parameter.verification]` is present:
-   `converged_at` must equal `value`; `grid_values` must be
-   sorted ascending and contain `converged_at`; `metric`
-   must appear in the metric registry (initially:
-   `{"total_energy"}`).
-8. `source` must equal `"campaign"` or `"manual"`.
-9. For `source = "campaign"`, the provenance fields
-   `campaign_id`, `source_structure`, and `imago_commit`
-   must all be non-empty.
-10. Every required field listed in the field tables above
-    -- top-level (`schema_version`, `entry_id`,
-    `generated_at`, `source`), the `[entry.signature]`
-    block and its required fields, the `[entry.provenance]`
-    block and its required fields, and each
-    `[[entry.parameter]]` block's required fields -- must
-    be present.  A missing field is a hard error whose
-    message names the file path, the offending block, and
-    the missing field name.  This rule mirrors DESIGN 5.2
-    rule 3: the schema is checked before the dataclass is
-    constructed so omissions surface as validation
-    failures with full context, not as bare TypeError
-    backtraces from the constructor.
+   top-level `SCHEMA_VERSION` marker file (parsed as a
+   bare decimal integer per the format above).
+2. `entry_id` must be unique across all entry files in
+   the entries directory.  Collisions are a hard error
+   with both filenames listed.
+3. `system_type` must be one of the four valid values
+   (`"crystalline"`, `"amorphous"`, `"nanostructure"`,
+   `"molecular"`).  An entry's file must live under the
+   matching `entries/<system_type>/` subdirectory; a
+   mismatch is a hard error.
+4. `composition_vector` must have exactly the 13 keys
+   listed above.  Each value must be in [0.0, 1.0].
+   The sum of all 13 values must be `1.0 +/- 1e-6`.
+5. If `system_type == "crystalline"`,  `lattice_family`
+   must be present and must equal one of `"cubic"`,
+   `"hex"`, `"tet"`, `"ortho"`, `"mono"`, `"tri"`.  If
+   `system_type != "crystalline"`, `lattice_family`
+   must be absent (or empty string).
+6. `gap_ev` must be `>= 0`.  `gap_kind` must be one of
+   `"direct"`, `"indirect"`, `"none"`.  `gap_kind ==
+   "none"` if and only if `gap_ev == 0.0` (a metal).
+7. `kpoint_density` must be `> 0`.
+8. `basis` must equal one of `"mb"`, `"fb"`, `"eb"`.
+   `functional` must be non-empty.
+9. `cell_atom_count` must be `> 0`;
+   `cell_volume_per_formula_unit` must be `> 0`.
+10. If `[entry.verification]` is present (required for
+    `source = "campaign"`): `converged_at` must equal
+    `measured.kpoint_density`; `grid_values` must be
+    sorted ascending and contain `converged_at`;
+    `metric` must appear in the metric registry
+    (initially `{"total_energy"}`);
+    `predictor_confidence` must be in [0.0, 1.0];
+    `predictor_neighbor_ids` must be a (possibly empty)
+    array of strings that refer to existing entry_ids
+    (referential integrity is not enforced at load --
+    a neighbor entry may have been promoted out --
+    but the field is recorded for forensics).
+11. `source` must equal `"campaign"` or `"manual"`.  For
+    `source = "campaign"`, the provenance fields
+    `campaign_id`, `source_structure`, and `imago_commit`
+    must all be non-empty; `[entry.verification]` is
+    required.  For `source = "manual"`, the curator's
+    `campaign_id` may be free-form;
+    `[entry.verification]` is optional.
+12. Every required field listed in the field tables
+    above must be present.  A missing field is a hard
+    error whose message names the file path, the
+    offending block, and the missing field name.  This
+    rule mirrors DESIGN 5.2 rule 3: the schema is
+    checked before the dataclass is constructed so
+    omissions surface as validation failures with full
+    context, not as bare TypeError backtraces from the
+    constructor.
 
 ### 7.3 Sketch (gold, single entry)
 
+This entry is the harvest from a converged TiO2-rutile
+calculation, captured at the time the dataspace was being
+seeded.  It lives at `share/historicalGuidanceDB/entries/
+crystalline/crystalline-a1b2c3.toml`.
+
 ```toml
 schema_version = 1
-entry_id       = "au-1_o-2_a1b2c3"
+entry_id       = "crystalline-a1b2c3"
 generated_at   = "2026-05-28T10:30:00Z"
 source         = "campaign"
 
 [entry.signature]
-elements         = ["au", "o"]
-stoichiometry    = [1, 2]
-structural_class = "rutile"
+system_type    = "crystalline"
+lattice_family = "tet"
+
+[entry.signature.composition_vector]
+alkali           = 0.0000000000000000e+00
+alkali_earth     = 0.0000000000000000e+00
+halide           = 0.0000000000000000e+00
+chalcogen        = 6.6666666666666663e-01
+pnictogen        = 0.0000000000000000e+00
+group_iv         = 0.0000000000000000e+00
+group_iii        = 0.0000000000000000e+00
+transition_metal = 3.3333333333333331e-01
+lanthanide       = 0.0000000000000000e+00
+actinide         = 0.0000000000000000e+00
+metalloid        = 0.0000000000000000e+00
+noble_gas        = 0.0000000000000000e+00
+hydrogen         = 0.0000000000000000e+00
+
+[entry.measured]
+gap_ev              = 3.0500000000000000e+00
+gap_kind            = "indirect"
+spin_polarization   = 0.0000000000000000e+00
+total_magnetization = 0.0000000000000000e+00
+kpoint_density      = 5.0000000000000000e+01
+dos_at_fermi        = 0.0000000000000000e+00
+
+[entry.context]
+basis                        = "fb"
+functional                   = "gga-pbe"
+convergence_threshold        = 1.0000000000000000e-06
+cell_atom_count              = 6
+cell_volume_per_formula_unit = 4.6253846153846157e+02
+
+[entry.verification]
+grid_values = [
+    2.5000000000000000e+01,
+    3.5000000000000000e+01,
+    5.0000000000000000e+01,
+    7.5000000000000000e+01,
+    1.0000000000000000e+02,
+]
+converged_at           = 5.0000000000000000e+01
+metric                 = "total_energy"
+metric_threshold       = 1.0000000000000000e-04
+predictor_confidence   = 0.0000000000000000e+00
+predictor_neighbor_ids = []
 
 [entry.provenance]
-campaign_id      = "potential_db_seed_2026_05_28"
-source_structure = "COD-1011098"
-imago_commit     = "ff33f5c"
-curator          = "harvest_guidance.py"
-
-[[entry.parameter]]
-name  = "kpoint_density"
-value = 2.0000000000000000e+02
-unit  = "1/angstrom"
-
-[entry.parameter.verification]
-grid_values = [
-   1.0000000000000000e+02,
-   1.5000000000000000e+02,
-   2.0000000000000000e+02,
-   2.5000000000000000e+02,
-   3.0000000000000000e+02,
-]
-converged_at          = 2.0000000000000000e+02
-metric                = "total_energy"
-metric_threshold      = 1.0000000000000000e-04
-similarity_at_predict = 0.0000000000000000e+00
+campaign_id      = "guidance_seed_2026_05_28"
+source_structure = "COD-1530819"
+imago_commit     = "6e17c33"
+curator          = "guidance_harvest.py"
 ```
 
 The sketch uses 16-significant-digit float formatting per
-the emitter contract in 7.5.  `similarity_at_predict = 0.0`
-records that this entry was harvested from a campaign that
-had no prior guidance to lean on (a seed run).  A later
-campaign that *did* consult the database would record the
-similarity it inherited.
+the emitter contract in 7.5.  Reading this entry:
+
+- The composition vector says TiO2 = 2/3 chalcogen (O,
+  oxygen) + 1/3 transition metal (Ti).  Exactly two
+  groups carry non-zero weight; the other eleven are
+  0.0.
+- `lattice_family = "tet"` is rutile's tetragonal
+  Bravais class.
+- `gap_ev = 3.05` (eV) and `gap_kind = "indirect"`
+  identify TiO2-rutile as a wide-gap indirect
+  semiconductor.
+- `kpoint_density = 50.0` is the converged density.
+- `predictor_confidence = 0.0` and
+  `predictor_neighbor_ids = []` record that this
+  campaign was launched without any prior to lean on --
+  a seed run, no prediction was made.  A later
+  campaign that *did* consult the predictor would
+  record a non-zero confidence and a non-empty
+  neighbor list (the IDs of the k nearest neighbors
+  the prediction interpolated from).
 
 ### 7.4 In-Memory Representation
 
-**Purpose of `historical_guidance_db.py`.**  This is the
-file-format library: a small, passive helper module that
-knows exactly one thing -- how to read, validate, look up
-entries in, and write the per-entry TOML files under
-`share/historicalGuidanceDB/entries/`.  It contains no
-orchestration, no kaleidoscope dispatch, no harvest logic.
-Its only external dependency is `tomllib` (Python stdlib).
+**Purpose of `guidance_db.py`.**  This is the file-format
+**and predictor** library: a small, passive helper module
+that knows exactly two things -- how to read/validate/write
+the per-entry TOML files under
+`share/historicalGuidanceDB/entries/`, and how to run the
+k-NN predictor over the in-memory dataspace those entries
+form.  It contains no orchestration, no kaleidoscope
+dispatch, and no harvest logic.  Its only runtime
+dependencies are `tomllib` (Python stdlib) and the
+existing `structure_control.py` (to compute composition
+vectors and lattice families from a `StructureControl`).
 
-It is imported by the campaign builder (consumer), by
-`harvest_guidance.py` (producer), and by `promote_guidance.py`
-(curator helper).  The library/producer/consumer split keeps
-read-only callers from pulling in harvest or curator code
-they do not use, and isolates any future schema bump to a
-single file (per ARCHITECTURE 10.6).
+It is imported by the campaign-builder helper (consumer,
+DESIGN 6.2.8), by `guidance_harvest.py` (producer), and
+by `guidance_promote.py` (curator helper).  The
+library / producer / consumer split keeps read-only
+callers from pulling in harvest or curator code they do
+not use, and isolates any future schema bump to a single
+file (per ARCHITECTURE 10.6).
 
-The module's docstring must capture this purpose explicitly,
-per the project's documentation policy.
+The module's docstring must capture this purpose
+explicitly, per the project's documentation policy.
 
-**Public surface:**
+**Element-group classification table.**  The composition-
+vector computation needs an element-to-group lookup.  Per
+Principle 11, that table is a checked-in data file rather
+than code:
+
+```
+share/historicalGuidanceDB/gap_groups.toml
+```
+
+Format:
+
+```toml
+schema_version = 1
+
+[groups]
+alkali           = ["Li", "Na", "K", "Rb", "Cs", "Fr"]
+alkali_earth     = ["Be", "Mg", "Ca", "Sr", "Ba", "Ra"]
+halide           = ["F", "Cl", "Br", "I", "At"]
+chalcogen        = ["O", "S", "Se", "Te", "Po"]
+pnictogen        = ["N", "P", "As", "Sb", "Bi"]
+group_iv         = ["C", "Si", "Ge", "Sn", "Pb"]
+group_iii        = ["B", "Al", "Ga", "In", "Tl"]
+transition_metal = ["Sc", "Ti", "V", "Cr", "Mn", "Fe",
+                    "Co", "Ni", "Cu", "Zn",
+                    "Y", "Zr", "Nb", "Mo", "Tc", "Ru",
+                    "Rh", "Pd", "Ag", "Cd",
+                    "Hf", "Ta", "W", "Re", "Os", "Ir",
+                    "Pt", "Au", "Hg"]
+lanthanide       = ["La", "Ce", "Pr", "Nd", "Pm", "Sm",
+                    "Eu", "Gd", "Tb", "Dy", "Ho", "Er",
+                    "Tm", "Yb", "Lu"]
+actinide         = ["Ac", "Th", "Pa", "U", "Np", "Pu",
+                    "Am", "Cm", "Bk", "Cf", "Es", "Fm",
+                    "Md", "No", "Lr"]
+metalloid        = []   # see DESIGN 7.10
+noble_gas        = ["He", "Ne", "Ar", "Kr", "Xe", "Rn"]
+hydrogen         = ["H"]
+```
+
+The library loads this table at first use and caches it
+process-wide.  Every element symbol that the library is
+asked to classify must appear in exactly one group; an
+unclassified element is a hard error (so a typo in a
+structure file fails loudly).  The `metalloid` group is
+present in the schema but starts empty pending the
+ambiguity resolution recorded in 7.10 (Si, B, Ge already
+sit in group_iv / group_iii; whether Ge / As / Sb / Te
+should move to metalloid is an open call).
+
+**Public surface (dataclasses):**
 
 ```python
 @dataclass(frozen=True)
 class Signature:
-    """Identifies a family of systems for which one
-    guidance entry applies.
-    """
-    elements:         tuple[str, ...]   # sorted, lower-case
-    stoichiometry:    tuple[int, ...]   # parallel to
-                                        #   elements
-    structural_class: str               # "" if unclassified
+    """Predictor feature input for one entry."""
+    system_type:        str               # "crystalline"
+                                          #   / "amorphous"
+                                          #   / "nanostructure"
+                                          #   / "molecular"
+    composition_vector: tuple[float, ...] # 13 floats,
+                                          #   ordered by the
+                                          #   canonical
+                                          #   group-name
+                                          #   sequence (7.2)
+    lattice_family:     str               # "" for non-
+                                          #   crystalline;
+                                          #   one of
+                                          #   {"cubic", "hex",
+                                          #    "tet", "ortho",
+                                          #    "mono", "tri"}
+                                          #   for crystalline
+
+@dataclass(frozen=True)
+class Measured:
+    """Quantities harvested from the converged calc."""
+    gap_ev:              float
+    gap_kind:            str             # "direct" | "indirect"
+                                         #   | "none"
+    spin_polarization:   float
+    total_magnetization: float
+    kpoint_density:      float
+    dos_at_fermi:        float | None    # None when absent
+
+@dataclass(frozen=True)
+class Context:
+    """Calculation context recorded with each entry."""
+    basis:                        str     # "mb" | "fb" | "eb"
+    functional:                   str     # e.g. "gga-pbe"
+    convergence_threshold:        float
+    cell_atom_count:              int
+    cell_volume_per_formula_unit: float   # Bohr^3
 
 @dataclass(frozen=True)
 class Verification:
-    """Optional record of the verification grid that
-    produced one parameter's converged value.
-    """
-    grid_values:           tuple[float, ...]
-    converged_at:          float
-    metric:                str
-    metric_threshold:      float
-    similarity_at_predict: float
-
-@dataclass(frozen=True)
-class Parameter:
-    """One unit of guidance: a named scalar with its
-    unit and optional verification provenance.
-    """
-    name:         str              # e.g. "kpoint_density"
-    value:        float
-    unit:         str              # e.g. "1/angstrom"
-    verification: Verification | None
+    """The grid that validated this entry's k-density."""
+    grid_values:            tuple[float, ...]
+    converged_at:           float
+    metric:                 str            # "total_energy"
+    metric_threshold:       float
+    predictor_confidence:   float          # [0.0, 1.0]
+    predictor_neighbor_ids: tuple[str, ...]
 
 @dataclass(frozen=True)
 class Provenance:
@@ -5142,52 +5723,103 @@ class Provenance:
 
 @dataclass(frozen=True)
 class GuidanceEntry:
-    """One curated row of the database."""
+    """One datapoint in the dataspace."""
     entry_id:     str
     generated_at: str             # ISO-8601 UTC
     source:       str             # "campaign" | "manual"
     signature:    Signature
+    measured:     Measured
+    context:      Context
+    verification: Verification | None   # None permitted
+                                        #   only for
+                                        #   source = "manual"
     provenance:   Provenance
-    parameters:   tuple[Parameter, ...]
 
 @dataclass
-class HistoricalGuidanceDatabase:
-    """The whole database, loaded into memory."""
-    schema_version: int
-    entries:        list[GuidanceEntry]
+class Dataspace:
+    """The whole dataspace, loaded into memory.
+
+    The predictor (7.6) operates on this object.  Entries
+    are partitioned by system_type so the per-system_type
+    sub-models can scan only their relevant subset; an
+    in-memory dict keyed by system_type makes that O(1).
+    """
+    schema_version:           int
+    entries_by_system_type:   dict[str, list[GuidanceEntry]]
+    group_table:              dict[str, str]   # symbol -> group
+                                               #   (cached from
+                                               #    gap_groups.toml)
+
+@dataclass(frozen=True)
+class PredictionResult:
+    """What predict() returns to the campaign-builder
+    helper (DESIGN 6.2.8).
+    """
+    predicted_kpoint_density: float
+    confidence:               float        # [0.0, 1.0]
+    is_under_trained:         bool         # True when the
+                                           #   dataspace is
+                                           #   too thin for
+                                           #   the predictor
+                                           #   to trust its
+                                           #   own answer
+                                           #   (7.6 / 7.9)
+    neighbor_entry_ids:       tuple[str, ...]
+    predicted_gap:            float | None # None for
+                                           #   non-crystalline
+    predicted_spin_pol:       float | None # None for
+                                           #   non-crystalline
 ```
 
-**Top-level functions:**
+**Public surface (top-level functions):**
 
 ```python
-def load(entries_dir: Path) -> HistoricalGuidanceDatabase:
-    """Read every *.toml under entries_dir, validate per 7.2
-    rules 1-9, return the loaded database.  Raises
-    HistoricalGuidanceError on any validation failure with
-    the filename and the failed rule cited.
+def load(root: Path) -> Dataspace:
+    """Read every entry TOML under root/entries/<system_type>/
+    and the gap_groups.toml table.  Validate per 7.2
+    rules 1-12, return the loaded Dataspace.  Raises
+    GuidanceDataspaceError on any validation failure
+    with the filename and the failed rule cited.
     """
 
-def save_entry(entry: GuidanceEntry,
-               entries_dir: Path) -> Path:
-    """Emit `entry` as TOML into entries_dir using the
-    deterministic hand-formatter (7.5).  Returns the
-    written path.  Raises if a file with the same
-    `entry_id` already exists in entries_dir (rule 2).
+def save_entry(entry: GuidanceEntry, root: Path) -> Path:
+    """Emit `entry` as TOML into
+    root/staging/<system_type>/ using the deterministic
+    hand-formatter (7.5).  Returns the written path.
+    Raises if a file with the same `entry_id` already
+    exists.
     """
 
-def signature_of(structure: StructureControl,
-                 structural_class: str = "") -> Signature:
+def compute_signature(
+    structure:   StructureControl,
+    system_type: str,
+    group_table: dict[str, str],
+) -> Signature:
     """Compute the Signature for a given StructureControl.
-    Sorts elements, normalizes stoichiometry to smallest-
-    whole-number form, lower-cases element symbols.
+    Atom-fraction across the 13 element groups using
+    group_table; the lattice_family for crystalline is
+    read off the StructureControl's Bravais lattice
+    detection.  Raises GuidanceDataspaceError if any
+    element symbol is missing from group_table (rule
+    enforced at compute time so the failure point names
+    the structure, not the dataspace load).
     """
 
-def predict(db: HistoricalGuidanceDatabase,
-            target: Signature) -> tuple[GuidanceEntry,
-                                        float] | None:
-    """Run the lookup algorithm (7.6).  Returns the best-
-    matching entry and its similarity score in [0.0, 1.0],
-    or None when no entry clears the minimum-match floor.
+def predict(
+    dataspace:   Dataspace,
+    query:       Signature,
+    basis:       str,
+    functional:  str,
+) -> PredictionResult:
+    """Run the predictor (7.6) for a given query
+    signature within the (basis, functional) sub-model.
+    Always returns a PredictionResult; the
+    `is_under_trained` flag plus the `confidence` score
+    tell the caller how seriously to take the prediction.
+    Never returns None: the caller (DESIGN 6.2.8) must
+    decide whether to verify-around the prediction, fall
+    back to the wide-grid default (7.9), or refuse to
+    proceed.
     """
 ```
 
@@ -5211,183 +5843,301 @@ third-party dependency.
 - The key order within a block is fixed (per the field-
   list order in 7.2), so the same in-memory entry always
   produces byte-identical TOML output.
+- The top-level block sequence is fixed:
+  `[entry.signature]` (with its sub-block
+  `[entry.signature.composition_vector]` written as
+  multi-line inline-table-like form -- one key per line,
+  the 13 group keys in canonical order),
+  `[entry.measured]`, `[entry.context]`,
+  `[entry.verification]` (when present),
+  `[entry.provenance]`.
 - Arrays of floats are written one element per line, with
   4 leading spaces of indent and a trailing comma after
   every element (including the last), to make per-element
-  diffs minimal.
-- Arrays of strings or integers stay inline.
-- A blank line separates top-level blocks (`[entry.signature]`
-  from `[entry.provenance]` from `[[entry.parameter]]`).
+  diffs minimal.  Arrays of strings or integers stay
+  inline.
+- A blank line separates top-level blocks; no blank lines
+  inside a block.
 
 **Slug derivation for entry filenames** (and `entry_id`):
 
 ```
-slug = elements_part + "_" + short_sha
-elements_part = "_".join(f"{el}-{n}"
-                         for el, n
-                         in zip(elements, stoichiometry))
+slug = system_type + "-" + short_sha
 short_sha = first 6 hex digits of SHA-256 over the bytes
             (campaign_id || source_structure || generated_at)
 ```
 
-The `short_sha` suffix is the collision guard discussed in
-ARCHITECTURE 10.8: two campaigns harvesting an entry for the
-same signature at the same instant produce different hashes
-(because either `campaign_id` or `source_structure` will
-differ), so their files do not collide.  If by extreme
-coincidence they do, `save_entry` raises rule-2 (a hard
-error visible to the harvest script, which retries with a
-fresh `generated_at`).
+Two virtues of putting `system_type` in the slug rather
+than chemistry: (1) it reflects the on-disk partition
+(`entries/<system_type>/<system_type>-<sha>.toml`), so a
+human glancing at a single file path can tell what kind
+of system it describes; (2) it removes the variable-
+length elements_part of the previous design, so every
+slug is exactly the same length (about 20 chars).
 
-### 7.6 Signature and Matching Algorithm
+The `short_sha` is the collision guard discussed in
+ARCH 10.8: two campaigns harvesting an entry at the same
+instant produce different hashes (because either
+`campaign_id` or `source_structure` will differ), so
+their files do not collide.  If by extreme coincidence
+they do, `save_entry` raises a hard error (rule 2) and
+the harvest script retries with a fresh `generated_at`.
 
-The lookup answers: "given a target signature, return the
-single best-matching entry from the database, along with a
-similarity score that the campaign builder can use to size
-the verification grid."
+### 7.6 Predictor Algorithm
 
-**Similarity metric.**  Let `T = (T_elements, T_stoich,
-T_class)` be the target signature and `E = (E_elements,
-E_stoich, E_class)` be one candidate entry's signature.
-Define:
+The predictor answers: "given a target system's feature
+vector and the (basis, functional) it will be run under,
+predict the converged k-density and tell the caller how
+confident the prediction is."
+
+The predictor is **k-nearest-neighbor regression with
+inverse-distance weighting**, run in **two stages for
+crystalline** systems and as a simple per-bucket
+canonical for non-crystalline.  The two-stage split for
+crystalline exploits the transferability argument from
+7.1: chemistry maps to electronic character (stage 1);
+electronic character maps to k-density (stage 2).  Each
+stage is a separate k-NN, with its own neighbor set,
+distance metric, and variance.
+
+**Step 1 -- partition by system_type.**  The Dataspace
+(7.4) is partitioned by system_type at load time.  The
+predictor first switches on the query's system_type:
+
+- `crystalline`: run the two-stage regression below.
+- `amorphous` / `nanostructure` / `molecular`: return the
+  canonical entry for that system_type (typically a
+  Gamma-floor density driven by the cell-volume
+  convention; see 7.9 for the exact day-1 canonical
+  values).  Chemistry plays little role here -- the
+  density convention dominates -- so the predictor's
+  job collapses to a constant.
+
+The rest of this section describes the crystalline path.
+
+**Step 2 -- sub-model selection by (basis, functional).**
+The predictor maintains a sub-model per (basis,
+functional) pair: the k-NN draws only on entries whose
+context matches.  Justification: changing the basis or
+the functional can shift the converged k-density and
+the measured gap meaningfully, and we do not want
+cross-functional interpolation to wash out that signal.
+
+If the queried (basis, functional) sub-model has
+fewer than `k_min = 3` entries, the predictor:
+
+- Falls back to the most-populous sub-model under the
+  same functional family (e.g. `(mb, gga-pbe)` ->
+  `(fb, gga-pbe)` if mb is sparse).
+- If no functional-family fallback exists, falls back
+  to the system_type's overall pool (ignoring context).
+- If the overall pool also has fewer than `k_min`
+  entries, returns
+  `PredictionResult(is_under_trained = True, ...)`.
+
+**Step 3 -- Stage 1, chemistry -> electronic character.**
+For each entry `E` in the sub-model, define the stage-1
+distance to the query `Q`:
 
 ```
-jaccard(T, E) =
-    |T_elements intersection E_elements|
-    -------------------------------------
-    |T_elements union E_elements|
+d1(Q, E) = sqrt(
+    w_comp * || Q.comp_vector - E.comp_vector ||^2
+  + w_latt * (1 if Q.lattice_family != E.lattice_family
+              else 0)
+)
 ```
 
-`jaccard` is in [0.0, 1.0] -- 1.0 if the element sets are
-identical, 0.0 if disjoint.
+Both `Q.comp_vector` and `E.comp_vector` are 13-vectors
+summing to 1.0 (per schema rule 4), so the squared
+Euclidean distance is a well-defined chemistry similarity
+in [0.0, 2.0].  The lattice-family term is a one-hot
+indicator: 0 if the query and entry share Bravais class,
+1 otherwise.
 
-A stoichiometry penalty accounts for the case where two
-entries share elements but differ in proportions (e.g. Au:O
-= 1:1 vs 1:2):
+Default weights: `w_comp = 1.0`, `w_latt = 0.25`.  These
+make composition the dominant signal and let lattice
+family separate polytypes (rutile-TiO2 from anatase-TiO2)
+without dominating.  Both are tunable; calibration after
+the seed campaign may shift them.
 
-```
-stoich_penalty(T, E) =
-    1.0 - average over shared elements el of:
-        min(T_n_el, E_n_el) / max(T_n_el, E_n_el)
-```
-
-where `T_n_el` and `E_n_el` are the multiplicities of
-element `el` in the target and the entry, respectively.
-For elements not shared between the two signatures, the
-penalty contribution is by convention 1.0 (treated as
-maximally penalized via the jaccard term, so they do not
-double-count here).  `stoich_penalty` is in [0.0, 1.0],
-with 0.0 meaning identical proportions across all shared
-elements.
-
-The combined similarity score is:
+Find the `k = 5` nearest neighbors by `d1`.  Stage-1
+predictions are inverse-distance-weighted means:
 
 ```
-similarity(T, E) =
-    jaccard(T, E) * (1.0 - 0.5 * stoich_penalty(T, E))
+weights:      w_i = 1.0 / (d1(Q, E_i) + epsilon)
+              normalized so sum(w_i) = 1.0
+predicted_gap        = sum(w_i * E_i.measured.gap_ev)
+predicted_spin_pol   = sum(w_i * E_i.measured.spin_polarization)
 ```
 
-The 0.5 weight on the stoichiometry penalty is a starting
-heuristic: the element set is the dominant signal (Jaccard
-contributes the full 1.0); stoichiometry is a secondary
-refinement (max 50% reduction within the same element set).
-This weight is tunable and may be revisited as more data
-arrives.
+with `epsilon = 1e-6` to avoid division by zero on an
+exact match.
 
-**Structural-class soft filter.**  When the target specifies
-`T_class != ""`:
+Stage-1 **confidence** is derived from the weighted
+variance of the neighbors' gap values:
 
-- Entries with `E_class == T_class` get their similarity
-  score multiplied by 1.0 (no change).
-- Entries with `E_class != T_class` and `E_class != ""`
-  get their similarity score multiplied by 0.75 (mild
-  demotion).
-- Entries with `E_class == ""` get their similarity score
-  multiplied by 1.0 (unclassified entries are not
-  demoted; absence of evidence does not penalize).
+```
+gap_variance = sum(w_i * (E_i.measured.gap_ev
+                           - predicted_gap)^2)
+gap_spread   = sqrt(gap_variance)
+confidence_1 = exp(-gap_spread / sigma_gap_ref)
+```
 
-When the target specifies `T_class == ""`, the filter is
-inactive and all entries get a multiplier of 1.0.
+with `sigma_gap_ref = 1.0` eV (the gap range over which
+the predictor is "comfortably confident").  This gives
+`confidence_1` in (0.0, 1.0]: 1.0 when the neighbors
+agree perfectly on gap, decaying as they disagree.
 
-This design honors the user's directive: "rely on
-[structural_class] only when given by the user who may
-know."  When the user provides a class, matches that share
-it are preferred but mismatches are not excluded; when the
-user does not provide one, the filter has no effect.
+**Step 4 -- Stage 2, electronic character -> k-density.**
+For each entry `E` in the same sub-model, define a
+stage-2 distance over the predicted electronic character:
 
-**Minimum-match floor.**  A similarity below 0.3 returns
-`None` (no usable match).  This is conservative: a 0.3
-floor means the lookup will return *something* for, e.g.,
-a Au-O-Ti system queried against an Au-O entry (Jaccard
-2/3 = 0.67, well above floor) but will reject a Au-O system
-queried against a Si-O entry (Jaccard 1/3 = 0.33,
-borderline; depends on stoichiometry).  The floor exists
-to prevent the "any historical entry is better than no
-guidance" failure mode where the prediction is so far off
-that the verification grid wastes more compute than
-starting from scratch would have.
+```
+d2(Q, E) = sqrt(
+    w_gap  * (predicted_gap        - E.measured.gap_ev      )^2
+              / sigma_gap^2
+  + w_spin * (predicted_spin_pol   - E.measured.spin_polarization)^2
+              / sigma_spin^2
+)
+```
 
-**Tiebreakers.**  If two entries achieve identical
-similarity scores, prefer:
+with `sigma_gap = 1.0` eV and `sigma_spin = 0.5`.  Note
+the asymmetry: stage 2's distance uses the **predicted**
+character (from stage 1), not the query's chemistry,
+because the goal is "find calculations whose
+gap-and-spin look like what this query is likely to
+produce."  Default weights: `w_gap = 1.0`,
+`w_spin = 0.5`.
 
-  1. The entry whose `generated_at` is most recent (latest
-     experience wins).
-  2. If still tied, the entry whose `source = "manual"`
-     (a curator's deliberate choice over an automated
-     harvest).
-  3. If still tied, the lexicographically first `entry_id`
-     (deterministic but arbitrary fallback).
+Find the `k = 5` nearest neighbors by `d2`.  Predicted
+k-density is the inverse-distance-weighted mean:
+
+```
+predicted_kpoint_density =
+    sum(w_i * E_i.measured.kpoint_density)
+```
+
+Stage-2 **confidence** is derived analogously:
+
+```
+kpd_variance = sum(w_i * (E_i.measured.kpoint_density
+                           - predicted_kpoint_density)^2)
+kpd_spread   = sqrt(kpd_variance)
+confidence_2 = exp(-kpd_spread / sigma_kpd_ref)
+```
+
+with `sigma_kpd_ref = 50.0` (k-points/Bohr^-3 over
+which the predictor is "comfortably confident" about
+density).
+
+**Combined confidence.**  The two stages compound:
+
+```
+confidence = confidence_1 * confidence_2
+```
+
+both in (0.0, 1.0], product also in (0.0, 1.0].
+
+**Returning the result.**  The predictor returns a
+`PredictionResult` (7.4) carrying
+`predicted_kpoint_density`, `confidence`,
+`is_under_trained = False`, the union of the stage-1
+and stage-2 neighbors' `entry_id`s (deduplicated), and
+the intermediate `predicted_gap` and
+`predicted_spin_pol` for forensics.
+
+**Tuning knobs and their defaults.**  All of these are
+named module-level constants in `guidance_db.py`, so
+calibration after the seed campaign is a one-file
+change:
+
+```
+k_min         = 3      # below this many entries, refuse
+                      #   the sub-model
+k_neighbors   = 5      # neighbors used at each stage
+epsilon       = 1e-6   # numerical floor on distance
+w_comp        = 1.0    # composition weight in d1
+w_latt        = 0.25   # lattice-family weight in d1
+w_gap         = 1.0    # gap weight in d2
+w_spin        = 0.5    # spin weight in d2
+sigma_gap     = 1.0    # gap normalization (eV) in d2
+sigma_spin    = 0.5    # spin normalization in d2
+sigma_gap_ref = 1.0    # gap-spread -> confidence_1
+sigma_kpd_ref = 50.0   # kpd-spread -> confidence_2
+```
+
+**Why this shape and not something more sophisticated.**
+k-NN with inverse-distance weighting is the simplest
+predictor that handles sparse, non-stationary, low-
+dimensional data well; produces a natural variance-based
+confidence; degrades gracefully (with fewer than `k`
+neighbors, predict-then-verify just widens the grid via
+low confidence rather than failing); and stays auditable
+(every prediction is "the weighted average of these 5
+listed neighbors").  Linear regression would assume
+smoothness we cannot defend across polytypes; neural
+networks would obscure the audit trail and require more
+data than the seed campaign produces.  Calibration after
+the seed campaign will tell us whether k-NN's accuracy
+floor is acceptable or whether a more sophisticated
+model is warranted.
 
 ### 7.7 Predict-then-Verify Campaign Construction
 
 This subsection covers the bridge from a single prediction
-to a concrete kaleidoscope campaign.  It is the campaign-
-builder helper that lives in `src/scripts/kaleidoscope/` per
-ARCHITECTURE 10.6.
+to a concrete kaleidoscope campaign.  The campaign-builder
+helper that lives in `src/scripts/kaleidoscope/` (DESIGN
+6.2.8) is what calls into this design rung; the algorithm
+below is what it executes.
 
 **Inputs:**
 
-- `target`: a `StructureControl` for the system we want to
-  converge.
-- `options`: a dict of `makeinput` options (everything *but*
-  the convergence knob we are predicting).
-- `structural_class`: optional string, supplied by the user
-  when they know it.
-- `db`: the loaded `HistoricalGuidanceDatabase`.
+- `target`: a `StructureControl` for the system to converge.
+- `options`: a dict of `makeinput` options (everything
+  *but* the swept knob).
+- `system_type`: one of the four valid values, declared by
+  the caller.
+- `basis`, `functional`: the (basis, functional) under
+  which the campaign will run; selects the predictor's
+  sub-model (7.6 step 2).
+- `dataspace`: the loaded `Dataspace` (7.4).
+- `verify`: optional bool, default True; False triggers
+  trust mode (6.2.1) -- a length-1 grid at the predicted
+  point.
 
 **Outputs:**
 
 - A `Campaign` of `CalcUnit`s (DESIGN 6.2.1) ready to
   dispatch.
-- A *prediction record* the harvest hook will later use to
-  recover the campaign's intent.
+- A `PredictionRecord` (7.4-derived) the harvest hook
+  recovers later.
 
 **Algorithm:**
 
 ```
-1.  target_sig = signature_of(target, structural_class)
+1.  query_sig = compute_signature(target, system_type,
+                                  dataspace.group_table)
 
-2.  hit = predict(db, target_sig)
+2.  pred = predict(dataspace, query_sig, basis, functional)
 
-3.  if hit is None:
-        # No historical guidance.  Fall back to the wide-
-        # grid default behavior described in 7.9.
+3.  if not verify:
+        # trust mode (DESIGN 6.2.1).
+        grid_values = [pred.predicted_kpoint_density]
+        policy      = "trust_no_verify"
+
+    elif pred.is_under_trained:
+        # the dataspace is too thin for the predictor to
+        # trust its own answer -- fall back to the wide-
+        # grid default (7.9).
         grid_values = default_wide_kpoint_density_grid()
-        prediction_record = {
-            "predicted_from": None,
-            "similarity":     0.0,
-            "policy":         "wide_grid_no_prior",
-        }
+        policy      = "wide_grid_no_prior"
+
     else:
-        entry, sim = hit
-        param = find_parameter(entry, "kpoint_density")
-        center = param.value
-        grid_values = build_verification_grid(center, sim)
-        prediction_record = {
-            "predicted_from": entry.entry_id,
-            "similarity":     sim,
-            "policy":         "verify_around_prediction",
-        }
+        grid_values = build_verification_grid(
+                          pred.predicted_kpoint_density,
+                          pred.confidence,
+                      )
+        policy = "verify_around_prediction"
 
 4.  units = [
         build_calc_unit(target, options,
@@ -5395,146 +6145,269 @@ ARCHITECTURE 10.6.
         for v in grid_values
     ]
 
-5.  campaign = Campaign(units = units, ...)
+5.  prediction_record = PredictionRecord(
+        policy             = policy,
+        predicted_value    = pred.predicted_kpoint_density
+                              if pred is not None else None,
+        confidence         = pred.confidence
+                              if pred is not None else 0.0,
+        is_under_trained   = (pred.is_under_trained
+                              if pred is not None
+                              else True),
+        neighbor_entry_ids = pred.neighbor_entry_ids
+                              if pred is not None else [],
+        predicted_gap      = pred.predicted_gap
+                              if pred is not None else None,
+        predicted_spin_pol = pred.predicted_spin_pol
+                              if pred is not None else None,
+        system_type        = system_type,
+        feature_vector     = query_sig,
+    )
+
+6.  campaign = Campaign(units=units, ...)
     attach_prediction_record(campaign, prediction_record)
 
-6.  return campaign
+7.  return campaign, prediction_record
 ```
 
-**The verification-grid widening function.**  This is the
-operational realization of "high similarity -> tight grid;
-low similarity -> wider grid."  A starting heuristic:
+**The verification-grid widening function.**  Now driven
+by the predictor's `confidence` rather than a chemistry-
+similarity score.  Same shape as before; the semantic
+input is different:
 
 ```
 def build_verification_grid(center: float,
-                            similarity: float) -> list[float]:
+                            confidence: float) -> list[float]:
     """Return a list of k-density values to sweep around
     `center`, with grid width scaling inversely with
-    similarity.
+    predictor confidence.
     """
     # Width is the multiplicative span: 1.5 means values
     #   from center/1.5 to center*1.5.
-    width = 1.2 + 1.5 * (1.0 - similarity)
+    width    = 1.2 + 1.5 * (1.0 - confidence)
     # Number of points scales similarly.
-    n_points = round(3 + 4 * (1.0 - similarity))
+    n_points = round(3 + 4 * (1.0 - confidence))
 
     # Logarithmically spaced for symmetric coverage.
     lo, hi = center / width, center * width
     return logspace(lo, hi, n_points)
 ```
 
-At `similarity = 1.0` (perfect match): width = 1.2, 3
-points, span [center/1.2, center*1.2].  Tight verification
-that the prior still holds.
+Behavior at the extremes:
 
-At `similarity = 0.7` (good match): width = 1.65, ~4 points,
-span [center/1.65, center*1.65].
-
-At `similarity = 0.3` (the floor): width = 2.25, 6 points,
-span [center/2.25, center*2.25].  Wide enough that if the
-prediction was a poor guide, the true converged point is
-still likely in range.
+- `confidence = 1.0` (perfect match, neighbors agree):
+  width = 1.2, 3 points, span [center/1.2, center*1.2].
+  Tight verification that the prior still holds.
+- `confidence = 0.7` (good match, modest spread):
+  width = 1.65, ~4 points.
+- `confidence = 0.3` (neighbors disagree significantly):
+  width = 2.25, 6 points, span [center/2.25, center*2.25].
+  Wide enough that if the prediction was a poor guide,
+  the true converged point is still likely in range.
 
 The exact constants (`1.2`, `1.5`, `3`, `4`) are starting
-heuristics.  Future calibration against real campaigns may
-adjust them.  They are the only knobs in the predictor;
-keeping them in one function makes that calibration easy.
+heuristics; calibration after the seed campaign may
+adjust them.  They are tunable knobs in
+`src/scripts/kaleidoscope/`, kept in the one function so
+calibration is a one-file change.
 
 **The prediction record** is persisted alongside the
-campaign (e.g., in `campaign.toml` as
-`[campaign.prediction]`) so that the harvest hook (7.8)
-can recover the predicting entry and the similarity score
-that drove the grid choice.  Without it, the harvested
-`similarity_at_predict` field would be unrecoverable.
+campaign (in `campaign.toml` as `[campaign.prediction]`)
+so the harvest hook (7.8) can recover the predicting
+neighbors and the confidence score that drove the grid
+choice.  Without it, the harvested
+`predictor_confidence` and `predictor_neighbor_ids`
+fields would be unrecoverable.
 
 ### 7.8 Harvest Pipeline (Staging and Promotion)
 
 The harvest hook turns a finished campaign into a staged
-guidance entry.  It runs after the verification grid has
-finished (or as a separate post-step the user invokes).
+guidance entry rich enough to feed the predictor.  It
+runs after the verification grid has finished (or as a
+separate post-step the user invokes).
 
 **Inputs:**
 
 - A finished campaign's workspace directory.
-- The campaign's prediction record (per 7.7).
+- The campaign's `[campaign.prediction]` block recovered
+  from `campaign.toml` (7.7).
 
-**Algorithm** (`harvest_guidance.py`):
+**What gets read out of each converged run's
+`result.toml`.**  The imago callable API (DESIGN 6.1)
+needs to expose, on each converged calc:
+
+- `gap_ev`, `gap_kind` (read off the eigenvalue spectrum;
+  see TODO C76 for the imago-side wire-up).
+- `total_magnetization` and `spin_polarization` (already
+  computed for spin-polarized runs; closed-shell runs
+  report 0.0).
+- `dos_at_fermi` (optional; computed for metals when
+  available).
+- The total energy at the end of SCF (used to pick the
+  converged grid point).
+
+When any of these is absent (a closed-shell molecular
+that did not run a spin-polarized SCF, an unsupported
+imago version), the harvest records the absent value as
+`null` if the schema permits or 0.0 with a flag in the
+provenance otherwise.
+
+**Algorithm** (`guidance_harvest.py`):
 
 ```
-1.  Load the campaign report (DESIGN 6.2.6).
+1.  Load the campaign report (DESIGN 6.2.6) and the
+    [campaign.prediction] block from campaign.toml.
 
-2.  For each structure in the campaign:
-      a. Filter to its verification grid (the CalcUnits
-         that swept k-density).
-      b. Inspect each CalcUnit's result: status, converged
-         energy, etc.
-      c. Pick the converged point: the smallest k-density
-         at which the total-energy change between
-         consecutive grid points is below
-         metric_threshold (default 1.0e-4 Hartree).
-      d. If no point converges (energy still moving at the
-         top of the grid), log a warning and SKIP this
-         structure -- a non-converged sweep does not earn
-         a guidance entry.  The user must widen the grid
-         and re-run.
-      e. Build a GuidanceEntry with:
-           - source = "campaign"
-           - signature from the structure
-           - provenance from the campaign metadata
-           - one Parameter with verification details
-             recovered from the grid + prediction record
-      f. Write the entry to share/historicalGuidanceDB/
-         staging/ via save_entry.
+2.  Group CalcUnits by id (one group per structure).
 
-3.  Print a one-line summary per structure
+3.  For each structure group:
+      a. Filter to the verification grid (the CalcUnits
+         that swept k-density).  Sort by k-density
+         ascending.
+      b. For each CalcUnit's converged run, parse
+         result.toml for total_energy, gap_ev, gap_kind,
+         spin_polarization, total_magnetization,
+         dos_at_fermi.
+      c. Pick the converged grid point: the smallest
+         k-density at which |E_i - E_{i+1}| <
+         metric_threshold AND |E_i - E_{i-1}| <
+         metric_threshold for i in (1, len(grid)-1).
+         Stricter than the original "single delta below"
+         rule: requires both consecutive-pair deltas to
+         be small, mitigating a single-grid-point
+         numerical fluke.
+      d. If no point satisfies the criterion (energy
+         still moving at the top of the grid), log a
+         warning, tag the campaign with
+         `prediction_mismatch = true`, and SKIP this
+         structure.  Non-converged sweeps do not earn
+         an entry.  The user must widen the grid and
+         re-run.
+      e. Compute the structure's signature: system_type
+         from the campaign's [campaign.prediction]
+         (which carries it from 7.7); composition_vector
+         and lattice_family via compute_signature().
+      f. Build a GuidanceEntry:
+            - signature: from step (e)
+            - measured: from the chosen converged
+              CalcUnit's result.toml
+            - context: from the campaign's options
+              (basis, functional, threshold, cell info)
+            - verification: grid_values,
+              converged_at = chosen k-density,
+              metric/metric_threshold,
+              predictor_confidence and
+              predictor_neighbor_ids from
+              [campaign.prediction].
+            - provenance: campaign_id, source_structure,
+              imago_commit, curator = "guidance_harvest.py".
+      g. Write the entry to
+         share/historicalGuidanceDB/staging/<system_type>/
+         via save_entry().
+
+4.  Print a one-line summary per structure
     (converged / skipped / staged path).
 ```
 
-**Promotion** (`promote_guidance.py`):
+**Promotion** (`guidance_promote.py`):
 
-A curator helper.  Three modes of operation:
+A curator helper.  Four modes of operation:
 
-- *Interactive review* (default).  Lists all files under
-  `staging/`; for each, prints the signature, the
-  provenance, the parameter values, and asks the curator
-  to PROMOTE, SKIP, or DELETE.  Promoted files move to
-  `entries/`.  Skipped files stay in staging for later
-  review.  Deleted files are removed.
-- *Batch promote all* (`--all`).  Promotes every staging
-  file without prompting.  Intended for trusted automated
-  campaigns where the curator has decided in advance that
-  the harvest results are acceptable.
+- *Interactive review* (default).  Lists all files
+  under `staging/<system_type>/`; for each, prints the
+  signature, measured quantities, verification grid,
+  and provenance, and asks the curator to PROMOTE,
+  SKIP, or DELETE.  Promoted files move to
+  `entries/<system_type>/`.  Skipped files stay in
+  staging for later review.  Deleted files are
+  removed.
+- *Auto-promote rule* (`--auto-promote`).  Promotes
+  every staging file that satisfies an objective
+  acceptance test:
+  - The converged k-density landed in the middle 60%
+    of the verification grid (not at either endpoint).
+    A converged-at-endpoint result is suspicious: the
+    grid may not have been wide enough.
+  - The top three grid points' total-energy variance
+    is below `metric_threshold * 10` (the converged
+    region is convincingly flat, not just one delta
+    below threshold).
+  - `gap_ev` and `gap_kind` are consistent
+    (`gap_kind == "none"` iff `gap_ev == 0.0`).
+  Files failing the rule stay in staging for the
+  curator's review.  In practice this auto-promotes
+  ~80% of seed-campaign entries with the curator
+  reviewing only the ~20% outliers.
+- *Batch promote all* (`--all`).  Promotes every
+  staging file without checking the rule.  Intended
+  for one-off cases where the curator has manually
+  reviewed the staging directory and decided the lot
+  is good.
 - *Dry run* (`--dry-run`).  Lists what would happen
   without moving files.
 
-Promotion is a `mv` operation -- the file's contents do not
-change.  This keeps provenance intact across the staging
-boundary.
+Promotion is a `mv` operation -- the file's contents
+do not change.  This keeps provenance intact across
+the staging boundary.
 
-**Why staging exists.**  An automated harvest is not the
-same as scientific endorsement.  Bugs in the harvest
-script, a verification grid that converged at an
-unphysical artifact (e.g., near a numerical instability),
-or a structure that was wrongly classified by the curator
-could all produce entries that should not propagate.
-Staging gives the curator a checkpoint to catch these
-before they influence future predictions.  The friction is
-the point.
+**Why staging exists.**  An automated harvest is not
+the same as scientific endorsement.  Bugs in the
+harvest script, a verification grid that converged at
+an unphysical artifact (e.g., near a numerical
+instability), or a structure that was wrongly
+classified by the curator could all produce entries
+that should not propagate.  Staging gives the curator
+a checkpoint to catch these before they influence
+future predictions.  The friction is the point; the
+`--auto-promote` rule lets the friction scale to a
+500-entry seed campaign without overwhelming the
+curator.
 
 ### 7.9 Bootstrap and Day-1 Behavior
 
-The database starts empty.  Several things must work
-gracefully in that state and as the database fills.
+The dataspace starts empty.  Several things must work
+gracefully in that state and as the dataspace fills.
 
-**Empty-database lookup.**  `predict(db, target)` over an
-empty `db.entries` returns `None`, and the campaign builder
-falls back to the wide-grid default per 7.7 step 3.  This
-is the same code path used when `predict` returns `None`
-because of the similarity floor, so empty-database and
-no-good-match behavior are unified.
+**Empty-dataspace prediction.**  `predict(dataspace,
+query, basis, functional)` over an empty Dataspace
+returns
+`PredictionResult(is_under_trained = True, ...)`.  The
+campaign-builder helper (DESIGN 6.2.8) then falls back to
+the wide-grid default per 7.7 step 3.  The under-trained
+path is unified with the no-sub-model and the sparse-
+sub-model paths -- 7.6's step 2 fallback decides under
+which conditions `is_under_trained` is set.
 
-**The wide-grid default.**  When no useful prior exists,
-the campaign builder uses:
+**Canonical entries for non-crystalline system_types.**
+For amorphous, nanostructure, and molecular system_types,
+the dataspace ships with one or two **canonical entries
+seeded by hand** at day-1 (`source = "manual"`) so the
+predictor can return something useful immediately.
+Justification: k-density for these system_types is set
+by the cell-volume convention to ~Gamma-only regardless
+of chemistry, so a single canonical entry per non-
+crystalline system_type captures essentially all the
+information the predictor needs.  The canonical entries
+are committed to git as part of the day-1 deliverable:
+
+```
+share/historicalGuidanceDB/entries/amorphous/
+  amorphous-canonical.toml      # kpd = 25.0
+share/historicalGuidanceDB/entries/nanostructure/
+  nanostructure-canonical.toml  # kpd = 25.0
+share/historicalGuidanceDB/entries/molecular/
+  molecular-canonical.toml      # kpd = 1.0 (Gamma-only)
+```
+
+These manual entries carry empty composition_vector
+(all zeros) and empty lattice_family -- the predictor
+treats them as "the canonical answer for this
+system_type."  Day-1 the predictor's non-crystalline
+path simply returns the matching canonical entry
+verbatim; future evidence may refine them.
+
+**The wide-grid default** (crystalline only, used when
+no usable predictor exists):
 
 ```
 default_wide_kpoint_density_grid() = [
@@ -5543,139 +6416,204 @@ default_wide_kpoint_density_grid() = [
 ]
 ```
 
-Eight points spanning a factor of 16, chosen to bracket the
-range commonly seen across published OLCAO results.  This is
-deliberately broader than any "verify around a prediction"
-grid: with no guidance, the campaign has to find the
-converged point unaided.  This list lives in the campaign
-builder, not in the guidance DB itself (no DB entries means
-no DB content to consult).
+Eight points spanning a factor of 16, chosen to bracket
+the k-density range commonly seen across published OLCAO
+results.  This is deliberately broader than any "verify
+around a prediction" grid: with no usable predictor, the
+campaign has to find the converged point unaided.  The
+list lives in the campaign-builder helper, not in the
+dataspace itself (an empty crystalline subtree means no
+dataspace content to consult).
 
-**On the chicken-and-egg with Principle 11.**  Hardcoding the
-wide-grid default is in mild tension with VISION Principle 11
-("scripts must never silently encode 'experience' as
-hardcoded constants").  The justification is that this list
-is the *seed* the database starts from, not a knob meant to
-encode operating experience: by definition it cannot itself
-live in the database when the database is what is empty.
-The list is documented here, kept short and inspectable,
-and is *not* updated by harvested entries.  Once the DB
-holds even one promoted entry, the wide-grid path becomes
-the rare no-match fallback rather than the dominant code
-path -- and the moment a curator finds the bracket
-inadequate they can edit the list explicitly with full
-audit trail.
+**On the chicken-and-egg with Principle 11.**  Hardcoding
+the wide-grid default is in mild tension with Principle
+11 ("scripts must never silently encode 'experience' as
+hardcoded constants").  The justification is that this
+list is the *seed* the dataspace starts from, not a knob
+meant to encode operating experience: by definition it
+cannot itself live in the dataspace when the dataspace
+is what is empty.  The list is documented here, kept
+short and inspectable, and is *not* updated by
+harvested entries.  Once the dataspace's crystalline
+subtree holds even a few entries the predictor can use,
+the wide-grid path becomes the rare under-trained
+fallback rather than the dominant code path -- and the
+moment a curator finds the bracket inadequate they can
+edit the list explicitly with full audit trail.
 
-**Non-convergence at the top of the grid -- failure mode and
-recovery.**  Both the wide-grid default (this section) and
-the verify-around-prediction grid (7.7) can fail to converge
-within their swept bounds.  Two distinct shapes:
+**Non-convergence at the top of the grid -- failure mode
+and recovery.**  Both the wide-grid default and the
+verify-around-prediction grid can fail to converge within
+their swept bounds.  Two distinct shapes:
 
 - *Wide-grid default fails to converge.*  The candidate
-  system requires a k-density above 400.0 (1/angstrom).
-  Diagnostic: the energy is still moving between the top
-  two grid points.  The harvest hook (7.8) logs a warning
-  and SKIPs the structure -- no entry is staged.  The
-  user re-runs with a manually-extended grid (e.g., adds
+  system requires a k-density above 400.0.  Diagnostic:
+  the energy is still moving between the top two grid
+  points.  The harvest hook (7.8) logs a warning, tags
+  the campaign with `prediction_mismatch = true`, and
+  SKIPs the structure -- no entry is staged.  The user
+  re-runs with a manually-extended grid (e.g., adds
   `kpoint_density = 600.0` to the campaign builder's
-  options), the second campaign converges, and the staged
-  entry then carries the higher value as the canonical
-  k-density for that signature.  No automatic retry is
-  built in for v1: silent re-dispatch with widened bounds
-  would couple kaleidoscope to a notion of "still
-  exploring" that the dumb-dispatch principle (Principle 9
-  / Principle 12) deliberately avoids.
-
+  options), the second campaign converges, and the
+  staged entry then carries the higher value as the
+  canonical k-density for that signature.  No automatic
+  retry is built in for v1: silent re-dispatch with
+  widened bounds would couple kaleidoscope to a notion
+  of "still exploring" that Principles 9 and 12
+  deliberately avoid.
 - *Verify-around-prediction fails to converge.*  The
   prediction was wrong enough that the converged point
   fell outside the widened grid (7.7's
   `build_verification_grid`).  Same diagnostic: energy
   still moving at one end.  Same recovery: harvest hook
-  SKIPs the structure, user re-runs with a manually-widened
-  grid.  As a quality-of-life nudge, a non-converged
-  verification additionally tags the staged campaign with
-  a `prediction_mismatch` flag the curator can review;
-  many such mismatches against one source entry signal that
-  the source entry is misleading and may warrant manual
-  attention (e.g., delete-and-re-seed) on review.
+  SKIPs and tags `prediction_mismatch = true`.  Many
+  such mismatches against the same neighbor set (the
+  predictor keeps pointing at neighbors whose value is
+  wrong for the queries that follow) signal that one or
+  more of those neighbors is misleading and may warrant
+  manual attention (delete-and-re-seed) on review.
 
-The principle: **kaleidoscope dispatches once per CalcUnit
-and reports.**  Multi-attempt convergence-finding loops live
-in Python on the client side, not inside kaleidoscope.  A
-researcher (or future tier-3 custom runner) wraps the
-dispatch in a re-run loop when needed; the core stays
-single-shot.
+The principle: **kaleidoscope dispatches once per
+CalcUnit and reports.**  Multi-attempt convergence-finding
+loops live in Python on the client side, not inside
+kaleidoscope.  A researcher (or future tier-3 custom
+runner) wraps the dispatch in a re-run loop when needed;
+the core stays single-shot.
 
-**Seeding the database.**  The first useful entries come
-from the C48.3 initial-potential-database build, which will
-run wide-grid sweeps on the curated reference solids
-specified in DESIGN 5.7.  Each successful sweep contributes
-one staged guidance entry.  Once a curator promotes those,
-later C48.3 reference solids that share chemistry inherit
-predictions.
+**The seed campaign (TODO C75).**  The first useful
+entries for the crystalline subtree come from a
+deliberate stratified seed run: ~150-250 calculations
+spanning element-group pairs and common stoichiometry
+patterns (binary AB, A2B, ABO3 perovskite, etc.) so the
+predictor has broad chemistry coverage from day-2 on.
+The seed campaign uses the wide-grid default per
+structure, runs through kaleidoscope, and feeds into the
+`--auto-promote` rule of `guidance_promote.py` (7.8)
+which lets the curator review only the ~20% outliers
+rather than all 250.  Once the seed lands, the C48.3
+producer (the first major consumer) sees confident
+predictions for most reference solids it converges and
+contributes its own entries on top.
 
-**Manual seeding.**  The curator may also write entries by
-hand (`source = "manual"`) before any campaign runs.  E.g.,
-a researcher who has converged Au-O-rutile systems in past
-work may seed the database with that experience.  Manual
-entries are subject to the same schema validation as
-harvested entries; they skip the staging step (a manual
-entry is written directly to `entries/`).
+**Manual seeding.**  Curators may write entries by hand
+(`source = "manual"`) at any point: a researcher who has
+converged TiO2-rutile in past work may seed it directly.
+Manual entries are subject to the same schema validation
+as harvested entries.  They are written directly to
+`entries/<system_type>/`, skipping the staging step.
 
-**Schema-version migration.**  When the schema bumps to v2,
-a `migrate_guidance.py` script reads every v1 entry, applies
-the v1->v2 transformation, and writes the v2 form back in
-place.  Old entries are not discarded.  This is parallel to
+**Schema-version migration.**  When the schema bumps to
+v2, `guidance_migrate.py` reads every v1 entry, applies
+the v1 -> v2 transformation, and writes the v2 form back
+in place.  Old entries are not discarded.  Parallel to
 the DESIGN 5.7 regeneration discipline.
 
 ### 7.10 Open Design Questions
 
-- **Cell-size guidance for defect supercells.**  The day-1
-  scope is k-point density.  Adding cell-size guidance
-  requires a host-aware signature (the host lattice plus
-  the defect species), which is a meaningful extension of
-  the signature schema.  Deferred until the schema has
-  proven out on k-density.
-- **Multi-metric verification.**  Today the verification
-  metric is total energy, and day-1 ships only that.
-  Future campaigns may need to verify on forces, density
-  change, or a composite.  The schema's `metric` field is
-  registry-keyed (rule 7) so adding new metrics is a
-  registry addition, not a schema change; the open
-  question is how to record a *vector* of metric
-  thresholds when more than one is required.  Deferred.
-- **Stoichiometry weighting in the similarity score.**
-  Weighting by stoichiometry is endorsed (the `stoich_penalty`
-  term in 7.6 stays).  The open knob is the *magnitude* of
-  the weight (currently 0.5 of the Jaccard contribution): a
-  starting heuristic that real calibration data from
-  production campaigns may push up or down.  Whether to
-  expose the weight as a tunable knob in the `predict()`
-  call (per-call override) or keep it as a hard-coded
-  constant inside the library is open; current lean is
-  hard-coded for simplicity until evidence demands
-  otherwise.
-- **Decay or staleness.**  Should old entries (e.g., entries
-  generated under Imago commits more than two years old)
-  carry a similarity penalty?  Argument for: imago itself
-  evolves; settings that worked at commit X may not be
-  optimal at commit Y.  Argument against: convergence
-  settings are physical properties of the system, not of
-  the code, so a once-converged k-density should still be
-  a good guide.  Deferred until real divergence is
-  observed.
+- **Metalloid assignment in `gap_groups.toml`.**  The
+  canonical metalloids (Si, B, Ge, As, Sb, Te) are also
+  members of group_iv (Si, Ge), group_iii (B), pnictogen
+  (As, Sb), and chalcogen (Te) by their column.  Each
+  element must live in exactly one bucket (rule 4
+  enforces the composition vector sums to 1.0 without
+  double-counting).  Day-1 we keep them in their
+  column-based groups and leave `metalloid` empty,
+  documenting the choice in `gap_groups.toml`'s
+  comments.  Real seed-campaign data will tell us
+  whether metalloid-as-a-group meaningfully separates
+  borderline-band semiconductors from their column
+  neighbors; if yes, a curator moves them on a v2
+  schema bump.
+- **k-NN tuning knobs after the seed campaign.**  All of
+  `k_neighbors`, the distance weights (`w_comp`,
+  `w_latt`, `w_gap`, `w_spin`), and the confidence
+  normalizations (`sigma_gap_ref`, `sigma_kpd_ref`) are
+  named constants in `guidance_db.py` (7.6).  Their
+  defaults are educated guesses.  Calibration after the
+  seed campaign should pick values that minimize the
+  predict-then-verify miss rate (how often does the
+  verification grid land its converged point at an
+  endpoint rather than the middle?).  The calibration
+  procedure itself is open: either a one-shot post-seed
+  analysis the curator runs, or a recurring auto-tune
+  that watches harvest patterns over time.
+- **Polytype confusion within the predictor.**
+  Composition + lattice_family does not fully separate
+  polymorphs that share a Bravais class (e.g.
+  alpha-quartz SiO2 vs beta-quartz SiO2, both
+  hexagonal).  The k-NN distance metric weights
+  composition heavily; close polymorphs may smear into
+  one another's predictions.  The verification grid is
+  the safety net, but a recurring problem here would
+  motivate adding a space-group integer as a side
+  feature or extending lattice_family to a finer
+  taxonomy.  Deferred until seed campaign reveals
+  whether this matters in practice.
+- **Spin-polarization interpretation across magnetic
+  orderings.**  `total_magnetization` is recorded per
+  formula unit; an antiferromagnet sums to ~0 even
+  though it has substantial local moments.  The
+  predictor's stage-2 distance uses total
+  magnetization, so AFM systems look like non-magnetic
+  systems to it.  A future schema bump may add
+  `local_moment_per_atom` (the max local moment
+  Imago reports on any site) as a separate field.
+- **Cell-size guidance for defect supercells.**
+  Adding cell-size guidance to the schema is a
+  meaningful future extension.  Most likely shape: a
+  separate `defect_cell_size` measured quantity
+  recorded when the calculation was a defect-in-host
+  supercell (host_lattice and defect_species side
+  features identifying the family).  Deferred until
+  k-density predictor has proven out.
+- **Multi-metric verification.**  Day-1's `metric` is
+  `total_energy`.  Future campaigns may need forces
+  or density-change.  The schema's `metric` field is
+  registry-keyed (rule 10) so adding new metrics is a
+  registry addition.  Open: how to record a *vector*
+  of metric thresholds when multiple are required.
+- **Functional / basis as sub-model dimensions vs k-NN
+  features.**  The predictor conditions on
+  (basis, functional) by running separate sub-models
+  per pair.  Alternative: treat them as additional
+  k-NN features.  The split approach is cleaner (no
+  spurious cross-functional interpolation) but
+  proliferates sub-models.  Calibration data may
+  motivate revisiting.
+- **Decay or staleness.**  Should entries from old
+  imago commits carry a confidence penalty?  Argument
+  for: imago itself evolves; settings that worked at
+  commit X may not be optimal at commit Y.  Argument
+  against: convergence settings are physical
+  properties of the system, not of the code.  Deferred
+  until real divergence is observed.
 
 **Closed by decision (2026-05-28, user):** the historical-
-guidance database does *not* cross-reference into the
+guidance dataspace does *not* cross-reference into the
 initial-potential database.  Once considered: a future
-`pot_label` parameter type that would let a guidance entry
+`pot_label` parameter that would let a guidance entry
 say "for this family, use initial-potential DB entry
 'default_solid'."  Decided against: the two artifacts
 serve different audiences with different update cadences,
-and entangling their schemas would couple their lifetimes
-unnecessarily.  Each database stands alone and shares only
-the curation discipline (VISION Principle 11), not its
-contents.
+and entangling their schemas would couple their lifetimes.
+Each artifact stands alone and shares only the curation
+discipline (Principle 11), not its contents.
+
+**Closed by decision (2026-05-29, user):** chemistry is
+not used as a *signature axis* in v1.  Considered: a
+categorical signature shape with `(system_type,
+gap_type)` as a discrete partition and chemistry-Jaccard
+as a soft refinement.  Replaced by the continuous
+feature-space + k-NN design above because (a) gap is a
+continuous variable, not a category, and binning it
+costs prediction accuracy at the boundaries; (b) the
+chemistry-to-electronic-character map is smooth enough
+for k-NN regression to learn it, and (c) the resulting
+predictor naturally produces a variance-based confidence
+score that drives the verification-grid width.
+Categorical lookup remains a fall-back option if the
+regression approach fails to deliver, but is not the
+primary day-1 design.
 
 ---
 

@@ -10,17 +10,23 @@
 
 - [ ] V1. Confirm design principles against additional test
   cases beyond KNbO3 (VISION Principles.1)
-- [x] V2. Add Goal 5 (historical-guidance database) and
+- [x] V2. Add Goal 5 (historical-guidance dataspace),
   Principle 11 (experience as a curated artifact, not tribal
-  knowledge) to VISION.  Done 2026-05-28 as part of the
-  DESIGN 7 / ARCH 10 chain landing: the new prong frames an
-  artifact that records which convergence settings have
-  worked on which families of systems and that future
-  calculations consult via predict-then-verify, with
-  per-campaign harvest into a staging area and curator
-  promotion.  Principle 11 generalises this same discipline
-  back to the initial-potential DB (Goal 3) so both Goals
-  share one curation philosophy.
+  knowledge), and Principle 12 (the campaign layer stays
+  dumb; campaign description lives in Python) to VISION.
+  Done 2026-05-28 as part of the original DESIGN 7 / ARCH 10
+  chain landing (categorical signature shape); revised
+  2026-05-29 (Path B) when Goal 5 was rewritten to frame
+  the artifact as a regression-trained dataspace rather than
+  a categorical lookup -- a small k-NN predictor learns
+  composition -> electronic-character -> k-density from a
+  curated set of converged calculations, and verifies its
+  prediction with a small grid whose width tracks the
+  predictor's uncertainty.  Principle 11 generalises this
+  curation discipline back to the initial-potential DB
+  (Goal 3) so both Goals share one philosophy.  Principle 12
+  promotes the no-DSL strategic decision out of memory and
+  governs DESIGN 6.2 and 7.
 
 ---
 
@@ -52,23 +58,31 @@
   phase via OpenACC, CUDA Fortran, or OpenMP target
   (ARCHITECTURE 6.3)
 - [x] A8. Write ARCHITECTURE §10 (historical guidance
-  database, VISION Goal 5).  Mirrors §8: layout under
-  share/historicalGuidanceDB/ with `entries/` (canonical)
-  and `staging/` (auto-harvested awaiting curator review),
-  one TOML per entry; TOML format choice with same
-  rationale as §8.2; data-flow diagram showing predict ->
-  build verification grid -> kaleidoscope -> harvest hook
-  -> staged TOML -> curator promotion; signature keying by
-  element set + stoichiometry + optional structural-class
-  soft filter; curation/regeneration split into
-  harvest_guidance.py (producer-side) and
-  promote_guidance.py (curator helper); module/script
-  impact (new historical_guidance_db.py library; new
-  kaleidoscope campaign-builder helper consuming a
-  guidance entry); explicit relationship-with-other-prongs
-  section that closes the no-cross-reference decision
-  against DESIGN 5.  Done 2026-05-28 alongside DESIGN 7
-  and the VISION update.
+  dataspace, VISION Goal 5).  Done 2026-05-28 (categorical
+  signature shape); rewritten 2026-05-29 (Path B) when
+  signature changed from (elements + stoichiometry +
+  structural_class) to (system_type + composition_vector +
+  lattice_family) with k-NN regression replacing the
+  categorical lookup.  Final shape (eight subsections):
+  10.1 layout under share/historicalGuidanceDB/ with
+  entries/<system_type>/, staging/<system_type>/,
+  SCHEMA_VERSION marker, and gap_groups.toml table; 10.2
+  TOML format with signature-first + measured + context +
+  verification + provenance invariants; 10.3 data flow
+  diagram showing the two-stage k-NN predictor and the
+  variance-aware widening; 10.4 feature space (13-d
+  composition + 6-axis lattice family + 4-way system_type)
+  and the k-NN predictor; 10.5 curation/regeneration/harvest
+  with seed-campaign auto-promote rule; 10.6 module impact
+  (guidance_db.py library, kaleidoscope helper,
+  guidance_harvest.py, guidance_promote.py, future
+  guidance_migrate.py, plus a small imago.py extension to
+  expose gap/spin/dos in result.toml, tracked as C76); 10.7
+  relationship to other prongs (no-link with DESIGN 5
+  closed by decision); 10.8 open architectural questions
+  including polytype confusion + spin-pol-vs-AFM
+  interpretation + functional/basis as sub-models vs
+  features.
 - [x] A7. Write ARCHITECTURE §9 (high-throughput
   calculation campaigns / "kaleidoscope", VISION Goal
   4).  Layers + one-directional dependency graph (9.1);
@@ -251,62 +265,69 @@
   cod_revision, strict on failure) and cif2skl.py (ASE
   CIF read -> StructureControl factory -> skl write).
   PSEUDOCODE for D11-D14 follows once each design lands.
-- [x] D16. Design the historical-guidance database
-  (VISION Goal 5, ARCHITECTURE §10).  The predict-then-
-  verify workflow: future calculations consult the DB for
-  the closest matching historical entry, use its k-density
-  as the predicted converged operating point, and run a
-  small verification grid around the prediction instead of
-  a wide convergence scan.  Subsections: 7.1 motivation +
-  why a separate DB from DESIGN 5 + why it accelerates
-  C48.3; 7.2 TOML schema v1 (per-entry signature with
-  element set + stoichiometry + optional structural class,
-  provenance, and one-or-more `[[entry.parameter]]` blocks
-  as the extensibility seam; day-1 ships only
-  `name = "kpoint_density"`); 7.3 worked gold sketch;
-  7.4 in-memory dataclasses (Signature, Parameter,
-  Verification, Provenance, GuidanceEntry,
-  HistoricalGuidanceDatabase) + the public surface
-  (load, save_entry, signature_of, predict); 7.5 hand-
-  formatted deterministic TOML emitter + the slug
-  derivation that uses a short SHA over campaign / source
-  / generated_at as a collision guard; 7.6 Jaccard +
-  stoichiometry-penalty similarity metric, structural-
-  class soft filter, minimum-match floor 0.3, and
-  tiebreakers; 7.7 predict-then-verify campaign
-  construction + the verification-grid widening function
-  (width scales with 1-similarity); 7.8 harvest pipeline
-  (harvest_guidance.py writes to staging; promote_guidance.py
-  is the curator's tool); 7.9 bootstrap behavior + the
-  wide-grid default for an empty DB or a no-match query;
-  7.10 open questions (cell-size guidance, multi-metric
-  verification, stoichiometry weight magnitude, staleness)
-  + the closed-by-decision record that the two databases
-  do NOT cross-reference each other.  Done 2026-05-28.
-- [ ] D17. Patch DESIGN 6.2 for the kaleidoscope <-> guidance
-  DB seam.  Four small writes that fall out once D16 lands:
-  (a) DESIGN 6.2.4 `<calc>`-tag rule (currently
-  `<job_name>-<basis_scf>`, e.g. `scf-mb`) is insufficient
-  for k-point / target-atom / supercell sweeps that all
-  collide under it.  Extend the tag rule to encode the
-  swept axis + value (e.g. `runs/graphite/kpt-density-200/`,
-  `runs/graphite/xanes-C12/`,
-  `cell-3x3x3_kpt-density-200_basis-fb/`).  (b) DB-producer
-  worked example in DESIGN 6.2.1 / 5.7 grows from "one unit
-  per reference solid" to "one sub-grid per solid, judged
-  to converged point, then harvest potential."  (c) A new
-  DESIGN 6.2 sub-section on the campaign-builder helper
-  that consumes a guidance entry and lays out the
-  verification grid; cross-references DESIGN 7.7.  (d)
-  Cross-reference VISION Principle 12 (the campaign layer
-  stays dumb; description lives in Python) and the
-  builder-split between kaleidoscope (option-axis sweeps)
-  and structure_control / acquisition (structure-axis
-  sweeps), so DESIGN 6.2 reflects the 2026-05-27 strategic
-  decisions that currently live only in memory.  None of
-  these is large; they are bundled here so they land in one
-  refine pass before the kaleidoscope/builder code work
-  (C71).
+- [x] D16. Design the historical-guidance dataspace
+  (VISION Goal 5, ARCHITECTURE §10).  Done 2026-05-28
+  (categorical signature shape, Jaccard lookup); rewritten
+  2026-05-29 (Path B) when the signature changed from
+  (elements + stoichiometry + structural_class) to
+  (system_type + 13-d composition_vector + 6-axis
+  lattice_family) and the lookup became a two-stage k-NN
+  regression with variance-based confidence.  Final shape
+  (ten subsections): 7.1 motivation + why a dataspace and
+  predictor rather than a categorical lookup; 7.2 TOML
+  schema v1 (signature / measured / context / verification /
+  provenance blocks with 12 validation rules); 7.3 worked
+  gold sketch (TiO2-rutile entry); 7.4 in-memory dataclasses
+  (Signature, Measured, Context, Verification, Provenance,
+  GuidanceEntry, Dataspace, PredictionResult) + the public
+  surface (load, save_entry, compute_signature, predict) +
+  the gap_groups.toml element-classification table layout
+  per Principle 11; 7.5 deterministic hand-formatted TOML
+  emitter + the `<system_type>-<short_sha>` slug derivation;
+  7.6 PREDICTOR ALGORITHM (two-stage k-NN with
+  inverse-distance weighting for crystalline; canonical
+  entry for non-crystalline; sub-models per
+  (basis, functional); variance-based confidence;
+  is_under_trained flag); 7.7 predict-then-verify campaign
+  construction + verification-grid widening driven by
+  predictor confidence + trust-mode (verify=False) for
+  nearly-identical-family campaigns; 7.8 harvest pipeline
+  (reads gap/spin/dos from result.toml; auto-promote rule
+  for the seed campaign + interactive curator review);
+  7.9 bootstrap (canonical entries seeded by hand for
+  non-crystalline; wide-grid default for under-trained
+  crystalline; non-convergence recovery); 7.10 open
+  questions (metalloid assignment, k-NN tuning knobs,
+  polytype confusion, AFM total_magnetization, cell-size
+  for defects, multi-metric verification, functional/basis
+  as sub-models vs features, staleness) + the two
+  closed-by-decision records (no link to DESIGN 5 from
+  2026-05-28; chemistry not as primary signature axis from
+  2026-05-29).
+- [x] D17. Patch DESIGN 6.2 for the kaleidoscope <-> guidance
+  DB seam.  Done 2026-05-29 in the Path B rewrite session:
+  (a) §6.2.4 extended with the **tree-per-varied-axis**
+  convention for sweep campaigns (one directory level per
+  varied axis in stable order, with single-tag rules for
+  axis names / values / decimal-points, bidirectional path
+  parsing, and `campaign.toml` recording the axis order +
+  fixed axes; chosen over a flat axis-value-string after
+  the user flagged filename-length growth); (b) the §6.2.1
+  worked example now describes the producer as a
+  predict-then-verify client expanding each reference
+  solid into a verification sub-grid, including a
+  "trust mode for nearly-identical families"
+  (`verify=False`) note that builds a length-1 sub-grid
+  and skips auto-staging the result; (c) §6.2.8 added as
+  a new subsection describing the campaign-builder helper
+  inside src/scripts/kaleidoscope/ (predict_settings,
+  build_verification_grid, build_calc_tag, the
+  PredictionRecord shape, cross-references to DESIGN 7.6 /
+  7.7 / 7.9 and to 6.2.4's tag convention); (d) the §6.2
+  intro paragraph now names Principles 8 / 10 / 12 and
+  documents the campaign-builder split (option-axis sweeps
+  inside kaleidoscope; structure-axis sweeps in
+  structure_control / acquisition).
 - [x] D15. Design the makeinput callable build API (the
   makeinput-side twin of D11/C63): turn makeinput.py from
   an argv-and-cwd-bound script into one that also exposes a
@@ -493,27 +514,63 @@
   functional change (the dir exists post-build), removes
   chain drift.  Next: code -- C68(a).
 
-### Historical guidance database (VISION 5, ARCH 10)
+### Historical guidance dataspace (VISION 5, ARCH 10, DESIGN 7)
 
 - [ ] P9. Write PSEUDOCODE for the historical-guidance
-  database library and the campaign-builder helper that
-  consumes it (DESIGN 7, D16).  Three blocks: (a) the
-  library -- load(), signature_of(),
-  predict() with the Jaccard + stoichiometry-penalty
-  metric and the structural-class soft filter, save_entry()
-  with the deterministic hand-formatted emitter and the
-  short-SHA slug derivation; (b) the campaign-builder
-  helper in src/scripts/kaleidoscope/ -- consume a
-  predict() result, lay out the verification grid via
-  build_verification_grid(center, similarity), attach the
-  prediction record to the campaign for the harvest hook
-  to recover, fall back to the wide-grid default when
-  predict() returns None; (c) harvest_guidance.py --
-  given a finished campaign's workspace, identify each
-  structure's verification grid, pick the converged point,
-  build a GuidanceEntry with verification provenance, and
-  write it via save_entry() into the staging directory.
-  Foundation for C70/C71/C72.
+  dataspace library, the predictor, the campaign-builder
+  helper, and the harvest pipeline (DESIGN 7, D16).  Four
+  blocks:
+  (a) **Library + I/O.**  load() walking
+  entries/<system_type>/ with all 12 validation rules
+  yielding clear file/block/field error messages; the
+  gap_groups.toml loader and the element-to-group lookup;
+  compute_signature(structure, system_type) producing the
+  13-d composition_vector via atom-fraction + the
+  lattice_family one-hot; save_entry() with the
+  deterministic hand-formatted emitter (16-sig-digit
+  floats, fixed block sequence, multi-line composition
+  vector layout, comma-trailing array layout) and the
+  `<system_type>-<short_sha>` slug derivation; the
+  in-memory Dataspace partitioned by system_type.
+  (b) **Predictor (DESIGN 7.6).**  The system_type switch
+  (canonical entry for non-crystalline; two-stage k-NN for
+  crystalline); sub-model selection by (basis, functional)
+  with the (basis -> functional-family -> overall pool)
+  fallback chain; stage-1 distance d1 over composition +
+  lattice_family with inverse-distance weights;
+  predicted_gap + predicted_spin_pol + confidence_1 via
+  weighted variance; stage-2 distance d2 over predicted
+  electronic character with inverse-distance weights;
+  predicted_kpoint_density + confidence_2; combined
+  confidence; PredictionResult assembly including the
+  is_under_trained flag.
+  (c) **Campaign-builder helper in
+  src/scripts/kaleidoscope/.**  predict_settings(structure,
+  options, dataspace, system_type, basis, functional,
+  verify, id, extra_axes) per DESIGN 6.2.8; the
+  build_verification_grid(center, confidence) widening
+  function; the wide-grid fallback for is_under_trained;
+  the trust-mode (verify=False) length-1 grid;
+  build_calc_tag(calc_axes) emitting the
+  tree-per-varied-axis paths per DESIGN 6.2.4;
+  PredictionRecord attachment to the campaign.
+  (d) **Harvest pipeline (guidance_harvest.py).**  Group
+  CalcUnits by id; sort each verification sub-grid by
+  k-density; parse result.toml for each converged calc
+  (gap_ev, gap_kind, spin_polarization,
+  total_magnetization, dos_at_fermi, total_energy);
+  pick the converged grid point with the two-sided
+  delta-below-threshold rule (DESIGN 7.8 step 3c);
+  SKIP-and-tag-prediction_mismatch on non-convergence at
+  the top; recover predictor_confidence and
+  predictor_neighbor_ids from [campaign.prediction];
+  build a GuidanceEntry; write it to
+  staging/<system_type>/ via save_entry().  Plus a
+  smaller block describing guidance_promote.py's three
+  modes (interactive review default, --auto-promote with
+  the middle-60%-of-grid + top-three-energy-variance
+  rule, --dry-run).
+  Foundation for C70-C73.
 
 ---
 
@@ -1295,7 +1352,7 @@ keeps the common case branch-free.
     remains and is off the critical path.  NEW dependencies
     in priority order: C69 (DESIGN 5.7 / PSEUDOCODE 11.4 /
     ARCH 8.5 revisions for producer-delegates-SCF); C70
-    (historical_guidance_db.py library); C71 (kaleidoscope
+    (guidance_db.py library); C71 (kaleidoscope
     campaign-builder helper consuming a guidance entry);
     and -- to actually deliver the acceleration -- C75
     (seed run populating share/historicalGuidanceDB/entries/
@@ -1657,111 +1714,154 @@ and PSEUDOCODE landed before code.
   to kaleidoscope (drops the bespoke run_imago_scf, COD
   fetch, and per-solid cache).  Pairs with C48.3.
 
-### Phase K -- historical guidance database (VISION 5, ARCH 10, DESIGN 7)
+### Phase K -- historical guidance dataspace (VISION 5, ARCH 10, DESIGN 7)
 
-The accumulation prong.  Each task wants D17 patched, P9
-landed, and the relevant DESIGN 7 subsection consulted
-before code lands.  The library (C70) is foundational; the
-campaign-builder helper (C71) is what makes predict-then-
-verify a real workflow; the harvest hook (C72) closes the
-loop back into the DB; the curator helper (C73) gates
-staging into canonical entries; the C48.3 wiring (C74) is
-the first major consumer that proves the artifact's
-payoff; the seed run (C75) populates the DB with its first
-real entries.
+The accumulation prong, post-Path-B rewrite.  Each task
+wants P9 landed and the relevant DESIGN 7 subsection
+consulted before code lands.  The library + predictor
+(C70) is foundational; the campaign-builder helper (C71)
+is what makes predict-then-verify a real workflow; the
+imago result.toml extension (C76) is a small Fortran-side
+prerequisite for harvest; the harvest hook (C72) closes
+the loop back into the dataspace; the curator helper (C73)
+gates staging into canonical entries; the seed campaign
+(C75) trains the predictor over the chemistry surface;
+the C48.3 wiring (C74) is the first major consumer.
 
-- [ ] C70. Implement `src/scripts/historical_guidance_db.py`
-  per DESIGN 7.2 / 7.4 / 7.5 / 7.6 and PSEUDOCODE P9(a).
-  The library: HistoricalGuidanceError; dataclasses
-  (Signature, Verification, Parameter, Provenance,
-  GuidanceEntry, HistoricalGuidanceDatabase); load() with
-  validation rules 1-9 (each rule cites its violating
-  filename and field in the message); save_entry() using
-  the deterministic hand-formatted emitter (16-significant-
-  digit floats, fixed key order, blank-line block
-  separators, comma-trailing per-line array layout); the
-  slug derivation that uses a short SHA over
-  (campaign_id || source_structure || generated_at);
-  signature_of(StructureControl, structural_class="");
-  predict(db, target) returning (entry, similarity) or
-  None when below the 0.3 floor.  Tests cover every
-  validation rule firing with the expected message; the
-  emitter is bit-deterministic for a fixed in-memory
-  database; round-trip load(save_entry(...)) preserves all
-  fields; the Jaccard + stoichiometry-penalty metric
-  produces the expected scores on a handful of curated
-  pairs (Au-O vs Au-O = 1.0; Au-O vs Si-O = 0.33; Au:O 1:2
-  vs Au:O 1:1 = 0.67); the structural-class soft filter
-  demotes mismatches by 0.75; ties are broken by
-  generated_at recency then by source=="manual" then by
-  entry_id.  Library load passes known_methods=None at the
-  module boundary just like initial_potential_db.py.
+- [ ] C70. Implement `src/scripts/guidance_db.py` per
+  DESIGN 7.2 / 7.4 / 7.5 / 7.6 and PSEUDOCODE P9(a)+(b).
+  Two halves rolled into one library because they share
+  the in-memory Dataspace:
+  **I/O half.** GuidanceDataspaceError; dataclasses
+  (Signature, Measured, Context, Verification, Provenance,
+  GuidanceEntry, Dataspace, PredictionResult);
+  `gap_groups.toml` loader with element-to-group lookup;
+  compute_signature(structure, system_type, group_table)
+  building the 13-d composition_vector and the
+  lattice_family one-hot; load(root) walking
+  entries/<system_type>/ with all 12 validation rules
+  yielding clear file/block/field error messages;
+  save_entry(entry, root) using the deterministic hand-
+  formatted emitter (16-sig-digit floats, fixed block
+  sequence, multi-line composition vector layout,
+  comma-trailing per-line array layout); the
+  `<system_type>-<short_sha>` slug derivation.
+  **Predictor half.** predict(dataspace, query, basis,
+  functional) returning a PredictionResult; the
+  system_type switch (canonical entry for non-crystalline;
+  two-stage k-NN for crystalline); sub-model selection
+  by (basis, functional) with the fallback chain;
+  stage-1 distance d1 over composition + lattice_family
+  with inverse-distance weights yielding predicted_gap,
+  predicted_spin_pol, confidence_1; stage-2 distance d2
+  over predicted electronic character yielding
+  predicted_kpoint_density and confidence_2; combined
+  confidence; the is_under_trained flag whose semantics
+  drive the campaign-builder's wide-grid fallback.
+  Tests: every validation rule fires with the expected
+  message; emitter is bit-deterministic; round-trip
+  load(save_entry(...)) preserves all fields; the k-NN
+  distance and weight formulas produce expected scores
+  on a handful of curated pairs; sub-model fallback chain
+  exercised under sparse-data conditions; the canonical-
+  non-crystalline path returns the expected canonical
+  entry.
 - [ ] C71. Implement the campaign-builder helper inside
-  `src/scripts/kaleidoscope/` per DESIGN 7.7 / D17(c) and
-  PSEUDOCODE P9(b).  predict_settings(structure, options,
-  structural_class, db) returns a Campaign of CalcUnits and
-  attaches a prediction record (predicted_from entry_id,
-  similarity, policy tag) to the campaign so the harvest
-  hook can later recover it.  build_verification_grid(center,
-  similarity) lays out the logspace grid whose width and
-  point count scale inversely with similarity per the
-  starting heuristics in DESIGN 7.7.  Empty-DB and
-  predict()==None cases fall through to
+  `src/scripts/kaleidoscope/` per DESIGN 6.2.8 / 7.7 and
+  PSEUDOCODE P9(c).  predict_settings(structure, options,
+  dataspace, system_type, basis, functional, verify, id,
+  extra_axes) returning (Campaign, PredictionRecord).
+  build_verification_grid(center, confidence) lays out
+  the logspace grid whose width and point count scale
+  inversely with predictor confidence (the 7.7 starting
+  heuristics).  is_under_trained falls through to
   default_wide_kpoint_density_grid() (the 8-point bracket
-  list in DESIGN 7.9).  Tests cover: the prediction record
-  shape; that high-similarity returns a 3-point tight grid
-  and low-similarity returns a 6-point wider grid; that
-  log-spacing is centered on the predicted value; that an
-  empty DB returns the wide-grid default with policy =
-  "wide_grid_no_prior".
-- [ ] C72. Implement `src/scripts/harvest_guidance.py` per
-  DESIGN 7.8 (harvest half) and PSEUDOCODE P9(c).  Given a
-  finished campaign workspace, walks each structure's
-  verification grid, picks the converged k-density (the
-  smallest grid value at which the consecutive-grid
-  energy change falls below metric_threshold), and emits
-  one staged TOML per structure under
-  `share/historicalGuidanceDB/staging/`.  Non-converged
-  sweeps log a warning and SKIP -- a non-converged sweep
-  does not earn an entry.  Recovers the prediction record
-  attached by C71 so the staged entry's
-  `similarity_at_predict` carries the right value.  Tests
-  on a synthetic campaign workspace fake (no real Imago
-  runs needed) covering the converged-path, skip-path, and
-  prediction-record-recovery cases.
-- [ ] C73. Implement `src/scripts/promote_guidance.py` per
-  DESIGN 7.8 (curator half).  Interactive review mode is
-  default: list every file in `staging/`, print signature
-  + provenance + parameter values, prompt curator to
-  PROMOTE / SKIP / DELETE; promoted files move to
-  `entries/`.  `--all` batch-promotes without prompting
-  (for trusted automated campaigns).  `--dry-run` lists
-  what would happen without moving anything.  Tests
-  exercise each mode against a synthetic staging
-  directory.
+  list in DESIGN 7.9).  trust mode (verify=False)
+  collapses to a length-1 grid at the predicted center.
+  build_calc_tag(calc_axes) emits the tree-per-varied-
+  axis paths per DESIGN 6.2.4.  Tests: prediction record
+  shape; high-confidence returns a 3-point tight grid and
+  low-confidence returns a 6-point wider grid; log-spacing
+  centered on the predicted value; empty dataspace
+  returns the wide-grid default with
+  policy = "wide_grid_no_prior"; trust mode returns
+  length 1; tag derivation matches the 6.2.4 examples.
+- [ ] C72. Implement `src/scripts/guidance_harvest.py`
+  per DESIGN 7.8 (harvest half) and PSEUDOCODE P9(d).
+  Walks each structure's verification sub-grid, parses
+  each converged calc's result.toml for the measured
+  electronic-structure quantities (gap_ev, gap_kind,
+  spin_polarization, total_magnetization, dos_at_fermi)
+  plus total_energy for the convergence test, picks the
+  converged grid point per the two-sided
+  delta-below-threshold rule (DESIGN 7.8 step 3c),
+  SKIPs and tags `prediction_mismatch = true` on
+  non-convergence at the top, recovers
+  predictor_confidence and predictor_neighbor_ids from
+  the campaign's [campaign.prediction] block, builds a
+  rich GuidanceEntry, and writes it to
+  staging/<system_type>/ via save_entry().  Depends on
+  C76 (the imago.py result.toml extension).  Tests on
+  synthetic campaign workspaces (no real imago runs):
+  converged-path, two-sided-delta path, prediction-
+  mismatch path, prediction-record-recovery path,
+  the non-crystalline harvest path.
+- [ ] C73. Implement `src/scripts/guidance_promote.py`
+  per DESIGN 7.8 (curator half).  Four modes:
+  interactive review (default), `--auto-promote` (with
+  the middle-60%-of-grid + top-three-energy-variance
+  rule from DESIGN 7.8), `--all`, `--dry-run`.
+  Interactive printed summary covers signature,
+  measured, verification, provenance.  Tests exercise
+  each mode against a synthetic staging directory.
 - [ ] C74. Wire the kaleidoscope campaign-builder helper
   (C71) into the C48.3 producer.  Replaces the current
   "user picks settings up front" pattern with predict-
   then-verify: for each reference solid in the curation
-  manifest, signature_of() the structure, predict() against
-  the guidance DB, lay out the verification grid via C71,
-  dispatch through kaleidoscope.  Bundled with C48.3 once
-  C68(b) (the kaleidoscope+SLURM seam) is solid and C70+C71
-  are in place.
-- [ ] C75. Seed `share/historicalGuidanceDB/entries/` with
-  the first real entries: run a few representative
-  reference solids (likely from the DESIGN 5.7 curation
-  manifest) with a wide-grid sweep (no prior), harvest via
-  C72, curator-promote via C73.  This is the bootstrap run
-  per DESIGN 7.9; it makes the database non-empty for the
-  first time and from then on later C48.3 reference solids
-  in similar chemical families inherit predictions.  Seed
-  candidates: silicon (Si, the diamond-structure baseline),
-  rocksalt MgO (an ionic baseline), fcc Au (a metallic
-  baseline), graphite/diamond C (a covalent baseline);
-  picked to cover four reasonably orthogonal chemistry
-  classes so partial-Jaccard matches resolve meaningfully
-  on day 2.
+  manifest, predict_settings(...) returns a verification
+  sub-grid Campaign, kaleidoscope dispatches it, the
+  harvest hook reads back both the converged potential
+  (for the C48.3 deliverable) and the rich measured
+  quantities (for guidance contribution).  Bundled with
+  C48.3 once C70+C71+C72+C76 are in place.
+- [ ] C75. Seed `share/historicalGuidanceDB/entries/`
+  via a deliberate stratified seed campaign.  ~150-250
+  calculations covering the chemistry surface
+  representatively rather than at random: for each
+  pair of element groups (alkali x halide, TM x
+  chalcogen, group_iv x chalcogen, etc.) and each common
+  stoichiometry pattern (binary AB, A2B, ABO3
+  perovskite), pick 3-5 representative COD entries.
+  Avoids over-sampling Si compounds and under-sampling
+  heavy elements + actinides + lanthanides.  Plus the
+  three day-1 canonical entries seeded manually for
+  amorphous, nanostructure, and molecular system_types
+  per DESIGN 7.9.  Uses kaleidoscope wide-grid sweeps
+  (no prior available); harvest via C72; promotes via
+  C73 `--auto-promote` so the curator reviews only
+  ~20% outliers.  This is the bootstrap that makes the
+  predictor non-trivial for the crystalline subtree
+  from day-2 on.  Needs cluster time and is a real
+  sub-project of its own: stratified-sampling design,
+  COD query scripting, allocation budget, post-seed
+  calibration of the k-NN tuning knobs per DESIGN 7.10.
+- [ ] C76. Extend imago.py's result.toml output to expose
+  the post-SCF electronic-structure quantities the
+  guidance harvest (C72) needs: `gap_ev` and `gap_kind`
+  (computed from the eigenvalue spectrum -- direct vs
+  indirect by comparing band-edge k-points),
+  `total_magnetization` (already computed for spin-
+  polarized runs; closed-shell runs report 0.0),
+  `spin_polarization` (fractional at the Fermi level for
+  metals; 0.0 otherwise), and `dos_at_fermi` for metals
+  (per eV per formula unit, computed from the DOS
+  histogram or LAT integration when available).  Each
+  field is optional in the schema -- a closed-shell
+  molecular calc with no spin polarization simply omits
+  spin/dos.  Small Fortran-side extension: post-SCF
+  analysis step + new fields written into the existing
+  result.toml emitter (DESIGN 6.1).  Prerequisite for
+  C72.
 
 ---
 

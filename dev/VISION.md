@@ -89,23 +89,34 @@ campaign instead of an exhaustive grid search.
    optics chains spanning many structures -- become a regular
    need; in that scenario the inner Parsl logic is unchanged
    and Snakemake is additive rather than a replacement.
-5. **Accumulate historical convergence guidance.** Build a
-   curated database that records, for each family of systems
-   imago has converged on before, the convergence settings
-   that worked (initially: k-point density in points per
-   reciprocal angstrom; later: cell size, basis size, and
-   other knobs).  New calculations consult the database to
-   *predict* a converged operating point and run a small
-   verification grid around it, rather than scanning a wide
-   convergence surface from scratch.  Each successful
-   campaign appends its result back into the database (via a
-   staging step that a curator promotes), so the artifact
-   grows monotonically with use.  The database makes the
-   initial-potential-database build (Goal 3) faster because
-   the producer becomes a predict-then-verify client of this
-   prong rather than a guesser of settings, and it makes
-   routine convergence work on new systems vastly cheaper
-   than today's full-grid sweeps.
+5. **Accumulate historical convergence guidance as a
+   chemistry-and-physics dataspace.** Build a curated
+   dataspace that records, for each converged calculation
+   imago has run, the chemistry-and-structure signature of
+   the system (element-group composition, lattice family,
+   system type), the resulting electronic-structure
+   character (band gap, spin polarization), and the
+   convergence settings that worked (initially: the
+   k-point density in points per unit reciprocal-cell
+   volume; later: cell size, basis size, and other
+   knobs).  A small regression / nearest-neighbor
+   predictor learns from this dataspace: given a new
+   system's signature, it predicts the converged
+   operating point and an uncertainty.  New calculations
+   then run a verification grid around the predicted
+   point -- narrow when the predictor is confident, wide
+   when it is not -- rather than scanning a convergence
+   surface from scratch.  Each successful campaign
+   appends its result back into the dataspace (via a
+   staging step that a curator promotes), so the
+   artifact grows monotonically with use and the
+   predictor gets better as it accumulates evidence.
+   The dataspace makes the initial-potential-database
+   build (Goal 3) faster because the producer becomes a
+   predict-then-verify client of this prong rather than
+   a guesser of settings, and it makes routine
+   convergence work on new systems vastly cheaper than
+   today's full-grid sweeps.
 
 ## Design Principles
 
