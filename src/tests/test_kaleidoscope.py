@@ -1,5 +1,5 @@
 """test_kaleidoscope.py -- Unit tests for the kaleidoscope
-campaign runner (C68; DESIGN 6.2; PSEUDOCODE 13).
+campaign dispatcher (C68; DESIGN 6.2; PSEUDOCODE 13).
 
 kaleidoscope drives a *set* of Imago calculations: it dispatches
 the per-structure work, tracks each one's outcome, caches
@@ -7,23 +7,23 @@ completed runs so a campaign resumes by re-running, and surfaces
 a report the client harvests.  Per VISION Principle 9 it is
 domain-agnostic -- it never interprets what a run computed.  That
 is exactly what lets these tests exercise the whole machinery
-*without* an Imago binary or $IMAGO_RC: a fake runner stands in
+*without* an Imago binary or $IMAGO_RC: a fake wingbeat stands in
 for the real one and reports whatever generic outcome a test
 wants.  The pieces pinned here, helpers-first then the driver:
 
 * ``validate_campaign`` -- the slug rule, the derived ``<calc>``
   tag when one id hosts several units, and the run-directory
   collision guard (PSEUDOCODE 13.3).
-* ``unit_run_dir`` -- the ``<root>/runs/<id>[/<calc>]`` layout.
+* ``unit_run_dir`` -- the ``<root>/wingbeats/<id>[/<calc>]`` layout.
 * the cache hit-test -- verbatim scalar compare plus key-file
   byte-comparison, and the done-status precondition
   (PSEUDOCODE 13.4).
-* ``run_campaign`` under *both* executors (LocalExecutor and a
+* ``dispatch`` under *both* executors (LocalExecutor and a
   Parsl ThreadPoolExecutor config) -- dispatch, the status
   lifecycle, complete-and-report (one failure never aborts the
   batch), resume-skips-done, and the ``on_outcome`` hook
   (PSEUDOCODE 13.5).
-* ``ImagoRunner`` -- the ImagoResult -> RunOutcome mapping and
+* ``ImagoWingbeat`` -- the ImagoResult -> WingbeatOutcome mapping and
   the persisted ``result.toml`` handoff, with imago's run entry
   points monkeypatched so no binary is needed (PSEUDOCODE 13.2).
 * the report views ``by_status`` / ``with_detail`` / ``failures``
@@ -39,14 +39,14 @@ import os
 import pytest
 
 from kaleidoscope import (
-    Campaign, CalcUnit, KeyFields, KeyFile, RunOutcome,
+    Campaign, CalcUnit, KeyFields, KeyFile, WingbeatOutcome,
     CampaignReport, ReportEntry, KaleidoscopeError,
-    run_campaign, register_runner, resolve_runner,
+    dispatch, register_wingbeat, resolve_wingbeat,
     validate_campaign, unit_run_dir,
     is_cache_hit, cache_key_matches, write_cache_key,
-    read_status, write_status, ImagoRunner,
+    read_status, write_status, ImagoWingbeat,
 )
-from kaleidoscope.runners import Runner
+from kaleidoscope.wingbeats import Wingbeat
 from kaleidoscope.workspace import derive_calc_tag
 
 
@@ -57,40 +57,40 @@ pytestmark = pytest.mark.unit
 
 
 # ==============================================================
-#  Fake runners (stand-ins for the real ImagoRunner)
+#  Fake wingbeats (stand-ins for the real ImagoWingbeat)
 # ==============================================================
 
-class CountingRunner(Runner):
-    """A runner that always completes and counts how many times
+class CountingRunner(Wingbeat):
+    """A wingbeat that always completes and counts how many times
     it actually executed.  Used to prove the cache skips a unit
-    on resume: a cache hit must NOT call the runner again, so the
-    count stays put across a second ``run_campaign``."""
+    on resume: a cache hit must NOT call the wingbeat again, so the
+    count stays put across a second ``dispatch``."""
 
     def __init__(self):
         self.calls = 0
 
-    def run(self, unit, run_dir):
+    def run(self, unit, wingbeat_dir):
         self.calls += 1
-        return RunOutcome(ok=True, detail="converged",
+        return WingbeatOutcome(ok=True, detail="converged",
                           runtime_seconds=0.1, message="")
 
 
-class ModalRunner(Runner):
-    """A runner whose behavior a unit selects through its
+class ModalRunner(Wingbeat):
+    """A wingbeat whose behavior a unit selects through its
     options, so one campaign can mix outcomes.  ``fake_mode`` is
     one of: ``ok`` (completes, detail "converged"); ``not_ok``
-    (completes but RunOutcome.ok is False -> status "failed");
+    (completes but WingbeatOutcome.ok is False -> status "failed");
     ``raise`` (raises on the worker, exercising the dispatcher's
     per-future capture -> status "failed")."""
 
-    def run(self, unit, run_dir):
+    def run(self, unit, wingbeat_dir):
         mode = unit.options.get("fake_mode", "ok")
         if mode == "raise":
-            raise RuntimeError("kaboom from the fake runner")
+            raise RuntimeError("kaboom from the fake wingbeat")
         if mode == "not_ok":
-            return RunOutcome(ok=False, detail="not_converged",
+            return WingbeatOutcome(ok=False, detail="not_converged",
                               runtime_seconds=0.0, message="hit ceiling")
-        return RunOutcome(ok=True, detail="converged",
+        return WingbeatOutcome(ok=True, detail="converged",
                           runtime_seconds=0.2, message="")
 
 
@@ -100,7 +100,7 @@ class ModalRunner(Runner):
 
 def _parsl_thread_config():
     """A minimal Parsl ``Config`` backed by a thread pool -- the
-    laptop deployment.  Threads run in-process, so the runner
+    laptop deployment.  Threads run in-process, so the wingbeat
     instance registered in this process is the very one a worker
     resolves (no pickling), and no cluster is needed."""
     from parsl.config import Config
@@ -114,7 +114,7 @@ def parsl_config(request):
     """Parametrize driver tests over both executors.  ``local``
     yields None (LocalExecutor, synchronous in-process); ``parsl``
     yields a thread-pool Config (ParslExecutor), skipped when
-    Parsl is not installed.  run_campaign chooses the executor
+    Parsl is not installed.  dispatch chooses the executor
     from the presence of this config."""
     if request.param == "parsl":
         pytest.importorskip("parsl")
@@ -127,15 +127,15 @@ def parsl_config(request):
 # ==============================================================
 
 def test_unit_run_dir_with_and_without_calc(tmp_path):
-    """The run directory is ``<root>/runs/<id>``; the ``<calc>``
+    """The run directory is ``<root>/wingbeats/<id>``; the ``<calc>``
     level appears only when the unit carries a calc tag."""
     campaign = Campaign(root=str(tmp_path), units=[])
     plain = CalcUnit(id="s1", structure="a.skl")
     assert unit_run_dir(campaign, plain) == os.path.join(
-        str(tmp_path), "runs", "s1")
+        str(tmp_path), "wingbeats", "s1")
     tagged = CalcUnit(id="s1", structure="a.skl", calc="v2")
     assert unit_run_dir(campaign, tagged) == os.path.join(
-        str(tmp_path), "runs", "s1", "v2")
+        str(tmp_path), "wingbeats", "s1", "v2")
 
 
 def test_validate_rejects_non_slug_id():
@@ -180,10 +180,10 @@ def test_validate_duplicate_run_dir_raises():
 
 
 def test_resolve_unknown_runner_raises():
-    """Asking for a runner that was never registered is a
+    """Asking for a wingbeat that was never registered is a
     campaign-construction fault, not a silent default."""
     with pytest.raises(KaleidoscopeError):
-        resolve_runner("no-such-runner-name")
+        resolve_wingbeat("no-such-wingbeat-name")
 
 
 # ==============================================================
@@ -217,68 +217,68 @@ def test_read_status_absent_is_none(tmp_path):
 
 def _staged_unit(tmp_path, source_text, staged_text,
                  scalars):
-    """Build a (run_dir, unit) pair for a cache test: write the
+    """Build a (wingbeat_dir, unit) pair for a cache test: write the
     current source file, stage a copy under the run directory
     (as a prior run would have left it), snapshot the key, and
     return both.  ``staged_text`` may differ from ``source_text``
     to exercise a byte mismatch."""
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
+    wingbeat_dir = tmp_path / "run"
+    wingbeat_dir.mkdir()
     source = tmp_path / "structure.skl"
     source.write_text(source_text)
-    (run_dir / "structure.skl").write_text(staged_text)
+    (wingbeat_dir / "structure.skl").write_text(staged_text)
     unit = CalcUnit(
         id="s1", structure=str(source),
         key_fields=KeyFields(
             scalars=scalars,
             files=[KeyFile(name="structure.skl",
                            source=str(source))]))
-    write_cache_key(str(run_dir), unit)
-    return str(run_dir), unit
+    write_cache_key(str(wingbeat_dir), unit)
+    return str(wingbeat_dir), unit
 
 
 def test_cache_matches_when_scalars_and_files_agree(tmp_path):
     """A unit whose scalars equal the snapshot and whose key file
     byte-equals its staged copy is a key match."""
-    run_dir, unit = _staged_unit(
+    wingbeat_dir, unit = _staged_unit(
         tmp_path, "LATTICE 1 2 3\n", "LATTICE 1 2 3\n",
         {"kpoints": "4x4x4", "threshold": 0.0001})
-    assert cache_key_matches(unit, run_dir) is True
+    assert cache_key_matches(unit, wingbeat_dir) is True
 
 
 def test_cache_misses_on_changed_scalar(tmp_path):
     """A single differing scalar field is a miss -- the key is
     compared verbatim, field by field."""
-    run_dir, _ = _staged_unit(
+    wingbeat_dir, _ = _staged_unit(
         tmp_path, "LATTICE 1 2 3\n", "LATTICE 1 2 3\n",
         {"kpoints": "4x4x4"})
     changed = CalcUnit(
         id="s1", structure="x",
         key_fields=KeyFields(scalars={"kpoints": "6x6x6"}))
-    assert cache_key_matches(changed, run_dir) is False
+    assert cache_key_matches(changed, wingbeat_dir) is False
 
 
 def test_cache_misses_on_byte_differing_key_file(tmp_path):
     """When the current source no longer byte-equals the staged
     copy the cache misses, even though the names match."""
-    run_dir, unit = _staged_unit(
+    wingbeat_dir, unit = _staged_unit(
         tmp_path, "LATTICE 9 9 9\n", "LATTICE 1 2 3\n",
         {"kpoints": "4x4x4"})
-    assert cache_key_matches(unit, run_dir) is False
+    assert cache_key_matches(unit, wingbeat_dir) is False
 
 
 def test_is_cache_hit_requires_done_status(tmp_path):
     """A matching key is necessary but not sufficient: the run
     must also have reached the ``done`` status.  A still-running
     directory is a miss, so the unit is relaunched."""
-    run_dir, unit = _staged_unit(
+    wingbeat_dir, unit = _staged_unit(
         tmp_path, "X\n", "X\n", {"v": 1})
     # No status.toml yet -> miss.
-    assert is_cache_hit(unit, run_dir) is False
-    write_status(run_dir, status="running")
-    assert is_cache_hit(unit, run_dir) is False
-    write_status(run_dir, status="done")
-    assert is_cache_hit(unit, run_dir) is True
+    assert is_cache_hit(unit, wingbeat_dir) is False
+    write_status(wingbeat_dir, status="running")
+    assert is_cache_hit(unit, wingbeat_dir) is False
+    write_status(wingbeat_dir, status="done")
+    assert is_cache_hit(unit, wingbeat_dir) is True
 
 
 # ==============================================================
@@ -286,15 +286,15 @@ def test_is_cache_hit_requires_done_status(tmp_path):
 # ==============================================================
 
 def test_campaign_runs_and_reports_done(tmp_path, parsl_config):
-    """A clean unit runs to ``done`` with the runner's ``detail``
+    """A clean unit runs to ``done`` with the wingbeat's ``detail``
     recorded, campaign.toml is written, and the report carries
     the entry in unit order."""
-    register_runner("fake_ok", CountingRunner())
-    unit = CalcUnit(id="u1", structure="s.skl", runner="fake_ok",
+    register_wingbeat("fake_ok", CountingRunner())
+    unit = CalcUnit(id="u1", structure="s.skl", wingbeat="fake_ok",
                     key_fields=KeyFields(scalars={"v": 1}))
     campaign = Campaign(root=str(tmp_path), units=[unit],
                         parsl_config=parsl_config)
-    report = run_campaign(campaign)
+    report = dispatch(campaign)
 
     assert len(report.entries) == 1
     entry = report.entries[0]
@@ -310,12 +310,12 @@ def test_status_lifecycle_fields_present(tmp_path, parsl_config):
     carries the full lifecycle: a queued-time ``submitted_at``,
     a worker-time ``started_at``, and the terminal ``done`` plus
     ``detail`` / ``finished_at`` / ``runtime_seconds``."""
-    register_runner("fake_ok", CountingRunner())
-    unit = CalcUnit(id="u1", structure="s.skl", runner="fake_ok",
+    register_wingbeat("fake_ok", CountingRunner())
+    unit = CalcUnit(id="u1", structure="s.skl", wingbeat="fake_ok",
                     key_fields=KeyFields(scalars={"v": 1}))
     campaign = Campaign(root=str(tmp_path), units=[unit],
                         parsl_config=parsl_config)
-    run_campaign(campaign)
+    dispatch(campaign)
 
     status = read_status(unit_run_dir(campaign, unit))
     assert status["status"] == "done"
@@ -330,21 +330,21 @@ def test_one_failure_does_not_abort_batch(tmp_path, parsl_config):
     the worker becomes ``failed`` while its siblings still reach
     ``done``.  A unit that completes-but-not-ok is also
     ``failed``, and both land in ``failures()``."""
-    register_runner("fake_modal", ModalRunner())
+    register_wingbeat("fake_modal", ModalRunner())
     units = [
-        CalcUnit(id="ok1", structure="s", runner="fake_modal",
+        CalcUnit(id="ok1", structure="s", wingbeat="fake_modal",
                  options={"fake_mode": "ok"},
                  key_fields=KeyFields(scalars={"v": 1})),
-        CalcUnit(id="boom", structure="s", runner="fake_modal",
+        CalcUnit(id="boom", structure="s", wingbeat="fake_modal",
                  options={"fake_mode": "raise"},
                  key_fields=KeyFields(scalars={"v": 1})),
-        CalcUnit(id="notok", structure="s", runner="fake_modal",
+        CalcUnit(id="notok", structure="s", wingbeat="fake_modal",
                  options={"fake_mode": "not_ok"},
                  key_fields=KeyFields(scalars={"v": 1})),
     ]
     campaign = Campaign(root=str(tmp_path), units=units,
                         parsl_config=parsl_config)
-    report = run_campaign(campaign)
+    report = dispatch(campaign)
 
     by_id = {e.id: e for e in report.entries}
     assert by_id["ok1"].status == "done"
@@ -358,45 +358,45 @@ def test_one_failure_does_not_abort_batch(tmp_path, parsl_config):
 def test_resume_skips_done_units(tmp_path):
     """Re-running a campaign is its resume: a unit already
     ``done`` with a still-matching key is a cache hit and the
-    runner is NOT called again (LocalExecutor path)."""
-    runner = CountingRunner()
-    register_runner("fake_count", runner)
+    wingbeat is NOT called again (LocalExecutor path)."""
+    wingbeat = CountingRunner()
+    register_wingbeat("fake_count", wingbeat)
     unit = CalcUnit(id="u1", structure="s.skl",
-                    runner="fake_count",
+                    wingbeat="fake_count",
                     key_fields=KeyFields(scalars={"v": 1}))
     campaign = Campaign(root=str(tmp_path), units=[unit])
 
-    first = run_campaign(campaign)
+    first = dispatch(campaign)
     assert first.entries[0].status == "done"
-    assert runner.calls == 1
+    assert wingbeat.calls == 1
 
-    second = run_campaign(campaign)        # resume == re-run
+    second = dispatch(campaign)        # resume == re-run
     assert second.entries[0].status == "done"
-    assert runner.calls == 1               # hit: not re-run
+    assert wingbeat.calls == 1               # hit: not re-run
 
 
 def test_on_outcome_callback_fires_per_unit(tmp_path):
     """The optional streaming hook is invoked once per unit with
     its terminal ReportEntry."""
-    register_runner("fake_ok", CountingRunner())
+    register_wingbeat("fake_ok", CountingRunner())
     seen = []
     units = [CalcUnit(id=f"u{i}", structure="s",
-                      runner="fake_ok",
+                      wingbeat="fake_ok",
                       key_fields=KeyFields(scalars={"v": i}))
              for i in range(3)]
     campaign = Campaign(root=str(tmp_path), units=units,
                         on_outcome=seen.append)
-    run_campaign(campaign)
+    dispatch(campaign)
     assert [e.id for e in seen] == ["u0", "u1", "u2"]
 
 
 # ==============================================================
-#  13.2 -- ImagoRunner: ImagoResult -> RunOutcome + result.toml
+#  13.2 -- ImagoWingbeat: ImagoResult -> WingbeatOutcome + result.toml
 # ==============================================================
 
 def _imago_result(status, **overrides):
     """Fabricate an ImagoResult for the mapping tests, with the
-    fields ImagoRunner reads (status, runtime, message) and the
+    fields ImagoWingbeat reads (status, runtime, message) and the
     ones _persist_result echoes (outputs, job)."""
     import imago
     fields = dict(
@@ -418,15 +418,15 @@ def test_imago_runner_maps_converged(tmp_path, monkeypatch):
     (tmp_path / "imago.dat").write_text("CONVERGENCE_TEST\n 1e-4\n")
     captured = {}
 
-    def fake_run_prepared(run_dir, **kwargs):
-        captured["run_dir"] = run_dir
+    def fake_run_prepared(wingbeat_dir, **kwargs):
+        captured["wingbeat_dir"] = wingbeat_dir
         return _imago_result(imago.RunStatus.CONVERGED)
 
     monkeypatch.setattr(imago, "run_prepared", fake_run_prepared)
     unit = CalcUnit(id="x", structure="s.skl")
-    outcome = ImagoRunner().run(unit, str(tmp_path))
+    outcome = ImagoWingbeat().run(unit, str(tmp_path))
 
-    assert captured["run_dir"] == str(tmp_path)   # prepared mode
+    assert captured["wingbeat_dir"] == str(tmp_path)   # prepared mode
     assert outcome.ok is True
     assert outcome.detail == "converged"
     assert outcome.runtime_seconds == 2.5
@@ -439,12 +439,12 @@ def test_imago_runner_maps_not_converged(tmp_path, monkeypatch):
     *completed*, so it is ok=True with detail="not_converged"."""
     import imago
 
-    def fake_run_structure(structure, options, run_dir):
+    def fake_run_structure(structure, options, wingbeat_dir):
         return _imago_result(imago.RunStatus.NOT_CONVERGED)
 
     monkeypatch.setattr(imago, "run_structure", fake_run_structure)
     unit = CalcUnit(id="x", structure="s.skl")
-    outcome = ImagoRunner().run(unit, str(tmp_path))
+    outcome = ImagoWingbeat().run(unit, str(tmp_path))
     assert outcome.ok is True
     assert outcome.detail == "not_converged"
 
@@ -454,12 +454,12 @@ def test_imago_runner_maps_failed_to_not_ok(tmp_path, monkeypatch):
     the unit did not complete."""
     import imago
 
-    def fake_run_structure(structure, options, run_dir):
+    def fake_run_structure(structure, options, wingbeat_dir):
         return _imago_result(imago.RunStatus.FAILED,
                              message="fortran abort")
 
     monkeypatch.setattr(imago, "run_structure", fake_run_structure)
-    outcome = ImagoRunner().run(CalcUnit(id="x", structure="s"),
+    outcome = ImagoWingbeat().run(CalcUnit(id="x", structure="s"),
                                 str(tmp_path))
     assert outcome.ok is False
     assert outcome.detail == "failed"
@@ -475,17 +475,17 @@ def test_imago_runner_prepared_detection_under_inputs(tmp_path,
     (tmp_path / "inputs" / "imago.dat").write_text("X\n")
     used = {}
 
-    def fake_run_prepared(run_dir, **kwargs):
+    def fake_run_prepared(wingbeat_dir, **kwargs):
         used["prepared"] = True
         return _imago_result(imago.RunStatus.CONVERGED)
 
-    def fake_run_structure(structure, options, run_dir):
+    def fake_run_structure(structure, options, wingbeat_dir):
         used["structure"] = True
         return _imago_result(imago.RunStatus.CONVERGED)
 
     monkeypatch.setattr(imago, "run_prepared", fake_run_prepared)
     monkeypatch.setattr(imago, "run_structure", fake_run_structure)
-    ImagoRunner().run(CalcUnit(id="x", structure="s"),
+    ImagoWingbeat().run(CalcUnit(id="x", structure="s"),
                       str(tmp_path))
     assert used == {"prepared": True}
 
@@ -497,13 +497,13 @@ def test_imago_runner_prepared_detection_under_inputs(tmp_path,
 def _entry(id, status, detail):
     """A minimal ReportEntry for the view tests."""
     return ReportEntry(id=id, calc=None, status=status,
-                       detail=detail, run_dir=f"/runs/{id}",
+                       detail=detail, wingbeat_dir=f"/wingbeats/{id}",
                        runtime_seconds=0.0, message="")
 
 
 def test_report_views_select_correctly():
     """``by_status`` filters on the generic lifecycle status,
-    ``with_detail`` on the runner-supplied detail (how a client
+    ``with_detail`` on the wingbeat-supplied detail (how a client
     selects converged units), and ``failures`` collects the
     failed/lost entries."""
     report = CampaignReport(entries=[

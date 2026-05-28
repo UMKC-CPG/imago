@@ -5,8 +5,8 @@ These are plain, domain-agnostic records.  Per VISION
 Principle 9 the campaign layer is ordinary scientific Python:
 kaleidoscope dispatches, tracks, and caches calculations
 without knowing what any of them computes.  The Imago-specific
-meaning of a run lives one level down in the runner
-(``runners.py``) and one level up in the client that reads each
+meaning of a run lives one level down in the wingbeat
+(``wingbeats.py``) and one level up in the client that reads each
 run directory after the campaign (the harvest, DESIGN 6.2.6).
 """
 
@@ -18,7 +18,7 @@ class KaleidoscopeError(Exception):
     """A campaign-construction or workspace fault -- for
     example an ``id`` that is not a filesystem-safe slug, two
     units colliding on one run directory, or a request for an
-    unregistered runner.  Distinct from ``imago.ImagoError``,
+    unregistered wingbeat.  Distinct from ``imago.ImagoError``,
     which concerns the running of a single calculation."""
     pass
 
@@ -60,10 +60,10 @@ class CalcUnit:
                       a curation reference_id); must be a slug.
     - ``structure`` : path to an ``imago.skl`` for the run.
     - ``options``   : the makeinput options used to build the
-                      run directory (passed to the runner).
+                      run directory (passed to the wingbeat).
     - ``calc``      : an optional variant tag, used only when one
                       structure hosts more than one calculation.
-    - ``runner``    : the runner name, or None for the campaign
+    - ``wingbeat``    : the wingbeat name, or None for the campaign
                       default.
     - ``key_fields``: the cache identity (DESIGN 6.2.5).
     """
@@ -71,7 +71,7 @@ class CalcUnit:
     structure: str
     options: dict = field(default_factory=dict)
     calc: Optional[str] = None
-    runner: Optional[str] = None
+    wingbeat: Optional[str] = None
     key_fields: KeyFields = field(default_factory=KeyFields)
 
 
@@ -82,7 +82,7 @@ class Campaign:
 
     - ``root``           : the workspace root directory.
     - ``units``          : the list of CalcUnit to run.
-    - ``default_runner`` : the runner for units naming none.
+    - ``default_wingbeat`` : the wingbeat for units naming none.
     - ``parsl_config``   : an optional Parsl ``Config``.  When
                            present the campaign dispatches
                            through Parsl (cluster parallelism);
@@ -98,17 +98,17 @@ class Campaign:
     """
     root: str
     units: list = field(default_factory=list)
-    default_runner: str = "imago"
+    default_wingbeat: str = "imago"
     parsl_config: Any = None
     on_outcome: Optional[Callable] = None
 
 
 @dataclass
-class RunOutcome:
-    """The domain-agnostic result a runner returns
+class WingbeatOutcome:
+    """The domain-agnostic result a wingbeat returns
     (DESIGN 6.2.2).  ``ok`` says whether the unit *completed*,
     not whether it "succeeded scientifically".  ``detail`` is an
-    opaque string the runner chooses (e.g. "converged",
+    opaque string the wingbeat chooses (e.g. "converged",
     "not_converged") that kaleidoscope records verbatim and
     never interprets -- which is what lets the campaign layer
     surface convergence in ``status.toml`` while staying
@@ -124,19 +124,19 @@ class ReportEntry:
     """One unit's terminal record in the campaign report
     (DESIGN 6.2.6).  Mirrors the generic ``status.toml`` fields
     and carries nothing domain-specific; the client reads each
-    ``run_dir`` itself to harvest results."""
+    ``wingbeat_dir`` itself to harvest results."""
     id: str
     calc: Optional[str]
     status: str
     detail: Optional[str]
-    run_dir: str
+    wingbeat_dir: str
     runtime_seconds: Optional[float]
     message: Optional[str]
 
 
 @dataclass
 class CampaignReport:
-    """The result of ``run_campaign``: one ReportEntry per unit,
+    """The result of ``dispatch``: one ReportEntry per unit,
     in unit order, plus convenience views (DESIGN 6.2.6).
     kaleidoscope never decides whether the aggregate is
     acceptable -- that judgment belongs to the client (VISION
@@ -149,7 +149,7 @@ class CampaignReport:
         return [e for e in self.entries if e.status == status]
 
     def with_detail(self, detail):
-        """Entries whose runner-supplied ``detail`` equals
+        """Entries whose wingbeat-supplied ``detail`` equals
         ``detail`` (e.g. "converged").  This is how a client
         such as the potential-DB producer selects the units it
         will harvest."""

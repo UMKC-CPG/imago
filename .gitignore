@@ -49,6 +49,8 @@ __pycache__
 # Parsl writes a per-run "runinfo/" tree (logs, monitoring,
 # task databases) into the working directory whenever a config
 # is loaded.  The kaleidoscope tests load a thread-pool config,
-# so this appears during a test run; it is transient runtime
-# state and must not be tracked.
+# so this appears during a test run (e.g. src/tests/runinfo/);
+# it is transient runtime state and must not be tracked.  The
+# unanchored form ignores it wherever a config happens to load.
 /runinfo
+runinfo/

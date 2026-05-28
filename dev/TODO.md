@@ -89,8 +89,8 @@
   imago.py CLI+callable API with two entry modes (9.2);
   ase_imago.py ASE Calculator kept separate, with the
   ASE-free StructureControl factory / adapter-glue split
-  (9.3); kaleidoscope/ Parsl runner with a pluggable
-  runner seam (9.4); cod_fish.py + cif2skl.py
+  (9.3); kaleidoscope/ Parsl dispatcher with a pluggable
+  wingbeat seam (9.4); cod_fish.py + cif2skl.py
   acquisition front-end (9.5); workspace layout +
   general run-reuse cache (mechanism in kaleidoscope,
   key fields per client) (9.6); clients +
@@ -224,22 +224,22 @@
   result keys), unit conversions, and the ASE-free
   StructureControl factory in structure_control.py plus
   the adapter-layer Atoms-reading glue.
-- [x] D13. Design the kaleidoscope campaign runner (ARCH
+- [x] D13. Design the kaleidoscope campaign dispatcher (ARCH
   9.4, 9.6): the Parsl dispatch model, the pluggable
-  runner seam, complete-and-report status tracking, the
+  wingbeat seam, complete-and-report status tracking, the
   workspace layout + id / <calc> tag / status.toml
   scheme (resolves the ARCH 9.8 open item), and the
   run-reuse cache mechanism with client-supplied key
   fields.
 
   Done 2026-05-21.  Landed as DESIGN section 6.2,
-  building on 6.1 (the default runner calls the 6.1 API
+  building on 6.1 (the default wingbeat calls the 6.1 API
   and persists the 6.1.2 ImagoResult).  Subsections:
   6.2.1 the domain-agnostic data model (CalcUnit /
   Campaign, with campaign.toml as a generated record);
-  6.2.2 the pluggable runner seam (Runner.run -> generic
-  RunOutcome with an opaque runner-supplied `detail`;
-  ImagoRunner maps ImagoResult and persists result.toml);
+  6.2.2 the pluggable wingbeat seam (Wingbeat.run -> generic
+  WingbeatOutcome with an opaque wingbeat-supplied `detail`;
+  ImagoWingbeat maps ImagoResult and persists result.toml);
   6.2.3 Parsl dispatch (one python_app per unit; both
   sweep and tight-loop shapes; per-future exception catch
   for Principle 10); 6.2.4 the workspace layout that
@@ -255,7 +255,7 @@
   PSEUDOCODE/C68.  Key judgment: kaleidoscope stays
   domain-agnostic (Principle 9) -- it tracks generic
   lifecycle status and records but never interprets the
-  runner's `detail`; all harvest is client-side.
+  wingbeat's `detail`; all harvest is client-side.
 
   Refined 2026-05-21: ARCH 9.6/9.8 updated to mark the
   workspace scheme resolved by DESIGN 6.2.4 (the open
@@ -331,7 +331,7 @@
 - [x] D15. Design the makeinput callable build API (the
   makeinput-side twin of D11/C63): turn makeinput.py from
   an argv-and-cwd-bound script into one that also exposes a
-  callable `build_run_dir(structure, options, run_dir)`,
+  callable `build_run_dir(structure, options, wingbeat_dir)`,
   with the CLI a thin wrapper.  This is the design rung
   that was missing under C68 item (a): DESIGN 6.1.3 deferred
   `run_structure`'s structure-and-options mode to "drive
@@ -346,7 +346,7 @@
   now) + CLI-as-thin-wrapper; 6.3.3 the `ScriptSettings`
   split (from_command_line / from_options sharing
   reconcile), mirroring C63; 6.3.4 cwd discipline -- stage
-  the skl into run_dir, chdir in, restore cwd in finally
+  the skl into wingbeat_dir, chdir in, restore cwd in finally
   (reuse the 6.1.4 pattern rather than rewrite makeinput's
   cwd-relative paths) + factor main()'s body into a callable
   build_inputs(settings, sc); 6.3.5 record_clp and the
@@ -448,10 +448,10 @@
   NOT_CONVERGED is now backed by the col-4/CONVERGENCE_TEST
   mechanism.
 - [x] P7. Write PSEUDOCODE for the kaleidoscope campaign
-  runner (DESIGN 6.2, D13): the `CalcUnit` / `Campaign`
+  wingbeat (DESIGN 6.2, D13): the `CalcUnit` / `Campaign`
   data model and `campaign.toml` serialization (6.2.1);
-  the `Runner` protocol and `RunOutcome`, with
-  `ImagoRunner` mapping `ImagoResult` and persisting
+  the `Wingbeat` protocol and `WingbeatOutcome`, with
+  `ImagoWingbeat` mapping `ImagoResult` and persisting
   `result.toml` (6.2.2); the Parsl per-unit dispatch with
   per-future exception capture for complete-and-report
   (6.2.3); the workspace id/`<calc>`/`status.toml`
@@ -463,15 +463,15 @@
   Done 2026-05-21.  Landed as PSEUDOCODE section 13,
   helpers-first then driver: 13.1 data model
   (CalcUnit/KeyFields/Campaign) + serialize_campaign;
-  13.2 Runner protocol + RunOutcome + ImagoRunner (calls
+  13.2 Wingbeat protocol + WingbeatOutcome + ImagoWingbeat (calls
   the §12 API, persists result.toml, maps status ->
   ok/detail); 13.3 unit_run_dir + validate_campaign (slug
   rule, <calc> derivation, collision abort) + status.toml
   read/write; 13.4 is_cache_hit / cache_key_matches
   (verbatim scalar compare + key-file byte-compare, no
-  hashing) / write_cache_key; 13.5 run_campaign +
+  hashing) / write_cache_key; 13.5 dispatch +
   dispatch_unit (hit -> completed_future; miss -> queued
-  + python_app) + run_unit_app + collect_future (the
+  + python_app) + execute_wingbeat_task + collect_future (the
   ParslTaskLost -> "lost" vs worker-exception -> "failed"
   split, per-future capture); 13.6 ReportEntry /
   CampaignReport / report_entry_from_status + the
@@ -484,7 +484,7 @@
 - [x] P8. Write PSEUDOCODE for the makeinput callable build
   API (DESIGN 6.3, D15): the `ScriptSettings`
   from_command_line / from_options split sharing reconcile
-  (6.3.3); `build_run_dir(structure, options, run_dir)` with
+  (6.3.3); `build_run_dir(structure, options, wingbeat_dir)` with
   skl staging and the chdir / restore-in-finally cwd
   discipline (6.3.4); `build_inputs(settings, sc)` factored
   out of main() so CLI and API share one build sequence;
@@ -1596,7 +1596,7 @@ and PSEUDOCODE landed before code.
 - [ ] C67. Implement cif2skl.py (ARCH 9.5, D14): read
   CIF with ASE -> C64 factory -> skl write.
 - [ ] C68. Implement kaleidoscope/ (ARCH 9.4, 9.6, D13):
-  Parsl dispatch, the pluggable runner seam, status
+  Parsl dispatch, the pluggable wingbeat seam, status
   tracking (complete-and-report), the campaign
   workspace, and the run-reuse cache mechanism.  Also
   carries the C63 deferral: the run_structure ->
@@ -1605,25 +1605,25 @@ and PSEUDOCODE landed before code.
   Increment 1, 2026-05-21 (package core + both executors):
   Created src/scripts/kaleidoscope/ implementing PSEUDOCODE
   §13 -- model.py (KeyFields/KeyFile/CalcUnit/Campaign/
-  RunOutcome/ReportEntry/CampaignReport + KaleidoscopeError);
+  WingbeatOutcome/ReportEntry/CampaignReport + KaleidoscopeError);
   workspace.py (slug rule, unit_run_dir, <calc> derivation,
   validate_campaign, status.toml read/merge-write,
   serialize_campaign); cache.py (write_cache_key,
   cache_key_matches with verbatim scalar compare + key-file
-  byte-compare, is_cache_hit); runners.py (Runner base,
-  ImagoRunner mapping ImagoResult + persisting result.toml,
-  RUNNERS registry); dispatch.py (run_campaign +
-  dispatch_unit + module-level _run_unit_task + collect,
+  byte-compare, is_cache_hit); wingbeats.py (Wingbeat base,
+  ImagoWingbeat mapping ImagoResult + persisting result.toml,
+  WINGBEATS registry); dispatch.py (dispatch +
+  dispatch_unit + module-level _execute_wingbeat_task + collect,
   the per-future capture, LocalExecutor and a real
   ParslExecutor -- the programmer installed parsl
   2026.05.18, so the Parsl path is implemented and tested
   against a ThreadPoolExecutor Config).  Executor chosen by
   campaign.parsl_config (present -> Parsl; absent -> local).
   Tests in src/tests/test_kaleidoscope.py with a fake
-  runner (no Imago binary): validate/slug/collision, cache
+  wingbeat (no Imago binary): validate/slug/collision, cache
   hit/miss/byte-compare, dispatch under BOTH executors,
   complete-and-report (one failure does not abort), status
-  lifecycle, and ImagoRunner mapping.
+  lifecycle, and ImagoWingbeat mapping.
   Increment 2, 2026-05-21 (item (a): makeinput callable
   build API + run_structure wiring, per D15/P8).  Refactored
   makeinput.py to the §14 shape: added MakeinputError;
@@ -1634,7 +1634,7 @@ and PSEUDOCODE landed before code.
   parse_command_line into _build_parser + parse(argv);
   record_clp takes argv and is CLI-only; factored main()'s
   body into build_inputs(settings, sc); added
-  build_run_dir(structure, options, run_dir, settings=None)
+  build_run_dir(structure, options, wingbeat_dir, settings=None)
   with skl staging + chdir/restore-in-finally; rewrote main()
   as the thin CLI wrapper (sys.exit(main())).  Wired
   imago.run_structure to build_run_dir -> run_prepared
@@ -1663,16 +1663,16 @@ and PSEUDOCODE landed before code.
   validated; recorded here, no committed test per programmer
   call).  Three cross-process checks on parsl 2026.05.18:
   (1) every arg ParslExecutor ships to a worker (CalcUnit with
-  nested KeyFields/KeyFile, run_dir, default_runner,
-  _run_unit_task, RunOutcome) pickles and round-trips with
+  nested KeyFields/KeyFile, wingbeat_dir, default_wingbeat,
+  _execute_wingbeat_task, WingbeatOutcome) pickles and round-trips with
   equality; (2) a fresh interpreter auto-registers ['imago'] on
   `import kaleidoscope` (DESIGN 6.2.2 holds cross-process);
-  (3) a 4-unit campaign run through the REAL run_campaign /
+  (3) a 4-unit campaign run through the REAL dispatch /
   ParslExecutor path on HighThroughputExecutor + LocalProvider
   (max_workers_per_node=2) came back all done+converged across
   TWO distinct worker PIDs, both != main -- proving genuine
   process separation, status written by the worker and
-  collected by main, and dfk cleanup.  Finding: a custom runner
+  collected by main, and dfk cleanup.  Finding: a custom wingbeat
   must have its module imported in the worker (PYTHONPATH +
   sitecustomize/worker_init); the default 'imago' auto-registers
   so the real producer path needs nothing extra.  Note the HTEX
@@ -1713,6 +1713,13 @@ and PSEUDOCODE landed before code.
   ARCHITECTURE 8.5 so the producer delegates SCF running
   to kaleidoscope (drops the bespoke run_imago_scf, COD
   fetch, and per-solid cache).  Pairs with C48.3.
+  In-scope addition (2026-05-29 refine): the curation
+  manifest's per-solid `system_type` field landed in §5.7
+  at the same time, so C69's producer rewrite needs to
+  thread it through (parse it from the manifest, supply
+  it to the guidance-dataspace predictor as the
+  `system_type` argument when calling predict(), record
+  it on the produced potential-DB entry for forensics).
 
 ### Phase K -- historical guidance dataspace (VISION 5, ARCH 10, DESIGN 7)
 
@@ -1768,7 +1775,20 @@ the C48.3 wiring (C74) is the first major consumer.
   entry.
 - [ ] C71. Implement the campaign-builder helper inside
   `src/scripts/kaleidoscope/` per DESIGN 6.2.8 / 7.7 and
-  PSEUDOCODE P9(c).  predict_settings(structure, options,
+  PSEUDOCODE P9(c).  **Prerequisite (model catch-up):** the
+  C68 code shipped `CalcUnit.calc` as `Optional[str]` and
+  `Campaign` with no `sweep`, but findings 2/3 (2026-05-28
+  refine) moved the design to `calc: tuple[str, ...]` (one
+  directory component per varied sweep axis) plus a
+  `Campaign.sweep: SweepRecord | None` field (DESIGN 6.2.1,
+  PSEUDOCODE 13.1).  Land that model change first --
+  `model.py` (calc -> tuple, add SweepRecord + Campaign.sweep),
+  `workspace.py` (unit_run_dir splats the tuple onto the path,
+  validate_campaign slugs each component and keys collisions
+  on the tuple, serialize_campaign emits calc as a TOML array
+  and a `[campaign.sweep]` block), and the test suite -- so
+  build_calc_tag has a tuple-shaped target to populate.
+  predict_settings(structure, options,
   dataspace, system_type, basis, functional, verify, id,
   extra_axes) returning (Campaign, PredictionRecord).
   build_verification_grid(center, confidence) lays out

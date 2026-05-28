@@ -2586,7 +2586,7 @@ library / script split -- this module is the
 **library**, `build_initial_potentials.py` is the
 **producer**, `makeinput.py` is the **consumer** --
 keeps read-only callers from pulling in manifest
-handling or SCF-runner code they don't use,
+handling or SCF-wingbeat code they don't use,
 isolates any future schema-version bump or format
 swap to one file (per ARCHITECTURE 8.7), and lets
 unit tests cover the file format with synthetic
@@ -3095,6 +3095,7 @@ schema_version = 2
 
 [[reference_solid]]
 reference_id          = "au_fcc"
+system_type           = "crystalline"
 # Exactly one of (cod_id, cod_revision) or structure_path is set
 # per [[reference_solid]] (validation rule 4 below).
 cod_id                = 9008463
@@ -3132,6 +3133,14 @@ convergence_threshold = 1.0e-6
 - `reference_id` (string): stable, human-readable identifier for
   the reference solid.  Used as the cache directory name; must
   match `[A-Za-z0-9_-]+` and be unique across the manifest.
+- `system_type` (string): one of `"crystalline"`, `"amorphous"`,
+  `"nanostructure"`, `"molecular"`.  Required field: the producer
+  must declare this so the guidance-dataspace predictor (DESIGN
+  7) can switch to the correct sub-model when called with the
+  reference solid's feature vector.  The bulk of curation
+  entries are crystalline (the canonical reference-solid case);
+  amorphous and molecular references are rare in this manifest
+  but supported for completeness.
 - `cod_id` (positive integer, optional iff `structure_path` is
   set): Crystallography Open Database entry ID.  The pipeline
   fetches the structure at regeneration time on cache miss.
@@ -3754,7 +3763,7 @@ detail to implement.
 The designs land incrementally, one subsection per
 TODO item, in dependency order: 6.1 is the `imago.py`
 callable API (TODO D11), the foundation every higher
-layer reaches through; the kaleidoscope runner (D13),
+layer reaches through; the kaleidoscope dispatcher (D13),
 the ASE adapter (D12), and structure acquisition (D14)
 follow in later subsections.  Note the section-number
 offset from ARCHITECTURE: DESIGN 6 corresponds to
@@ -3848,6 +3857,14 @@ ImagoResult
   total_energy      float | None: harvested total energy
                       in Hartree, when available; the
                       ASE adapter (D12) converts to eV
+  measured          MeasuredQuantities | None: scalar
+                      electronic-structure quantities
+                      harvested from the converged SCF
+                      output (see below).  None for
+                      runs that did not converge or for
+                      job types that do not compute
+                      them.  Used by the guidance-
+                      dataspace harvest (DESIGN 7.8)
   outputs           dict[str, str]: logical name ->
                       absolute path for each output file
                       produced (e.g. "scfV", "energy",
@@ -3859,7 +3876,41 @@ ImagoResult
   runtime_seconds   float: wall-clock time of the run,
                       for kaleidoscope's status.toml
   message           human-readable summary or error text
+
+MeasuredQuantities
+  gap_ev               float | None: band gap in eV,
+                         read from the eigenvalue
+                         spectrum; 0.0 for metals; None
+                         when not computed (closed-shell
+                         molecular runs that skipped the
+                         analysis, unsupported job types)
+  gap_kind             str | None: "direct" / "indirect" /
+                         "none"; "none" iff gap_ev == 0.0
+  spin_polarization    float | None: fractional spin
+                         polarization at the Fermi
+                         level for metals; 0.0 for
+                         closed-shell non-magnetic
+                         systems
+  total_magnetization  float | None: total magnetic
+                         moment per formula unit in Bohr
+                         magnetons; 0.0 for non-magnetic
+  dos_at_fermi         float | None: density of states
+                         at the Fermi level per eV per
+                         formula unit; populated for
+                         metals when the histogram or
+                         LAT integration has been run
 ```
+
+The `measured` block is the C76 follow-up: a small
+extension to imago.py's post-SCF analysis path that
+exposes these quantities through the callable API.
+Their primary consumer is the guidance-dataspace harvest
+(DESIGN 7.8), but they are also of general interest to
+any client that wants to inspect what the calculation
+produced without re-parsing Imago's native output files.
+Every field is optional so a job type that does not
+compute it (e.g. a band-structure-only run) cleanly
+omits it.
 
 `RunStatus` is an enum with four members, chosen so the
 campaign layer can branch on outcome without parsing
@@ -3935,7 +3986,7 @@ both return an `ImagoResult`.
   (job type, bases, edge) that today come off the
   command line; when omitted, the same resource-control
   defaults apply as for a bare CLI `imago` invocation.
-  This is the mode kaleidoscope's default runner uses,
+  This is the mode kaleidoscope's default wingbeat uses,
   because kaleidoscope (or makeinput, dispatched by it)
   has already built the directory.
 - **`run_structure(structure, options, run_dir, *,
@@ -4108,7 +4159,7 @@ the contract above.
   skip the file) is an implementation detail with no
   bearing on the returned contract.
 
-### 6.2 kaleidoscope campaign runner
+### 6.2 kaleidoscope campaign dispatcher
 
 This subsection designs ARCHITECTURE 9.4 and 9.6: the
 Parsl-based package that drives a *set* of Imago
@@ -4126,9 +4177,9 @@ kaleidoscope is *ordinary scientific Python* and stays
 free of materials-specific coupling.  It dispatches,
 tracks, and caches; it does not know what an SCF or a
 potential is.  Everything domain-specific lives either
-below it (the runner, 6.2.2) or above it (the client,
+below it (the wingbeat, 6.2.2) or above it (the client,
 6.2.6).  Three other load-bearing principles shape this
-design.  Principle 8 keeps the runner seam independent of
+design.  Principle 8 keeps the wingbeat seam independent of
 the execution adapter.  Principle 10 (complete-and-report)
 ensures one failed unit never aborts the campaign.  And
 Principle 12 (the campaign layer stays dumb; campaign
@@ -4139,7 +4190,7 @@ kaleidoscope never grows a campaign description language
 independent units; higher-order campaign shape (multi-axis
 sweeps, dependent phases, per-unit iteration) is composed
 in client Python that builds the flat list, or absorbed
-inside a custom runner that owns one unit's internal
+inside a custom wingbeat that owns one unit's internal
 iteration (6.2.2).
 
 A practical corollary of Principle 12 is the
@@ -4166,12 +4217,17 @@ CalcUnit
   id            stable per-structure key (6.2.4); the
                   curation reference_id for the producer,
                   a COD id for an acquisition campaign
-  calc          optional calc-variant tag (6.2.4); None
-                  when the structure hosts one calc
+  calc          tuple[str, ...] of per-axis directory
+                  components (6.2.4).  The empty tuple
+                  means "no second level"; a single-
+                  element tuple is one calc tag; a multi-
+                  element tuple is a nested-axis sweep
+                  (one element per varied axis, in
+                  Campaign.sweep.varied_axes order)
   structure     path to an imago.skl (or a structure
-                  handle the chosen runner understands)
+                  handle the chosen wingbeat understands)
   options       makeinput options for this unit
-  runner        which runner executes it (6.2.2);
+  wingbeat      which Wingbeat executes it (6.2.2);
                   defaults to the campaign default
   key_fields    client-declared cache identity (6.2.5):
                   scalar fields + names of key files
@@ -4179,10 +4235,39 @@ CalcUnit
 Campaign
   root          workspace root directory (6.2.4)
   units         list[CalcUnit]
-  default_runner   runner used when a unit names none
+  default_wingbeat  Wingbeat used when a unit names none
   parsl_config  the Parsl Config (deployment, 6.2.3)
+  sweep         SweepRecord | None: records varied_axes
+                  order + fixed_axes when the campaign
+                  was built by the predict-then-verify
+                  helper (6.2.8); None for hand-built
+                  campaigns that did not declare a sweep
   on_outcome    optional per-unit callback (6.2.6)
+
+SweepRecord
+  varied_axes   tuple[str, ...]: axis names in the
+                  canonical order they appear at each
+                  level of CalcUnit.calc
+  fixed_axes    dict[str, str]: axis -> value for axes
+                  that take the same value across every
+                  unit in the campaign (recorded as
+                  context, not as a calc-tag level)
 ```
+
+The `CalcUnit.calc` tuple is the on-disk path
+representation of the unit's sweep position.  Each
+element is a `<axis>-<value>` directory component per the
+6.2.4 naming rules; iterating the tuple gives the levels
+top-to-bottom.  `pathlib.Path(unit.id, *unit.calc)` builds
+the unit's run-dir relative to `root/wingbeats/`; reading
+an existing path back, split on `/` to recover the tuple.
+The shape is deliberately a tuple of strings rather than
+a dict of (axis -> value): the campaign's `sweep` field
+already records the axis order canonically, and
+duplicating the axis names per unit would invite drift
+between them.  Future extensions (per-axis annotations,
+floats with units) become a `tuple[CalcAxis, ...]` swap
+without changing the path-building code.
 
 A client builds a `Campaign` in process -- kaleidoscope
 is a library first (Principle 9), not a CLI -- and hands
@@ -4205,7 +4290,7 @@ solid into a small **verification sub-grid** of
 `CalcUnit`s -- one per k-density value chosen by the
 predict-then-verify algorithm of 7.7.  Every unit in that
 sub-grid shares `id = reference_id`, the curated skl as
-`structure`, the default (Imago) runner, and the same
+`structure`, the default (Imago) wingbeat, and the same
 `key_fields` (scalar `convergence_threshold` and
 `imago_commit`; the structure file as a key file); they
 differ in `calc` (the per-grid-point tag per 6.2.4) and in
@@ -4247,25 +4332,25 @@ stage it manually via a `source = "manual"` entry per
 7.4 / 7.8.  This is a deliberate asymmetry: trust mode
 *consumes* the guidance DB without *amending* it.
 
-#### 6.2.2 The pluggable runner seam
+#### 6.2.2 The pluggable wingbeat seam
 
-A *runner* is the seam (Principle 8) that isolates
+A *wingbeat* is the seam (Principle 8) that isolates
 kaleidoscope's dispatch core from how a unit actually
 executes.  It is a small protocol:
 
 ```
-Runner.run(unit, run_dir) -> RunOutcome
+Wingbeat.run(unit, wingbeat_dir) -> WingbeatOutcome
 ```
 
-The runner receives a unit and the prepared run
+The wingbeat receives a unit and the prepared run
 directory, executes the calculation however it likes,
-and returns a **domain-agnostic** `RunOutcome`:
+and returns a **domain-agnostic** `WingbeatOutcome`:
 
 ```
-RunOutcome
+WingbeatOutcome
   ok        bool: did the unit complete (not "succeed
               scientifically" -- see detail)
-  detail    short opaque string the runner chooses and
+  detail    short opaque string the wingbeat chooses and
               kaleidoscope records but never interprets
               (e.g. "converged", "not_converged")
   runtime_seconds  float
@@ -4279,26 +4364,26 @@ list of surfaced outcomes ("converged, non-converged,
 cluster-side loss, post-processing error") is therefore
 a deliberate split -- cluster-side loss is
 kaleidoscope's own (a Parsl task that vanished, 6.2.3),
-while converged / non-converged are runner-supplied
+while converged / non-converged are wingbeat-supplied
 `detail` strings.  This is what lets kaleidoscope
 surface convergence in `status.toml` *and* stay ignorant
 of what convergence means.
 
-- The **default runner** (`ImagoRunner`) calls the 6.1
+- The **default wingbeat** (`ImagoWingbeat`) calls the 6.1
   API: `run_structure(unit.structure, unit.options,
-  run_dir)` (or `run_prepared` when inputs are already
+  wingbeat_dir)` (or `run_prepared` when inputs are already
   staged).  It maps the returned `ImagoResult` into a
-  `RunOutcome`: `ok = status in {CONVERGED,
+  `WingbeatOutcome`: `ok = status in {CONVERGED,
   NOT_CONVERGED, SKIPPED}` (the binary *ran*),
   `detail = status.name.lower()`.  It also **persists
   the full `ImagoResult` into the run directory** as
   `result.toml` (6.2.6), so the Imago-native detail
   survives for the client to reload without
   kaleidoscope ever parsing it.
-- An **ASE runner** wraps `ImagoCalculator` (D12) for
+- An **ASE wingbeat** wraps `ImagoCalculator` (D12) for
   units that need ASE-MD or ASE-relaxation semantics; it
   too ultimately calls the 6.1 API underneath.
-- A single campaign may **blend runners** per unit, so
+- A single campaign may **blend wingbeats** per unit, so
   plain SCFs and adapter-wrapped calculations dispatch
   under one campaign (ARCHITECTURE 9.4).  New adapters
   slot in by implementing the protocol; the dispatch
@@ -4307,7 +4392,7 @@ of what convergence means.
 #### 6.2.3 Parsl dispatch and complete-and-report
 
 Each unit becomes one Parsl app: a `python_app` that
-runs `unit.runner.run(unit, run_dir)` on a worker.
+runs `unit.wingbeat.run(unit, wingbeat_dir)` on a worker.
 Kaleidoscope's `parsl_config` (a Parsl `Config`, supplied
 by the client/deployment) maps those apps onto SLURM via
 a `HighThroughputExecutor` and a SLURM provider, so the
@@ -4323,7 +4408,7 @@ both expressed in this one model:
   workers.
 - **Tightly iterative inner loops** (adaptive
   convergence, future AIMD): the *iteration* lives
-  inside the unit's runner (it calls the 6.1 API in a
+  inside the unit's wingbeat (it calls the 6.1 API in a
   loop, or drives ASE's optimizer), so kaleidoscope still
   dispatches one unit; it does not need to model the
   inner loop as a DAG.  If a future client genuinely
@@ -4357,13 +4442,13 @@ here is terminal (`failed` or `lost`, 6.2.4): kaleidoscope
 records it and the client decides acceptance.  Where
 custodian-style correction *does* belong is one layer
 down -- inside imago.py's own iterate-to-convergence
-logic, or inside a smarter runner that loops on the 6.1
+logic, or inside a smarter wingbeat that loops on the 6.1
 API, precisely the "tightly iterative inner loop" shape
 above.  In that arrangement custodian's true analog is
-the runner plus imago.py's intra-run resume, not
+the wingbeat plus imago.py's intra-run resume, not
 kaleidoscope: the layering mirrors VASP's own
 `FireWorks/jobflow -> custodian -> VASP` as `kaleidoscope
--> runner -> imago.py`.  kaleidoscope still dispatches one
+-> wingbeat -> imago.py`.  kaleidoscope still dispatches one
 unit and sees one outcome; recovery within a run lives
 below it, and whole-run reuse on resume lives in the
 cache (6.2.5).
@@ -4378,11 +4463,11 @@ committed scheme.
   campaign.toml          generated from the Campaign
                            (6.2.1): what to run.
   structures/<id>/        acquired/curated inputs.
-  runs/<id>[/<calc>]/      one working dir per calc:
+  wingbeats/<id>[/<calc>]/      one working dir per calc:
       <staged makeinput inputs + run outputs>
       cache_key.toml      identity snapshot (6.2.5).
-      result.toml         runner-persisted native result
-                            (6.2.6); Imago for ImagoRunner.
+      result.toml         wingbeat-persisted native result
+                            (6.2.6); Imago for ImagoWingbeat.
       status.toml         lifecycle + outcome (below).
   results/                client-aggregated outputs.
   logs/
@@ -4403,12 +4488,12 @@ two offending units named.
 exists only when one structure hosts more than one
 calculation (different bases, a property run vs. its SCF,
 a sweep over a varied axis).  A unit with no calc tags
-runs directly in `runs/<id>/` with no second level.  When
+runs directly in `wingbeats/<id>/` with no second level.  When
 present, every directory component obeys the
 `[a-z0-9_-]` rule and must be unique among the calcs
 sharing an `id`.  For the legacy single-calc-per-id case,
-kaleidoscope derives a default tag from the runner's job
-identity (for the Imago runner,
+kaleidoscope derives a default tag from the wingbeat's job
+identity (for the Imago wingbeat,
 `"<job_name>-<basis_scf>"`, e.g. `"scf-mb"`), and errors
 only if that derived tag still collides.
 
@@ -4424,20 +4509,20 @@ sweep complexity:
 
 ```
 Single-axis (k-density sweep over 3 values):
-  runs/graphite/kpt-density-100/
-  runs/graphite/kpt-density-150/
-  runs/graphite/kpt-density-200/
+  wingbeats/graphite/kpt-density-100/
+  wingbeats/graphite/kpt-density-150/
+  wingbeats/graphite/kpt-density-200/
 
 Two-axis (cell x k-density):
-  runs/graphite/cell-2x2x2/kpt-density-100/
-  runs/graphite/cell-2x2x2/kpt-density-150/
-  runs/graphite/cell-2x2x2/kpt-density-200/
-  runs/graphite/cell-3x3x3/kpt-density-100/
-  runs/graphite/cell-3x3x3/kpt-density-150/
-  runs/graphite/cell-3x3x3/kpt-density-200/
+  wingbeats/graphite/cell-2x2x2/kpt-density-100/
+  wingbeats/graphite/cell-2x2x2/kpt-density-150/
+  wingbeats/graphite/cell-2x2x2/kpt-density-200/
+  wingbeats/graphite/cell-3x3x3/kpt-density-100/
+  wingbeats/graphite/cell-3x3x3/kpt-density-150/
+  wingbeats/graphite/cell-3x3x3/kpt-density-200/
 
 Three-axis (basis x cell x k-density):
-  runs/graphite/basis-mb/cell-2x2x2/kpt-density-100/
+  wingbeats/graphite/basis-mb/cell-2x2x2/kpt-density-100/
   ...
 ```
 
@@ -4480,8 +4565,8 @@ First, flat tags balloon: a 4-axis sweep at typical value
 widths produces 60-80 character names that wrap and
 break tab-completion.  Second, the tree mirrors how
 humans actually navigate the data -- `ls
-runs/graphite/cell-3x3x3/` shows every k-density value
-swept at that cell size, a natural slice.  `find runs
+wingbeats/graphite/cell-3x3x3/` shows every k-density value
+swept at that cell size, a natural slice.  `find wingbeats
 -name 'kpt-density-200' -type d` finds the same
 swept-value across cell sizes, the orthogonal slice.
 Neither slice is convenient under a flat string.
@@ -4506,8 +4591,8 @@ id               = "<id>"
 calc             = "<calc>"     # omitted when None
 status           = "queued" | "running" | "done"
                    | "failed" | "lost"
-detail           = "<runner string>"  # e.g. "converged"
-runner           = "imago" | "ase" | ...
+detail           = "<wingbeat string>"  # e.g. "converged"
+wingbeat         = "imago" | "ase" | ...
 submitted_at     = <iso8601>
 started_at       = <iso8601>    # omitted until running
 finished_at      = <iso8601>    # omitted until terminal
@@ -4517,11 +4602,11 @@ message          = "<text>"
 
 The five `status` values are kaleidoscope-owned and
 generic.  `queued` / `running` are lifecycle;
-`done` / `failed` are terminal runner outcomes
-(`done` iff `RunOutcome.ok`); `lost` is the
+`done` / `failed` are terminal wingbeat outcomes
+(`done` iff `WingbeatOutcome.ok`); `lost` is the
 kaleidoscope-only category for a Parsl-side
 disappearance (worker died, allocation expired) where no
-`RunOutcome` ever came back.  Convergence does **not**
+`WingbeatOutcome` ever came back.  Convergence does **not**
 appear as a status -- it rides in `detail`, per 6.2.2.
 
 #### 6.2.5 The run-reuse cache
@@ -4531,8 +4616,14 @@ ARCHITECTURE 9.6, split into mechanism (kaleidoscope) and
 policy (client) so generality does not cost correctness.
 
 **Mechanism (kaleidoscope).**  Before launching a unit,
-kaleidoscope resolves its `run_dir = runs/<id>[/<calc>]/`
-and performs the hit-test:
+kaleidoscope resolves its
+`wingbeat_dir = wingbeats/<id>[/<calc>]/` and performs
+the hit-test.  Under the 6.2.4 sweep-tag convention,
+`<calc>` may expand to multiple nested directory levels
+(`<axis1>-<value1>/<axis2>-<value2>/...`); the hit-test
+keys on the full leaf path and otherwise behaves
+identically -- the cache mechanism is oblivious to how
+deep the per-unit tree is.
 
 1. If the directory exists, holds a `cache_key.toml`
    that matches the unit's *current* key (below), and
@@ -4582,7 +4673,7 @@ directory at all.  The two never overlap.
 
 Kaleidoscope returns a `CampaignReport`: one entry per
 unit, each carrying `id`, `calc`, `status`, `detail`,
-`run_dir`, `runtime_seconds`, and `message` -- exactly
+`wingbeat_dir`, `runtime_seconds`, and `message` -- exactly
 the generic `status.toml` fields, nothing domain-specific.
 An optional per-unit `on_outcome` callback (6.2.1) fires
 as each unit reaches a terminal state, so a client can
@@ -4590,10 +4681,10 @@ stream-process rather than wait for the whole batch.
 
 **Harvest stays on the client side.**  Kaleidoscope does
 not read domain data out of run directories (Principle
-9).  The handoff is the run directory itself: the runner
+9).  The handoff is the run directory itself: the wingbeat
 persisted its native result there (`result.toml`), so the
 client walks the report and, for each unit it deems
-acceptable, opens `run_dir` and reads what it needs.  For
+acceptable, opens `wingbeat_dir` and reads what it needs.  For
 the producer that means: keep units whose `detail ==
 "converged"`, reload the 6.1.2 `ImagoResult` from
 `result.toml`, read the converged `scfV` from
@@ -4631,11 +4722,11 @@ changes the contracts above.
   Whether such units need a distinct executor or a
   resource cap so a few long inner loops do not starve a
   parallel sweep sharing the same allocation.
-- **`result.toml` for non-Imago runners.**  The Imago
-  runner persists an `ImagoResult`; what a future
-  non-Imago runner persists (and how a mixed-runner
-  client reads it back) is that runner's contract, set
-  when the runner is added, not here.
+- **`result.toml` for non-Imago wingbeats.**  The Imago
+  wingbeat persists an `ImagoResult`; what a future
+  non-Imago wingbeat persists (and how a mixed-wingbeat
+  client reads it back) is that wingbeat's contract, set
+  when the wingbeat is added, not here.
 
 #### 6.2.8 Campaign-builder helper for predict-then-verify
 
@@ -4734,8 +4825,10 @@ predict_settings(
       units = []
       for v in grid_values:
           unit_options = dict(options)
-          unit_options["kpoint_density"] = v
-          calc_axes = {"kpt-density": v}
+          unit_options["kpd"] = v          # makeinput
+                                           #   options-dict key
+          calc_axes = {"kpt-density": v}   # tag-tree
+                                           #   display name
           if extra_axes is not None:
               calc_axes.update(extra_axes)
           units.append(CalcUnit(
@@ -4743,13 +4836,15 @@ predict_settings(
               calc      = build_calc_tag(calc_axes),
               structure = structure,
               options   = unit_options,
-              runner    = "imago",
+              wingbeat  = "imago",
               key_fields = standard_key_fields(),
           ))
 
-    `build_calc_tag(calc_axes)` produces the nested
-    `<axis>-<value>/...` tag per 6.2.4 ("Sweep
-    campaigns: one directory level per varied axis").
+    `build_calc_tag(calc_axes)` returns a
+    `tuple[str, ...]` of `<axis>-<value>` directory
+    components -- the on-disk representation of the
+    sweep position per CalcUnit.calc (6.2.1) and the
+    tag-tree convention (6.2.4).
 
 5.  Assemble the PredictionRecord:
 
@@ -4828,7 +4923,7 @@ it is captured here before the code lands.
 
 #### 6.3.1 Why a callable build API
 
-The default kaleidoscope runner (`ImagoRunner`, 6.2.2)
+The default kaleidoscope wingbeat (`ImagoWingbeat`, 6.2.2)
 calls `imago.run_structure(structure, options, run_dir)`
 on any unit whose run directory is not already prepared.
 `run_structure` in turn must build that directory from a
@@ -4859,7 +4954,7 @@ grouping op, a `-pot` override naming an absent database
 entry) -- raise a `MakeinputError`.  `MakeinputError` is
 the makeinput analog of `ImagoError`: a programmer- or
 environment-level fault that no per-unit retry can fix, so
-it propagates out of the worker's runner where the
+it propagates out of the worker's wingbeat where the
 campaign records the unit `failed` and continues
 (Principle 10).
 
@@ -5038,9 +5133,9 @@ function run_structure(structure, options, run_dir,
 
 The import is local, so `imago.py` keeps importing without
 makeinput's environment loaded -- the same lazy-import
-courtesy `ImagoRunner` already extends to `imago` (6.2.2).
+courtesy `ImagoWingbeat` already extends to `imago` (6.2.2).
 This is the seam that lets a kaleidoscope campaign hand a
-bare `imago.skl` plus options to the default runner and
+bare `imago.skl` plus options to the default wingbeat and
 have the run directory built and run in one worker call,
 which is exactly the dependency the C48.3 potential-DB
 producer is waiting on.
@@ -5660,6 +5755,41 @@ ambiguity resolution recorded in 7.10 (Si, B, Ge already
 sit in group_iv / group_iii; whether Ge / As / Sb / Te
 should move to metalloid is an open call).
 
+**Canonical orderings.**  Two module-level constants in
+`guidance_db.py` pin the index order of the
+predictor's feature vectors so every consumer (load(),
+save_entry(), compute_signature(), predict()) agrees on
+which slot means what.  Schema rule 4 (composition vector
+sums to 1.0) and the on-disk TOML representations in 7.2
+both use these orderings.
+
+```python
+CANONICAL_GROUP_ORDER = (
+    "alkali",
+    "alkali_earth",
+    "halide",
+    "chalcogen",
+    "pnictogen",
+    "group_iv",
+    "group_iii",
+    "transition_metal",
+    "lanthanide",
+    "actinide",
+    "metalloid",
+    "noble_gas",
+    "hydrogen",
+)   # 13 element groups, the composition-vector slot order
+
+CANONICAL_LATTICE_ORDER = (
+    "cubic",
+    "hex",
+    "tet",
+    "ortho",
+    "mono",
+    "tri",
+)   # 6 Bravais classes, the lattice_onehot slot order
+```
+
 **Public surface (dataclasses):**
 
 ```python
@@ -5671,17 +5801,27 @@ class Signature:
                                           #   / "nanostructure"
                                           #   / "molecular"
     composition_vector: tuple[float, ...] # 13 floats,
-                                          #   ordered by the
-                                          #   canonical
-                                          #   group-name
-                                          #   sequence (7.2)
+                                          #   ordered by
+                                          #   CANONICAL_GROUP_ORDER
     lattice_family:     str               # "" for non-
                                           #   crystalline;
                                           #   one of
-                                          #   {"cubic", "hex",
-                                          #    "tet", "ortho",
-                                          #    "mono", "tri"}
+                                          #   CANONICAL_LATTICE_ORDER
                                           #   for crystalline
+    lattice_onehot:     tuple[float, ...] # 6 floats: the
+                                          #   one-hot encoding
+                                          #   of lattice_family
+                                          #   in CANONICAL_LATTICE_ORDER.
+                                          #   All zeros for
+                                          #   non-crystalline.
+                                          #   Derived field --
+                                          #   compute_signature()
+                                          #   sets it from
+                                          #   lattice_family
+                                          #   so the predictor
+                                          #   (7.6) can use it
+                                          #   directly without
+                                          #   re-encoding.
 
 @dataclass(frozen=True)
 class Measured:
@@ -5941,18 +6081,38 @@ distance to the query `Q`:
 
 ```
 d1(Q, E) = sqrt(
-    w_comp * || Q.comp_vector - E.comp_vector ||^2
-  + w_latt * (1 if Q.lattice_family != E.lattice_family
-              else 0)
+    w_comp * || Q.composition_vector
+              - E.composition_vector ||^2
+  + w_latt * || Q.lattice_onehot
+              - E.lattice_onehot ||^2 / 2.0
 )
 ```
 
-Both `Q.comp_vector` and `E.comp_vector` are 13-vectors
-summing to 1.0 (per schema rule 4), so the squared
-Euclidean distance is a well-defined chemistry similarity
-in [0.0, 2.0].  The lattice-family term is a one-hot
-indicator: 0 if the query and entry share Bravais class,
-1 otherwise.
+Both `Q.composition_vector` and `E.composition_vector`
+are 13-vectors summing to 1.0 (per schema rule 4), so the
+squared Euclidean distance is a well-defined chemistry
+similarity in [0.0, 2.0].  Both `Q.lattice_onehot` and
+`E.lattice_onehot` are 6-vectors in canonical Bravais
+order (cubic, hex, tet, ortho, mono, tri), with exactly
+one entry equal to 1.0 and the others 0.0 -- derived from
+the entry's `lattice_family` string at
+`compute_signature` time (7.4).  The squared Euclidean
+distance between two one-hot vectors is 0.0 if they match
+and 2.0 if they differ; the `/2.0` normalizes that term
+to the same [0.0, 1.0] dynamic range as the
+composition-distance contribution, so the `w_latt`
+default of 0.25 reads as "lattice contributes up to 25%
+of the composition-term weight on a full mismatch."
+
+**Why one-hot for lattice_family rather than a string-
+equality test.**  Operationally equivalent for the
+single-feature case, but materially more extensible:
+adding a second categorical feature later (space-group
+class, defect-host indicator, ...) is just a longer
+concatenated vector and one more weight, and swapping
+the predictor for a fancier model (learned distance,
+random forest) treats the one-hot directly as numpy
+features without bespoke preprocessing.
 
 Default weights: `w_comp = 1.0`, `w_latt = 0.25`.  These
 make composition the dominant signal and let lattice
@@ -6141,9 +6301,21 @@ below is what it executes.
 
 4.  units = [
         build_calc_unit(target, options,
-                        kpoint_density = v)
+                        kpd = v)
         for v in grid_values
     ]
+
+    Two-name convention worth pinning here:
+    - `kpd` is the makeinput options-dict key (matches
+      makeinput.py's argparse dest for `-kpd`).  Used
+      anywhere the value is passed to makeinput.
+    - `kpt-density` is the display name used inside
+      the calc-tag tree (per 6.2.4's tag convention)
+      and inside Campaign.sweep.varied_axes.  Used
+      anywhere the axis appears as a directory level
+      or as a sweep-axis name humans inspect.
+    The campaign-builder helper (6.2.8) is the
+    translation point between the two names.
 
 5.  prediction_record = PredictionRecord(
         policy             = policy,
@@ -6477,7 +6649,7 @@ The principle: **kaleidoscope dispatches once per
 CalcUnit and reports.**  Multi-attempt convergence-finding
 loops live in Python on the client side, not inside
 kaleidoscope.  A researcher (or future tier-3 custom
-runner) wraps the dispatch in a re-run loop when needed;
+wingbeat) wraps the dispatch in a re-run loop when needed;
 the core stays single-shot.
 
 **The seed campaign (TODO C75).**  The first useful

@@ -4582,14 +4582,14 @@ the verdict reuses the convergence metric the SCF already
 writes per cycle.  Everything else in §12 is a faithful
 restructuring of behavior that `imago.py` already has.
 
-## 13. kaleidoscope Campaign Runner (DESIGN 6.2)
+## 13. kaleidoscope Campaign Dispatch (DESIGN 6.2)
 
-The Parsl-based runner that drives a *set* of Imago
+The Parsl-based dispatcher that drives a *set* of Imago
 calculations, per DESIGN 6.2.  It builds on §12: the
-default runner calls the §12 callable API and persists
+default wingbeat calls the §12 callable API and persists
 its `ImagoResult`.  The pieces, helpers first then the
 driver: the data model and `campaign.toml` (13.1); the
-runner protocol and the Imago runner (13.2); the
+wingbeat protocol and the Imago wingbeat (13.2); the
 workspace paths, id rules, and `status.toml` (13.3); the
 cache hit-test (13.4); the dispatch driver with
 complete-and-report (13.5); and the report plus the
@@ -4597,7 +4597,7 @@ client-side harvest handoff (13.6).
 
 The governing rule (VISION Principle 9): kaleidoscope is
 domain-agnostic.  It dispatches, tracks, and caches; it
-never interprets what a run computed.  The runner's
+never interprets what a run computed.  The wingbeat's
 `detail` string is recorded verbatim and never parsed;
 all domain harvest is client-side (13.6).
 
@@ -4613,19 +4613,34 @@ dataclass KeyFields:
 
 dataclass CalcUnit:
     id          : str          # stable per-structure key
-    calc        : str | None   # calc-variant tag, or None
+    calc        : tuple[str,...]  # per-axis directory
+                               #   components (DESIGN
+                               #   6.2.1); () = no second
+                               #   level; one element per
+                               #   varied sweep axis
     structure   : str          # path to an imago.skl
     options     : dict         # makeinput options
-    runner      : str | None   # runner name; None -> the
+    wingbeat    : str | None   # wingbeat name; None -> the
                                #   campaign default
     key_fields  : KeyFields    # client-declared identity
 
 dataclass Campaign:
     root           : str       # workspace root directory
     units          : list      # list[CalcUnit]
-    default_runner : str       # runner name for None units
+    default_wingbeat : str     # wingbeat name for None units
     parsl_config   : object    # a Parsl Config (deployment)
+    sweep          : SweepRecord | None  # varied/fixed axes
+                               #   when built by the predict-
+                               #   then-verify helper (DESIGN
+                               #   6.2.8); None otherwise
     on_outcome     : callable | None  # per-unit callback
+
+dataclass SweepRecord:
+    varied_axes : tuple[str,...]  # axis names, in the order
+                               #   they appear at each level
+                               #   of CalcUnit.calc
+    fixed_axes  : dict         # axis -> value for axes held
+                               #   constant across the campaign
 ```
 
 ```
@@ -4633,46 +4648,52 @@ function serialize_campaign(campaign):
     # Write campaign.toml: the authoritative record of
     # WHAT was asked for, separate from each run's
     # status.toml record of WHAT HAPPENED (13.3).  A resume
-    # (13.5) reads the units back from here.
-    write_toml(join(campaign.root, "campaign.toml"),
-        { root = campaign.root,
-          default_runner = campaign.default_runner,
-          units = [ as_dict(u) for u in campaign.units ] })
+    # (13.5) reads the units back from here.  The optional
+    # [campaign.sweep] block is emitted only when the
+    # campaign was built by the predict-then-verify helper
+    # (DESIGN 6.2.1/6.2.8); each unit's calc tuple serializes
+    # as a TOML array of directory-component strings.
+    record = { root = campaign.root,
+               default_wingbeat = campaign.default_wingbeat,
+               units = [ as_dict(u) for u in campaign.units ] }
+    if campaign.sweep is not None:
+        record["sweep"] = as_dict(campaign.sweep)
+    write_toml(join(campaign.root, "campaign.toml"), record)
 ```
 
-### 13.2 Runner protocol and ImagoRunner (DESIGN 6.2.2)
+### 13.2 Wingbeat protocol and ImagoWingbeat (DESIGN 6.2.2)
 
-The runner is the seam (Principle 8) between dispatch and
+The wingbeat is the seam (Principle 8) between dispatch and
 execution.  It returns a *domain-agnostic* outcome.
 
 ```
-dataclass RunOutcome:
+dataclass WingbeatOutcome:
     ok              : bool     # did the unit COMPLETE
                                #   (not "succeed
                                #   scientifically")
-    detail          : str      # opaque string the runner
+    detail          : str      # opaque string the wingbeat
                                #   chooses; recorded, never
                                #   interpreted by kaleido-
                                #   scope (e.g. "converged")
     runtime_seconds : float
     message         : str
 
-protocol Runner:
-    function run(unit, run_dir) -> RunOutcome
+protocol Wingbeat:
+    function run(unit, wingbeat_dir) -> WingbeatOutcome
 ```
 
 ```
-class ImagoRunner implements Runner:
-    function run(unit, run_dir):
-        # Default runner: drive the §12 API.  Structure-
+class ImagoWingbeat implements Wingbeat:
+    function run(unit, wingbeat_dir):
+        # Default wingbeat: drive the §12 API.  Structure-
         # and-options mode builds the run dir then runs.
         result = imago.run_structure(
-                     unit.structure, unit.options, run_dir)
+                     unit.structure, unit.options, wingbeat_dir)
 
         # Persist the §12.1 ImagoResult for the client to
         # reload (13.6).  kaleidoscope never reads it; it is
-        # the runner -> client handoff, kept domain-side.
-        write_toml(join(run_dir, "result.toml"),
+        # the wingbeat -> client handoff, kept domain-side.
+        write_toml(join(wingbeat_dir, "result.toml"),
                    as_dict(result))
 
         # Map the Imago-native status onto the generic
@@ -4682,14 +4703,14 @@ class ImagoRunner implements Runner:
         # (e.g. "converged", "not_converged", "skipped").
         ok = result.status in (CONVERGED, NOT_CONVERGED,
                                SKIPPED)
-        return RunOutcome(
+        return WingbeatOutcome(
             ok = ok,
             detail = lower(result.status.name),
             runtime_seconds = result.runtime_seconds,
             message = result.message)
 ```
 
-An ASE runner (D12) and future adapters implement the
+An ASE wingbeat (D12) and future adapters implement the
 same protocol; the dispatch core (13.5) never changes
 when one is added.
 
@@ -4697,10 +4718,13 @@ when one is added.
 
 ```
 function unit_run_dir(campaign, unit):
-    base = join(campaign.root, "runs", unit.id)
-    # The optional <calc> level exists only when a
-    # structure hosts more than one calculation.
-    return join(base, unit.calc) if unit.calc else base
+    base = join(campaign.root, "wingbeats", unit.id)
+    # The optional <calc> level(s) exist only when a
+    # structure hosts more than one calculation.  calc is a
+    # tuple of per-axis directory components (one level per
+    # varied sweep axis, DESIGN 6.2.1), so splat it onto the
+    # path; an empty tuple leaves the unit directly in base.
+    return join(base, *unit.calc) if unit.calc else base
 ```
 
 ```
@@ -4709,19 +4733,19 @@ function validate_campaign(campaign):
     # time; abort (raise) on any violation, naming the
     # offenders -- a silent rewrite would break the cache
     # hit-test (13.4).
-    seen = {}                       # id -> set of calc tags
+    seen = {}                       # id -> set of calc tuples
     for unit in campaign.units:
         require_slug(unit.id)       # lowercased [a-z0-9_-]
-        if unit.calc is not None:
-            require_slug(unit.calc)
-        tag = unit.calc
+        for component in unit.calc:  # each directory level
+            require_slug(component)  #   is its own slug
+        tag = unit.calc             # a tuple (possibly empty)
         # Derive a default <calc> when an id ends up hosting
         # multiple units but a unit gave no tag (DESIGN
-        # 6.2.4): "<job_name>-<basis_scf>" for the Imago
-        # runner.
-        if tag is None and id_hosts_multiple(campaign,
-                                             unit.id):
-            tag = derive_calc_tag(unit)
+        # 6.2.4): a one-element tuple holding
+        # "<job_name>-<basis_scf>" for the Imago wingbeat.
+        if tag == () and id_hosts_multiple(campaign,
+                                           unit.id):
+            tag = (derive_calc_tag(unit),)
             unit.calc = tag
         require(unit.id not in seen
                 or tag not in seen[unit.id],
@@ -4740,24 +4764,24 @@ function require_slug(s):
 ```
 
 ```
-function write_status(run_dir, **fields):
+function write_status(wingbeat_dir, **fields):
     # One file per run dir, rewritten through the
     # lifecycle.  status is kaleidoscope-owned and generic;
     # convergence rides in `detail`, never in `status`.
     # Omit started_at/finished_at/runtime_seconds until
-    # they exist; omit calc when None.
-    write_toml(join(run_dir, "status.toml"), fields)
+    # they exist; omit calc when it is the empty tuple.
+    write_toml(join(wingbeat_dir, "status.toml"), fields)
 
-function read_status(run_dir):
-    p = join(run_dir, "status.toml")
+function read_status(wingbeat_dir):
+    p = join(wingbeat_dir, "status.toml")
     return read_toml(p) if exists(p) else None
 ```
 
 The five `status` values are `queued`, `running`, `done`,
 `failed`, `lost` -- the first four are the unit lifecycle
-(`done` iff `RunOutcome.ok`); `lost` is the
+(`done` iff `WingbeatOutcome.ok`); `lost` is the
 kaleidoscope-only category for a Parsl-side disappearance
-where no `RunOutcome` came back (13.5).
+where no `WingbeatOutcome` came back (13.5).
 
 ### 13.4 Cache hit-test (DESIGN 6.2.5)
 
@@ -4765,21 +4789,21 @@ Mechanism owned by kaleidoscope; the key *fields* are
 supplied by the client on each `CalcUnit`.
 
 ```
-function is_cache_hit(unit, run_dir):
+function is_cache_hit(unit, wingbeat_dir):
     # Hit iff the dir exists, its recorded key still
     # matches the unit's current key, AND its status is
     # "done".  Anything else is a miss -> (re)launch.
-    if not is_dir(run_dir):
+    if not is_dir(wingbeat_dir):
         return False
-    st = read_status(run_dir)
+    st = read_status(wingbeat_dir)
     if st is None or st["status"] != "done":
         return False
-    return cache_key_matches(unit, run_dir)
+    return cache_key_matches(unit, wingbeat_dir)
 ```
 
 ```
-function cache_key_matches(unit, run_dir):
-    saved = read_toml(join(run_dir, "cache_key.toml"))
+function cache_key_matches(unit, wingbeat_dir):
+    saved = read_toml(join(wingbeat_dir, "cache_key.toml"))
     if saved is None:
         return False
     # Scalar fields: verbatim field-by-field compare.
@@ -4791,7 +4815,7 @@ function cache_key_matches(unit, run_dir):
     # to see why a cache missed (DESIGN 6.2.5 / 5.7).
     for logical in unit.key_fields.files:
         current = key_file_source(unit, logical)
-        staged  = key_file_staged(run_dir, logical)
+        staged  = key_file_staged(wingbeat_dir, logical)
         if not exists(staged) \
            or not files_byte_equal(current, staged):
             return False
@@ -4799,9 +4823,9 @@ function cache_key_matches(unit, run_dir):
 ```
 
 ```
-function write_cache_key(run_dir, unit):
+function write_cache_key(wingbeat_dir, unit):
     # The identity snapshot, written on launch (13.5).
-    write_toml(join(run_dir, "cache_key.toml"),
+    write_toml(join(wingbeat_dir, "cache_key.toml"),
         { scalars = unit.key_fields.scalars,
           files   = unit.key_fields.files })
 ```
@@ -4814,7 +4838,7 @@ Resuming a campaign is just re-running it: the hit-test
 skips the `done` units and re-dispatches the rest.
 
 ```
-function run_campaign(campaign):
+function dispatch(campaign):
     validate_campaign(campaign)            # 13.3
     makedirs(campaign.root, exist_ok=True)
     serialize_campaign(campaign)           # 13.1
@@ -4839,34 +4863,34 @@ function run_campaign(campaign):
 
 ```
 function dispatch_unit(campaign, unit):
-    run_dir = unit_run_dir(campaign, unit)
-    if is_cache_hit(unit, run_dir):         # 13.4
+    wingbeat_dir = unit_run_dir(campaign, unit)
+    if is_cache_hit(unit, wingbeat_dir):         # 13.4
         # Hit: no Parsl app; resolve immediately from the
         # existing status.toml.
         return completed_future(
-            report_entry_from_status(unit, run_dir))
+            report_entry_from_status(unit, wingbeat_dir))
     # Miss: prepare the dir, snapshot the key, mark queued,
-    # and submit the runner as a python_app.
-    makedirs(run_dir, exist_ok=True)
-    write_cache_key(run_dir, unit)          # 13.4
-    write_status(run_dir, id=unit.id, calc=unit.calc,
+    # and submit the wingbeat as a python_app.
+    makedirs(wingbeat_dir, exist_ok=True)
+    write_cache_key(wingbeat_dir, unit)          # 13.4
+    write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status="queued",
-        runner=(unit.runner or campaign.default_runner),
+        wingbeat=(unit.wingbeat or campaign.default_wingbeat),
         submitted_at=now())
-    return submit_app(run_unit_app, campaign, unit, run_dir)
+    return submit_app(execute_wingbeat_task, campaign, unit, wingbeat_dir)
 ```
 
 ```
 @parsl_python_app
-function run_unit_app(campaign, unit, run_dir):
-    # Runs on a worker.  Returns the RunOutcome; raising
+function execute_wingbeat_task(campaign, unit, wingbeat_dir):
+    # Runs on a worker.  Returns the WingbeatOutcome; raising
     # here surfaces to collect_future as a worker-side
     # failure.
-    write_status(run_dir, id=unit.id, calc=unit.calc,
+    write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status="running", started_at=now())
-    runner  = resolve_runner(campaign, unit)   # name->Runner
-    outcome = runner.run(unit, run_dir)         # 13.2
-    write_status(run_dir, id=unit.id, calc=unit.calc,
+    wingbeat  = resolve_wingbeat(campaign, unit)   # name->Wingbeat
+    outcome = wingbeat.run(unit, wingbeat_dir)         # 13.2
+    write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status=("done" if outcome.ok else "failed"),
         detail=outcome.detail,
         finished_at=now(),
@@ -4877,47 +4901,47 @@ function run_unit_app(campaign, unit, run_dir):
 
 ```
 function collect_future(campaign, unit, fut):
-    run_dir = unit_run_dir(campaign, unit)
+    wingbeat_dir = unit_run_dir(campaign, unit)
     try:
         fut.result()       # re-raises any worker exception
     except ParslTaskLost:
-        # No RunOutcome ever came back: cluster-side loss.
-        write_status(run_dir, id=unit.id, calc=unit.calc,
+        # No WingbeatOutcome ever came back: cluster-side loss.
+        write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
             status="lost", finished_at=now(),
             message="cluster-side loss")
     except Exception as e:
         # App raised on the worker but the failure returned:
         # status.toml may already say running; force failed.
-        write_status(run_dir, id=unit.id, calc=unit.calc,
+        write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
             status="failed", finished_at=now(),
             message=str(e))
     # In every case status.toml is now terminal; build the
     # report entry from it (single source of truth).
-    return report_entry_from_status(unit, run_dir)
+    return report_entry_from_status(unit, wingbeat_dir)
 ```
 
 ### 13.6 Report and client-side harvest (DESIGN 6.2.6)
 
 ```
 dataclass ReportEntry:
-    id, calc, status, detail, run_dir,
+    id, calc, status, detail, wingbeat_dir,
     runtime_seconds, message
 
 dataclass CampaignReport:
     entries : list      # list[ReportEntry]
 
-function report_entry_from_status(unit, run_dir):
-    st = read_status(run_dir)
+function report_entry_from_status(unit, wingbeat_dir):
+    st = read_status(wingbeat_dir)
     return ReportEntry(
         id=unit.id, calc=unit.calc,
         status=st["status"], detail=st.get("detail"),
-        run_dir=run_dir,
+        wingbeat_dir=wingbeat_dir,
         runtime_seconds=st.get("runtime_seconds"),
         message=st.get("message"))
 ```
 
 Harvest is *not* kaleidoscope's job (Principle 9).  The
-handoff is the run directory: the runner persisted its
+handoff is the run directory: the wingbeat persisted its
 native `result.toml` there (13.2), so the client walks the
 report and reads what it needs from the dirs it deems
 acceptable.  The C48 producer's harvest, which lives in
@@ -4934,7 +4958,7 @@ function harvest_converged_potentials(report, manifest):
         if entry.detail != "converged":
             continue                 # skip, recorded in report
         result = read_toml(
-            join(entry.run_dir, "result.toml"))   # §12.1
+            join(entry.wingbeat_dir, "result.toml"))   # §12.1
         scfV_path = result["outputs"]["scfV"]
         # Coefficients come from the converged scfV output;
         # alphas come from the run's INPUT (min/max/number).
@@ -5146,6 +5170,6 @@ function run_structure(structure, options, run_dir,
 ```
 
 This is what lets a kaleidoscope campaign hand a bare
-`imago.skl` plus options to the default runner (§13.2) and
+`imago.skl` plus options to the default wingbeat (§13.2) and
 have the run directory built and run in one worker call --
 the dependency the C48.3 producer is waiting on.

@@ -26,7 +26,7 @@ src/
     ase_imago.py       ASE Calculator, ImagoCalculator (9.3)
     cod_fish.py        COD acquisition front-end -> CIF (9.5)
     cif2skl.py         CIF -> imago.skl converter (9.5)
-    kaleidoscope/      Parsl campaign runner, "kaleidoscope" (9.4)
+    kaleidoscope/      Parsl campaign dispatcher, "kaleidoscope" (9.4)
   kinds.f90            Shared precision kinds
   constants.f90        Shared physical/mathematical constants
 dev/
@@ -943,7 +943,7 @@ the initial-potential database build (Section 8.5),
 convergence sweeps, validation harnesses, and future
 ab-initio molecular dynamics and high-throughput
 screening -- do not each reinvent *how* to submit and
-watch jobs on a cluster.  The campaign runner is named
+watch jobs on a cluster.  The campaign dispatcher is named
 **kaleidoscope**.
 
 The layers and the four scripts/packages that realize
@@ -954,7 +954,7 @@ them:
 - `ase_imago.py` -- an ASE Calculator,
   `ImagoCalculator`, adapting Imago to the
   materials-simulation community (9.3).
-- `kaleidoscope/` -- a Parsl-based campaign runner that
+- `kaleidoscope/` -- a Parsl-based campaign dispatcher that
   drives many calculations in parallel and/or series
   batches (9.4).
 - `cod_fish.py` + `cif2skl.py` -- the structure-
@@ -1100,7 +1100,7 @@ Principle 9 and keeps `import ase` confined to the
 modules that genuinely need it.  `cif2skl.py` (9.5)
 reuses the same factory.
 
-### 9.4 kaleidoscope: the campaign runner
+### 9.4 kaleidoscope: the campaign dispatcher
 
 `kaleidoscope/` is a Parsl-based package that drives a
 *set* of calculations.  Given a campaign specification
@@ -1113,18 +1113,18 @@ iterative inner loops (adaptive convergence, future
 AIMD) under one model.
 
 Kaleidoscope dispatches a *unit of work* through a
-pluggable runner seam.  The default runner is the
+pluggable wingbeat seam.  The default wingbeat is the
 `imago.py` API directly -- the campaign layer is
 ordinary scientific Python (Principle 9), and most
 campaigns (the database build, convergence sweeps) need
 nothing more.  But a unit may also be dispatched
 *through the ASE adapter* (for ASE-MD or ASE relaxation
 semantics), or through a future adapter, and a single
-campaign may blend runners -- some units plain Imago
+campaign may blend wingbeats -- some units plain Imago
 SCF, others adapter-wrapped -- so that Imago
 calculations can be mixed with other ASE-compatible
 calculations and dispatch activities under one campaign.
-Keeping the runner pluggable is what lets new adapters
+Keeping the wingbeat pluggable is what lets new adapters
 and new blends slot in without changing kaleidoscope's
 dispatch core (Principle 8).
 
@@ -1141,7 +1141,7 @@ management (9.6).
 ### 9.5 Structure acquisition: cod_fish.py + cif2skl.py
 
 Structure acquisition is a front-end, separate from the
-campaign runner, in two small CLI tools:
+campaign dispatcher, in two small CLI tools:
 
 - `cod_fish.py` pulls a structure from the
   Crystallography Open Database by `cod_id` at a pinned
@@ -1187,12 +1187,12 @@ the `status.toml` schema); the shape is:
   structures/<id>/       Acquired inputs.
       <id>.cif
       <id>.skl
-  runs/<id>[/<calc>]/     One working dir per calculation:
+  wingbeats/<id>[/<calc>]/     One working dir per calculation:
       <makeinput inputs: imago.dat, structure.dat,
        scfV.dat, kp-*>
       <run outputs: gs_scfV-<basis>.dat, imago.out>
       cache_key.toml      Cache identity snapshot.
-      result.toml         Runner-persisted native result.
+      result.toml         Wingbeat-persisted native result.
       status.toml         queued / running / done / failed /
                           lost, plus detail and timings.
   results/               Harvested / aggregated outputs.
@@ -1201,12 +1201,12 @@ the `status.toml` schema); the shape is:
 
 A single structure may host more than one calculation
 (e.g., different bases or property runs), hence the
-optional `<calc>` level under `runs/<id>/`.
+optional `<calc>` level under `wingbeats/<id>/`.
 
 This layout also subsumes the producer's content-keyed
 SCF cache (DESIGN 5.7's
 `share/atomicBDB/cache/scf/<reference_id>/`): a
-kaleidoscope `runs/<id>/` directory *is* a cached run,
+kaleidoscope `wingbeats/<id>/` directory *is* a cached run,
 so cache-hit/miss logic becomes "is there a completed
 run directory for this id whose inputs still match?"
 
@@ -1269,14 +1269,14 @@ the ASE adapter stays a flat `ase_imago.py` (9.3); the
 `Atoms`-to-`StructureControl` translation splits into
 an ASE-free factory in `structure_control.py` plus
 adapter-layer glue (9.3, 9.5); and kaleidoscope
-dispatches through a pluggable runner seam, defaulting
+dispatches through a pluggable wingbeat seam, defaulting
 to `imago.py` but able to use the ASE adapter or future
 adapters (9.4).
 
 The **workspace scheme (9.6)** was deferred here and is
 now resolved: the stable-id convention, the `<calc>`
 tag format, and the `status.toml` schema are pinned in
-DESIGN 6.2.4 (with each `runs/<id>[/<calc>]/` cache
+DESIGN 6.2.4 (with each `wingbeats/<id>[/<calc>]/` cache
 directory carrying `cache_key.toml`, `result.toml`, and
 `status.toml`).
 

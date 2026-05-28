@@ -1,7 +1,7 @@
 """kaleidoscope.dispatch -- the campaign driver
 (DESIGN 6.2.3; PSEUDOCODE 13.5).
 
-``run_campaign`` walks the units, consults the cache, dispatches
+``dispatch`` walks the units, consults the cache, dispatches
 the misses through an executor, and gathers the results with
 per-future exception capture so a single failure never aborts
 the campaign (VISION Principle 10).  Resuming a campaign is just
@@ -29,15 +29,15 @@ from .workspace import (unit_run_dir, validate_campaign,
                         serialize_campaign, write_status,
                         read_status)
 from .cache import is_cache_hit, write_cache_key
-from .runners import resolve_runner
+from .wingbeats import resolve_wingbeat
 
 
 class TaskLost(Exception):
-    """A unit whose executor task vanished with no RunOutcome --
+    """A unit whose executor task vanished with no WingbeatOutcome --
     a cluster-side loss (manager/worker death, expired
     allocation).  Mapped to the ``lost`` status, which is
     distinct from ``failed`` (a unit that ran and reported, or
-    whose runner raised) (DESIGN 6.2.4)."""
+    whose wingbeat raised) (DESIGN 6.2.4)."""
     pass
 
 
@@ -61,20 +61,20 @@ def _is_lost(exc):
 #  The unit task (module-level so a worker process can import it)
 # ------------------------------------------------------------------
 
-def _run_unit_task(unit, run_dir, default_runner):
-    """Execute one unit and return its ``RunOutcome``.  Runs on a
+def _execute_wingbeat_task(unit, wingbeat_dir, default_wingbeat):
+    """Execute one unit and return its ``WingbeatOutcome``.  Runs on a
     worker (a thread, or a remote process under a multi-process
     executor), so it writes the ``running`` and the terminal
-    status into the run directory itself.  Resolving the runner
+    status into the run directory itself.  Resolving the wingbeat
     by name here is what lets a worker process reconstruct it
     after import (DESIGN 6.2.2, 6.2.3)."""
-    runner_name = unit.runner or default_runner
-    write_status(run_dir, id=unit.id, calc=unit.calc,
-                 status="running", runner=runner_name,
+    wingbeat_name = unit.wingbeat or default_wingbeat
+    write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
+                 status="running", wingbeat=wingbeat_name,
                  started_at=now_iso())
-    runner = resolve_runner(runner_name)
-    outcome = runner.run(unit, run_dir)
-    write_status(run_dir, id=unit.id, calc=unit.calc,
+    wingbeat = resolve_wingbeat(wingbeat_name)
+    outcome = wingbeat.run(unit, wingbeat_dir)
+    write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
                  status=("done" if outcome.ok else "failed"),
                  detail=outcome.detail, finished_at=now_iso(),
                  runtime_seconds=outcome.runtime_seconds,
@@ -108,9 +108,9 @@ class LocalExecutor:
     as a real future would -- letting the dispatcher's
     complete-and-report logic stay identical across executors."""
 
-    def submit_unit(self, unit, run_dir, default_runner):
+    def submit_unit(self, unit, wingbeat_dir, default_wingbeat):
         try:
-            value = _run_unit_task(unit, run_dir, default_runner)
+            value = _execute_wingbeat_task(unit, wingbeat_dir, default_wingbeat)
             return _LocalFuture(value=value)
         except Exception as err:          # noqa: BLE001
             return _LocalFuture(error=err)
@@ -152,11 +152,11 @@ class ParslExecutor:
         parsl.load(parsl_config)
         # Wrap the module-level task as a Parsl app once; calling
         #   the app returns an AppFuture per unit.
-        self._app = python_app(_run_unit_task)
+        self._app = python_app(_execute_wingbeat_task)
 
-    def submit_unit(self, unit, run_dir, default_runner):
+    def submit_unit(self, unit, wingbeat_dir, default_wingbeat):
         return _ParslFuture(
-            self._app(unit, run_dir, default_runner)
+            self._app(unit, wingbeat_dir, default_wingbeat)
         )
 
     def close(self):
@@ -170,28 +170,28 @@ class ParslExecutor:
 #  Dispatch helpers
 # ------------------------------------------------------------------
 
-def _prepare_miss(campaign, unit, run_dir):
+def _prepare_miss(campaign, unit, wingbeat_dir):
     """Set up a cache miss for launch: create the run directory,
     snapshot the cache key, and mark the unit ``queued`` (DESIGN
     6.2.5)."""
-    os.makedirs(run_dir, exist_ok=True)
-    write_cache_key(run_dir, unit)
-    write_status(run_dir, id=unit.id, calc=unit.calc,
+    os.makedirs(wingbeat_dir, exist_ok=True)
+    write_cache_key(wingbeat_dir, unit)
+    write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
                  status="queued",
-                 runner=(unit.runner or campaign.default_runner),
+                 wingbeat=(unit.wingbeat or campaign.default_wingbeat),
                  submitted_at=now_iso())
 
 
-def report_entry_from_status(unit, run_dir):
+def report_entry_from_status(unit, wingbeat_dir):
     """Build a ReportEntry from the run directory's terminal
     ``status.toml`` -- the single source of truth (DESIGN
     6.2.6)."""
-    status = read_status(run_dir) or {}
+    status = read_status(wingbeat_dir) or {}
     return ReportEntry(
         id=unit.id, calc=unit.calc,
         status=status.get("status", "unknown"),
         detail=status.get("detail"),
-        run_dir=run_dir,
+        wingbeat_dir=wingbeat_dir,
         runtime_seconds=status.get("runtime_seconds"),
         message=status.get("message"),
     )
@@ -200,21 +200,21 @@ def report_entry_from_status(unit, run_dir):
 def _collect(campaign, unit, future):
     """Resolve one future, recording its terminal status.  A
     ``TaskLost`` becomes the ``lost`` status; any other exception
-    (including a runner that raised on the worker) becomes
+    (including a wingbeat that raised on the worker) becomes
     ``failed``; a clean return leaves the terminal status the
     task itself already wrote (DESIGN 6.2.3, 6.2.4)."""
-    run_dir = unit_run_dir(campaign, unit)
+    wingbeat_dir = unit_run_dir(campaign, unit)
     try:
         future.result()
     except TaskLost as lost:
-        write_status(run_dir, id=unit.id, calc=unit.calc,
+        write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
                      status="lost", finished_at=now_iso(),
                      message=str(lost) or "cluster-side loss")
     except Exception as err:              # noqa: BLE001
-        write_status(run_dir, id=unit.id, calc=unit.calc,
+        write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
                      status="failed", finished_at=now_iso(),
                      message=str(err))
-    return report_entry_from_status(unit, run_dir)
+    return report_entry_from_status(unit, wingbeat_dir)
 
 
 def _fire(campaign, entry):
@@ -227,7 +227,7 @@ def _fire(campaign, entry):
 #  The campaign driver
 # ------------------------------------------------------------------
 
-def run_campaign(campaign, executor=None):
+def dispatch(campaign, executor=None):
     """Run every unit in the campaign and return a CampaignReport
     (DESIGN 6.2.3).  Cache hits are reported straight from their
     existing ``status.toml``; misses are prepared, dispatched
@@ -255,15 +255,15 @@ def run_campaign(campaign, executor=None):
         # Pass 1: report hits immediately, dispatch misses.
         pending = []                  # (index, unit, future)
         for index, unit in enumerate(campaign.units):
-            run_dir = unit_run_dir(campaign, unit)
-            if is_cache_hit(unit, run_dir):
-                entry = report_entry_from_status(unit, run_dir)
+            wingbeat_dir = unit_run_dir(campaign, unit)
+            if is_cache_hit(unit, wingbeat_dir):
+                entry = report_entry_from_status(unit, wingbeat_dir)
                 results[index] = entry
                 _fire(campaign, entry)
             else:
-                _prepare_miss(campaign, unit, run_dir)
+                _prepare_miss(campaign, unit, wingbeat_dir)
                 future = executor.submit_unit(
-                    unit, run_dir, campaign.default_runner
+                    unit, wingbeat_dir, campaign.default_wingbeat
                 )
                 pending.append((index, unit, future))
 

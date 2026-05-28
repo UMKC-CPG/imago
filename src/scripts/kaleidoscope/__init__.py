@@ -1,4 +1,4 @@
-"""kaleidoscope -- the high-throughput Imago campaign runner
+"""kaleidoscope -- the high-throughput Imago campaign dispatcher
 (VISION Goal 4; ARCHITECTURE 9.4, 9.6; DESIGN 6.2; PSEUDOCODE
 13).
 
@@ -8,22 +8,22 @@ completed runs so a campaign can be resumed by simply re-running
 it, and surfaces a report the client uses to decide acceptance.
 Per VISION Principle 9 it is ordinary, domain-agnostic
 scientific Python -- it never interprets what a run computed.
-The Imago-specific behavior lives in the runner
-(``kaleidoscope.runners``) below it, and in the client that
+The Imago-specific behavior lives in the wingbeat
+(``kaleidoscope.wingbeats``) below it, and in the client that
 reads each run directory after the campaign (the harvest) above
 it.
 
 Typical use::
 
-    from kaleidoscope import Campaign, CalcUnit, run_campaign
+    from kaleidoscope import Campaign, CalcUnit, dispatch
 
     campaign = Campaign(root="/work/my_campaign", units=[...])
-    report = run_campaign(campaign)
+    report = dispatch(campaign)
     for entry in report.with_detail("converged"):
-        ...   # client harvests entry.run_dir/result.toml
+        ...   # client harvests entry.wingbeat_dir/result.toml
 
 This ``__init__`` is the package's public façade; the supporting
-modules (``model``, ``workspace``, ``cache``, ``runners``,
+modules (``model``, ``workspace``, ``cache``, ``wingbeats``,
 ``dispatch``) carry the implementation.
 """
 
@@ -33,19 +33,19 @@ from .model import (
     KeyFields,
     CalcUnit,
     Campaign,
-    RunOutcome,
+    WingbeatOutcome,
     ReportEntry,
     CampaignReport,
 )
-from .runners import (
-    Runner,
-    ImagoRunner,
-    register_runner,
-    resolve_runner,
-    RUNNERS,
+from .wingbeats import (
+    Wingbeat,
+    ImagoWingbeat,
+    register_wingbeat,
+    resolve_wingbeat,
+    WINGBEATS,
 )
 from .dispatch import (
-    run_campaign,
+    dispatch,
     LocalExecutor,
     ParslExecutor,
     TaskLost,
@@ -65,9 +65,9 @@ from .cache import (
 
 __all__ = [
     "KaleidoscopeError", "KeyFile", "KeyFields", "CalcUnit",
-    "Campaign", "RunOutcome", "ReportEntry", "CampaignReport",
-    "Runner", "ImagoRunner", "register_runner", "resolve_runner",
-    "RUNNERS", "run_campaign", "LocalExecutor", "ParslExecutor",
+    "Campaign", "WingbeatOutcome", "ReportEntry", "CampaignReport",
+    "Wingbeat", "ImagoWingbeat", "register_wingbeat", "resolve_wingbeat",
+    "WINGBEATS", "dispatch", "LocalExecutor", "ParslExecutor",
     "TaskLost", "report_entry_from_status", "unit_run_dir",
     "validate_campaign", "read_status", "write_status",
     "is_cache_hit", "cache_key_matches", "write_cache_key",

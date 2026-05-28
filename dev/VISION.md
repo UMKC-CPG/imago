@@ -215,8 +215,8 @@ campaign instead of an exhaustive grid search.
     belongs in a database that future readers can audit and
     future campaigns can update.
 12. **The campaign layer stays dumb; description lives in
-    Python.**  The kaleidoscope runner is a thin dispatcher
-    over a flat list of independent `CalcUnit` records.  It
+    Python.**  The kaleidoscope dispatcher is thin: it drives
+    a flat list of independent `CalcUnit` records.  It
     does not interpret per-calculation options, has no notion
     of "this calc depends on that calc," and does not grow a
     campaign description language (no campaign DSL, no
@@ -224,8 +224,8 @@ campaign instead of an exhaustive grid search.
     campaign shape -- multi-axis sweeps, dependent phases,
     per-unit internal iteration -- lives in ordinary client-
     side Python that *builds* the flat list before handing it
-    off, or in custom runners that own the iteration for one
-    unit.  This is the deliberate design choice that
+    off, or in custom wingbeats that own the iteration for
+    one unit.  This is the deliberate design choice that
     distinguishes kaleidoscope from workflow engines like
     Snakemake or LAMMPS' input language: by refusing to grow
     a domain language, kaleidoscope stays open to every

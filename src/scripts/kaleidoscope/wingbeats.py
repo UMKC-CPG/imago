@@ -1,71 +1,71 @@
-"""kaleidoscope.runners -- the pluggable runner seam
+"""kaleidoscope.wingbeats -- the pluggable wingbeat seam
 (DESIGN 6.2.2; PSEUDOCODE 13.2).
 
-A *runner* is the seam (VISION Principle 8) between
+A *wingbeat* is the seam (VISION Principle 8) between
 kaleidoscope's dispatch core and how a unit actually executes.
 It takes a unit and its prepared run directory and returns a
-domain-agnostic ``RunOutcome``; the dispatch core never changes
-when a new runner is added.
+domain-agnostic ``WingbeatOutcome``; the dispatch core never changes
+when a new wingbeat is added.
 
-The default runner, ``ImagoRunner``, drives the imago.py
-callable API (DESIGN 6.1).  An ASE runner (D12) and future
-adapters implement the same one-method protocol.  Runners are
-looked up by name through the ``RUNNERS`` registry so a unit can
-name its runner as a string and a worker process can resolve it
+The default wingbeat, ``ImagoWingbeat``, drives the imago.py
+callable API (DESIGN 6.1).  An ASE wingbeat (D12) and future
+adapters implement the same one-method protocol.  Wingbeats are
+looked up by name through the ``WINGBEATS`` registry so a unit can
+name its wingbeat as a string and a worker process can resolve it
 after import.
 """
 
 import os
 
-from .model import RunOutcome, KaleidoscopeError
+from .model import WingbeatOutcome, KaleidoscopeError
 from .workspace import emit_scalar, toml_line
 
 
 # ------------------------------------------------------------------
-#  Runner protocol and registry
+#  Wingbeat protocol and registry
 # ------------------------------------------------------------------
 
-class Runner:
-    """Base class documenting the runner protocol.  A runner
-    implements ``run(unit, run_dir) -> RunOutcome``; ``run``
+class Wingbeat:
+    """Base class documenting the wingbeat protocol.  A wingbeat
+    implements ``run(unit, wingbeat_dir) -> WingbeatOutcome``; ``run``
     executes the calculation however it likes and reports a
     generic outcome.  ``ok`` means the unit *completed*, not
     that it succeeded scientifically; ``detail`` is an opaque
     string kaleidoscope records but never interprets."""
 
-    def run(self, unit, run_dir):
+    def run(self, unit, wingbeat_dir):
         raise NotImplementedError
 
 
-# name -> Runner instance.  The default runner is registered at
+# name -> Wingbeat instance.  The default wingbeat is registered at
 #   import (below), so a freshly imported worker process can
 #   resolve "imago" without any campaign-side setup.
-RUNNERS = {}
+WINGBEATS = {}
 
 
-def register_runner(name, runner):
-    """Register a runner instance under a name (DESIGN 6.2.2).
-    A custom runner must be registered at import time in any
+def register_wingbeat(name, wingbeat):
+    """Register a wingbeat instance under a name (DESIGN 6.2.2).
+    A custom wingbeat must be registered at import time in any
     process that will execute it -- the main process always, and
     each worker process when a multi-process executor is used."""
-    RUNNERS[name] = runner
+    WINGBEATS[name] = wingbeat
 
 
-def resolve_runner(name):
-    """Return the registered runner for ``name`` or raise."""
-    if name not in RUNNERS:
+def resolve_wingbeat(name):
+    """Return the registered wingbeat for ``name`` or raise."""
+    if name not in WINGBEATS:
         raise KaleidoscopeError(
-            f"no runner registered under name {name!r}; "
-            f"known runners: {sorted(RUNNERS)}"
+            f"no wingbeat registered under name {name!r}; "
+            f"known wingbeats: {sorted(WINGBEATS)}"
         )
-    return RUNNERS[name]
+    return WINGBEATS[name]
 
 
 # ------------------------------------------------------------------
-#  The default Imago runner
+#  The default Imago wingbeat
 # ------------------------------------------------------------------
 
-class ImagoRunner(Runner):
+class ImagoWingbeat(Wingbeat):
     """Run a unit through the imago.py callable API (DESIGN
     6.2.2).  When the run directory already holds staged inputs
     it is run as a prepared directory; otherwise it is built from
@@ -74,19 +74,19 @@ class ImagoRunner(Runner):
     client can reload it during harvest -- kaleidoscope itself
     never reads it (VISION Principle 9)."""
 
-    def run(self, unit, run_dir):
+    def run(self, unit, wingbeat_dir):
         # Imported lazily so the package imports without imago's
         #   own runtime environment ($IMAGO_RC etc.) being set.
         import imago
 
-        if self._is_prepared(run_dir):
-            result = imago.run_prepared(run_dir)
+        if self._is_prepared(wingbeat_dir):
+            result = imago.run_prepared(wingbeat_dir)
         else:
             result = imago.run_structure(
-                unit.structure, unit.options, run_dir
+                unit.structure, unit.options, wingbeat_dir
             )
 
-        self._persist_result(run_dir, result)
+        self._persist_result(wingbeat_dir, result)
 
         # Map the Imago-native status onto the generic outcome:
         #   "ran" covers CONVERGED / NOT_CONVERGED / SKIPPED;
@@ -97,7 +97,7 @@ class ImagoRunner(Runner):
             imago.RunStatus.NOT_CONVERGED,
             imago.RunStatus.SKIPPED,
         )
-        return RunOutcome(
+        return WingbeatOutcome(
             ok=ok,
             detail=result.status.value,
             runtime_seconds=result.runtime_seconds,
@@ -105,24 +105,24 @@ class ImagoRunner(Runner):
         )
 
     @staticmethod
-    def _is_prepared(run_dir):
+    def _is_prepared(wingbeat_dir):
         """A run directory is 'prepared' when it already holds
         the primary imago.dat (directly or under inputs/), so it
         can be run as-is without a makeinput build."""
         for candidate in ("imago.dat",
                           os.path.join("inputs", "imago.dat")):
-            if os.path.exists(os.path.join(run_dir, candidate)):
+            if os.path.exists(os.path.join(wingbeat_dir, candidate)):
                 return True
         return False
 
     @staticmethod
-    def _persist_result(run_dir, result):
-        """Write the ImagoResult to ``<run_dir>/result.toml`` for
+    def _persist_result(wingbeat_dir, result):
+        """Write the ImagoResult to ``<wingbeat_dir>/result.toml`` for
         the client's harvest.  Flat scalar fields first, then an
         ``[outputs]`` table of logical-key -> path and a ``[job]``
         table echoing what ran."""
-        os.makedirs(run_dir, exist_ok=True)
-        path = os.path.join(run_dir, "result.toml")
+        os.makedirs(wingbeat_dir, exist_ok=True)
+        path = os.path.join(wingbeat_dir, "result.toml")
         with open(path, "w") as result_file:
             result_file.write(
                 toml_line("status", result.status.value)
@@ -164,5 +164,5 @@ class ImagoRunner(Runner):
             )
 
 
-# Register the default runner at import time.
-register_runner("imago", ImagoRunner())
+# Register the default wingbeat at import time.
+register_wingbeat("imago", ImagoWingbeat())

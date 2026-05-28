@@ -5,7 +5,7 @@ This module pins the workspace scheme that ARCHITECTURE 9.8 had
 left open: the stable-id convention (a filesystem-safe slug),
 the optional ``<calc>`` tag for one structure hosting several
 calculations, and the ``status.toml`` schema.  It also provides
-the small, deterministic TOML emitters the cache and the runner
+the small, deterministic TOML emitters the cache and the wingbeat
 reuse (``emit_scalar`` / ``toml_line``), kept here so the whole
 package writes TOML one way.
 """
@@ -66,16 +66,16 @@ def require_slug(value, what):
 
 def unit_run_dir(campaign, unit):
     """Absolute path of a unit's run directory:
-    ``<root>/runs/<id>[/<calc>]``.  The ``<calc>`` level exists
+    ``<root>/wingbeats/<id>[/<calc>]``.  The ``<calc>`` level exists
     only when the unit carries a calc tag (DESIGN 6.2.4)."""
-    base = os.path.join(campaign.root, "runs", unit.id)
+    base = os.path.join(campaign.root, "wingbeats", unit.id)
     return os.path.join(base, unit.calc) if unit.calc else base
 
 
 def derive_calc_tag(unit):
     """Derive a default ``<calc>`` tag for a unit that gave none
     but shares its id with other units (DESIGN 6.2.4).  For the
-    Imago runner this is ``"<job>-<scf_basis>"`` read from the
+    Imago wingbeat this is ``"<job>-<scf_basis>"`` read from the
     makeinput options, falling back to ``scf``/``fb`` when those
     keys are absent."""
     job = str(unit.options.get("job", "scf"))
@@ -119,8 +119,8 @@ def validate_campaign(campaign):
 #  status.toml -- the per-run lifecycle record
 # ------------------------------------------------------------------
 
-def write_status(run_dir, **fields):
-    """Update ``<run_dir>/status.toml`` with the given fields.
+def write_status(wingbeat_dir, **fields):
+    """Update ``<wingbeat_dir>/status.toml`` with the given fields.
 
     The write *merges* into any existing file so that fields
     accumulated earlier in the lifecycle (``submitted_at`` at
@@ -129,22 +129,22 @@ def write_status(run_dir, **fields):
     skipped.  The five lifecycle ``status`` values are
     kaleidoscope-owned and generic (queued / running / done /
     failed / lost); convergence is never a status -- it rides in
-    the runner-supplied ``detail`` (DESIGN 6.2.4)."""
-    os.makedirs(run_dir, exist_ok=True)
-    merged = read_status(run_dir) or {}
+    the wingbeat-supplied ``detail`` (DESIGN 6.2.4)."""
+    os.makedirs(wingbeat_dir, exist_ok=True)
+    merged = read_status(wingbeat_dir) or {}
     for key, value in fields.items():
         if value is not None:
             merged[key] = value
-    path = os.path.join(run_dir, "status.toml")
+    path = os.path.join(wingbeat_dir, "status.toml")
     with open(path, "w") as status_file:
         for key, value in merged.items():
             status_file.write(toml_line(key, value))
 
 
-def read_status(run_dir):
+def read_status(wingbeat_dir):
     """Return the parsed ``status.toml`` for a run directory, or
     None when the file does not exist."""
-    path = os.path.join(run_dir, "status.toml")
+    path = os.path.join(wingbeat_dir, "status.toml")
     if not os.path.exists(path):
         return None
     with open(path, "rb") as status_file:
@@ -161,7 +161,7 @@ def serialize_campaign(campaign):
     ``status.toml`` record of *what happened* (DESIGN 6.2.1).
 
     This slice records the per-unit identity fields (id,
-    structure, calc, runner); the makeinput options and the
+    structure, calc, wingbeat); the makeinput options and the
     cache key live with the run (cache_key.toml) and are not
     round-tripped here.  campaign.toml is for inspection and as a
     resume record; a resume itself is just re-running the
@@ -171,7 +171,7 @@ def serialize_campaign(campaign):
     with open(path, "w") as campaign_file:
         campaign_file.write(toml_line("root", campaign.root))
         campaign_file.write(
-            toml_line("default_runner", campaign.default_runner)
+            toml_line("default_wingbeat", campaign.default_wingbeat)
         )
         for unit in campaign.units:
             campaign_file.write("\n[[unit]]\n")
@@ -180,4 +180,4 @@ def serialize_campaign(campaign):
                 toml_line("structure", unit.structure)
             )
             campaign_file.write(toml_line("calc", unit.calc))
-            campaign_file.write(toml_line("runner", unit.runner))
+            campaign_file.write(toml_line("wingbeat", unit.wingbeat))
