@@ -6961,3 +6961,539 @@ scales," Comp. Phys. Comm. 2022, 271, 108171.
 DOI: 10.1016/j.cpc.2021.108171
 - `angle_style harmonic`: E = K (theta - theta_0)^2
   convention used throughout section 4.8
+
+
+## 8. Resource & Cost Guidance Dataspace
+
+### 8.1 Overview and Motivation
+
+This section pins the schema, data structures, and algorithms
+for the resource-and-cost dataspace introduced in VISION Goal
+6 and architected in ARCHITECTURE section 11.  Where the
+historical-guidance dataspace (section 7) records what
+operating point is *accurate*, this one records what a run
+*costs*: for every imago run it stores the problem-size
+signature, the parallel execution configuration, the
+build/toolchain the binary was compiled with, and the
+measured resources (peak memory, disk, walltime).  A
+physics-informed regressor learns the cost surface, and the
+near-term consumer turns a prediction into a SLURM resource
+request that neither overflows memory nor exceeds the
+walltime limit.
+
+It is a deliberate sibling of section 7, not an extension
+(ARCHITECTURE 11.1).  The two share the
+library / producer / consumer discipline, the
+staging-then-promote curation, schema versioning, and the
+registry-validated-key discipline, but they are independent
+artifacts.  The reason they stay separate is portability: a
+converged k-density transfers across machines, whereas a
+walltime is meaningful only on the machine that produced it.
+This dataspace is therefore partitioned by a **hardware
+fingerprint** (8.5), and its atomic unit is a single
+**execution observation** -- one run under one configuration,
+never collapsed to a per-system summary -- so the same
+artifact serves provisioning now and configuration
+optimization, build comparison, and scaling studies later
+with no schema change.
+
+### 8.2 TOML Schema (version 1)
+
+Each observation is one TOML file under
+`entries/<hardware_fingerprint>/` (promoted) or
+`staging/<hardware_fingerprint>/` (harvested, awaiting a
+curator).  It carries top-level keys plus four content blocks
+(`[observation.signature]`, `[observation.execution]`,
+`[observation.build]`, `[observation.resources]`) and a
+`[observation.provenance]` block.
+
+**Top-level keys (required):**
+
+  Field                 Type    Description
+  --------------------------------------------------------
+  schema_version        int     Schema version integer. Must equal 1. Mirrors
+                                the bare-integer SCHEMA_VERSION marker at the
+                                dataspace root.
+  observation_id        string  Unique slug identifying this observation;
+                                equals the file stem and is unique across the
+                                whole entries + staging tree.
+  generated_at          string  ISO-8601 UTC timestamp of when the observation
+                                was harvested or hand-entered.
+  source                string  One of `flight` (harvested from a flight run)
+                                or `manual` (hand-seeded, e.g. a bootstrap
+                                point).
+  outcome               string  One of `completed`, `oom`, `timeout`,
+                                `failed`. Governs whether the resources block
+                                is a measurement or a censored bound (rules
+                                below).
+  hardware_fingerprint  string  The partition key (8.5). Must be registered in
+                                hardware_registry.toml and must equal the
+                                entries/<fingerprint>/ directory the file
+                                lives under.
+
+**Size signature, under `[observation.signature]` (required):**
+
+The cost-driving dimensions of the problem.  All are known
+before the run, derived from the makeinput inputs and the
+structure.  `secular_dimension` is the dominant scaling
+variable the predictor regresses on.
+
+  Field                    Type  Description
+  --------------------------------------------------------
+  atom_count               int   Number of atoms in the simulation cell. > 0.
+  electron_count           int   Total electron count (all-electron: core +
+                                 valence). > 0.
+  valence_electron_count   int   SCF-active valence electron count. >= 0 and
+                                 <= electron_count. The orthogonalized secular
+                                 problem is built on the valence space.
+  basis_function_count     int   Number of valence LCAO basis functions,
+                                 before the spinor multiplier. > 0.
+  wavefunction_components  int   1 for a 1-component (non-relativistic,
+                                 Schrodinger) treatment, 4 for a 4-component
+                                 (fully relativistic, Dirac) treatment. The
+                                 4-spinor structure multiplies the secular
+                                 dimension.
+  secular_dimension        int   Dimension of the eigenproblem actually solved
+                                 -- approximately basis_function_count times
+                                 wavefunction_components after core
+                                 orthogonalization. The dominant cost driver;
+                                 > 0.
+  kpoint_count             int   Number of k-points actually computed (IBZ or
+                                 full mesh). > 0.
+  spin_channels            int   1 for a spin-restricted run, 2 for
+                                 spin-polarized.
+
+**Execution configuration, under `[observation.execution]`
+(required):**
+
+How the run was launched.  This block is an extensible,
+registry-validated key-value table: every key present must
+appear in the checked-in `EXECUTION_KNOB_REGISTRY` (8.4), and
+a new knob (a GPU count, a NUMA policy) is added by extending
+the registry and bumping the schema version -- never by
+silently introducing an unrecognized key.
+
+  Field                 Type    Description
+  --------------------------------------------------------
+  node_count            int     Compute nodes the run used. > 0.
+  cores_per_node        int     Physical cores per node engaged. > 0.
+  total_cores           int     Total cores across all nodes. > 0. Recorded
+                                explicitly, not derived, so a partially-packed
+                                node is faithful.
+  mpi_ranks             int     Number of MPI processes. > 0.
+  omp_threads_per_rank  int     OpenMP threads per MPI rank. > 0; 1 when
+                                OpenMP is unused.
+  binding               string  Process/thread affinity policy.
+                                Registry-validated: e.g. `none`, `core`,
+                                `socket`.
+
+**Build configuration, under `[observation.build]`
+(required):**
+
+The *coarse layer* of the two-layer build record (ARCHITECTURE
+11.3): normalized, bucketed knobs that act as predictor
+features.  Like the execution block this is registry-validated
+against `BUILD_KNOB_REGISTRY` (8.4) and extensible; the
+*fidelity layer* (the full compile string) lives in
+provenance.  Values are bucketed on purpose -- an optimization
+*level*, not a flag string; a *major* version, not a patch --
+so a build is a comparable feature, not a fragmenting one.
+
+  Field               Type    Description
+  --------------------------------------------------------
+  compiler_family     string  Fortran compiler family: e.g. `gfortran`,
+                              `ifort`, `ifx`.
+  compiler_version    string  Major (optionally minor) compiler version,
+                              bucketed -- e.g. `13` or `13.2`, never a full
+                              patch string.
+  optimization_level  string  Optimization bucket: e.g. `O0`, `O2`, `O3`,
+                              `Ofast`.
+  arch_simd           string  Coarse instruction-set tag: e.g. `generic`,
+                              `avx2`, `avx512`.
+  blas_impl           string  BLAS/LAPACK implementation: e.g. `openblas`,
+                              `mkl`, `reference`.
+  blas_threading      string  `threaded` or `sequential`.
+  scalapack           string  ScaLAPACK presence plus major version, or
+                              `none`.
+  hdf5                string  HDF5 variant plus major version: `parallel`
+                              (MPI-IO) or `serial`.
+  mpi_family          string  MPI implementation plus major version: e.g.
+                              `openmpi-4`, `intelmpi-2021`, or `none`.
+
+**Measured resources, under `[observation.resources]`
+(required):**
+
+What the run actually used.  The metric set is extensible via
+`RESOURCE_METRIC_REGISTRY` (8.4).  When `outcome` is not
+`completed`, the relevant metric is a *censored bound*, not a
+point measurement (see the outcome rules below).
+
+  Field              Type   Description
+  --------------------------------------------------------
+  peak_memory_bytes  int    Peak resident memory high-water mark. For
+                            outcome=completed, the measured peak; for
+                            outcome=oom, the memory limit the run hit (a lower
+                            bound on the true need -- censored).
+  disk_bytes         int    Disk footprint high-water mark (output plus
+                            scratch). > 0 for a completed run.
+  walltime_seconds   real   Wallclock runtime. For completed, the measured
+                            time; for outcome=timeout, the walltime limit (a
+                            censored upper bound on the need).
+  cpu_seconds        real   Optional aggregate CPU time across ranks and
+                            threads. May be absent.
+  phase_timings      table  Optional sub-table of per-phase wallclock seconds:
+                            setup, scf, eigensolve, postproc. May be absent or
+                            partial.
+
+**Provenance, under `[observation.provenance]` (required):**
+
+Where the observation came from, plus the build fidelity
+layer.  `compile_string` is always recorded so any flag is
+recoverable post-hoc even when it is not a coarse knob.
+
+  Field             Type    Description
+  --------------------------------------------------------
+  flight_id         string  The flight that produced this run. Non-empty for
+                            source=flight.
+  source_structure  string  The structure identifier or path the run computed.
+  imago_commit      string  Git SHA of imago at run time. Non-empty for
+                            source=flight.
+  hostname          string  Host or cluster the run executed on (diagnostic;
+                            the fingerprint is the canonical machine key).
+  compile_string    string  The FULL, verbatim compiler invocation and flag
+                            string -- the build fidelity layer (8.4). Always
+                            recorded so any flag is recoverable post-hoc.
+  library_detail    string  Verbatim detail of the linked libraries (exact
+                            HDF5 / ScaLAPACK / BLAS / MPI versions and build
+                            options). Free-form provenance.
+  curator           string  Who or what produced the entry: e.g.
+                            `resource_harvest.py`.
+
+**Validation rules** (enforced at load time; every failure
+names the file, block, and field at fault, as in section 7
+and DESIGN 5.2):
+
+1.  `schema_version` equals 1, in both the marker file and
+    the entry.
+2.  `observation_id` is unique across the whole entries +
+    staging tree, and equals the file stem.
+3.  `hardware_fingerprint` is registered in
+    `hardware_registry.toml` AND equals the
+    `entries/<fingerprint>/` directory the file lives under.
+4.  `source` is one of `flight`, `manual`.
+5.  `outcome` is one of `completed`, `oom`, `timeout`,
+    `failed`.
+6.  Size signature: `atom_count`, `electron_count`,
+    `basis_function_count`, `secular_dimension`,
+    `kpoint_count` are all > 0; `0 <= valence_electron_count
+    <= electron_count`; `wavefunction_components` is 1 or 4;
+    `spin_channels` is 1 or 2.
+7.  Execution: every key is in `EXECUTION_KNOB_REGISTRY`;
+    `node_count`, `cores_per_node`, `total_cores`,
+    `mpi_ranks`, `omp_threads_per_rank` are all > 0;
+    `binding` is a registered value.
+8.  Build: every key is in `BUILD_KNOB_REGISTRY`;
+    `compiler_family` and `optimization_level` are non-empty
+    and registered.
+9.  Resources: every key is in `RESOURCE_METRIC_REGISTRY`.
+    For `outcome = completed`, `peak_memory_bytes`,
+    `disk_bytes`, and `walltime_seconds` are present and > 0.
+    For `outcome = oom`, `peak_memory_bytes` is present and
+    interpreted as a lower bound; for `outcome = timeout`,
+    `walltime_seconds` is present and interpreted as an upper
+    bound (8.7).
+10. Provenance: for `source = flight`, `flight_id`,
+    `source_structure`, and `imago_commit` are non-empty;
+    `compile_string` is present for every source.
+11. Registry coupling: an unknown key in any registry-backed
+    block is a hard error -- extensibility goes through the
+    registry, never through silent key drift.
+12. The schema is checked BEFORE the dataclass is built, so
+    an omission surfaces as a clear validation failure rather
+    than a constructor error.
+
+### 8.3 Sketch (gold, single observation)
+
+A completed run of a 12-atom cell, 1-component, on a 24-core
+Haswell node with 4 MPI ranks x 6 OpenMP threads:
+
+```toml
+schema_version       = 1
+observation_id       = "intel-haswell-24c-128gb-a1b2c3"
+generated_at         = "2026-05-29T18:00:00Z"
+source               = "flight"
+outcome              = "completed"
+hardware_fingerprint = "intel-haswell-24c-128gb"
+
+[observation.signature]
+atom_count              = 12
+electron_count          = 312
+valence_electron_count  = 96
+basis_function_count    = 348
+wavefunction_components = 1
+secular_dimension       = 348
+kpoint_count            = 84
+spin_channels           = 1
+
+[observation.execution]
+node_count           = 1
+cores_per_node       = 24
+total_cores          = 24
+mpi_ranks            = 4
+omp_threads_per_rank = 6
+binding              = "socket"
+
+[observation.build]
+compiler_family    = "ifort"
+compiler_version   = "2021.5"
+optimization_level = "O3"
+arch_simd          = "avx2"
+blas_impl          = "mkl"
+blas_threading     = "threaded"
+scalapack          = "mkl-2021"
+hdf5               = "parallel-1.14"
+mpi_family         = "intelmpi-2021"
+
+[observation.resources]
+peak_memory_bytes = 18253611008
+disk_bytes        = 2147483648
+walltime_seconds  = 4123.7
+cpu_seconds       = 98969.0
+
+[observation.resources.phase_timings]
+setup      = 88.4
+scf        = 3402.1
+eigensolve = 2911.6
+postproc   = 121.0
+
+[observation.provenance]
+flight_id        = "resource_seed_2026_05_29"
+source_structure = "COD-1011098"
+imago_commit     = "73eb567"
+hostname         = "node042.cluster.umkc.edu"
+compile_string   = "ifort -O3 -xCORE-AVX2 -qopenmp ..."
+library_detail   = "HDF5 1.14.3 parallel (OpenMPI 4.1.5); MKL 2021.5"
+curator          = "resource_harvest.py"
+```
+
+The emitter is the same hand-formatted, deterministic
+discipline as section 7.5 (fixed block sequence, fixed key
+order, `%.16e` for real values, byte-identical output for a
+given in-memory observation); it is not restated here.
+
+### 8.4 In-Memory Representation
+
+The dataclasses mirror the schema block-for-block.  The
+constants and the three registries are named in one place so a
+post-seed recalibration or a new knob is a one-file change.
+
+```
+SCHEMA_VERSION          = 1
+VALID_SOURCES           = ("flight", "manual")
+VALID_OUTCOMES          = ("completed", "oom", "timeout",
+                           "failed")
+WAVEFUNCTION_COMPONENTS = (1, 4)     # Schrodinger | Dirac
+SPIN_CHANNELS           = (1, 2)
+
+# Extensible, checked-in registries.  A key not listed here
+# is rejected at load (rule 11); a new knob/metric is added
+# by extending the registry and bumping SCHEMA_VERSION.
+EXECUTION_KNOB_REGISTRY = ("node_count", "cores_per_node",
+    "total_cores", "mpi_ranks", "omp_threads_per_rank",
+    "binding")
+VALID_BINDINGS          = ("none", "core", "socket")
+BUILD_KNOB_REGISTRY     = ("compiler_family",
+    "compiler_version", "optimization_level", "arch_simd",
+    "blas_impl", "blas_threading", "scalapack", "hdf5",
+    "mpi_family")
+RESOURCE_METRIC_REGISTRY = ("peak_memory_bytes", "disk_bytes",
+    "walltime_seconds", "cpu_seconds", "phase_timings")
+```
+
+```
+dataclass SizeSignature:
+    atom_count              : int
+    electron_count          : int
+    valence_electron_count  : int
+    basis_function_count    : int
+    wavefunction_components : int    # 1 (Schrodinger) | 4
+    secular_dimension       : int    # dominant cost driver
+    kpoint_count            : int
+    spin_channels           : int    # 1 | 2
+
+dataclass ExecutionConfig:
+    knobs : dict          # registry-validated key -> value;
+                          #   node_count, mpi_ranks, binding...
+
+dataclass BuildConfig:
+    knobs : dict          # registry-validated coarse knobs;
+                          #   the verbatim string is in
+                          #   Provenance.compile_string
+
+dataclass MeasuredResources:
+    metrics : dict        # registry-validated metric -> value;
+                          #   phase_timings is a nested dict
+    censored : bool       # True when outcome != completed:
+                          #   a bound, not a point measurement
+
+dataclass Provenance:
+    flight_id        : str
+    source_structure : str
+    imago_commit     : str
+    hostname         : str
+    compile_string   : str   # build fidelity layer (verbatim)
+    library_detail   : str
+    curator          : str
+
+dataclass Observation:
+    observation_id       : str
+    generated_at         : str
+    source               : str        # flight | manual
+    outcome              : str        # completed | oom | ...
+    hardware_fingerprint : str        # partition key
+    signature            : SizeSignature
+    execution            : ExecutionConfig
+    build                : BuildConfig
+    resources            : MeasuredResources
+    provenance           : Provenance
+
+dataclass ResourceDataspace:
+    schema_version            : int
+    observations_by_fingerprint : dict   # fp -> list[Obs]
+    hardware_registry         : dict      # fp -> attributes
+```
+
+`ExecutionConfig` and `BuildConfig` hold open `dict`s rather
+than fixed fields precisely so the registries -- not the
+dataclass definition -- are the single source of truth for
+which knobs exist.  Promoting a studied compiler flag to a
+first-class feature (ARCHITECTURE 11.3) is then a registry
+edit, not a dataclass change.
+
+### 8.5 Hardware Fingerprint
+
+The fingerprint is the coarse partition within which cost is
+comparable.  The v1 recipe is a normalized slug
+
+```
+<cpu_vendor>-<cpu_microarch>-<cores_per_node>c-<mem_per_node_gb>gb
+```
+
+e.g. `intel-haswell-24c-128gb`.  The CPU string is normalized
+to vendor + microarchitecture family (stepping, base clock,
+and exact model number are dropped) so routine BIOS or
+microcode churn does not fragment the data -- the granularity
+tension flagged in ARCHITECTURE 11.8.  `hardware_registry.toml`
+maps each fingerprint to its full probed attributes (exact CPU
+model, socket count, memory, interconnect) for diagnostics;
+the observation files carry only the fingerprint, never the
+repeated attributes, mirroring how section 7 keeps the element
+group table out of individual entries.
+
+When a fingerprint is under-populated (below the predictor's
+minimum sample count), the predictor falls back to the
+nearest related fingerprint by probed attributes, or to a
+conservative cold-start request (8.8); it never silently
+predicts from one machine for another.
+
+### 8.6 Predictor Algorithm
+
+Within a fixed `(hardware_fingerprint, build-bucket)`, cost is
+a smooth, physics-grounded function of size and parallel
+configuration.  The model is therefore a **physics-informed
+regression** rather than the pure k-NN of section 7.6.  Peak
+memory scales roughly as the square of `secular_dimension` and
+the eigensolve as its cube; the predictor fits a power law
+
+```
+log(resource) = log(A) + p * log(secular_dimension)
+                + (parallel and spin correction terms)
+```
+
+by least squares per `(fingerprint, build-bucket)` group,
+recovering the exponent `p` from the data (expected near 2 for
+memory, near 3 for walltime) rather than assuming it.  The
+parallel correction captures the speedup from `mpi_ranks` and
+`omp_threads_per_rank` and the memory split across ranks.  A
+k-NN fallback (over `secular_dimension`, `kpoint_count`,
+`spin_channels`, scaled by the parallel config) is used when a
+group is too thin to fit a stable exponent.  The exact
+functional form and the thin-group threshold are tuning knobs
+calibrated after the seed flight (8.8); they are deliberately
+*not* required for the artifact to begin accumulating data.
+
+For the near-term consumer -- **provisioning** -- the flight
+layer queries the predictor with a proposed parallel config
+and the new run's size signature, receives predicted memory /
+disk / walltime, applies a safety margin, and emits the SLURM
+request.  Because every observation also stores its full
+parallel and build configuration, the same fitted surface
+later answers *which* configuration or build is cheapest
+(configuration optimization, build comparison) with no schema
+change.
+
+### 8.7 Capture and Harvest
+
+Each observation is assembled at harvest from the four sources
+of ARCHITECTURE 11.4: the dispatch-time size signature and
+execution config (recorded by the wingbeat into the run
+directory), the CMake-emitted `build_info.toml` (both build
+layers), SLURM `sacct` accounting (`MaxRSS`, disk high-water,
+`Elapsed`), and the optional imago self-report of per-phase
+timings.  `resource_harvest.py` walks a finished flight,
+builds one `Observation` per run directory, and writes it to
+`staging/<fingerprint>/`; a curator promotes with the same
+discipline as section 7.8.
+
+**Censored (non-completed) runs are retained, not discarded.**
+A run killed for OOM is positive evidence that its config is
+insufficient at that size: it is staged with `outcome = oom`,
+`peak_memory_bytes` set to the memory limit it hit, and
+`MeasuredResources.censored = True`.  A `timeout` run is staged
+with `walltime_seconds` set to the limit.  The regressor (8.6)
+treats a censored memory observation as a lower bound and a
+censored walltime as an upper bound rather than a point; how
+that censoring enters the least-squares fit is an open
+question (8.9).  A `failed` run (a Fortran abort unrelated to
+resources) carries no usable cost signal and is staged only
+for diagnostics, never promoted.
+
+### 8.8 Bootstrap and Day-1 Behavior
+
+A fresh fingerprint has no observations, so the predictor
+cannot yet predict for it.  Day-1 behavior on an empty or
+under-populated fingerprint: the provisioner falls back to a
+conservative resource request (a generous memory and walltime
+ceiling, optionally scaled from a related fingerprint by
+probed attributes), runs the job, and harvests the result --
+which seeds the fingerprint.  A small `manual` seed (a handful
+of hand-entered observations spanning the size range on the
+local machine) accelerates this, exactly as the section-7 seed
+flight (C75) bootstraps convergence guidance.  The artifact
+then improves monotonically: each completed flight appends
+observations, and the fitted exponents tighten as evidence
+accumulates.
+
+### 8.9 Open Design Questions
+
+- **Exact regression form and censored-data handling.**  The
+  power-law-in-`secular_dimension` model (8.6) and how OOM /
+  timeout bounds enter the fit (a censored / Tobit-style
+  regression, or simply weighting them as bounds) are open and
+  calibrated after the seed.
+- **`secular_dimension` provenance.**  Whether it is recorded
+  directly from imago (authoritative) or derived from
+  `basis_function_count x wavefunction_components` minus the
+  core-orthogonalization reduction (portable but approximate)
+  is open; the schema records it directly, with the primitives
+  kept for cross-checking.
+- **Aggregate vs per-rank memory.**  `peak_memory_bytes` as a
+  job aggregate vs per-node vs per-rank changes how the
+  parallel correction is modeled; ARCHITECTURE 11.8 flags the
+  reconciliation of `sacct` / `time` / self-report sources.
+- **Build effects on numerics, not just cost.**  Per
+  ARCHITECTURE 11.8, build choices can perturb low-order
+  digits of the physics result; whether the build block is
+  ever referenced from the section-7 (convergence) side --
+  against the no-cross-reference boundary -- is to be settled
+  here, not assumed.
