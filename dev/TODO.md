@@ -615,7 +615,7 @@
   Done 2026-05-28.  Landed as PSEUDOCODE section 15, in
   seven subsections: 15.1 constants + the 7.4 dataclasses
   restated in field order (Verification carries the new
-  grid_energies); 15.2 load_group_table + compute_signature
+  grid_energies); 15.2 load_elemental_groups + compute_signature
   with the CRYSTAL_SYSTEM_TO_FAMILY map (trigonal lumped
   into hex per 7.10); 15.3 load() + load_entry/
   load_verification enforcing all 12 rules with file/

@@ -5329,7 +5329,7 @@ group dict and refuses an element that lands in two groups
 last assignment).
 
 ```
-function load_group_table(path):
+function load_elemental_groups(path):
     raw = tomllib.load(path)
     require(raw["schema_version"] == SCHEMA_VERSION, path,
         "elemental_groups.toml schema_version != "
@@ -5435,7 +5435,7 @@ function load(root):
         join(root, "SCHEMA_VERSION"),
         "marker " + marker + " != " + str(SCHEMA_VERSION))
 
-    group_table = load_group_table(
+    group_table = load_elemental_groups(
         join(root, "elemental_groups.toml"))
 
     entries_by_type = { t: [] for t in VALID_SYSTEM_TYPES }

@@ -40,7 +40,7 @@ entry's ``schema_version`` key must equal :data:`SCHEMA_VERSION`;
 ``guidance_migrate.py``, not by silent coercion).
 
 Public surface (this module is built in increments; the
-foundation below covers shapes + signatures)
+emitter (15.4) and predictor (15.5) follow)
 ----------------------------------------------------------------
 Signature, Measured, Context, Verification, Provenance,
 GuidanceEntry, Dataspace, PredictionResult
@@ -55,6 +55,12 @@ compute_signature(structure, system_type, group_table, label)
 bravais_family_of(structure)
     Map a structure's space-group number to one of the six
     v1 lattice families.
+load(root)
+    Read and validate the whole dataspace under ``root`` into a
+    :class:`Dataspace`, partitioned by system_type.
+load_entry(path, system_type_dir, seen_ids)
+    Read and validate one entry file against DESIGN 7.2 rules
+    1-12, with file/block/field error messages.
 
 Its only external dependency is ``tomllib`` (Python standard
 library) plus the duck-typed ``StructureControl`` attributes
@@ -64,6 +70,8 @@ symbols), and ``space_group_num``.
 
 from __future__ import annotations
 
+import glob
+import os
 import tomllib
 from dataclasses import dataclass
 from typing import Any
@@ -412,3 +420,296 @@ def compute_signature(structure: Any, system_type: str,
         composition_vector=composition,
         lattice_family=family,
         lattice_onehot=onehot)
+
+
+# ============================================================
+#  TOML reader load() (DESIGN 7.2 rules 1-12 / PSEUDOCODE 15.3)
+# ============================================================
+
+def _require(condition: bool, path: str, message: str) -> None:
+    """Raise a ``ValueError`` naming the file at fault when a
+    validation condition fails.  This mirrors the
+    file/block/field error discipline of
+    ``initial_potential_db.load`` (DESIGN 5.2): a caller reading
+    the message learns exactly which file and field broke a
+    rule, without a stack dive.
+    """
+
+    if not condition:
+        raise ValueError(path + ": " + message)
+
+
+def load(root: str) -> Dataspace:
+    """Read and validate the whole dataspace under ``root``.
+
+    Reads the bare-integer ``SCHEMA_VERSION`` marker, the
+    ``elemental_groups.toml`` table, and every entry under
+    ``entries/<system_type>/``, validating each file against the
+    twelve rules (DESIGN 7.2) and partitioning the result by
+    system_type.  A ``system_type`` subdirectory that does not
+    exist simply contributes no entries -- an empty dataspace is
+    valid (it is exactly the cold-start state, DESIGN 7.9).
+    """
+
+    # Rule 1 (marker half): the bare-integer marker file at the
+    # dataspace root must equal SCHEMA_VERSION.
+    marker_path = os.path.join(root, "SCHEMA_VERSION")
+    with open(marker_path, "r") as handle:
+        marker = handle.read().strip()
+    _require(marker == str(SCHEMA_VERSION), marker_path,
+             "marker " + marker + " != " + str(SCHEMA_VERSION))
+
+    group_table = load_elemental_groups(
+        os.path.join(root, "elemental_groups.toml"))
+
+    entries_by_type: dict[str, list[GuidanceEntry]] = {
+        system_type: [] for system_type in VALID_SYSTEM_TYPES}
+    seen_ids: dict[str, str] = {}        # entry_id -> source path
+    for system_type in VALID_SYSTEM_TYPES:
+        subdir = os.path.join(root, "entries", system_type)
+        if not os.path.isdir(subdir):
+            continue
+        for path in sorted(glob.glob(
+                os.path.join(subdir, "*.toml"))):
+            entry = load_entry(path, system_type, seen_ids)
+            entries_by_type[system_type].append(entry)
+
+    return Dataspace(
+        schema_version=SCHEMA_VERSION,
+        entries_by_system_type=entries_by_type,
+        group_table=group_table)
+
+
+def load_entry(path: str, system_type_dir: str,
+               seen_ids: dict[str, str]) -> GuidanceEntry:
+    """Read and validate one entry file against DESIGN 7.2 rules
+    1-12, returning a :class:`GuidanceEntry`.
+
+    The schema is fully checked BEFORE any dataclass is built
+    (rule 12), so an omission surfaces as a clear validation
+    failure rather than a bare constructor ``TypeError`` -- the
+    same discipline as DESIGN 5.2.  ``system_type_dir`` is the
+    directory the file was found under (rule 3 requires the
+    entry's own ``system_type`` to match it); ``seen_ids`` maps
+    each entry_id seen so far to its file so a duplicate names
+    both files (rule 2).
+    """
+
+    with open(path, "rb") as handle:
+        raw = tomllib.load(handle)
+
+    # Rule 12 (top-level half): the required top-level keys.
+    for field_name in ("schema_version", "entry_id",
+                       "generated_at", "source"):
+        _require(field_name in raw, path,
+                 "missing top-level: " + field_name)
+
+    # Rule 1 (entry half): version agrees with the marker.
+    _require(raw["schema_version"] == SCHEMA_VERSION, path,
+             "schema_version " + str(raw["schema_version"])
+             + " != " + str(SCHEMA_VERSION))
+
+    # Rule 11 (source domain): flight | manual.
+    source = raw["source"]
+    _require(source in ("flight", "manual"), path,
+             "source must be flight|manual, got " + str(source))
+
+    # Rule 2: entry_id unique across the whole entries tree.
+    entry_id = raw["entry_id"]
+    _require(entry_id not in seen_ids, path,
+             "duplicate entry_id " + str(entry_id) + " (also in "
+             + seen_ids.get(entry_id, "?") + ")")
+    seen_ids[entry_id] = path
+
+    _require("entry" in raw, path, "missing [entry]")
+    entry = raw["entry"]
+
+    # --- signature block --------------------------------------
+    _require("signature" in entry, path,
+             "missing [entry.signature]")
+    sig = entry["signature"]
+    _require("system_type" in sig, path,
+             "missing signature.system_type")
+    system_type = sig["system_type"]
+
+    # Rule 3: system_type valid AND matches the directory.
+    _require(system_type in VALID_SYSTEM_TYPES, path,
+             "invalid system_type: " + str(system_type))
+    _require(system_type == system_type_dir, path,
+             "system_type " + system_type + " under entries/"
+             + system_type_dir + "/")
+
+    # Rule 4: composition_vector has exactly the 13 group keys,
+    # each in [0, 1], summing to 1.0 +/- 1e-6.
+    _require("composition_vector" in sig, path,
+             "missing signature.composition_vector")
+    cv = sig["composition_vector"]
+    _require(set(cv.keys()) == set(CANONICAL_GROUP_ORDER), path,
+             "composition_vector keys != the 13 element groups")
+    composition = tuple(cv[g] for g in CANONICAL_GROUP_ORDER)
+    for group, fraction in zip(CANONICAL_GROUP_ORDER, composition):
+        _require(0.0 <= fraction <= 1.0, path,
+                 "composition_vector[" + group + "] out of [0,1]")
+    _require(abs(sum(composition) - 1.0) <= 1.0e-6, path,
+             "composition_vector sums to " + str(sum(composition))
+             + " != 1.0")
+
+    # Rule 5: lattice_family present + valid iff crystalline.
+    family = sig.get("lattice_family", "")
+    if system_type == "crystalline":
+        _require(family in CANONICAL_LATTICE_ORDER, path,
+                 "crystalline entry: lattice_family must be one of"
+                 " the six families, got '" + str(family) + "'")
+        onehot = tuple(
+            1.0 if name == family else 0.0
+            for name in CANONICAL_LATTICE_ORDER)
+    else:
+        _require(family == "", path,
+                 "non-crystalline entry must not set lattice_family")
+        onehot = tuple(0.0 for _ in CANONICAL_LATTICE_ORDER)
+
+    signature = Signature(system_type, composition, family, onehot)
+
+    # --- measured block ---------------------------------------
+    _require("measured" in entry, path, "missing [entry.measured]")
+    m = entry["measured"]
+    for field_name in ("gap_ev", "gap_kind", "spin_polarization",
+                       "total_magnetization", "kpoint_density"):
+        _require(field_name in m, path,
+                 "missing measured." + field_name)
+
+    # Rule 6: gap_ev >= 0; gap_kind valid; "none" iff metal.
+    _require(m["gap_ev"] >= 0.0, path, "gap_ev < 0")
+    _require(m["gap_kind"] in VALID_GAP_KINDS, path,
+             "invalid gap_kind: " + str(m["gap_kind"]))
+    is_metal = (m["gap_ev"] == 0.0)
+    _require((m["gap_kind"] == "none") == is_metal, path,
+             "gap_kind=='none' iff gap_ev==0.0 violated")
+    # Rule 7: kpoint_density > 0.
+    _require(m["kpoint_density"] > 0.0, path,
+             "kpoint_density must be > 0")
+
+    measured = Measured(
+        gap_ev=m["gap_ev"],
+        gap_kind=m["gap_kind"],
+        spin_polarization=m["spin_polarization"],
+        total_magnetization=m["total_magnetization"],
+        kpoint_density=m["kpoint_density"],
+        dos_at_fermi=m.get("dos_at_fermi"))      # optional
+
+    # --- context block ----------------------------------------
+    _require("context" in entry, path, "missing [entry.context]")
+    c = entry["context"]
+    for field_name in ("basis", "functional", "scf_threshold",
+                       "cell_atom_count",
+                       "cell_volume_per_formula_unit"):
+        _require(field_name in c, path,
+                 "missing context." + field_name)
+    # Rule 8: basis valid; functional non-empty.
+    _require(c["basis"] in VALID_BASES, path,
+             "invalid basis: " + str(c["basis"]))
+    _require(len(c["functional"]) > 0, path,
+             "functional must be non-empty")
+    # Rule 9: cell counts / volumes positive.
+    _require(c["cell_atom_count"] > 0, path,
+             "cell_atom_count must be > 0")
+    _require(c["cell_volume_per_formula_unit"] > 0.0, path,
+             "cell_volume_per_formula_unit must be > 0")
+    context = Context(
+        basis=c["basis"],
+        functional=c["functional"],
+        scf_threshold=c["scf_threshold"],
+        cell_atom_count=c["cell_atom_count"],
+        cell_volume_per_formula_unit=c[
+            "cell_volume_per_formula_unit"])
+
+    # --- verification block (required for source=flight) ------
+    verification = None
+    if "verification" in entry:
+        verification = load_verification(
+            entry["verification"], measured, path)
+    _require(verification is not None or source == "manual", path,
+             "source=flight requires [entry.verification]")
+
+    # --- provenance block -------------------------------------
+    _require("provenance" in entry, path,
+             "missing [entry.provenance]")
+    p = entry["provenance"]
+    for field_name in ("flight_id", "source_structure",
+                       "imago_commit", "curator"):
+        _require(field_name in p, path,
+                 "missing provenance." + field_name)
+    if source == "flight":
+        # Rule 11: flight entries need a non-empty flight_id,
+        # source_structure, and imago_commit.
+        for field_name in ("flight_id", "source_structure",
+                           "imago_commit"):
+            _require(len(p[field_name]) > 0, path,
+                     "source=flight needs non-empty " + field_name)
+    provenance = Provenance(
+        flight_id=p["flight_id"],
+        source_structure=p["source_structure"],
+        imago_commit=p["imago_commit"],
+        curator=p["curator"])
+
+    return GuidanceEntry(
+        entry_id=entry_id,
+        generated_at=raw["generated_at"],
+        source=source,
+        signature=signature,
+        measured=measured,
+        context=context,
+        verification=verification,
+        provenance=provenance)
+
+
+def load_verification(raw_verification: dict[str, Any],
+                      measured: Measured,
+                      path: str) -> Verification:
+    """Validate and build the ``[entry.verification]`` block
+    (DESIGN 7.2 rule 10).
+
+    The grid must be sorted ascending, ``converged_at`` must be a
+    grid point and must equal ``measured.kpoint_density`` (the
+    converged density and the recorded target are the same
+    number), the metric must be registered, and the confidence
+    must lie in [0, 1].  ``grid_energies`` is optional but, when
+    present, must be parallel to ``grid_values`` so the curator's
+    auto-promote rule can read flatness from the staging file
+    alone (DESIGN 7.8).
+    """
+
+    v = raw_verification
+    for field_name in ("grid_values", "converged_at", "metric",
+                       "metric_threshold", "predictor_confidence",
+                       "predictor_neighbor_ids"):
+        _require(field_name in v, path,
+                 "missing verification." + field_name)
+
+    grid = v["grid_values"]
+    _require(list(grid) == sorted(grid), path,
+             "grid_values not sorted ascending")
+    _require(v["converged_at"] in grid, path,
+             "converged_at not present in grid_values")
+    _require(v["converged_at"] == measured.kpoint_density, path,
+             "converged_at != measured.kpoint_density")
+    _require(v["metric"] in METRIC_REGISTRY, path,
+             "unknown metric: " + str(v["metric"]))
+    _require(0.0 <= v["predictor_confidence"] <= 1.0, path,
+             "predictor_confidence out of [0,1]")
+
+    energies = v.get("grid_energies")
+    if energies is not None:
+        _require(len(energies) == len(grid), path,
+                 "grid_energies length != grid_values length")
+
+    return Verification(
+        grid_values=tuple(grid),
+        grid_energies=(tuple(energies)
+                       if energies is not None else None),
+        converged_at=v["converged_at"],
+        metric=v["metric"],
+        metric_threshold=v["metric_threshold"],
+        predictor_confidence=v["predictor_confidence"],
+        predictor_neighbor_ids=tuple(
+            v["predictor_neighbor_ids"]))

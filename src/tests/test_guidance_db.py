@@ -14,6 +14,7 @@ the real StructureControl fixtures and auto-skip when
 """
 
 import os
+import shutil
 
 import pytest
 
@@ -22,7 +23,9 @@ from guidance_db import (
     CANONICAL_LATTICE_ORDER,
     bravais_family_of,
     compute_signature,
+    load,
     load_elemental_groups,
+    load_entry,
     _crystal_system_of,
 )
 
@@ -253,3 +256,342 @@ class TestRealStructureIntegration:
         assert sig.composition_vector[
             CANONICAL_GROUP_ORDER.index("chalcogen")] == pytest.approx(0.5)
         assert sig.lattice_family == "hex"
+
+
+# ============================================================
+#  Reader: load() and load_entry() (PSEUDOCODE 15.3)
+# ============================================================
+#
+# Default building blocks for a valid flight entry.  Each rule
+# test copies one block and tweaks a single field, so a failure
+# isolates exactly the rule under test.
+
+DEF_TOP = {
+    "schema_version": 1, "entry_id": "crystalline-aaa111",
+    "generated_at": "2026-05-29T00:00:00Z", "source": "flight"}
+DEF_SIG = {"system_type": "crystalline", "lattice_family": "tet"}
+DEF_COMP = {group: 0.0 for group in CANONICAL_GROUP_ORDER}
+DEF_COMP["transition_metal"] = 1.0 / 3.0
+DEF_COMP["chalcogen"] = 2.0 / 3.0
+DEF_MEAS = {
+    "gap_ev": 3.0, "gap_kind": "direct", "spin_polarization": 0.0,
+    "total_magnetization": 0.0, "kpoint_density": 50.0,
+    "dos_at_fermi": 0.0}
+DEF_CTX = {
+    "basis": "fb", "functional": "gga-pbe", "scf_threshold": 1.0e-6,
+    "cell_atom_count": 6, "cell_volume_per_formula_unit": 100.0}
+DEF_VER = {
+    "grid_values": [25.0, 50.0, 100.0],
+    "grid_energies": [-1.0, -1.5, -1.51], "converged_at": 50.0,
+    "metric": "total_energy", "metric_threshold": 1.0e-4,
+    "predictor_confidence": 0.8, "predictor_neighbor_ids": ["a", "b"]}
+DEF_PROV = {
+    "flight_id": "seed_2026", "source_structure": "COD-1",
+    "imago_commit": "abc1234", "curator": "harvest.py"}
+
+
+def _val(value):
+    """Render one Python value as a TOML scalar / array."""
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return '"' + value + '"'
+    if isinstance(value, list):
+        return "[" + ", ".join(_val(item) for item in value) + "]"
+    return repr(value)            # int -> "6"; float -> "1e-06"
+
+
+def _entry_text(top=None, signature=None, composition=None,
+                measured=None, context=None, verification=DEF_VER,
+                provenance=None):
+    """Build entry-file TOML text from the default blocks, with
+    any block replaced wholesale.  ``verification=None`` omits
+    the verification block entirely.
+    """
+
+    top = DEF_TOP if top is None else top
+    signature = DEF_SIG if signature is None else signature
+    composition = DEF_COMP if composition is None else composition
+    measured = DEF_MEAS if measured is None else measured
+    context = DEF_CTX if context is None else context
+    provenance = DEF_PROV if provenance is None else provenance
+
+    lines = [k + " = " + _val(v) for k, v in top.items()]
+    lines += ["", "[entry.signature]"]
+    lines += [k + " = " + _val(v) for k, v in signature.items()]
+    lines += ["", "[entry.signature.composition_vector]"]
+    lines += [g + " = " + _val(composition[g]) for g in composition]
+    lines += ["", "[entry.measured]"]
+    lines += [k + " = " + _val(v) for k, v in measured.items()]
+    lines += ["", "[entry.context]"]
+    lines += [k + " = " + _val(v) for k, v in context.items()]
+    if verification is not None:
+        lines += ["", "[entry.verification]"]
+        lines += [k + " = " + _val(v)
+                  for k, v in verification.items()]
+    lines += ["", "[entry.provenance]"]
+    lines += [k + " = " + _val(v) for k, v in provenance.items()]
+    return "\n".join(lines) + "\n"
+
+
+def _write_dataspace(tmp_path, entry_text=None,
+                     system_type="crystalline", entry_name="e1.toml",
+                     marker="1", entries=None):
+    """Lay out a minimal dataspace under ``tmp_path``: the marker
+    file, a copy of the real elemental_groups.toml, and one or
+    more entry files.  ``entries`` is a list of
+    ``(system_type, name, text)`` triples; if omitted a single
+    entry is written from ``entry_text`` (default valid).
+    """
+
+    (tmp_path / "SCHEMA_VERSION").write_text(marker + "\n")
+    shutil.copy(GROUPS_PATH,
+                str(tmp_path / "elemental_groups.toml"))
+    if entries is None:
+        entries = [(system_type, entry_name,
+                    entry_text if entry_text is not None
+                    else _entry_text())]
+    for system_type_dir, name, text in entries:
+        directory = tmp_path / "entries" / system_type_dir
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_text(text)
+    return str(tmp_path)
+
+
+def _load_entry_text(tmp_path, text, system_type="crystalline"):
+    """Write one entry file and validate it directly via
+    load_entry (skipping the marker/groups scaffolding)."""
+
+    path = tmp_path / "entry.toml"
+    path.write_text(text)
+    return load_entry(str(path), system_type, {})
+
+
+class TestLoadDataspace:
+    def test_loads_valid_flight_entry(self, tmp_path):
+        space = load(_write_dataspace(tmp_path))
+        assert space.schema_version == 1
+        entries = space.entries_by_system_type["crystalline"]
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.source == "flight"
+        assert entry.signature.lattice_family == "tet"
+        assert entry.measured.kpoint_density == 50.0
+        assert entry.verification is not None
+        assert entry.verification.converged_at == 50.0
+        assert entry.provenance.flight_id == "seed_2026"
+        # Untouched partitions are empty, not missing.
+        assert space.entries_by_system_type["amorphous"] == []
+
+    def test_empty_dataspace_is_valid(self, tmp_path):
+        (tmp_path / "SCHEMA_VERSION").write_text("1\n")
+        shutil.copy(GROUPS_PATH,
+                    str(tmp_path / "elemental_groups.toml"))
+        space = load(str(tmp_path))
+        assert all(entries == [] for entries
+                   in space.entries_by_system_type.values())
+
+    def test_manual_entry_without_verification(self, tmp_path):
+        text = _entry_text(
+            top={**DEF_TOP, "source": "manual"}, verification=None)
+        space = load(_write_dataspace(tmp_path, text))
+        entry = space.entries_by_system_type["crystalline"][0]
+        assert entry.source == "manual"
+        assert entry.verification is None
+
+    def test_bad_marker_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="marker"):
+            load(_write_dataspace(tmp_path, marker="2"))
+
+    def test_duplicate_entry_id_across_files(self, tmp_path):
+        text = _entry_text()
+        space = _write_dataspace(tmp_path, entries=[
+            ("crystalline", "a.toml", text),
+            ("crystalline", "b.toml", text)])
+        with pytest.raises(ValueError, match="duplicate entry_id"):
+            load(space)
+
+    def test_system_type_directory_mismatch(self, tmp_path):
+        # Entry declares crystalline but lives under amorphous/.
+        text = _entry_text()
+        space = _write_dataspace(tmp_path, entries=[
+            ("amorphous", "a.toml", text)])
+        with pytest.raises(ValueError,
+                           match="under entries/amorphous"):
+            load(space)
+
+
+class TestEntryValidationRules:
+    def test_missing_top_level_source(self, tmp_path):
+        top = {k: v for k, v in DEF_TOP.items() if k != "source"}
+        with pytest.raises(ValueError,
+                           match="missing top-level: source"):
+            _load_entry_text(tmp_path, _entry_text(top=top))
+
+    def test_entry_schema_version_mismatch(self, tmp_path):
+        with pytest.raises(ValueError, match="schema_version"):
+            _load_entry_text(tmp_path, _entry_text(
+                top={**DEF_TOP, "schema_version": 2}))
+
+    def test_invalid_source(self, tmp_path):
+        with pytest.raises(ValueError, match="flight"):
+            _load_entry_text(tmp_path, _entry_text(
+                top={**DEF_TOP, "source": "bogus"}))
+
+    def test_invalid_system_type(self, tmp_path):
+        with pytest.raises(ValueError, match="invalid system_type"):
+            _load_entry_text(tmp_path, _entry_text(
+                signature={**DEF_SIG, "system_type": "bogus"}))
+
+    def test_composition_keys_wrong(self, tmp_path):
+        comp = dict(DEF_COMP)
+        del comp["hydrogen"]
+        with pytest.raises(ValueError,
+                           match="composition_vector keys"):
+            _load_entry_text(tmp_path,
+                             _entry_text(composition=comp))
+
+    def test_composition_sum_not_one(self, tmp_path):
+        comp = {group: 0.0 for group in CANONICAL_GROUP_ORDER}
+        comp["hydrogen"] = 0.5
+        with pytest.raises(ValueError, match="sums to"):
+            _load_entry_text(tmp_path,
+                             _entry_text(composition=comp))
+
+    def test_composition_out_of_range(self, tmp_path):
+        comp = {group: 0.0 for group in CANONICAL_GROUP_ORDER}
+        comp["hydrogen"] = 1.5
+        with pytest.raises(ValueError, match=r"out of \[0,1\]"):
+            _load_entry_text(tmp_path,
+                             _entry_text(composition=comp))
+
+    def test_crystalline_invalid_lattice_family(self, tmp_path):
+        with pytest.raises(ValueError,
+                           match="lattice_family must be one"):
+            _load_entry_text(tmp_path, _entry_text(
+                signature={**DEF_SIG, "lattice_family": "bogus"}))
+
+    def test_crystalline_missing_lattice_family(self, tmp_path):
+        with pytest.raises(ValueError,
+                           match="lattice_family must be one"):
+            _load_entry_text(tmp_path, _entry_text(
+                signature={"system_type": "crystalline"}))
+
+    def test_noncrystalline_with_lattice_family(self, tmp_path):
+        with pytest.raises(ValueError,
+                           match="must not set lattice_family"):
+            _load_entry_text(tmp_path, _entry_text(
+                signature={"system_type": "amorphous",
+                           "lattice_family": "tet"}),
+                system_type="amorphous")
+
+    def test_gap_negative(self, tmp_path):
+        with pytest.raises(ValueError, match="gap_ev < 0"):
+            _load_entry_text(tmp_path, _entry_text(
+                measured={**DEF_MEAS, "gap_ev": -1.0}))
+
+    def test_invalid_gap_kind(self, tmp_path):
+        with pytest.raises(ValueError, match="invalid gap_kind"):
+            _load_entry_text(tmp_path, _entry_text(
+                measured={**DEF_MEAS, "gap_kind": "bogus"}))
+
+    def test_gap_kind_metal_mismatch(self, tmp_path):
+        # gap_ev=3.0 but gap_kind="none" claims a metal.
+        with pytest.raises(ValueError, match="iff"):
+            _load_entry_text(tmp_path, _entry_text(
+                measured={**DEF_MEAS, "gap_kind": "none"}))
+
+    def test_metal_is_consistent(self, tmp_path):
+        # gap_ev=0.0 + gap_kind="none" is a valid metal.
+        entry = _load_entry_text(tmp_path, _entry_text(
+            measured={**DEF_MEAS, "gap_ev": 0.0,
+                      "gap_kind": "none"}))
+        assert entry.measured.gap_ev == 0.0
+
+    def test_kpoint_density_nonpositive(self, tmp_path):
+        with pytest.raises(ValueError,
+                           match="kpoint_density must be > 0"):
+            _load_entry_text(tmp_path, _entry_text(
+                measured={**DEF_MEAS, "kpoint_density": 0.0}))
+
+    def test_invalid_basis(self, tmp_path):
+        with pytest.raises(ValueError, match="invalid basis"):
+            _load_entry_text(tmp_path, _entry_text(
+                context={**DEF_CTX, "basis": "xx"}))
+
+    def test_empty_functional(self, tmp_path):
+        with pytest.raises(ValueError,
+                           match="functional must be non-empty"):
+            _load_entry_text(tmp_path, _entry_text(
+                context={**DEF_CTX, "functional": ""}))
+
+    def test_cell_atom_count_nonpositive(self, tmp_path):
+        with pytest.raises(ValueError,
+                           match="cell_atom_count must be > 0"):
+            _load_entry_text(tmp_path, _entry_text(
+                context={**DEF_CTX, "cell_atom_count": 0}))
+
+    def test_cell_volume_nonpositive(self, tmp_path):
+        with pytest.raises(ValueError,
+                           match="cell_volume_per_formula_unit"):
+            _load_entry_text(tmp_path, _entry_text(
+                context={**DEF_CTX,
+                         "cell_volume_per_formula_unit": 0.0}))
+
+    def test_flight_requires_verification(self, tmp_path):
+        with pytest.raises(ValueError,
+                           match=r"requires \[entry.verification\]"):
+            _load_entry_text(tmp_path,
+                             _entry_text(verification=None))
+
+    def test_flight_needs_nonempty_flight_id(self, tmp_path):
+        with pytest.raises(ValueError, match="non-empty flight_id"):
+            _load_entry_text(tmp_path, _entry_text(
+                provenance={**DEF_PROV, "flight_id": ""}))
+
+
+class TestVerificationRule10:
+    def test_grid_not_sorted(self, tmp_path):
+        with pytest.raises(ValueError, match="not sorted"):
+            _load_entry_text(tmp_path, _entry_text(
+                verification={**DEF_VER,
+                              "grid_values": [100.0, 50.0, 25.0]}))
+
+    def test_converged_at_not_in_grid(self, tmp_path):
+        with pytest.raises(ValueError,
+                           match="converged_at not present"):
+            _load_entry_text(tmp_path, _entry_text(
+                verification={**DEF_VER, "converged_at": 999.0}))
+
+    def test_converged_at_neq_kpoint_density(self, tmp_path):
+        # 100.0 is in the grid but != measured.kpoint_density.
+        with pytest.raises(ValueError,
+                           match="converged_at != measured"):
+            _load_entry_text(tmp_path, _entry_text(
+                verification={**DEF_VER, "converged_at": 100.0}))
+
+    def test_unknown_metric(self, tmp_path):
+        with pytest.raises(ValueError, match="unknown metric"):
+            _load_entry_text(tmp_path, _entry_text(
+                verification={**DEF_VER, "metric": "free_energy"}))
+
+    def test_confidence_out_of_range(self, tmp_path):
+        with pytest.raises(ValueError,
+                           match="predictor_confidence out of"):
+            _load_entry_text(tmp_path, _entry_text(
+                verification={**DEF_VER,
+                              "predictor_confidence": 1.5}))
+
+    def test_grid_energies_length_mismatch(self, tmp_path):
+        with pytest.raises(ValueError, match="grid_energies length"):
+            _load_entry_text(tmp_path, _entry_text(
+                verification={**DEF_VER,
+                              "grid_energies": [-1.0, -1.5]}))
+
+    def test_grid_energies_optional(self, tmp_path):
+        version = {k: v for k, v in DEF_VER.items()
+                   if k != "grid_energies"}
+        entry = _load_entry_text(tmp_path,
+                                 _entry_text(verification=version))
+        assert entry.verification.grid_energies is None
