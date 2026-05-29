@@ -1341,7 +1341,7 @@ share/
                             Bumped on schema change.
                             Readers refuse files whose
                             `schema_version` mismatches.
-    gap_groups.toml         Element-group classification
+    elemental_groups.toml   Element-group classification
                             table (alkali / alkali-earth /
                             halide / chalcogen / ... / H).
                             Loaded by the library at init
@@ -1496,7 +1496,7 @@ combines a chemistry vector with a lattice-family vector
   alkali-earth, halide, chalcogen, pnictogen, group-IV,
   group-III, transition-metal (lumped 3d/4d/5d),
   lanthanide, actinide, metalloid, noble-gas, hydrogen.
-  The group classification table (`gap_groups.toml`,
+  The group classification table (`elemental_groups.toml`,
   10.1) is a checked-in data file; Principle 11
   requires the chemistry knowledge to be auditable,
   not buried in code.
@@ -1612,7 +1612,7 @@ Python:
 
 - `src/scripts/guidance_db.py`: new library.
   TOML reader + validation; element-group classifier
-  (loads `gap_groups.toml`); composition-vector and
+  (loads `elemental_groups.toml`); composition-vector and
   lattice-family computation from a StructureControl;
   the in-memory dataspace; the two-stage k-NN
   predictor; the deterministic hand-formatted emitter.
@@ -1779,7 +1779,7 @@ system_type:
   hardware_registry.toml        known fingerprints + the
                                 probed attributes that
                                 define each (analogous to
-                                section 10's gap_groups).
+                                section 10's elemental_groups).
   entries/<fingerprint>/*.toml  promoted observations.
   staging/<fingerprint>/*.toml  harvested, awaiting a
                                 curator.

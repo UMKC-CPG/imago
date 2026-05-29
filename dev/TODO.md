@@ -74,7 +74,7 @@
   categorical lookup.  Final shape (eight subsections):
   10.1 layout under share/historicalGuidanceDB/ with
   entries/<system_type>/, staging/<system_type>/,
-  SCHEMA_VERSION marker, and gap_groups.toml table; 10.2
+  SCHEMA_VERSION marker, and elemental_groups.toml table; 10.2
   TOML format with signature-first + measured + context +
   verification + provenance invariants; 10.3 data flow
   diagram showing the two-stage k-NN predictor and the
@@ -307,7 +307,7 @@
   (Signature, Measured, Context, Verification, Provenance,
   GuidanceEntry, Dataspace, PredictionResult) + the public
   surface (load, save_entry, compute_signature, predict) +
-  the gap_groups.toml element-classification table layout
+  the elemental_groups.toml element-classification table layout
   per Principle 11; 7.5 deterministic hand-formatted TOML
   emitter + the `<system_type>-<short_sha>` slug derivation;
   7.6 PREDICTOR ALGORITHM (two-stage k-NN with
@@ -563,7 +563,7 @@
   (a) **Library + I/O.**  load() walking
   entries/<system_type>/ with all 12 validation rules
   yielding clear file/block/field error messages; the
-  gap_groups.toml loader and the element-to-group lookup;
+  elemental_groups.toml loader and the element-to-group lookup;
   compute_signature(structure, system_type) producing the
   13-d composition_vector via atom-fraction + the
   lattice_family one-hot; save_entry() with the
@@ -1843,7 +1843,7 @@ the C48.3 wiring (C74) is the first major consumer.
   **I/O half.** GuidanceDataspaceError; dataclasses
   (Signature, Measured, Context, Verification, Provenance,
   GuidanceEntry, Dataspace, PredictionResult);
-  `gap_groups.toml` loader with element-to-group lookup;
+  `elemental_groups.toml` loader with element-to-group lookup;
   compute_signature(structure, system_type, group_table)
   building the 13-d composition_vector and the
   lattice_family one-hot; load(root) walking

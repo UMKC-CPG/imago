@@ -5206,7 +5206,7 @@ dataspace is a curated artifact, not tribal knowledge.  The
 library reads and validates; the producers stage and
 promote; the consumer (the kaleidoscope helper) predicts.
 The element-group classification lives in a checked-in data
-file (`gap_groups.toml`), never hardcoded.
+file (`elemental_groups.toml`), never hardcoded.
 
 ### 15.1 Constants and in-memory shapes (DESIGN 7.4)
 
@@ -5322,7 +5322,7 @@ dataclass PredictionResult:    # what predict() returns
 
 ### 15.2 Element groups and compute_signature (DESIGN 7.4)
 
-`gap_groups.toml` is the checked-in element-to-group table
+`elemental_groups.toml` is the checked-in element-to-group table
 (Principle 11).  The loader inverts it into a symbol ->
 group dict and refuses an element that lands in two groups
 (a data-file typo must fail loudly, not silently win the
@@ -5332,14 +5332,14 @@ last assignment).
 function load_group_table(path):
     raw = tomllib.load(path)
     require(raw["schema_version"] == SCHEMA_VERSION, path,
-        "gap_groups.toml schema_version != "
+        "elemental_groups.toml schema_version != "
         + str(SCHEMA_VERSION))
     table = {}                       # symbol -> group name
     for group in CANONICAL_GROUP_ORDER:
         # Every group key must be present (even metalloid,
         # which ships empty per DESIGN 7.4 / 7.10).
         require(group in raw["groups"], path,
-            "gap_groups.toml missing group: " + group)
+            "elemental_groups.toml missing group: " + group)
         for symbol in raw["groups"][group]:
             require(symbol not in table, path,
                 "element " + symbol + " assigned to two"
@@ -5371,7 +5371,7 @@ function compute_signature(structure, system_type,
         symbol = element_symbol_of(site)
         require(symbol in group_table,
             "element " + symbol + " (in structure "
-            + structure.name + ") not in gap_groups.toml")
+            + structure.name + ") not in elemental_groups.toml")
         counts[group_table[symbol]] += 1
         total_atoms += 1
     require(total_atoms > 0, "structure has no atoms")
@@ -5421,7 +5421,7 @@ this one table makes a future split a one-line change.
 ### 15.3 TOML reader load() (DESIGN 7.2 rules 1-12)
 
 `load(root)` reads the `SCHEMA_VERSION` marker, the
-`gap_groups.toml` table, and every entry under
+`elemental_groups.toml` table, and every entry under
 `entries/<system_type>/`, validating each against the 12
 rules and partitioning by system_type.  Like
 `initial_potential_db.load` (§11.1), every failure names the
@@ -5436,7 +5436,7 @@ function load(root):
         "marker " + marker + " != " + str(SCHEMA_VERSION))
 
     group_table = load_group_table(
-        join(root, "gap_groups.toml"))
+        join(root, "elemental_groups.toml"))
 
     entries_by_type = { t: [] for t in VALID_SYSTEM_TYPES }
     seen_ids = {}                       # entry_id -> path

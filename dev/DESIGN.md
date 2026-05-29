@@ -5428,7 +5428,7 @@ hydrogen         H  (its own bucket per discussion)
 ```
 
 The exact element-to-group assignment table lives in
-`share/historicalGuidanceDB/gap_groups.toml` (a checked-
+`share/historicalGuidanceDB/elemental_groups.toml` (a checked-
 in data file, not code -- Principle 11).  7.4 describes
 its layout and how the library consumes it; 7.10 records
 the open ambiguity around metalloids and how it is
@@ -5797,7 +5797,7 @@ Principle 11, that table is a checked-in data file rather
 than code:
 
 ```
-share/historicalGuidanceDB/gap_groups.toml
+share/historicalGuidanceDB/elemental_groups.toml
 ```
 
 Format:
@@ -5981,7 +5981,7 @@ class Dataspace:
     entries_by_system_type:   dict[str, list[GuidanceEntry]]
     group_table:              dict[str, str]   # symbol -> group
                                                #   (cached from
-                                               #    gap_groups.toml)
+                                               #    elemental_groups.toml)
 
 @dataclass(frozen=True)
 class PredictionResult:
@@ -6009,7 +6009,7 @@ class PredictionResult:
 ```python
 def load(root: Path) -> Dataspace:
     """Read every entry TOML under root/entries/<system_type>/
-    and the gap_groups.toml table.  Validate per 7.2
+    and the elemental_groups.toml table.  Validate per 7.2
     rules 1-12, return the loaded Dataspace.  Raises
     GuidanceDataspaceError on any validation failure
     with the filename and the failed rule cited.
@@ -6803,7 +6803,7 @@ the DESIGN 5.7 regeneration discipline.
 
 ### 7.10 Open Design Questions
 
-- **Metalloid assignment in `gap_groups.toml`.**  The
+- **Metalloid assignment in `elemental_groups.toml`.**  The
   canonical metalloids (Si, B, Ge, As, Sb, Te) are also
   members of group_iv (Si, Ge), group_iii (B), pnictogen
   (As, Sb), and chalcogen (Te) by their column.  Each
@@ -6811,7 +6811,7 @@ the DESIGN 5.7 regeneration discipline.
   enforces the composition vector sums to 1.0 without
   double-counting).  Day-1 we keep them in their
   column-based groups and leave `metalloid` empty,
-  documenting the choice in `gap_groups.toml`'s
+  documenting the choice in `elemental_groups.toml`'s
   comments.  Real seed-flight data will tell us
   whether metalloid-as-a-group meaningfully separates
   borderline-band semiconductors from their column
