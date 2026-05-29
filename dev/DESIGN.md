@@ -4733,8 +4733,8 @@ changes the contracts above.
 This subsection designs the **first option-axis builder
 helper** living inside `src/scripts/kaleidoscope/`: a
 small factory function that turns "a structure plus an
-options dict plus a `HistoricalGuidanceDatabase`" into a
-campaign of `CalcUnit`s laid out as a verification grid
+options dict plus a loaded `Dataspace` (DESIGN 7.4)" into
+a campaign of `CalcUnit`s laid out as a verification grid
 around the predictor's predicted operating point.  It is
 the corollary-of-Principle-12 builder split mentioned in
 the 6.2 intro: option-axis sweeps live here, and this is
@@ -4763,11 +4763,16 @@ constructs `CalcUnit`s directly.
 predict_settings(
     structure,                 # StructureControl or skl path
     options,                   # dict of non-swept makeinput
-                               #   options (e.g. functional,
-                               #   basis, scf_tolerance, ...)
-    db,                        # HistoricalGuidanceDatabase
-                               #   loaded from share/
-                               #   historicalGuidanceDB/
+                               #   options; MUST carry "basis"
+                               #   and "functional" -- they
+                               #   select the predictor sub-
+                               #   model (DESIGN 7.6 step 2) --
+                               #   plus the usual scf_tolerance,
+                               #   ... held fixed across the grid
+    dataspace,                 # Dataspace loaded by
+                               #   guidance_db.load() from
+                               #   share/historicalGuidanceDB/
+                               #   (DESIGN 7.4)
     system_type,               # "crystalline" / "amorphous"
                                #   / "nanostructure" /
                                #   "molecular" (DESIGN 7.2)
@@ -4776,26 +4781,35 @@ predict_settings(
     id           = None,       # campaign-level unit id; if
                                #   None, derived from
                                #   structure path
-    extra_axes   = None,       # optional list of additional
-                               #   sweep axes the caller
-                               #   wants on top of k-density
 )  ->  (Campaign, PredictionRecord)
 ```
 
 **Algorithm sketch.**
 
 ```
-1.  Compute the feature vector for the structure per
-    DESIGN 7.4 (composition vector + lattice family for
-    crystalline; system_type fixed by argument).
+1.  Compute the query signature for the structure per
+    DESIGN 7.4 (if `structure` is a path, load it into a
+    StructureControl first):
+        query_sig = compute_signature(structure,
+                        system_type, dataspace.group_table)
+    This builds the 13-d composition vector and (for
+    crystalline) the lattice-family one-hot; system_type
+    is fixed by argument.
 
-2.  Query the predictor:
-        result = db.predict(feature_vector, system_type)
+2.  Query the predictor.  `predict` is the DESIGN 7.4
+    free function over the loaded Dataspace, not a method
+    on a `db` object; the (basis, functional) sub-model
+    is selected from the options dict (DESIGN 7.6 step 2):
+        result = predict(dataspace, query_sig,
+                         options["basis"],
+                         options["functional"])
 
-    `result` carries the predicted converged k-density,
-    a confidence score (variance over the k nearest
-    neighbors, DESIGN 7.6), and the neighbor entries
-    that produced the prediction.
+    `result` is a PredictionResult (DESIGN 7.4) carrying
+    the predicted converged k-density, a combined
+    confidence score (stage-1 x stage-2 variance, DESIGN
+    7.6), an `is_under_trained` flag, the intermediate
+    `predicted_gap` / `predicted_spin_pol`, and the
+    neighbor entry_ids that produced the prediction.
 
 3.  Decide the verification grid:
 
@@ -4820,17 +4834,25 @@ predict_settings(
                        )
           policy      = "verify_around_prediction"
 
-4.  Build one CalcUnit per grid value:
+4.  Round and dedupe the grid to integer k-densities,
+    then build one CalcUnit per value.  Each value is an
+    integer in BOTH the makeinput `kpd` option and the
+    `kpt-density-<int>` tag, so the on-disk tag parses
+    back to exactly the swept value (6.2.4
+    bidirectionality).  The wide-grid defaults (DESIGN
+    7.9) are already integers; build_verification_grid's
+    logspace floats round here.  Deduping collapses a
+    degenerate grid where rounding merged two close
+    logspace points:
 
+      kpd_grid = sorted(set(round(v) for v in grid_values))
       units = []
-      for v in grid_values:
+      for kpd_int in kpd_grid:
           unit_options = dict(options)
-          unit_options["kpd"] = v          # makeinput
-                                           #   options-dict key
-          calc_axes = {"kpt-density": v}   # tag-tree
-                                           #   display name
-          if extra_axes is not None:
-              calc_axes.update(extra_axes)
+          unit_options["kpd"] = kpd_int        # makeinput
+                                               #   options key
+          calc_axes = {"kpt-density": kpd_int} # tag-tree
+                                               #   display name
           units.append(CalcUnit(
               id        = id,
               calc      = build_calc_tag(calc_axes),
@@ -4844,29 +4866,47 @@ predict_settings(
     `tuple[str, ...]` of `<axis>-<value>` directory
     components -- the on-disk representation of the
     sweep position per CalcUnit.calc (6.2.1) and the
-    tag-tree convention (6.2.4).
+    tag-tree convention (6.2.4).  In v1 it is the single
+    `("kpt-density-<int>",)` component: one varied axis.
 
-5.  Assemble the PredictionRecord:
+5.  Assemble the PredictionRecord -- the full field set,
+    identical to DESIGN 7.7 step 5 and matching the
+    [campaign.prediction] fields the harvest hook recovers
+    (DESIGN 7.8).  `predict()` always returns a
+    PredictionResult (never None, DESIGN 7.4), so no
+    None-guards are needed; the under-trained case is
+    carried by `is_under_trained`:
 
       prediction_record = PredictionRecord(
-          policy           = policy,
-          predicted_value  = (result.predicted_kpoint_density
-                              if result is not None
-                              else None),
-          confidence       = (result.confidence
-                              if result is not None
-                              else None),
-          neighbor_ids     = (result.neighbor_entry_ids
-                              if result is not None
-                              else []),
-          system_type      = system_type,
-          feature_vector   = feature_vector,
+          policy             = policy,
+          predicted_value    = result.predicted_kpoint_density,
+          confidence         = result.confidence,
+          is_under_trained   = result.is_under_trained,
+          neighbor_entry_ids = result.neighbor_entry_ids,
+          predicted_gap      = result.predicted_gap,
+          predicted_spin_pol = result.predicted_spin_pol,
+          system_type        = system_type,
+          feature_vector     = query_sig,
       )
 
-6.  Return (Campaign(units=units, ...), prediction_record).
-    The caller attaches `prediction_record` to the
-    Campaign's metadata so the harvest hook (DESIGN 7.8)
-    can recover it.
+6.  Record the sweep shape so serialize_campaign emits
+    the [campaign.sweep] block (PSEUDOCODE 13.1) and the
+    harvest hook can recover the varied axis without
+    re-deriving it from run-dir paths (DESIGN 7.8 step
+    3a).  In v1 the single varied axis is k-density;
+    basis and functional are the fixed context axes:
+
+      sweep = SweepRecord(
+          varied_axes = ("kpt-density",),
+          fixed_axes  = { "basis":      options["basis"],
+                          "functional": options["functional"] },
+      )
+
+    Return (Campaign(units=units, sweep=sweep, ...),
+    prediction_record).  The caller attaches
+    `prediction_record` to the Campaign so the harvest
+    hook (DESIGN 7.8) recovers it from
+    [campaign.prediction] in campaign.toml.
 ```
 
 **Trust mode and the harvest contract.**  When
@@ -4882,10 +4922,12 @@ can stage it manually per DESIGN 7.4 / 7.8.
 
 **Cross-references.**  The pieces this helper coordinates:
 
-- DESIGN 7.4 -- feature-vector computation
-  (`feature_vector_from_structure`).
-- DESIGN 7.6 -- `db.predict()` (k-NN regression over
-  the dataspace, with the variance-aware confidence).
+- DESIGN 7.4 -- signature computation
+  (`compute_signature`, returning a `Signature`) and the
+  `predict(dataspace, query, basis, functional)` free
+  function (not a method on a `db` object).
+- DESIGN 7.6 -- the k-NN regression `predict()` runs over
+  the dataspace, with the variance-aware confidence.
 - DESIGN 7.7 -- `build_verification_grid` widening
   function.
 - DESIGN 7.9 -- `default_wide_kpoint_density_grid` and
@@ -4895,14 +4937,27 @@ can stage it manually per DESIGN 7.4 / 7.8.
 - 6.2.6 -- the harvest handoff that consumes the
   `PredictionRecord` to write back into the dataspace.
 
+**Single varied axis in v1.**  `predict_settings` sweeps
+exactly one axis -- k-density -- so `Campaign.sweep`
+always has `varied_axes = ("kpt-density",)` and every
+`CalcUnit.calc` is a one-element tuple.  This matches
+DESIGN 7.2's "exactly one verified target" and DESIGN
+7.7's single-axis grid.  An earlier draft carried an
+`extra_axes` parameter for additional swept axes, but its
+sketch conflated a constant tag-level (dict `.update`)
+with a true Cartesian sweep and was dropped; genuine
+multi-axis sweeps belong in a future helper (next
+paragraph), which can build the nested 6.2.4 tag tree and
+a multi-entry `varied_axes`.
+
 **Future option-axis builder helpers** will live alongside
-this one (XANES-target sweeps, basis-size sweeps), each
-following the same shape: an upstream domain-aware library
-plus a small helper that turns its query result into a
-`Campaign` with the right tag convention.  None of those
-helpers belongs inside the dispatch core; all of them
-will share the path conventions and the
-`PredictionRecord` mechanism this first helper
+this one (multi-axis sweeps, XANES-target sweeps, basis-
+size sweeps), each following the same shape: an upstream
+domain-aware library plus a small helper that turns its
+query result into a `Campaign` with the right tag
+convention.  None of those helpers belongs inside the
+dispatch core; all of them will share the path conventions
+and the `PredictionRecord` mechanism this first helper
 establishes.
 
 ### 6.3 makeinput callable build API
@@ -6299,11 +6354,18 @@ below is what it executes.
                       )
         policy = "verify_around_prediction"
 
-4.  units = [
-        build_calc_unit(target, options,
-                        kpd = v)
-        for v in grid_values
-    ]
+4.  Round each grid value to an integer k-density and
+    dedupe (so the 6.2.4 tag parses back to exactly the
+    swept value; the 7.9 wide-grid defaults are already
+    integers, and build_verification_grid's logspace
+    floats round here -- a degenerate grid where rounding
+    merged two close points collapses):
+
+        kpd_grid = sorted(set(round(v) for v in grid_values))
+        units = [
+            build_calc_unit(target, options, kpd = kpd_int)
+            for kpd_int in kpd_grid
+        ]
 
     Two-name convention worth pinning here:
     - `kpd` is the makeinput options-dict key (matches
@@ -6336,8 +6398,20 @@ below is what it executes.
         feature_vector     = query_sig,
     )
 
-6.  campaign = Campaign(units=units, ...)
+6.  campaign = Campaign(
+        units = units,
+        sweep = SweepRecord(
+            varied_axes = ("kpt-density",),
+            fixed_axes  = { "basis":      basis,
+                            "functional": functional },
+        ),
+        ...
+    )
     attach_prediction_record(campaign, prediction_record)
+    The `sweep` field (DESIGN 6.2.1) makes
+    serialize_campaign emit [campaign.sweep], so harvest
+    (7.8 step 3a) recovers the varied axis without parsing
+    run-dir paths.
 
 7.  return campaign, prediction_record
 ```

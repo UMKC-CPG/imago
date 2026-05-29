@@ -1423,7 +1423,11 @@ new calculation (structure, options, system_type)
     |    "given this structure, predict the converged
     |     k-density and tell me how confident you are."
     v
-guidance_db.predict(feature_vector, system_type)
+guidance_db.predict(dataspace, query_signature,
+                    basis, functional)
+    |   (free function over the loaded Dataspace, DESIGN
+    |    7.4; query_signature carries system_type, and
+    |    (basis, functional) selects the sub-model.)
     |   1. Switch on system_type:
     |      - amorphous, nanostructure, molecular:
     |        consult the small dedicated sub-model
