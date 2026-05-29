@@ -27,6 +27,14 @@
   (Goal 3) so both Goals share one philosophy.  Principle 12
   promotes the no-DSL strategic decision out of memory and
   governs DESIGN 6.2 and 7.
+- [x] V3. Add Goal 6 (resource & cost guidance dataspace) to
+  VISION.  Done 2026-05-29.  A hardware-aware sibling of Goal
+  5: records per-run cost (peak memory, disk, walltime) vs
+  problem size, parallel configuration, and build/toolchain so
+  the flight layer provisions SLURM requests instead of
+  guessing.  Kept separate from Goal 5 because cost is
+  hardware-specific where convergence guidance is portable
+  (ARCHITECTURE 11, DESIGN 8).
 
 ---
 
@@ -98,6 +106,24 @@
   (commit 2dc5b30).  The workspace scheme (9.8), left
   open then, is now resolved by D13 / DESIGN 6.2.4 and
   ARCH 9.6/9.8 updated to match (2026-05-21).
+- [x] A9. Write ARCHITECTURE §11 (resource & cost guidance
+  dataspace, VISION Goal 6).  Done 2026-05-29.  Eight
+  subsections paralleling §10: 11.1 relationship to §10 (sibling
+  not extension; portability is why they stay separate); 11.2
+  layout partitioned by hardware fingerprint + the
+  single-execution-observation atomic unit; 11.3 the four
+  observation blocks (size signature incl. 1-Schrodinger /
+  4-Dirac components + secular dimension, execution config,
+  two-layer build config, measured resources); 11.4 capture
+  from four sources (dispatch config, CMake build_info, sacct,
+  imago self-report) + retained censored failed runs; 11.5
+  feature space + physics-informed regressor + provisioning
+  consumer; 11.6 module impact (resource_db.py,
+  resource_harvest.py, provisioning consumer, future
+  resource_migrate.py, CMake build_info hook); 11.7 relationship
+  to other prongs; 11.8 open questions (fingerprint + build-knob
+  granularity, peak-memory capture, node contention, censored
+  data, portable normalization).
 
 ---
 
@@ -359,6 +385,20 @@
   discipline over path-rewriting -- safe because
   kaleidoscope parallelism is across separate workers, each
   with its own cwd.  PSEUDOCODE follows as P8.
+- [x] D18. Write DESIGN §8 (resource & cost dataspace schema,
+  VISION 6 / ARCH 11).  Done 2026-05-29.  Parallels DESIGN 7:
+  TOML schema with 12 validation rules + four observation
+  blocks + provenance (8.2); gold sketch (8.3); in-memory
+  dataclasses + the three checked-in registries
+  (EXECUTION_KNOB_REGISTRY / BUILD_KNOB_REGISTRY /
+  RESOURCE_METRIC_REGISTRY) (8.4); hardware-fingerprint recipe
+  with microarch normalization (8.5); physics-informed
+  power-law regressor in secular_dimension with k-NN fallback
+  (8.6); capture + harvest with censored-data handling (8.7);
+  cold-start provisioning + manual seed (8.8); open questions
+  (8.9).  Pins the two-layer build record: coarse bucketed
+  knobs as features + the full verbatim compile_string as
+  provenance.
 
 ---
 
@@ -604,6 +644,32 @@
   core domain-agnostic (Principle 9) -- this needs the
   matching Flight.metadata field added in C71's model
   catch-up.
+
+### Resource & cost dataspace (VISION 6, ARCH 11, DESIGN 8)
+
+- [ ] P10. Write PSEUDOCODE (new §16) for the resource & cost
+  dataspace, paralleling §15.  Four blocks: (a) **library +
+  I/O** -- load() walking entries/<hardware_fingerprint>/ with
+  all 12 validation rules and file/block/field error messages;
+  the hardware_registry.toml loader + the fingerprint recipe
+  (8.5); the three registry validators (execution / build /
+  resource) with the unknown-key-fails-loudly rule; save_entry()
+  with the deterministic hand-formatted emitter and the
+  two-layer build record (coarse knobs + verbatim
+  compile_string); the Observation dataclass + the
+  ResourceDataspace partitioned by fingerprint.  (b)
+  **Predictor (DESIGN 8.6)** -- the per-(fingerprint,
+  build-bucket) physics-informed power-law fit in
+  secular_dimension (log-log least squares recovering the
+  exponent), the parallel + spin corrections, the k-NN fallback
+  for thin groups, and the censored (oom / timeout bound)
+  handling.  (c) **Provisioning consumer** -- predict
+  mem/disk/walltime for a proposed config + safety margin ->
+  SLURM request; the cold-start fallback for empty or
+  under-populated fingerprints (8.8).  (d) **Harvest** --
+  resource_harvest.py joining the four capture sources (8.7),
+  one Observation per run dir, censored failed-run staging,
+  staging-then-promote.
 
 ---
 
@@ -1924,6 +1990,53 @@ the C48.3 wiring (C74) is the first major consumer.
   analysis step + new fields written into the existing
   result.toml emitter (DESIGN 6.1).  Prerequisite for
   C72.
+
+### Phase L -- resource & cost dataspace (VISION 6, ARCH 11, DESIGN 8)
+
+Sibling of Phase K.  Near-term consumer is provisioning (C81);
+config-optimization / build-comparison / scaling studies ride
+on the same data later with no schema change.  Built on P10.
+
+- [ ] C77. Implement src/scripts/resource_db.py: the library +
+  predictor.  load/validate (12 rules, file/block/field error
+  messages), the hardware_registry.toml loader + fingerprint
+  recipe (8.5), the three registry validators, the
+  deterministic hand-formatted emitter with the two-layer build
+  record, round-trip load/save, and the physics-informed
+  power-law predictor with k-NN fallback (8.6).  Modeled on
+  guidance_db.py (C70) and initial_potential_db.py.  Tests cover
+  the rules, emitter determinism, the regressor on curated
+  points, registry rejection of unknown keys, and censored-bound
+  handling.  Register in src/scripts/CMakeLists.txt.
+- [ ] C78. CMake build-system hook emitting build_info.toml at
+  configure/install time -- compiler + full flag string +
+  detected HDF5 / ScaLAPACK / BLAS / MPI versions and variants
+  -- so the build block (both layers) is captured without
+  hand-entry (ARCH 11.4, 11.6; DESIGN 8.7).
+- [ ] C79. Capture hooks in the wingbeat / imago.py: record the
+  dispatch-time size signature + execution config into the run
+  directory, and scrape SLURM sacct (MaxRSS / disk / Elapsed)
+  after the run; optional imago self-report of per-phase timings
+  into result.toml (ARCH 11.4, DESIGN 8.7).
+- [ ] C80. Implement src/scripts/resource_harvest.py: walk a
+  finished flight, join the four capture sources into one
+  Observation per run dir, stage censored failed runs as bounds,
+  write to staging/<fingerprint>/ (DESIGN 8.7).  Sibling of
+  guidance_harvest.py (C72).
+- [ ] C81. Provisioning consumer in the flight layer (the
+  kaleidoscope flight-builder helper or a thin sibling): query
+  the predictor with a proposed config + size, apply a safety
+  margin, annotate the Parsl provider's SLURM resource request;
+  cold-start fallback for empty fingerprints (DESIGN 8.6, 8.8).
+  The near-term consumer (VISION Goal 6).
+- [ ] C82. Seed the resource dataspace on the local cluster: a
+  small manual + flight-harvested set of observations spanning
+  the size range on each available hardware fingerprint, so the
+  predictor becomes non-trivial.  Needs cluster time.  Sibling
+  of the C75 convergence seed.
+- [ ] C83. (future) src/scripts/resource_migrate.py: schema
+  migration tool mirroring guidance_migrate.py.  Not day-1
+  scope (ARCH 11.6).
 
 ---
 
