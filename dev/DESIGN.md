@@ -5516,6 +5516,19 @@ the verification block sits at the entry level.
                                        swept by the
                                        verification grid,
                                        sorted ascending.
+  grid_energies                array   The total energy
+                                       (Hartree) at each
+                                       grid point, parallel
+                                       to grid_values (same
+                                       length, same order).
+                                       Recorded so the
+                                       curator's auto-promote
+                                       rule (7.8) can judge
+                                       the converged region's
+                                       flatness from the
+                                       staging file alone,
+                                       without re-reading the
+                                       campaign workspace.
   converged_at                 real    The value at which
                                        the convergence
                                        metric was first
@@ -5621,6 +5634,9 @@ decide whether to refuse a file.  Day-1 contents:
     `source = "campaign"`): `converged_at` must equal
     `measured.kpoint_density`; `grid_values` must be
     sorted ascending and contain `converged_at`;
+    `grid_energies`, when present, must have the same
+    length as `grid_values` (the two arrays are parallel
+    and share an order);
     `metric` must appear in the metric registry
     (initially `{"total_energy"}`);
     `predictor_confidence` must be in [0.0, 1.0];
@@ -5700,6 +5716,13 @@ grid_values = [
     5.0000000000000000e+01,
     7.5000000000000000e+01,
     1.0000000000000000e+02,
+]
+grid_energies = [
+    -1.9512340000000000e+03,
+    -1.9512378000000000e+03,
+    -1.9512389000000000e+03,
+    -1.9512389400000000e+03,
+    -1.9512389500000000e+03,
 ]
 converged_at           = 5.0000000000000000e+01
 metric                 = "total_energy"
@@ -5902,6 +5925,14 @@ class Context:
 class Verification:
     """The grid that validated this entry's k-density."""
     grid_values:            tuple[float, ...]
+    grid_energies:          tuple[float, ...] | None  # total
+                                          #   energy (Hartree)
+                                          #   per grid point,
+                                          #   parallel to
+                                          #   grid_values; None
+                                          #   for a manual
+                                          #   entry with no
+                                          #   recorded sweep
     converged_at:           float
     metric:                 str            # "total_energy"
     metric_threshold:       float
@@ -6540,6 +6571,10 @@ provenance otherwise.
             - context: from the campaign's options
               (basis, functional, threshold, cell info)
             - verification: grid_values,
+              grid_energies (the parallel total-energy
+              array gathered in step b, so the
+              auto-promote rule can judge flatness from
+              the staged file alone),
               converged_at = chosen k-density,
               metric/metric_threshold,
               predictor_confidence and
@@ -6574,10 +6609,15 @@ A curator helper.  Four modes of operation:
     of the verification grid (not at either endpoint).
     A converged-at-endpoint result is suspicious: the
     grid may not have been wide enough.
-  - The top three grid points' total-energy variance
-    is below `metric_threshold * 10` (the converged
-    region is convincingly flat, not just one delta
-    below threshold).
+  - The total-energy variance over the top three grid
+    points -- read from the entry's `grid_energies`
+    array (7.2), which is why harvest records it -- is
+    below `metric_threshold * 10` (the converged region
+    is convincingly flat, not just one delta below
+    threshold).  A staging entry that lacks
+    `grid_energies` (a hand-written manual entry) is
+    never auto-promoted on this criterion; it falls to
+    interactive review.
   - `gap_ev` and `gap_kind` are consistent
     (`gap_kind == "none"` iff `gap_ev == 0.0`).
   Files failing the rule stay in staging for the

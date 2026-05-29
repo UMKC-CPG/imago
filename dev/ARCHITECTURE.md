@@ -1577,13 +1577,16 @@ src/scripts/
   TOML per structure into the appropriate
   `share/historicalGuidanceDB/staging/<system_type>/`
   subdirectory.
-- `guidance_promote.py` is the curator's tool.  Three
+- `guidance_promote.py` is the curator's tool.  Four
   modes: interactive one-at-a-time review (default);
   batch `--auto-promote` for trusted automated campaigns
   meeting an objective acceptance rule (the converged
   k-density landed in the middle 60% of the verification
   grid AND the top three grid points' total-energy
-  variance is below threshold); `--dry-run` preview.
+  variance -- read from the staged entry's `grid_energies`
+  array -- is below threshold); `--all` to promote the
+  whole staging directory after manual review; `--dry-run`
+  preview.
   The auto-promotion rule lets a 500-entry seed campaign
   promote ~80% of entries unattended, with the curator
   reviewing only the ~20% outliers.
