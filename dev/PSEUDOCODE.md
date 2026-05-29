@@ -5173,3 +5173,1181 @@ This is what lets a kaleidoscope campaign hand a bare
 `imago.skl` plus options to the default wingbeat (§13.2) and
 have the run directory built and run in one worker call --
 the dependency the C48.3 producer is waiting on.
+
+## 15. Historical Guidance Dataspace (DESIGN 7)
+
+The accumulation prong: a dataspace of converged
+calculations plus a small two-stage k-NN predictor that
+turns a new system's chemistry into a predicted converged
+k-density and an uncertainty, so a new campaign verifies a
+small grid around the prediction instead of scanning a wide
+one (DESIGN 7.1).  Four blocks, helpers first then drivers:
+the file-format-and-predictor library `guidance_db.py`
+(15.1 shapes, 15.2 signatures, 15.3 reader, 15.4 emitter,
+15.5 predictor); the campaign-builder helper inside
+`src/scripts/kaleidoscope/` (15.6); the harvest and curator
+producers `guidance_harvest.py` / `guidance_promote.py`
+(15.7).  All Python under `src/scripts/`; the Fortran side
+changes only to expose gap/spin/dos in `result.toml`
+(TODO C76).
+
+The governing discipline (VISION Principle 11): the
+dataspace is a curated artifact, not tribal knowledge.  The
+library reads and validates; the producers stage and
+promote; the consumer (the kaleidoscope helper) predicts.
+The element-group classification lives in a checked-in data
+file (`gap_groups.toml`), never hardcoded.
+
+### 15.1 Constants and in-memory shapes (DESIGN 7.4)
+
+```
+# Schema + partition constants.
+SCHEMA_VERSION              = 1
+VALID_SYSTEM_TYPES          = ("crystalline", "amorphous",
+                               "nanostructure", "molecular")
+NON_CRYSTALLINE_TYPES       = ("amorphous", "nanostructure",
+                               "molecular")
+VALID_BASES                 = ("mb", "fb", "eb")
+VALID_GAP_KINDS             = ("direct", "indirect", "none")
+METRIC_REGISTRY             = ("total_energy",)  # 7.2 rule 10
+
+# Canonical slot orderings (DESIGN 7.4).  These pin which
+# vector slot means which group / Bravais family, so the
+# reader, emitter, compute_signature, and predictor all
+# agree.  The composition vector sums to 1.0 (7.2 rule 4).
+CANONICAL_GROUP_ORDER       = (   # 13 element groups
+    "alkali", "alkali_earth", "halide", "chalcogen",
+    "pnictogen", "group_iv", "group_iii", "transition_metal",
+    "lanthanide", "actinide", "metalloid", "noble_gas",
+    "hydrogen")
+CANONICAL_LATTICE_ORDER     = (   # 6 Bravais families
+    "cubic", "hex", "tet", "ortho", "mono", "tri")
+
+# Predictor tuning knobs (DESIGN 7.6).  All named here so a
+# post-seed-campaign calibration is a one-file change.
+k_min          = 3        # below this, refuse the sub-model
+k_neighbors    = 5        # neighbors used at each k-NN stage
+epsilon        = 1e-6     # numerical floor on distance
+w_comp         = 1.0      # composition weight in d1
+w_latt         = 0.25     # lattice-family weight in d1
+w_gap          = 1.0      # gap weight in d2
+w_spin         = 0.5      # spin weight in d2
+sigma_gap      = 1.0      # gap normalization (eV) in d2
+sigma_spin     = 0.5      # spin normalization in d2
+sigma_gap_ref  = 1.0      # gap-spread -> confidence_1 (eV)
+sigma_kpd_ref  = 50.0     # kpd-spread -> confidence_2
+```
+
+The dataclasses mirror DESIGN 7.4 exactly; restated here in
+field order so the reader (15.3) and emitter (15.4) have a
+single target.  `Verification.grid_energies` is the array
+the harvest records so the curator's auto-promote rule
+(15.7) reads flatness from a staging file alone.
+
+```
+dataclass Signature:        # the predictor's feature input
+    system_type        : str            # one of the four
+    composition_vector : tuple[float]   # 13, group order
+    lattice_family     : str            # "" if non-crystalline
+    lattice_onehot     : tuple[float]   # 6, lattice order;
+                                        #   all zeros if non-
+                                        #   crystalline
+
+dataclass Measured:
+    gap_ev              : float
+    gap_kind            : str           # direct|indirect|none
+    spin_polarization   : float
+    total_magnetization : float
+    kpoint_density      : float         # predictor target
+    dos_at_fermi        : float | None  # None when absent
+
+dataclass Context:
+    basis                        : str  # mb|fb|eb
+    functional                   : str  # e.g. "gga-pbe"
+    convergence_threshold        : float
+    cell_atom_count              : int
+    cell_volume_per_formula_unit : float   # Bohr^3
+
+dataclass Verification:
+    grid_values            : tuple[float]
+    grid_energies          : tuple[float] | None  # parallel
+                                          #   to grid_values
+    converged_at           : float
+    metric                 : str          # "total_energy"
+    metric_threshold       : float
+    predictor_confidence   : float        # [0.0, 1.0]
+    predictor_neighbor_ids : tuple[str]
+
+dataclass Provenance:
+    campaign_id      : str
+    source_structure : str
+    imago_commit     : str
+    curator          : str
+
+dataclass GuidanceEntry:
+    entry_id     : str
+    generated_at : str               # ISO-8601 UTC
+    source       : str               # campaign|manual
+    signature    : Signature
+    measured     : Measured
+    context      : Context
+    verification : Verification | None   # None only for
+                                         #   source=manual
+    provenance   : Provenance
+
+dataclass Dataspace:
+    schema_version         : int
+    entries_by_system_type : dict        # system_type ->
+                                         #   list[GuidanceEntry]
+    group_table            : dict        # symbol -> group name
+
+dataclass PredictionResult:    # what predict() returns
+    predicted_kpoint_density : float
+    confidence               : float     # [0.0, 1.0]
+    is_under_trained         : bool
+    neighbor_entry_ids       : tuple[str]
+    predicted_gap            : float | None  # None if non-
+    predicted_spin_pol       : float | None  #   crystalline
+```
+
+### 15.2 Element groups and compute_signature (DESIGN 7.4)
+
+`gap_groups.toml` is the checked-in element-to-group table
+(Principle 11).  The loader inverts it into a symbol ->
+group dict and refuses an element that lands in two groups
+(a data-file typo must fail loudly, not silently win the
+last assignment).
+
+```
+function load_group_table(path):
+    raw = tomllib.load(path)
+    require(raw["schema_version"] == SCHEMA_VERSION, path,
+        "gap_groups.toml schema_version != "
+        + str(SCHEMA_VERSION))
+    table = {}                       # symbol -> group name
+    for group in CANONICAL_GROUP_ORDER:
+        # Every group key must be present (even metalloid,
+        # which ships empty per DESIGN 7.4 / 7.10).
+        require(group in raw["groups"], path,
+            "gap_groups.toml missing group: " + group)
+        for symbol in raw["groups"][group]:
+            require(symbol not in table, path,
+                "element " + symbol + " assigned to two"
+                + " groups (" + table.get(symbol, "?")
+                + ", " + group + ")")
+            table[symbol] = group
+    return table
+```
+
+`compute_signature` turns a `StructureControl` into the
+predictor's feature input.  Composition is atom-fraction
+weighted across the 13 groups; lattice family is read off
+the structure's Bravais detection (crystalline only).  An
+element symbol missing from the table is a hard error here
+-- at compute time -- so the message names the offending
+structure, not the dataspace load (DESIGN 7.4).
+
+```
+function compute_signature(structure, system_type,
+                           group_table):
+    require(system_type in VALID_SYSTEM_TYPES,
+        "unknown system_type: " + system_type)
+
+    # Composition vector: count atoms per group, normalize
+    # to atom-fraction, lay out in CANONICAL_GROUP_ORDER.
+    counts = { g: 0 for g in CANONICAL_GROUP_ORDER }
+    total_atoms = 0
+    for site in structure.atom_sites:
+        symbol = element_symbol_of(site)
+        require(symbol in group_table,
+            "element " + symbol + " (in structure "
+            + structure.name + ") not in gap_groups.toml")
+        counts[group_table[symbol]] += 1
+        total_atoms += 1
+    require(total_atoms > 0, "structure has no atoms")
+    composition = tuple(
+        counts[g] / total_atoms for g in CANONICAL_GROUP_ORDER)
+
+    # Lattice family + one-hot (crystalline only).  For non-
+    # crystalline the family is "" and the one-hot all zeros
+    # (DESIGN 7.4); the predictor's stage-1 distance then
+    # never sees a lattice term for those system_types.
+    if system_type == "crystalline":
+        family = bravais_family_of(structure)   # 15.2 note
+        require(family in CANONICAL_LATTICE_ORDER,
+            "unrecognized lattice family: " + family)
+        onehot = tuple(
+            1.0 if f == family else 0.0
+            for f in CANONICAL_LATTICE_ORDER)
+    else:
+        family = ""
+        onehot = tuple(0.0 for f in CANONICAL_LATTICE_ORDER)
+
+    return Signature(
+        system_type        = system_type,
+        composition_vector = composition,
+        lattice_family     = family,
+        lattice_onehot     = onehot)
+```
+
+`bravais_family_of(structure)` maps the structure's detected
+crystal system to one of the six families.  It reuses the
+StructureControl's existing space-group / Bravais detection
+(the same machinery the applySpaceGroup path drives).  The
+v1 mapping lumps trigonal into `hex`:
+
+```
+CRYSTAL_SYSTEM_TO_FAMILY = {
+    "triclinic":    "tri",   "monoclinic":   "mono",
+    "orthorhombic": "ortho", "tetragonal":   "tet",
+    "trigonal":     "hex",   "hexagonal":    "hex",
+    "cubic":        "cubic" }
+```
+
+The trigonal -> hex lumping (six families, not seven) is a
+v1 simplification flagged in DESIGN 7.10; isolating it in
+this one table makes a future split a one-line change.
+
+### 15.3 TOML reader load() (DESIGN 7.2 rules 1-12)
+
+`load(root)` reads the `SCHEMA_VERSION` marker, the
+`gap_groups.toml` table, and every entry under
+`entries/<system_type>/`, validating each against the 12
+rules and partitioning by system_type.  Like
+`initial_potential_db.load` (§11.1), every failure names the
+file, block, and field at fault.
+
+```
+function load(root):
+    # Rule 1 (marker half): the bare-integer marker file.
+    marker = strip(read_file(join(root, "SCHEMA_VERSION")))
+    require(marker == str(SCHEMA_VERSION),
+        join(root, "SCHEMA_VERSION"),
+        "marker " + marker + " != " + str(SCHEMA_VERSION))
+
+    group_table = load_group_table(
+        join(root, "gap_groups.toml"))
+
+    entries_by_type = { t: [] for t in VALID_SYSTEM_TYPES }
+    seen_ids = {}                       # entry_id -> path
+    for system_type in VALID_SYSTEM_TYPES:
+        subdir = join(root, "entries", system_type)
+        if not exists(subdir):
+            continue
+        for path in sorted(glob(subdir, "*.toml")):
+            entry = load_entry(path, system_type, seen_ids)
+            entries_by_type[system_type].append(entry)
+
+    return Dataspace(
+        schema_version         = SCHEMA_VERSION,
+        entries_by_system_type = entries_by_type,
+        group_table            = group_table)
+```
+
+`load_entry` is the per-file validator.  It checks the
+schema BEFORE building the dataclass (rule 12) so an
+omission surfaces as a clear validation failure, not a bare
+constructor TypeError -- the same discipline as DESIGN 5.2
+rule 3.
+
+```
+function load_entry(path, system_type_dir, seen_ids):
+    raw = tomllib.load(path)
+
+    # Rule 12 (top-level half): required top-level keys.
+    for f in ("schema_version", "entry_id", "generated_at",
+              "source"):
+        require(f in raw, path, "missing top-level: " + f)
+
+    # Rule 1 (entry half): version agrees with the marker.
+    require(raw["schema_version"] == SCHEMA_VERSION, path,
+        "schema_version " + str(raw["schema_version"])
+        + " != " + str(SCHEMA_VERSION))
+
+    # Rule 11: source domain + provenance/verification
+    # coupling.
+    source = raw["source"]
+    require(source in ("campaign", "manual"), path,
+        "source must be campaign|manual, got " + source)
+
+    # Rule 2: entry_id unique across the whole entries tree.
+    eid = raw["entry_id"]
+    require(eid not in seen_ids, path,
+        "duplicate entry_id " + eid + " (also in "
+        + seen_ids.get(eid, "?") + ")")
+    seen_ids[eid] = path
+
+    # --- signature block -------------------------------
+    require("entry" in raw and "signature" in raw["entry"],
+        path, "missing [entry.signature]")
+    sig = raw["entry"]["signature"]
+    require("system_type" in sig, path,
+        "missing signature.system_type")
+    st = sig["system_type"]
+
+    # Rule 3: system_type valid AND matches the directory
+    # the file lives under.
+    require(st in VALID_SYSTEM_TYPES, path,
+        "invalid system_type: " + st)
+    require(st == system_type_dir, path,
+        "system_type " + st + " under entries/"
+        + system_type_dir + "/")
+
+    # Rule 4: composition vector has exactly the 13 keys,
+    # each in [0,1], summing to 1.0 +/- 1e-6.
+    require("composition_vector" in sig, path,
+        "missing signature.composition_vector")
+    cv = sig["composition_vector"]
+    require(set(cv.keys()) == set(CANONICAL_GROUP_ORDER),
+        path, "composition_vector keys != the 13 groups")
+    composition = tuple(cv[g] for g in CANONICAL_GROUP_ORDER)
+    for g, x in zip(CANONICAL_GROUP_ORDER, composition):
+        require(0.0 <= x <= 1.0, path,
+            "composition_vector[" + g + "] out of [0,1]")
+    require(abs(sum(composition) - 1.0) <= 1e-6, path,
+        "composition_vector sums to "
+        + str(sum(composition)) + " != 1.0")
+
+    # Rule 5: lattice_family present+valid iff crystalline.
+    family = sig.get("lattice_family", "")
+    if st == "crystalline":
+        require(family in CANONICAL_LATTICE_ORDER, path,
+            "crystalline entry: lattice_family must be one"
+            + " of the six families, got '" + family + "'")
+        onehot = tuple(
+            1.0 if f == family else 0.0
+            for f in CANONICAL_LATTICE_ORDER)
+    else:
+        require(family == "", path,
+            "non-crystalline entry must not set"
+            + " lattice_family")
+        onehot = tuple(0.0 for f in CANONICAL_LATTICE_ORDER)
+
+    signature = Signature(st, composition, family, onehot)
+
+    # --- measured block --------------------------------
+    require("measured" in raw["entry"], path,
+        "missing [entry.measured]")
+    m = raw["entry"]["measured"]
+    for f in ("gap_ev", "gap_kind", "spin_polarization",
+              "total_magnetization", "kpoint_density"):
+        require(f in m, path, "missing measured." + f)
+
+    # Rule 6: gap_ev >= 0; gap_kind valid; none iff metal.
+    require(m["gap_ev"] >= 0.0, path, "gap_ev < 0")
+    require(m["gap_kind"] in VALID_GAP_KINDS, path,
+        "invalid gap_kind: " + m["gap_kind"])
+    is_metal = (m["gap_ev"] == 0.0)
+    require((m["gap_kind"] == "none") == is_metal, path,
+        "gap_kind=='none' iff gap_ev==0.0 violated")
+    # Rule 7: kpoint_density > 0.
+    require(m["kpoint_density"] > 0.0, path,
+        "kpoint_density must be > 0")
+
+    measured = Measured(
+        gap_ev              = m["gap_ev"],
+        gap_kind            = m["gap_kind"],
+        spin_polarization   = m["spin_polarization"],
+        total_magnetization = m["total_magnetization"],
+        kpoint_density      = m["kpoint_density"],
+        dos_at_fermi        = m.get("dos_at_fermi"))  # opt.
+
+    # --- context block ---------------------------------
+    require("context" in raw["entry"], path,
+        "missing [entry.context]")
+    c = raw["entry"]["context"]
+    for f in ("basis", "functional", "convergence_threshold",
+              "cell_atom_count", "cell_volume_per_formula_unit"):
+        require(f in c, path, "missing context." + f)
+    # Rule 8: basis valid; functional non-empty.
+    require(c["basis"] in VALID_BASES, path,
+        "invalid basis: " + c["basis"])
+    require(len(c["functional"]) > 0, path,
+        "functional must be non-empty")
+    # Rule 9: cell counts/volumes positive.
+    require(c["cell_atom_count"] > 0, path,
+        "cell_atom_count must be > 0")
+    require(c["cell_volume_per_formula_unit"] > 0.0, path,
+        "cell_volume_per_formula_unit must be > 0")
+    context = Context(
+        c["basis"], c["functional"],
+        c["convergence_threshold"], c["cell_atom_count"],
+        c["cell_volume_per_formula_unit"])
+
+    # --- verification block ----------------------------
+    # Required for source=campaign (rule 11); optional for
+    # source=manual.
+    verification = None
+    if "verification" in raw["entry"]:
+        v = raw["entry"]["verification"]
+        verification = load_verification(v, measured, path)
+    require(verification is not None or source == "manual",
+        path, "source=campaign requires [entry.verification]")
+
+    # --- provenance block ------------------------------
+    require("provenance" in raw["entry"], path,
+        "missing [entry.provenance]")
+    p = raw["entry"]["provenance"]
+    for f in ("campaign_id", "source_structure",
+              "imago_commit", "curator"):
+        require(f in p, path, "missing provenance." + f)
+    if source == "campaign":
+        # Rule 11: campaign entries need non-empty source +
+        # commit + campaign id.
+        for f in ("campaign_id", "source_structure",
+                  "imago_commit"):
+            require(len(p[f]) > 0, path,
+                "source=campaign needs non-empty " + f)
+    provenance = Provenance(
+        p["campaign_id"], p["source_structure"],
+        p["imago_commit"], p["curator"])
+
+    return GuidanceEntry(
+        entry_id     = eid,
+        generated_at = raw["generated_at"],
+        source       = source,
+        signature    = signature,
+        measured     = measured,
+        context      = context,
+        verification = verification,
+        provenance   = provenance)
+```
+
+```
+function load_verification(v, measured, path):
+    # Rule 10: verification internal consistency.
+    for f in ("grid_values", "converged_at", "metric",
+              "metric_threshold", "predictor_confidence",
+              "predictor_neighbor_ids"):
+        require(f in v, path, "missing verification." + f)
+    grid = v["grid_values"]
+    require(grid == sorted(grid), path,
+        "grid_values not sorted ascending")
+    require(v["converged_at"] in grid, path,
+        "converged_at not present in grid_values")
+    require(v["converged_at"] == measured["kpoint_density"],
+        path, "converged_at != measured.kpoint_density")
+    require(v["metric"] in METRIC_REGISTRY, path,
+        "unknown metric: " + v["metric"])
+    require(0.0 <= v["predictor_confidence"] <= 1.0, path,
+        "predictor_confidence out of [0,1]")
+    # grid_energies optional; if present, parallel length.
+    energies = v.get("grid_energies")
+    if energies is not None:
+        require(len(energies) == len(grid), path,
+            "grid_energies length != grid_values length")
+    return Verification(
+        grid_values            = tuple(grid),
+        grid_energies          = (tuple(energies)
+                                  if energies is not None
+                                  else None),
+        converged_at           = v["converged_at"],
+        metric                 = v["metric"],
+        metric_threshold       = v["metric_threshold"],
+        predictor_confidence   = v["predictor_confidence"],
+        predictor_neighbor_ids = tuple(
+            v["predictor_neighbor_ids"]))
+```
+
+### 15.4 Hand-formatted emitter save_entry() (DESIGN 7.5)
+
+Deterministic hand-formatter, same philosophy as §11.2:
+fixed block sequence, fixed key order, `%.16e` floats,
+float arrays one-per-line with a trailing comma after every
+element.  Byte-identical output for a given in-memory entry
+so version-control diffs are meaningful.
+
+```
+function fmt_float(x):      return format(x, ".16e")
+function fmt_string(s):
+    # TOML basic string: escape backslash and quote.
+    return '"' + s.replace("\\","\\\\").replace('"','\\"')
+           + '"'
+```
+
+```
+function short_sha(campaign_id, source_structure,
+                   generated_at):
+    # DESIGN 7.5 slug guard: first 6 hex of SHA-256 over the
+    # three provenance fields concatenated.  Two simultaneous
+    # harvests differ in campaign_id or source_structure, so
+    # their hashes (and files) differ.
+    blob = (campaign_id + source_structure
+            + generated_at).encode("utf-8")
+    return sha256_hex(blob)[:6]
+
+function slug_for(entry):
+    return (entry.signature.system_type + "-"
+            + short_sha(entry.provenance.campaign_id,
+                        entry.provenance.source_structure,
+                        entry.generated_at))
+```
+
+```
+function save_entry(entry, root):
+    # Emit into staging/<system_type>/<slug>.toml.  Refuse a
+    # collision (7.2 rule 2 / 7.5): the caller retries with a
+    # fresh generated_at on the rare hash clash.
+    slug = slug_for(entry)
+    subdir = join(root, "staging", entry.signature.system_type)
+    make_dirs(subdir)
+    path = join(subdir, slug + ".toml")
+    require(not exists(path), "save_entry: " + path
+        + " already exists (entry_id collision)")
+    write_file(path, format_entry(entry, slug))
+    return path
+```
+
+```
+function format_entry(entry, slug):
+    out = []
+    # Top-level block.  entry_id always equals the slug.
+    out.append("schema_version = " + str(SCHEMA_VERSION))
+    out.append("entry_id       = " + fmt_string(slug))
+    out.append("generated_at   = "
+        + fmt_string(entry.generated_at))
+    out.append("source         = " + fmt_string(entry.source))
+    out.append("")
+
+    # [entry.signature] + the multi-line composition vector.
+    out.append("[entry.signature]")
+    out.append("system_type    = "
+        + fmt_string(entry.signature.system_type))
+    if entry.signature.system_type == "crystalline":
+        out.append("lattice_family = "
+            + fmt_string(entry.signature.lattice_family))
+    out.append("")
+    out.append("[entry.signature.composition_vector]")
+    width = max(len(g) for g in CANONICAL_GROUP_ORDER)
+    for g, x in zip(CANONICAL_GROUP_ORDER,
+                    entry.signature.composition_vector):
+        out.append(pad(g, width) + " = " + fmt_float(x))
+    out.append("")
+
+    # [entry.measured].  dos_at_fermi emitted only if present.
+    out.append("[entry.measured]")
+    emit_kv(out, "gap_ev",              entry.measured.gap_ev)
+    emit_kv(out, "gap_kind",            entry.measured.gap_kind)
+    emit_kv(out, "spin_polarization",
+            entry.measured.spin_polarization)
+    emit_kv(out, "total_magnetization",
+            entry.measured.total_magnetization)
+    emit_kv(out, "kpoint_density",
+            entry.measured.kpoint_density)
+    if entry.measured.dos_at_fermi is not None:
+        emit_kv(out, "dos_at_fermi",
+                entry.measured.dos_at_fermi)
+    out.append("")
+
+    # [entry.context].
+    out.append("[entry.context]")
+    emit_kv(out, "basis",      entry.context.basis)
+    emit_kv(out, "functional", entry.context.functional)
+    emit_kv(out, "convergence_threshold",
+            entry.context.convergence_threshold)
+    emit_kv(out, "cell_atom_count",
+            entry.context.cell_atom_count)
+    emit_kv(out, "cell_volume_per_formula_unit",
+            entry.context.cell_volume_per_formula_unit)
+    out.append("")
+
+    # [entry.verification] when present.  grid_values and
+    # grid_energies are one-float-per-line, trailing comma.
+    if entry.verification is not None:
+        v = entry.verification
+        out.append("[entry.verification]")
+        emit_float_array(out, "grid_values", v.grid_values)
+        if v.grid_energies is not None:
+            emit_float_array(out, "grid_energies",
+                             v.grid_energies)
+        emit_kv(out, "converged_at",     v.converged_at)
+        emit_kv(out, "metric",           v.metric)
+        emit_kv(out, "metric_threshold", v.metric_threshold)
+        emit_kv(out, "predictor_confidence",
+                v.predictor_confidence)
+        out.append("predictor_neighbor_ids = ["
+            + join_csv(fmt_string(i)
+                       for i in v.predictor_neighbor_ids)
+            + "]")
+        out.append("")
+
+    # [entry.provenance].
+    out.append("[entry.provenance]")
+    emit_kv(out, "campaign_id",      entry.provenance.campaign_id)
+    emit_kv(out, "source_structure",
+            entry.provenance.source_structure)
+    emit_kv(out, "imago_commit",     entry.provenance.imago_commit)
+    emit_kv(out, "curator",          entry.provenance.curator)
+
+    return "\n".join(out) + "\n"
+```
+
+```
+function emit_kv(out, key, value):
+    # Render one key = value line.  Floats use %.16e; ints
+    # bare; strings TOML-quoted.  Block-internal alignment
+    # follows the 7.3 sketch's hand-aligned '=' columns.
+    if value is a float:    text = fmt_float(value)
+    elif value is an int:   text = str(value)
+    else:                   text = fmt_string(value)
+    out.append(key + " = " + text)
+
+function emit_float_array(out, key, values):
+    out.append(key + " = [")
+    for x in values:
+        out.append("    " + fmt_float(x) + ",")
+    out.append("]")
+```
+
+(The exact `=`-column alignment per block matches the
+DESIGN 7.3 gold sketch; a tiny `pad`/width pass like
+§11.2's `format_block` produces it.  Omitted here for
+brevity -- the byte-determinism that matters comes from the
+fixed key order, the fixed float format, and the
+one-element-per-line arrays.)
+
+### 15.5 Predictor predict() (DESIGN 7.6)
+
+`predict` switches on system_type: non-crystalline returns
+the canonical entry; crystalline runs the two-stage k-NN.
+It always returns a `PredictionResult` (never None); the
+`is_under_trained` flag plus `confidence` tell the caller
+how seriously to take it (DESIGN 7.4).
+
+```
+function predict(dataspace, query, basis, functional):
+    pool = dataspace.entries_by_system_type.get(
+               query.system_type, [])
+
+    if query.system_type in NON_CRYSTALLINE_TYPES:
+        return predict_non_crystalline(pool)
+
+    entries, under_trained = select_submodel(
+        pool, basis, functional)
+    if under_trained:
+        # No usable sub-model: the caller (15.6) falls back
+        # to the wide-grid default (DESIGN 7.9).  The
+        # density field is unused in this branch.
+        return PredictionResult(
+            predicted_kpoint_density = 0.0,
+            confidence               = 0.0,
+            is_under_trained         = True,
+            neighbor_entry_ids       = (),
+            predicted_gap            = None,
+            predicted_spin_pol       = None)
+
+    pgap, pspin, conf1, n1 = stage1(query, entries)
+    pkpd, conf2, n2        = stage2(pgap, pspin, entries)
+    return PredictionResult(
+        predicted_kpoint_density = pkpd,
+        confidence               = conf1 * conf2,
+        is_under_trained         = False,
+        neighbor_entry_ids       = dedup(n1 + n2),
+        predicted_gap            = pgap,
+        predicted_spin_pol       = pspin)
+```
+
+```
+function predict_non_crystalline(pool):
+    # k-density is set by the cell-volume convention, not
+    # chemistry, so the single hand-seeded canonical entry
+    # (DESIGN 7.9) captures essentially all the signal.
+    canon = [e for e in pool if e.source == "manual"]
+    if len(canon) == 0:
+        return PredictionResult(
+            0.0, 0.0, True, (), None, None)  # under-trained
+    # Day-1 there is exactly one; if several accumulate, the
+    # most recent canonical wins (deterministic by
+    # generated_at).
+    entry = max(canon, key = lambda e: e.generated_at)
+    return PredictionResult(
+        predicted_kpoint_density = entry.measured.kpoint_density,
+        confidence               = 1.0,
+        is_under_trained         = False,
+        neighbor_entry_ids       = (entry.entry_id,),
+        predicted_gap            = None,
+        predicted_spin_pol       = None)
+```
+
+Sub-model selection is the (basis, functional) ->
+functional-family -> overall-pool fallback chain of DESIGN
+7.6 step 2.  `is_under_trained` is set only when even the
+overall pool is too thin.
+
+```
+function select_submodel(pool, basis, functional):
+    # 1. Exact (basis, functional) sub-model.
+    exact = [e for e in pool
+             if e.context.basis == basis
+             and e.context.functional == functional]
+    if len(exact) >= k_min:
+        return exact, False
+
+    # 2. Most-populous (basis, functional) sub-model within
+    #    the same functional family (DESIGN 7.6: (mb,gga-pbe)
+    #    -> (fb,gga-pbe)).
+    fam = functional_family(functional)
+    family = [e for e in pool
+              if functional_family(e.context.functional) == fam]
+    best = most_populous_submodel(family)
+    if len(best) >= k_min:
+        return best, False
+
+    # 3. The whole system_type pool, context ignored.
+    if len(pool) >= k_min:
+        return pool, False
+
+    # 4. Too thin everywhere -> under-trained.
+    return pool, True
+
+function functional_family(functional):
+    # v1: the token before the first hyphen ("gga-pbe" ->
+    # "gga", "lda" -> "lda").  Whether functional/basis are
+    # sub-models or features is open (DESIGN 7.10); isolating
+    # the rule here makes that a one-line change.
+    return functional.split("-")[0]
+
+function most_populous_submodel(entries):
+    # Group by (basis, functional); return the largest group.
+    groups = group_by(entries,
+        key = lambda e: (e.context.basis, e.context.functional))
+    if len(groups) == 0:
+        return []
+    return max(groups.values(), key = len)
+```
+
+The two k-NN stages share one inverse-distance-weighted
+helper.  Weights are `1/(d+epsilon)` normalized to sum 1.0.
+
+```
+function knn_weights(entries, distance_of):
+    # distance_of(entry) -> float >= 0.  Returns the
+    # k_neighbors nearest as (entry, weight) pairs.
+    scored = sort(entries, key = distance_of)        # ascending
+    nearest = scored[: min(k_neighbors, len(scored))]
+    raw = [1.0 / (distance_of(e) + epsilon) for e in nearest]
+    total = sum(raw)
+    return [(e, r / total) for e, r in zip(nearest, raw)]
+```
+
+```
+function stage1(query, entries):
+    # Chemistry -> electronic character.  d1 combines the
+    # composition L2 distance with the lattice-family one-hot
+    # term, the latter halved so a full mismatch maps to the
+    # same [0,1] range as composition (DESIGN 7.6 step 3).
+    function d1(e):
+        comp_sq = sum_sq(sub(query.composition_vector,
+                             e.signature.composition_vector))
+        latt_sq = sum_sq(sub(query.lattice_onehot,
+                             e.signature.lattice_onehot))
+        return sqrt(w_comp * comp_sq
+                    + w_latt * latt_sq / 2.0)
+
+    nbrs = knn_weights(entries, d1)
+    pgap  = sum(w * e.measured.gap_ev            for e, w in nbrs)
+    pspin = sum(w * e.measured.spin_polarization for e, w in nbrs)
+    # Confidence_1 from the weighted gap variance (7.6).
+    var = sum(w * (e.measured.gap_ev - pgap) ** 2
+              for e, w in nbrs)
+    conf1 = exp(-sqrt(var) / sigma_gap_ref)
+    return pgap, pspin, conf1, [e.entry_id for e, _ in nbrs]
+```
+
+```
+function stage2(pgap, pspin, entries):
+    # Electronic character -> k-density.  d2 uses the
+    # PREDICTED character (from stage 1), not the query's
+    # chemistry: "find calcs whose gap/spin look like what
+    # this query is likely to produce" (DESIGN 7.6 step 4).
+    function d2(e):
+        gap_term  = w_gap  * (pgap  - e.measured.gap_ev) ** 2 \
+                    / sigma_gap ** 2
+        spin_term = w_spin * (pspin
+                    - e.measured.spin_polarization) ** 2 \
+                    / sigma_spin ** 2
+        return sqrt(gap_term + spin_term)
+
+    nbrs = knn_weights(entries, d2)
+    pkpd = sum(w * e.measured.kpoint_density for e, w in nbrs)
+    var = sum(w * (e.measured.kpoint_density - pkpd) ** 2
+              for e, w in nbrs)
+    conf2 = exp(-sqrt(var) / sigma_kpd_ref)
+    return pkpd, conf2, [e.entry_id for e, _ in nbrs]
+```
+
+### 15.6 Campaign-builder helper (DESIGN 6.2.8 / 7.7)
+
+Lives in `src/scripts/kaleidoscope/` (a domain-aware
+optional convenience; the dispatch core stays dumb,
+Principle 12).  It turns a structure + options + loaded
+Dataspace into a verification-grid `Campaign` plus a
+`PredictionRecord` the harvest hook later recovers.
+
+```
+dataclass PredictionRecord:    # 7.7-derived; serialized as
+                               # [campaign.prediction]
+    policy             : str        # trust_no_verify |
+                                    #   wide_grid_no_prior |
+                                    #   verify_around_prediction
+    predicted_value    : float | None
+    confidence         : float
+    is_under_trained   : bool
+    neighbor_entry_ids : tuple[str]
+    predicted_gap      : float | None
+    predicted_spin_pol : float | None
+    system_type        : str
+    feature_vector     : Signature
+```
+
+```
+function default_wide_kpoint_density_grid():
+    # DESIGN 7.9: 8-point bracket spanning a factor of 16,
+    # used when no usable predictor exists.  Lives HERE, not
+    # in the dataspace (an empty crystalline subtree has no
+    # content to consult -- the chicken-and-egg of 7.9).
+    return [25.0, 50.0, 100.0, 150.0,
+            200.0, 250.0, 300.0, 400.0]
+```
+
+```
+function logspace(lo, hi, n):
+    # n geometrically-spaced points, endpoints inclusive.
+    if n <= 1:
+        return [sqrt(lo * hi)]            # geometric midpoint
+    step = (log(hi) - log(lo)) / (n - 1)
+    return [exp(log(lo) + i * step) for i in range(n)]
+
+function build_verification_grid(center, confidence):
+    # DESIGN 7.7: width and point count scale inversely with
+    # predictor confidence.  conf=1 -> tight 3-point span
+    # [center/1.2, center*1.2]; conf=0 -> wide 7-point span.
+    width    = 1.2 + 1.5 * (1.0 - confidence)
+    n_points = round(3 + 4 * (1.0 - confidence))
+    return logspace(center / width, center * width, n_points)
+```
+
+```
+function encode_axis_value(v):
+    # DESIGN 6.2.4 rule 3: '.' -> 'p', leading '-' -> 'm'.
+    # The campaign builder rounds k-density to an integer
+    # first (below), so in v1 this is just the decimal int;
+    # the general encoder is kept for future axes.
+    if v == round(v):
+        text = str(int(round(v)))
+    else:
+        text = trim_trailing_zeros(repr_compact(v))
+    negative = text.startswith("-")
+    if negative:
+        text = text[1:]
+    text = text.replace(".", "p")
+    return ("m" + text) if negative else text
+
+function build_calc_tag(calc_axes):
+    # calc_axes is an ORDERED mapping {axis: value}; the
+    # order must match Campaign.sweep.varied_axes.  Returns a
+    # tuple of "<axis>-<encoded-value>" directory components
+    # (DESIGN 6.2.1 / 6.2.4).  In v1 it is one component.
+    components = []
+    for axis, value in calc_axes.items():       # insertion order
+        require(matches(axis, "^[a-z0-9-]+$"),
+            "calc axis name not a slug: " + axis)
+        components.append(axis + "-" + encode_axis_value(value))
+    return tuple(components)
+```
+
+```
+function predict_settings(structure, options, dataspace,
+                          system_type, verify = True,
+                          id = None):
+    # options MUST carry "basis" and "functional" (they
+    # select the predictor sub-model, DESIGN 7.6 step 2).
+    sc = (structure if is_structure_control(structure)
+          else load_skl(structure))
+    query_sig = compute_signature(
+        sc, system_type, dataspace.group_table)
+
+    result = predict(dataspace, query_sig,
+                     options["basis"], options["functional"])
+
+    # Decide the grid + policy (DESIGN 7.7 step 3).
+    if not verify:
+        grid_values = [result.predicted_kpoint_density]
+        policy = "trust_no_verify"
+    elif result.is_under_trained:
+        grid_values = default_wide_kpoint_density_grid()
+        policy = "wide_grid_no_prior"
+    else:
+        grid_values = build_verification_grid(
+            result.predicted_kpoint_density, result.confidence)
+        policy = "verify_around_prediction"
+
+    # Round + dedupe to integer k-densities so the on-disk
+    # tag parses back to exactly the swept value (6.2.4).
+    kpd_grid = sorted(set(round(v) for v in grid_values))
+
+    unit_id = id if id is not None else slug_from_path(structure)
+    units = []
+    for kpd_int in kpd_grid:
+        unit_options = dict(options)
+        unit_options["kpd"] = kpd_int          # makeinput key
+        calc_axes = ordered_map({"kpt-density": kpd_int})
+        units.append(CalcUnit(
+            id         = unit_id,
+            calc       = build_calc_tag(calc_axes),
+            structure  = structure,
+            options    = unit_options,
+            wingbeat   = "imago",
+            key_fields = standard_key_fields()))
+
+    # Record the sweep shape (DESIGN 6.2.8 step 6) so
+    # serialize_campaign emits [campaign.sweep] and harvest
+    # recovers the varied axis without path-parsing.
+    sweep = SweepRecord(
+        varied_axes = ("kpt-density",),
+        fixed_axes  = { "basis":      options["basis"],
+                        "functional": options["functional"] })
+
+    record = PredictionRecord(
+        policy             = policy,
+        predicted_value    = result.predicted_kpoint_density,
+        confidence         = result.confidence,
+        is_under_trained   = result.is_under_trained,
+        neighbor_entry_ids = result.neighbor_entry_ids,
+        predicted_gap      = result.predicted_gap,
+        predicted_spin_pol = result.predicted_spin_pol,
+        system_type        = system_type,
+        feature_vector     = query_sig)
+
+    campaign = Campaign(units = units, sweep = sweep, ...)
+    attach_prediction_record(campaign, record)
+    return campaign, record
+```
+
+```
+function standard_key_fields():
+    # DESIGN 6.2.1: the producer's cache identity -- scalar
+    # convergence_threshold + imago_commit, with the
+    # structure file byte-compared.
+    return KeyFields(
+        scalars = {"convergence_threshold", "imago_commit"},
+        files   = ["structure"])
+```
+
+**Attaching the PredictionRecord without teaching the core
+about it.**  DESIGN 6.2.8 step 6 / 7.7 step 6 say the record
+is attached to "the Campaign's metadata" and serialized as
+`[campaign.prediction]`, but the §13.1 `Campaign` has no
+field for it, and the dispatch core must not interpret
+domain data (Principle 9).  The pseudocode pins this the way
+the opaque `WingbeatOutcome.detail` is handled: `Campaign`
+carries a generic `metadata: dict[str, dict]` (default
+empty) that `serialize_campaign` (§13.1) emits VERBATIM as
+`[campaign.<key>]` tables, never reading the contents.
+
+```
+function attach_prediction_record(campaign, record):
+    # Domain-aware helper stashes a plain dict; the core only
+    # round-trips it.  Harvest (15.7) reads it back.
+    campaign.metadata["prediction"] = as_dict(record)
+```
+
+This requires one small addition flagged for DESIGN 6.2.1 /
+PSEUDOCODE 13.1: the generic `metadata` field on `Campaign`
+plus the `serialize_campaign` line that emits each
+`metadata[key]` as a `[campaign.<key>]` block.  It keeps the
+core domain-agnostic while letting the §7 helper persist the
+prediction provenance the harvest needs.
+
+### 15.7 Harvest and promote (DESIGN 7.8)
+
+**`guidance_harvest.py`** turns a finished campaign into
+staged guidance entries.  It reads the campaign workspace
+(it is the producer that has workspace access; the curator
+later works on staging files alone).
+
+```
+function harvest_campaign(workspace_root, db_root, dataspace):
+    campaign = read_campaign_toml(
+        join(workspace_root, "campaign.toml"))
+    prediction = campaign.metadata.get("prediction")  # 15.6
+
+    for unit_id, units in group_by_id(campaign.units):
+        # a. The verification sub-grid for this structure,
+        #    sorted by swept k-density (v1: every unit).
+        grid = sort(units, key = lambda u: u.options["kpd"])
+
+        # b. Parse each converged run's result.toml.
+        kpds, energies, rts = [], [], []
+        for u in grid:
+            rt = read_result_toml(
+                join(workspace_root, "wingbeats", u.id, *u.calc,
+                     "result.toml"))
+            kpds.append(u.options["kpd"])
+            energies.append(rt["total_energy"])
+            rts.append(rt)
+
+        thr = prediction_metric_threshold(prediction)
+
+        # c. Pick the converged grid point (DESIGN 7.8 3c).
+        idx = pick_converged(energies, thr)
+
+        # d. Non-convergence at the top of the range: tag and
+        #    SKIP -- a non-converged sweep earns no entry.
+        if idx is None:
+            warn(unit_id + ": energy still moving at top of"
+                 + " grid -- skipped")
+            tag_prediction_mismatch(workspace_root, unit_id)
+            continue
+
+        # Trust mode harvests deliverables but does NOT
+        # auto-stage a guidance entry (DESIGN 6.2.1 / 7.7):
+        # one converged calc is weaker evidence than a grid.
+        if prediction is not None \
+           and prediction["policy"] == "trust_no_verify":
+            log(unit_id + ": trusted point (not staged)")
+            continue
+
+        # e. Signature: system_type from the prediction
+        #    record (it carries it from 7.7); composition +
+        #    lattice via compute_signature.
+        st = (prediction["system_type"] if prediction is not None
+              else "crystalline")
+        sc = load_skl(grid[0].structure)
+        sig = compute_signature(sc, st, dataspace.group_table)
+
+        # f. Build the rich GuidanceEntry.
+        chosen_rt  = rts[idx]
+        chosen_kpd = kpds[idx]
+        entry = GuidanceEntry(
+            entry_id     = "",                # set by save_entry
+            generated_at = now_iso8601_utc(),
+            source       = "campaign",
+            signature    = sig,
+            measured     = Measured(
+                gap_ev              = chosen_rt["gap_ev"],
+                gap_kind            = chosen_rt["gap_kind"],
+                spin_polarization   = chosen_rt.get(
+                                        "spin_polarization", 0.0),
+                total_magnetization = chosen_rt.get(
+                                        "total_magnetization", 0.0),
+                kpoint_density      = chosen_kpd,
+                dos_at_fermi        = chosen_rt.get(
+                                        "dos_at_fermi")),
+            context      = Context(
+                basis      = campaign.sweep.fixed_axes["basis"],
+                functional = campaign.sweep.fixed_axes["functional"],
+                convergence_threshold = grid[0].options[
+                    "scf_tolerance"],
+                cell_atom_count = chosen_rt["cell_atom_count"],
+                cell_volume_per_formula_unit = chosen_rt[
+                    "cell_volume_per_formula_unit"]),
+            verification = Verification(
+                grid_values   = tuple(kpds),
+                grid_energies = tuple(energies),  # 7.8 / 7.2
+                converged_at  = chosen_kpd,
+                metric        = "total_energy",
+                metric_threshold = thr,
+                predictor_confidence = (
+                    prediction["confidence"]
+                    if prediction is not None else 0.0),
+                predictor_neighbor_ids = tuple(
+                    prediction["neighbor_entry_ids"]
+                    if prediction is not None else [])),
+            provenance   = Provenance(
+                campaign_id      = campaign_id_of(workspace_root),
+                source_structure = grid[0].structure,
+                imago_commit     = chosen_rt["imago_commit"],
+                curator          = "guidance_harvest.py"))
+
+        # g. Stage it.  save_entry fills entry_id = slug.
+        path = save_entry(entry, db_root)
+        log(unit_id + ": staged " + path)
+```
+
+```
+function pick_converged(energies, threshold):
+    # DESIGN 7.8 step 3c: the smallest interior grid index i
+    # at which BOTH consecutive-pair energy deltas fall below
+    # threshold.  Two-sided so a single-point fluke does not
+    # masquerade as convergence.  Returns None if the energy
+    # is still moving (no flat interior point).
+    for i in range(1, len(energies) - 1):
+        below_up   = abs(energies[i] - energies[i + 1]) < threshold
+        below_down = abs(energies[i] - energies[i - 1]) < threshold
+        if below_up and below_down:
+            return i
+    return None
+```
+
+**`guidance_promote.py`** is the curator helper.  Four
+modes; promotion is a `mv` of the file from
+`staging/<system_type>/` to `entries/<system_type>/`, so the
+contents (and provenance) never change.
+
+```
+function promote(db_root, mode):
+    for system_type in VALID_SYSTEM_TYPES:
+        staged = sorted(glob(
+            join(db_root, "staging", system_type), "*.toml"))
+        for path in staged:
+            entry = load_entry(path, system_type, {})
+
+            if mode == "dry-run":
+                print_would_promote(entry,
+                    auto_promote_ok(entry))
+            elif mode == "all":
+                move_to_entries(path, db_root, system_type)
+            elif mode == "auto-promote":
+                if auto_promote_ok(entry):
+                    move_to_entries(path, db_root, system_type)
+                # else: leave in staging for review.
+            else:                                # interactive
+                print_summary(entry)             # sig+measured
+                                                 #   +verif+prov
+                choice = ask("PROMOTE / SKIP / DELETE")
+                if choice == "PROMOTE":
+                    move_to_entries(path, db_root, system_type)
+                elif choice == "DELETE":
+                    remove_file(path)
+                # SKIP: leave in staging.
+```
+
+```
+function auto_promote_ok(entry):
+    # DESIGN 7.8 objective acceptance test, evaluated from
+    # the staging file alone (this is why harvest records
+    # grid_energies).
+    v = entry.verification
+    if v is None or v.grid_energies is None:
+        return False                      # manual / no sweep
+
+    # 1. Converged density in the middle 60% of the grid
+    #    (not at either endpoint -- a grid that may have been
+    #    too narrow).
+    lo, hi = v.grid_values[0], v.grid_values[-1]
+    if hi == lo:
+        return False
+    position = (v.converged_at - lo) / (hi - lo)
+    if not (0.2 <= position <= 0.8):
+        return False
+
+    # 2. Top-three grid points' total-energy variance below
+    #    metric_threshold * 10 (convincingly flat).
+    top3 = v.grid_energies[-3:]
+    if variance(top3) >= v.metric_threshold * 10.0:
+        return False
+
+    # 3. gap_ev / gap_kind consistent.
+    is_metal = (entry.measured.gap_ev == 0.0)
+    if (entry.measured.gap_kind == "none") != is_metal:
+        return False
+
+    return True
+```
+
+In practice the rule auto-promotes ~80% of a seed campaign
+(TODO C75) and leaves the ~20% endpoint-converged or
+not-yet-flat outliers for the curator's interactive review
+-- the friction that makes a 250-entry seed tractable
+without rubber-stamping every entry (DESIGN 7.8).

@@ -516,7 +516,7 @@
 
 ### Historical guidance dataspace (VISION 5, ARCH 10, DESIGN 7)
 
-- [ ] P9. Write PSEUDOCODE for the historical-guidance
+- [x] P9. Write PSEUDOCODE for the historical-guidance
   dataspace library, the predictor, the campaign-builder
   helper, and the harvest pipeline (DESIGN 7, D16).  Four
   blocks:
@@ -571,6 +571,39 @@
   the middle-60%-of-grid + top-three-energy-variance
   rule, --dry-run).
   Foundation for C70-C73.
+
+  Done 2026-05-28.  Landed as PSEUDOCODE section 15, in
+  seven subsections: 15.1 constants + the 7.4 dataclasses
+  restated in field order (Verification carries the new
+  grid_energies); 15.2 load_group_table + compute_signature
+  with the CRYSTAL_SYSTEM_TO_FAMILY map (trigonal lumped
+  into hex per 7.10); 15.3 load() + load_entry/
+  load_verification enforcing all 12 rules with file/
+  block/field messages; 15.4 the hand-formatted emitter
+  (save_entry, short_sha slug, format_entry, the float-
+  array layout); 15.5 the predictor (predict switch,
+  predict_non_crystalline, select_submodel three-tier
+  fallback + functional_family, the shared knn_weights,
+  stage1/stage2 with d1/d2 + variance confidences);
+  15.6 the campaign-builder helper (PredictionRecord,
+  default_wide_kpoint_density_grid, logspace +
+  build_verification_grid, encode_axis_value/
+  build_calc_tag, predict_settings, standard_key_fields);
+  15.7 harvest_campaign + pick_converged and promote +
+  auto_promote_ok.  Two design decisions the pseudocode
+  forced, both pre-cleaned in DESIGN/ARCH before P9 was
+  written (commits 7976c05 + 194b041): the predict() seam
+  (free function predict(dataspace, query, basis,
+  functional), not a stale db.predict method) and the
+  grid_energies array (so auto-promote runs from a staging
+  file alone).  One smaller pinning surfaced WHILE writing
+  P9 and is recorded inside 15.6 + carried into C71: the
+  PredictionRecord reaches campaign.toml via a generic
+  opaque Campaign.metadata dict that serialize_campaign
+  emits verbatim as [campaign.<key>], keeping the dispatch
+  core domain-agnostic (Principle 9) -- this needs the
+  matching Campaign.metadata field added in C71's model
+  catch-up.
 
 ---
 
@@ -1782,12 +1815,21 @@ the C48.3 wiring (C74) is the first major consumer.
   directory component per varied sweep axis) plus a
   `Campaign.sweep: SweepRecord | None` field (DESIGN 6.2.1,
   PSEUDOCODE 13.1).  Land that model change first --
-  `model.py` (calc -> tuple, add SweepRecord + Campaign.sweep),
+  `model.py` (calc -> tuple, add SweepRecord + Campaign.sweep,
+  plus a generic opaque `Campaign.metadata: dict` field per
+  PSEUDOCODE 15.6 -- the seam by which the campaign-builder
+  attaches its PredictionRecord without the dispatch core
+  interpreting it, Principle 9),
   `workspace.py` (unit_run_dir splats the tuple onto the path,
   validate_campaign slugs each component and keys collisions
-  on the tuple, serialize_campaign emits calc as a TOML array
-  and a `[campaign.sweep]` block), and the test suite -- so
-  build_calc_tag has a tuple-shaped target to populate.
+  on the tuple, serialize_campaign emits calc as a TOML array,
+  a `[campaign.sweep]` block, and each `metadata[key]` as a
+  verbatim `[campaign.<key>]` table), and the test suite -- so
+  build_calc_tag has a tuple-shaped target to populate and the
+  PredictionRecord round-trips through campaign.toml.  This
+  also implies a one-line DESIGN 6.2.1 / PSEUDOCODE 13.1
+  addition (the Campaign.metadata field + its serialize line),
+  flagged in PSEUDOCODE 15.6.
   predict_settings(structure, options,
   dataspace, system_type, basis, functional, verify, id,
   extra_axes) returning (Campaign, PredictionRecord).
