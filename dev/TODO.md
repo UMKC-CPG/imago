@@ -1836,7 +1836,7 @@ gates staging into canonical entries; the seed flight
 (C75) trains the predictor over the chemistry surface;
 the C48.3 wiring (C74) is the first major consumer.
 
-- [ ] C70. Implement `src/scripts/guidance_db.py` per
+- [x] C70. Implement `src/scripts/guidance_db.py` per
   DESIGN 7.2 / 7.4 / 7.5 / 7.6 and PSEUDOCODE P9(a)+(b).
   Two halves rolled into one library because they share
   the in-memory Dataspace:
@@ -1874,6 +1874,17 @@ the C48.3 wiring (C74) is the first major consumer.
   exercised under sparse-data conditions; the canonical-
   non-crystalline path returns the expected canonical
   entry.
+  Done 2026-05-29 in four tested increments: foundation
+  (c7223b2: constants/dataclasses + elemental_groups.toml +
+  load_elemental_groups + compute_signature/bravais),
+  reader (b82d872: load + 12 rules), emitter (4593d0a:
+  save_entry/format_entry, byte-deterministic), predictor
+  (cddf68f: predict + two-stage k-NN).  84 tests in
+  test_guidance_db.py, all green.  Three §15.2 details
+  resolved against the real StructureControl: Bravais via the
+  IT space_group_num ranges (hard error on the 0 = "no space
+  group"); element symbols matched case-insensitively (SC
+  stores them lower-cased).
 - [ ] C71. Implement the flight-builder helper inside
   `src/scripts/kaleidoscope/` per DESIGN 6.2.8 / 7.7 and
   PSEUDOCODE P9(c).  **Prerequisite (model catch-up):** the
