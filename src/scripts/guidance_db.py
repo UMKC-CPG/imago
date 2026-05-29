@@ -39,9 +39,8 @@ entry's ``schema_version`` key must equal :data:`SCHEMA_VERSION`;
 :func:`load` rejects anything else (a future bump is handled by
 ``guidance_migrate.py``, not by silent coercion).
 
-Public surface (this module is built in increments; the
-predictor (15.5) follows)
-----------------------------------------------------------------
+Public surface
+--------------
 Signature, Measured, Context, Verification, Provenance,
 GuidanceEntry, Dataspace, PredictionResult
     The in-memory records mirroring DESIGN 7.4 field-for-field.
@@ -65,6 +64,11 @@ save_entry(entry, root) / format_entry(entry, slug) / slug_for
     Emit an entry to ``staging/<system_type>/<slug>.toml`` with
     the byte-deterministic, %.16e hand-formatter; the slug is
     ``<system_type>-<short_sha>`` over the provenance fields.
+predict(dataspace, query, basis, functional)
+    Predict a converged k-density and confidence for a new
+    system: the canonical entry for non-crystalline systems, the
+    two-stage k-NN (select_submodel -> stage1 -> stage2) for
+    crystalline ones.  Always returns a PredictionResult.
 
 Its only external dependency is ``tomllib`` (Python standard
 library) plus the duck-typed ``StructureControl`` attributes
@@ -76,8 +80,10 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import math
 import os
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -944,3 +950,240 @@ def format_entry(entry: GuidanceEntry, slug: str) -> str:
         ("curator", entry.provenance.curator)])
 
     return "\n".join(lines) + "\n"
+
+
+# ============================================================
+#  Predictor predict() (DESIGN 7.6 / PSEUDOCODE 15.5)
+# ============================================================
+#
+# Given a new system's Signature, predict its converged k-point
+# density and an uncertainty.  Non-crystalline systems return
+# the single hand-seeded canonical entry (k-density there is set
+# by a cell-volume convention, not chemistry).  Crystalline
+# systems run a two-stage k-NN: stage 1 maps chemistry to the
+# electronic character (gap, spin) the system is likely to
+# produce, and stage 2 maps that predicted character to a
+# k-density -- "find calcs whose gap/spin look like what this
+# query will produce, and copy their converged density."
+# predict always returns a PredictionResult; is_under_trained +
+# confidence tell the caller (the flight-builder helper, 15.6)
+# how much to widen its verification grid.
+
+
+def predict(dataspace: Dataspace, query: Signature,
+            basis: str, functional: str) -> PredictionResult:
+    """Predict the converged k-point density for ``query``.
+
+    ``basis`` and ``functional`` select the predictor sub-model
+    (DESIGN 7.6 step 2): the dataspace is conditioned on the
+    calculation settings the new run will use, so a prediction
+    never interpolates across incompatible settings.
+    """
+
+    pool = dataspace.entries_by_system_type.get(
+        query.system_type, [])
+
+    if query.system_type in NON_CRYSTALLINE_TYPES:
+        return predict_non_crystalline(pool)
+
+    entries, under_trained = select_submodel(pool, basis, functional)
+    if under_trained:
+        # No usable sub-model: the caller falls back to the
+        # wide-grid default (DESIGN 7.9).  The density field is
+        # unused in this branch.
+        return PredictionResult(
+            predicted_kpoint_density=0.0,
+            confidence=0.0,
+            is_under_trained=True,
+            neighbor_entry_ids=(),
+            predicted_gap=None,
+            predicted_spin_pol=None)
+
+    predicted_gap, predicted_spin, conf1, ids1 = stage1(query, entries)
+    predicted_kpd, conf2, ids2 = stage2(
+        predicted_gap, predicted_spin, entries)
+    return PredictionResult(
+        predicted_kpoint_density=predicted_kpd,
+        confidence=conf1 * conf2,
+        is_under_trained=False,
+        neighbor_entry_ids=_dedup(ids1 + ids2),
+        predicted_gap=predicted_gap,
+        predicted_spin_pol=predicted_spin)
+
+
+def predict_non_crystalline(
+        pool: list[GuidanceEntry]) -> PredictionResult:
+    """Return the canonical-entry prediction for a non-crystalline
+    system_type.  k-density there follows a cell-volume
+    convention rather than chemistry, so the single hand-seeded
+    ``manual`` entry (DESIGN 7.9) carries essentially all the
+    signal.  If several canonical entries accumulate, the most
+    recent wins (deterministic by ``generated_at``)."""
+
+    canonical = [entry for entry in pool if entry.source == "manual"]
+    if not canonical:
+        return PredictionResult(
+            predicted_kpoint_density=0.0, confidence=0.0,
+            is_under_trained=True, neighbor_entry_ids=(),
+            predicted_gap=None, predicted_spin_pol=None)
+    entry = max(canonical, key=lambda e: e.generated_at)
+    return PredictionResult(
+        predicted_kpoint_density=entry.measured.kpoint_density,
+        confidence=1.0,
+        is_under_trained=False,
+        neighbor_entry_ids=(entry.entry_id,),
+        predicted_gap=None,
+        predicted_spin_pol=None)
+
+
+def functional_family(functional: str) -> str:
+    """The functional family: the token before the first hyphen
+    (``"gga-pbe" -> "gga"``, ``"lda" -> "lda"``).  Whether
+    functional/basis are sub-model dimensions or regression
+    features is open (DESIGN 7.10); isolating the rule here makes
+    that a one-line change."""
+
+    return functional.split("-")[0]
+
+
+def most_populous_submodel(
+        entries: list[GuidanceEntry]) -> list[GuidanceEntry]:
+    """Group ``entries`` by ``(basis, functional)`` and return the
+    largest group (empty list if there are no entries)."""
+
+    groups: dict[tuple[str, str], list[GuidanceEntry]] = {}
+    for entry in entries:
+        key = (entry.context.basis, entry.context.functional)
+        groups.setdefault(key, []).append(entry)
+    if not groups:
+        return []
+    return max(groups.values(), key=len)
+
+
+def select_submodel(pool: list[GuidanceEntry], basis: str,
+                    functional: str) -> tuple[list[GuidanceEntry], bool]:
+    """Pick the entries the k-NN runs over, via the
+    (basis, functional) -> functional-family -> overall-pool
+    fallback chain (DESIGN 7.6 step 2).  Returns
+    ``(entries, is_under_trained)``; ``is_under_trained`` is True
+    only when even the whole system_type pool has fewer than
+    :data:`k_min` entries."""
+
+    # 1. The exact (basis, functional) sub-model.
+    exact = [entry for entry in pool
+             if entry.context.basis == basis
+             and entry.context.functional == functional]
+    if len(exact) >= k_min:
+        return exact, False
+
+    # 2. The most-populous sub-model within the same functional
+    #    family (e.g. (mb,gga-pbe) backing off to (fb,gga-pbe)).
+    family_token = functional_family(functional)
+    family = [entry for entry in pool
+              if functional_family(entry.context.functional)
+              == family_token]
+    best = most_populous_submodel(family)
+    if len(best) >= k_min:
+        return best, False
+
+    # 3. The whole system_type pool, settings ignored.
+    if len(pool) >= k_min:
+        return pool, False
+
+    # 4. Too thin everywhere.
+    return pool, True
+
+
+def knn_weights(entries: list[GuidanceEntry],
+                distance_of: Callable[[GuidanceEntry], float]
+                ) -> list[tuple[GuidanceEntry, float]]:
+    """Return the ``k_neighbors`` nearest entries as
+    ``(entry, weight)`` pairs.  Weights are inverse-distance,
+    ``1 / (d + epsilon)``, normalized to sum to 1.0 -- so an
+    exact match (d = 0) dominates without dividing by zero."""
+
+    scored = sorted(entries, key=distance_of)
+    nearest = scored[:min(k_neighbors, len(scored))]
+    raw = [1.0 / (distance_of(entry) + epsilon) for entry in nearest]
+    total = sum(raw)
+    return [(entry, weight / total)
+            for entry, weight in zip(nearest, raw)]
+
+
+def stage1(query: Signature, entries: list[GuidanceEntry]
+           ) -> tuple[float, float, float, list[str]]:
+    """Chemistry -> electronic character.  The distance ``d1``
+    combines the composition L2 distance with the lattice-family
+    one-hot term, the latter halved so a full lattice mismatch
+    maps into the same [0, 1] range as composition (DESIGN 7.6
+    step 3).  Returns the inverse-distance-weighted predicted
+    gap and spin, a confidence from the weighted gap variance,
+    and the neighbor entry_ids."""
+
+    def d1(entry: GuidanceEntry) -> float:
+        comp_sq = sum(
+            (a - b) ** 2 for a, b in zip(
+                query.composition_vector,
+                entry.signature.composition_vector))
+        latt_sq = sum(
+            (a - b) ** 2 for a, b in zip(
+                query.lattice_onehot,
+                entry.signature.lattice_onehot))
+        return math.sqrt(w_comp * comp_sq + w_latt * latt_sq / 2.0)
+
+    neighbors = knn_weights(entries, d1)
+    predicted_gap = sum(
+        weight * entry.measured.gap_ev
+        for entry, weight in neighbors)
+    predicted_spin = sum(
+        weight * entry.measured.spin_polarization
+        for entry, weight in neighbors)
+    variance = sum(
+        weight * (entry.measured.gap_ev - predicted_gap) ** 2
+        for entry, weight in neighbors)
+    confidence = math.exp(-math.sqrt(variance) / sigma_gap_ref)
+    neighbor_ids = [entry.entry_id for entry, _ in neighbors]
+    return predicted_gap, predicted_spin, confidence, neighbor_ids
+
+
+def stage2(predicted_gap: float, predicted_spin: float,
+           entries: list[GuidanceEntry]
+           ) -> tuple[float, float, list[str]]:
+    """Electronic character -> k-density.  The distance ``d2``
+    uses the PREDICTED character from stage 1, not the query's
+    chemistry: find calcs whose gap/spin resemble what this query
+    is likely to produce, and copy their converged density.
+    Returns the weighted predicted k-density, a confidence from
+    the weighted k-density variance, and the neighbor ids."""
+
+    def d2(entry: GuidanceEntry) -> float:
+        gap_term = (w_gap * (predicted_gap - entry.measured.gap_ev) ** 2
+                    / sigma_gap ** 2)
+        spin_term = (w_spin
+                     * (predicted_spin
+                        - entry.measured.spin_polarization) ** 2
+                     / sigma_spin ** 2)
+        return math.sqrt(gap_term + spin_term)
+
+    neighbors = knn_weights(entries, d2)
+    predicted_kpd = sum(
+        weight * entry.measured.kpoint_density
+        for entry, weight in neighbors)
+    variance = sum(
+        weight * (entry.measured.kpoint_density - predicted_kpd) ** 2
+        for entry, weight in neighbors)
+    confidence = math.exp(-math.sqrt(variance) / sigma_kpd_ref)
+    neighbor_ids = [entry.entry_id for entry, _ in neighbors]
+    return predicted_kpd, confidence, neighbor_ids
+
+
+def _dedup(ids: list[str]) -> tuple[str, ...]:
+    """Order-preserving de-duplication of neighbor entry_ids."""
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for identifier in ids:
+        if identifier not in seen:
+            seen.add(identifier)
+            out.append(identifier)
+    return tuple(out)

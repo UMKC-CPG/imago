@@ -21,15 +21,28 @@ import pytest
 from guidance_db import (
     CANONICAL_GROUP_ORDER,
     CANONICAL_LATTICE_ORDER,
+    VALID_SYSTEM_TYPES,
+    Context,
+    Dataspace,
+    GuidanceEntry,
+    Measured,
+    Provenance,
+    Signature,
     bravais_family_of,
     compute_signature,
     format_entry,
+    functional_family,
+    k_neighbors,
+    knn_weights,
     load,
     load_elemental_groups,
     load_entry,
+    predict,
     save_entry,
+    select_submodel,
     short_sha,
     slug_for,
+    stage1,
     _crystal_system_of,
 )
 
@@ -693,3 +706,210 @@ class TestEmitter:
             "f1", "s1", "g1")
         assert short_sha("f1", "s1", "g1") != short_sha(
             "f2", "s1", "g1")
+
+
+# ============================================================
+#  Predictor: predict() and its stages (PSEUDOCODE 15.5)
+# ============================================================
+
+def _comp(**weights):
+    """Build a 13-d composition vector from group -> weight."""
+
+    vector = [0.0] * len(CANONICAL_GROUP_ORDER)
+    for group, weight in weights.items():
+        vector[CANONICAL_GROUP_ORDER.index(group)] = weight
+    return tuple(vector)
+
+
+def _pentry(entry_id, *, comp=None, lattice="cubic", gap=1.0,
+            spin=0.0, kpd=50.0, basis="fb", functional="gga-pbe",
+            source="flight", system_type="crystalline",
+            generated_at="2026-01-01"):
+    """Construct an in-memory GuidanceEntry for predictor tests
+    (no file I/O -- the predictor operates on loaded entries)."""
+
+    vector = comp if comp is not None else _comp()
+    if system_type == "crystalline":
+        family = lattice
+        onehot = tuple(1.0 if n == lattice else 0.0
+                       for n in CANONICAL_LATTICE_ORDER)
+    else:
+        family = ""
+        onehot = tuple(0.0 for _ in CANONICAL_LATTICE_ORDER)
+    return GuidanceEntry(
+        entry_id=entry_id, generated_at=generated_at, source=source,
+        signature=Signature(system_type, vector, family, onehot),
+        measured=Measured(gap, "none" if gap == 0.0 else "direct",
+                          spin, 0.0, kpd, None),
+        context=Context(basis, functional, 1.0e-6, 6, 100.0),
+        verification=None,
+        provenance=Provenance("f", "s", "c", "cur"))
+
+
+def _space(entries):
+    """Wrap entries in a Dataspace, partitioned by system_type."""
+
+    by_type = {st: [] for st in VALID_SYSTEM_TYPES}
+    for entry in entries:
+        by_type[entry.signature.system_type].append(entry)
+    return Dataspace(1, by_type, {})
+
+
+class TestPredictorNonCrystalline:
+    def test_returns_canonical_manual_entry(self):
+        space = _space([_pentry(
+            "amorphous-1", system_type="amorphous", source="manual",
+            kpd=80.0)])
+        query = Signature("amorphous", _comp(hydrogen=1.0), "",
+                          (0.0,) * 6)
+        result = predict(space, query, "fb", "gga-pbe")
+        assert result.predicted_kpoint_density == 80.0
+        assert result.confidence == 1.0
+        assert not result.is_under_trained
+        assert result.neighbor_entry_ids == ("amorphous-1",)
+
+    def test_under_trained_without_manual_entry(self):
+        # Only flight entries, no hand-seeded canonical one.
+        space = _space([_pentry(
+            "amorphous-1", system_type="amorphous", source="flight")])
+        query = Signature("amorphous", _comp(hydrogen=1.0), "",
+                          (0.0,) * 6)
+        result = predict(space, query, "fb", "gga-pbe")
+        assert result.is_under_trained
+        assert result.confidence == 0.0
+
+
+class TestSubmodelSelection:
+    def test_functional_family(self):
+        assert functional_family("gga-pbe") == "gga"
+        assert functional_family("gga-pw91") == "gga"
+        assert functional_family("lda") == "lda"
+
+    def test_exact_submodel(self):
+        pool = [_pentry("e%d" % i) for i in range(3)]   # fb,gga-pbe
+        entries, under = select_submodel(pool, "fb", "gga-pbe")
+        assert not under
+        assert len(entries) == 3
+
+    def test_family_fallback_picks_most_populous(self):
+        # Query (mb,gga-pbe): only 1 exact, but 3 (fb,gga-pbe) in
+        # the gga family -> fall back to those three.
+        pool = ([_pentry("mb1", basis="mb")]
+                + [_pentry("fb%d" % i, basis="fb") for i in range(3)]
+                + [_pentry("lda%d" % i, functional="lda")
+                   for i in range(2)])
+        entries, under = select_submodel(pool, "mb", "gga-pbe")
+        assert not under
+        assert len(entries) == 3
+        assert all(e.context.basis == "fb"
+                   and e.context.functional == "gga-pbe"
+                   for e in entries)
+
+    def test_pool_fallback_when_family_thin(self):
+        # Query (eb,scan): no exact, no scan family, but 4 total.
+        pool = ([_pentry("a", basis="fb", functional="lda"),
+                 _pentry("b", basis="mb", functional="lda"),
+                 _pentry("c", basis="fb", functional="gga-pbe"),
+                 _pentry("d", basis="mb", functional="gga-pbe")])
+        entries, under = select_submodel(pool, "eb", "scan")
+        assert not under
+        assert len(entries) == 4
+
+    def test_under_trained_when_pool_too_thin(self):
+        pool = [_pentry("a"), _pentry("b")]      # 2 < k_min (3)
+        entries, under = select_submodel(pool, "fb", "gga-pbe")
+        assert under
+
+
+class TestKnnWeights:
+    def test_weights_sum_to_one_and_cap_at_k(self):
+        entries = [_pentry("e%d" % i) for i in range(7)]
+        # Distance increases with index; nearest is e0.
+        distance = {e: float(i) for i, e in enumerate(entries)}
+        pairs = knn_weights(entries, lambda e: distance[e])
+        assert len(pairs) == k_neighbors           # capped at 5
+        assert sum(w for _, w in pairs) == pytest.approx(1.0)
+        # Nearest neighbour carries the most weight.
+        weights = [w for _, w in pairs]
+        assert weights[0] == max(weights)
+
+    def test_exact_match_dominates(self):
+        entries = [_pentry("near"), _pentry("far1"), _pentry("far2")]
+        distance = {entries[0]: 0.0, entries[1]: 10.0,
+                    entries[2]: 20.0}
+        pairs = knn_weights(entries, lambda e: distance[e])
+        nearest, weight = pairs[0]
+        assert nearest.entry_id == "near"
+        assert weight > 0.999          # 1/eps swamps the rest
+
+
+class TestStages:
+    def test_stage1_weighted_gap_and_full_confidence(self):
+        # All neighbours share gap=2.0 -> predicted 2.0, zero
+        # variance -> confidence 1.0.
+        entries = [_pentry("e%d" % i, gap=2.0) for i in range(3)]
+        pgap, pspin, conf, ids = stage1(
+            Signature("crystalline", _comp(), "cubic",
+                      tuple(1.0 if n == "cubic" else 0.0
+                            for n in CANONICAL_LATTICE_ORDER)),
+            entries)
+        assert pgap == pytest.approx(2.0)
+        assert conf == pytest.approx(1.0)
+        assert len(ids) == 3
+
+    def test_stage1_lattice_term_separates_polytypes(self):
+        # Same composition, different lattice; query is cubic, so
+        # the cubic entry (d1=0) dominates over the tet one.
+        cubic = _pentry("cubic", lattice="cubic", gap=1.0)
+        tet = _pentry("tet", lattice="tet", gap=5.0)
+        query = Signature(
+            "crystalline", _comp(), "cubic",
+            tuple(1.0 if n == "cubic" else 0.0
+                  for n in CANONICAL_LATTICE_ORDER))
+        pgap, _, _, _ = stage1(query, [cubic, tet])
+        assert pgap == pytest.approx(1.0, abs=1e-3)
+
+
+class TestPredictEndToEnd:
+    def test_confident_prediction_when_neighbors_agree(self):
+        comp = _comp(transition_metal=1.0 / 3.0, chalcogen=2.0 / 3.0)
+        space = _space([_pentry("e%d" % i, comp=comp, gap=2.0,
+                                kpd=60.0) for i in range(4)])
+        query = Signature(
+            "crystalline", comp, "cubic",
+            tuple(1.0 if n == "cubic" else 0.0
+                  for n in CANONICAL_LATTICE_ORDER))
+        result = predict(space, query, "fb", "gga-pbe")
+        assert not result.is_under_trained
+        assert result.predicted_kpoint_density == pytest.approx(60.0)
+        assert result.predicted_gap == pytest.approx(2.0)
+        assert result.confidence == pytest.approx(1.0)
+        assert len(result.neighbor_entry_ids) > 0
+
+    def test_confidence_drops_when_densities_disagree(self):
+        # Same gaps (so stage 2 weights are equal) but spread-out
+        # densities -> a confident gap but an uncertain density.
+        comp = _comp(transition_metal=1.0 / 3.0, chalcogen=2.0 / 3.0)
+        space = _space([
+            _pentry("e0", comp=comp, gap=2.0, kpd=40.0),
+            _pentry("e1", comp=comp, gap=2.0, kpd=50.0),
+            _pentry("e2", comp=comp, gap=2.0, kpd=60.0),
+            _pentry("e3", comp=comp, gap=2.0, kpd=70.0)])
+        query = Signature(
+            "crystalline", comp, "cubic",
+            tuple(1.0 if n == "cubic" else 0.0
+                  for n in CANONICAL_LATTICE_ORDER))
+        result = predict(space, query, "fb", "gga-pbe")
+        assert result.predicted_kpoint_density == pytest.approx(55.0)
+        assert result.confidence < 1.0
+
+    def test_under_trained_thin_crystalline_pool(self):
+        space = _space([_pentry("a"), _pentry("b")])     # 2 < k_min
+        query = Signature(
+            "crystalline", _comp(), "cubic",
+            tuple(1.0 if n == "cubic" else 0.0
+                  for n in CANONICAL_LATTICE_ORDER))
+        result = predict(space, query, "fb", "gga-pbe")
+        assert result.is_under_trained
+        assert result.confidence == 0.0
+        assert result.neighbor_entry_ids == ()
