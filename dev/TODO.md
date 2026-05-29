@@ -2008,6 +2008,15 @@ the C48.3 wiring (C74) is the first major consumer.
   `kpoint_integration` and part of the predictor sub-model
   key (DESIGN 7.2/7.6); the harvest fills it from the flight
   options.
+  **Python half DONE (16156a4):** imago.py reads the fixed
+  8-column row (col 6 Mag._Mom. -> total_magnetization, col 7
+  gap Hartree -> gap_ev in eV, col 8 code -> gap_kind via
+  {0:none,1:direct,2:indirect}), length-gated for pre-gap
+  files; ImagoResult + the wingbeat result.toml serializer
+  carry the fields.  PENDING: the Fortran iteration-file
+  writer (programmer, in progress) emitting cols 6-8 + always
+  printing the magnetization column; then confirm the gap_kind
+  code order and verify end to end.
 
 ### Phase L -- resource & cost dataspace (VISION 6, ARCH 11, DESIGN 8)
 
