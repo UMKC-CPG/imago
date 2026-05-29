@@ -40,7 +40,7 @@ entry's ``schema_version`` key must equal :data:`SCHEMA_VERSION`;
 ``guidance_migrate.py``, not by silent coercion).
 
 Public surface (this module is built in increments; the
-emitter (15.4) and predictor (15.5) follow)
+predictor (15.5) follows)
 ----------------------------------------------------------------
 Signature, Measured, Context, Verification, Provenance,
 GuidanceEntry, Dataspace, PredictionResult
@@ -61,6 +61,10 @@ load(root)
 load_entry(path, system_type_dir, seen_ids)
     Read and validate one entry file against DESIGN 7.2 rules
     1-12, with file/block/field error messages.
+save_entry(entry, root) / format_entry(entry, slug) / slug_for
+    Emit an entry to ``staging/<system_type>/<slug>.toml`` with
+    the byte-deterministic, %.16e hand-formatter; the slug is
+    ``<system_type>-<short_sha>`` over the provenance fields.
 
 Its only external dependency is ``tomllib`` (Python standard
 library) plus the duck-typed ``StructureControl`` attributes
@@ -71,6 +75,7 @@ symbols), and ``space_group_num``.
 from __future__ import annotations
 
 import glob
+import hashlib
 import os
 import tomllib
 from dataclasses import dataclass
@@ -713,3 +718,229 @@ def load_verification(raw_verification: dict[str, Any],
         predictor_confidence=v["predictor_confidence"],
         predictor_neighbor_ids=tuple(
             v["predictor_neighbor_ids"]))
+
+
+# ============================================================
+#  Hand-formatted emitter save_entry() (DESIGN 7.5 /
+#  PSEUDOCODE 15.4)
+# ============================================================
+#
+# Deterministic hand-formatter, same philosophy as
+# initial_potential_db.save: a fixed block sequence, a fixed
+# key order, %.16e floats, and float arrays one element per
+# line with a trailing comma.  The output is byte-identical for
+# a given in-memory entry, so version-control diffs are
+# meaningful and a save/reload round trip is lossless for
+# IEEE-754 binary64 values.  Within each block the `=` signs are
+# aligned one space past the longest key in that block (matching
+# the DESIGN 7.3 gold sketch); the float arrays are emitted
+# unpadded as multi-line blocks.
+
+
+def _fmt_float(value: float) -> str:
+    """Render a float in the canonical 16-significant-digit form
+    (one digit before the point, sixteen after, signed two-digit
+    exponent) -- e.g. ``5.0000000000000000e+01``.  This is the
+    representation that round-trips exactly through a decimal
+    string for binary64.
+    """
+
+    return format(value, ".16e")
+
+
+def _toml_string(text: str) -> str:
+    """Quote a string as a TOML basic string, escaping backslash
+    and double quote (the only escapes the schema's string
+    fields can need)."""
+
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _scalar(value: Any) -> str:
+    """Render one scalar: floats as %.16e, ints bare, strings
+    TOML-quoted.  ``bool`` is guarded before ``int`` because it
+    is an ``int`` subclass (no boolean fields exist today, but
+    the guard keeps a future one honest)."""
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return _fmt_float(value)
+    if isinstance(value, int):
+        return str(value)
+    return _toml_string(value)
+
+
+def _emit_scalars(lines: list[str],
+                  pairs: list[tuple[str, Any]],
+                  width: int | None = None) -> None:
+    """Append ``key = value`` lines with the ``=`` signs aligned.
+    By default the alignment width is the longest key among
+    ``pairs``; ``width`` overrides it when a block's keys must
+    align to a wider key emitted separately (the verification
+    block, whose float arrays carry the same scalars as
+    ``predictor_neighbor_ids``)."""
+
+    if width is None:
+        width = max(len(key) for key, _ in pairs)
+    for key, value in pairs:
+        lines.append(key.ljust(width) + " = " + _scalar(value))
+
+
+def _emit_float_array(lines: list[str], key: str,
+                      values: tuple[float, ...]) -> None:
+    """Append a float array as a multi-line block: the opener
+    ``key = [`` (unpadded), one ``    <float>,`` line per
+    element, and a closing ``]``."""
+
+    lines.append(key + " = [")
+    for value in values:
+        lines.append("    " + _fmt_float(value) + ",")
+    lines.append("]")
+
+
+def short_sha(flight_id: str, source_structure: str,
+              generated_at: str) -> str:
+    """The slug guard (DESIGN 7.5): the first six hex digits of
+    the SHA-256 over the three provenance fields concatenated.
+    Two simultaneous harvests differ in ``flight_id`` or
+    ``source_structure``, so their hashes (and filenames) differ.
+    """
+
+    blob = (flight_id + source_structure
+            + generated_at).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:6]
+
+
+def slug_for(entry: GuidanceEntry) -> str:
+    """The entry's filename stem and ``entry_id``:
+    ``<system_type>-<short_sha>``."""
+
+    return (entry.signature.system_type + "-"
+            + short_sha(entry.provenance.flight_id,
+                        entry.provenance.source_structure,
+                        entry.generated_at))
+
+
+def save_entry(entry: GuidanceEntry, root: str) -> str:
+    """Emit ``entry`` into ``staging/<system_type>/<slug>.toml``
+    under ``root`` and return the path written.
+
+    Producers stage; a curator promotes (DESIGN 7.8), so a fresh
+    harvest always lands in ``staging/``.  The on-disk
+    ``entry_id`` is set to the slug here (the harvest builds the
+    entry with an empty ``entry_id`` and lets the slug fill it).
+    A pre-existing file at the target is refused (DESIGN 7.2 rule
+    2 / 7.5): the caller retries with a fresh ``generated_at`` on
+    the rare hash clash, rather than silently overwriting.
+    """
+
+    slug = slug_for(entry)
+    subdir = os.path.join(root, "staging", entry.signature.system_type)
+    os.makedirs(subdir, exist_ok=True)
+    path = os.path.join(subdir, slug + ".toml")
+    if os.path.exists(path):
+        raise ValueError(
+            "save_entry: " + path
+            + " already exists (entry_id collision)")
+    with open(path, "w") as handle:
+        handle.write(format_entry(entry, slug))
+    return path
+
+
+def format_entry(entry: GuidanceEntry, slug: str) -> str:
+    """Render ``entry`` to the canonical, byte-deterministic TOML
+    text (the gold sketch of DESIGN 7.3).  ``slug`` becomes the
+    on-disk ``entry_id``."""
+
+    lines: list[str] = []
+
+    # Top-level block.  schema_version is a bare int; entry_id
+    # always equals the slug.
+    _emit_scalars(lines, [
+        ("schema_version", SCHEMA_VERSION),
+        ("entry_id", slug),
+        ("generated_at", entry.generated_at),
+        ("source", entry.source)])
+    lines.append("")
+
+    # [entry.signature] -- lattice_family only when crystalline.
+    lines.append("[entry.signature]")
+    signature_pairs = [("system_type", entry.signature.system_type)]
+    if entry.signature.system_type == "crystalline":
+        signature_pairs.append(
+            ("lattice_family", entry.signature.lattice_family))
+    _emit_scalars(lines, signature_pairs)
+    lines.append("")
+
+    # The composition vector: all 13 groups, aligned to the
+    # widest group name, in canonical order.
+    lines.append("[entry.signature.composition_vector]")
+    width = max(len(group) for group in CANONICAL_GROUP_ORDER)
+    for group, fraction in zip(CANONICAL_GROUP_ORDER,
+                               entry.signature.composition_vector):
+        lines.append(group.ljust(width) + " = " + _fmt_float(fraction))
+    lines.append("")
+
+    # [entry.measured] -- dos_at_fermi emitted only when present.
+    lines.append("[entry.measured]")
+    measured_pairs = [
+        ("gap_ev", entry.measured.gap_ev),
+        ("gap_kind", entry.measured.gap_kind),
+        ("spin_polarization", entry.measured.spin_polarization),
+        ("total_magnetization", entry.measured.total_magnetization),
+        ("kpoint_density", entry.measured.kpoint_density)]
+    if entry.measured.dos_at_fermi is not None:
+        measured_pairs.append(
+            ("dos_at_fermi", entry.measured.dos_at_fermi))
+    _emit_scalars(lines, measured_pairs)
+    lines.append("")
+
+    # [entry.context].
+    lines.append("[entry.context]")
+    _emit_scalars(lines, [
+        ("basis", entry.context.basis),
+        ("functional", entry.context.functional),
+        ("scf_threshold", entry.context.scf_threshold),
+        ("cell_atom_count", entry.context.cell_atom_count),
+        ("cell_volume_per_formula_unit",
+         entry.context.cell_volume_per_formula_unit)])
+    lines.append("")
+
+    # [entry.verification] when present.  The float arrays are
+    # multi-line and unpadded; the remaining scalars align to the
+    # widest of their own keys (predictor_neighbor_ids).
+    if entry.verification is not None:
+        v = entry.verification
+        lines.append("[entry.verification]")
+        _emit_float_array(lines, "grid_values", v.grid_values)
+        if v.grid_energies is not None:
+            _emit_float_array(lines, "grid_energies",
+                              v.grid_energies)
+        scalar_width = max(
+            len("converged_at"), len("metric"),
+            len("metric_threshold"), len("predictor_confidence"),
+            len("predictor_neighbor_ids"))
+        _emit_scalars(lines, [
+            ("converged_at", v.converged_at),
+            ("metric", v.metric),
+            ("metric_threshold", v.metric_threshold),
+            ("predictor_confidence", v.predictor_confidence)],
+            width=scalar_width)
+        # predictor_neighbor_ids: an inline string array, aligned
+        # to the same width.
+        ids = ", ".join(_toml_string(i)
+                        for i in v.predictor_neighbor_ids)
+        lines.append("predictor_neighbor_ids".ljust(scalar_width)
+                     + " = [" + ids + "]")
+        lines.append("")
+
+    # [entry.provenance].
+    lines.append("[entry.provenance]")
+    _emit_scalars(lines, [
+        ("flight_id", entry.provenance.flight_id),
+        ("source_structure", entry.provenance.source_structure),
+        ("imago_commit", entry.provenance.imago_commit),
+        ("curator", entry.provenance.curator)])
+
+    return "\n".join(lines) + "\n"

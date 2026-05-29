@@ -23,9 +23,13 @@ from guidance_db import (
     CANONICAL_LATTICE_ORDER,
     bravais_family_of,
     compute_signature,
+    format_entry,
     load,
     load_elemental_groups,
     load_entry,
+    save_entry,
+    short_sha,
+    slug_for,
     _crystal_system_of,
 )
 
@@ -595,3 +599,97 @@ class TestVerificationRule10:
         entry = _load_entry_text(tmp_path,
                                  _entry_text(verification=version))
         assert entry.verification.grid_energies is None
+
+
+# ============================================================
+#  Emitter: save_entry() / format_entry() (PSEUDOCODE 15.4)
+# ============================================================
+
+class TestEmitter:
+    def test_round_trip_flight_entry(self, tmp_path):
+        # load -> save -> load reproduces every field bit-exactly
+        # (the %.16e format round-trips binary64).  entry_id
+        # becomes the slug, which save_entry assigns.
+        original = _load_entry_text(tmp_path, _entry_text())
+        path = save_entry(original, str(tmp_path))
+        reloaded = load_entry(path, "crystalline", {})
+        assert reloaded.signature == original.signature
+        assert reloaded.measured == original.measured
+        assert reloaded.context == original.context
+        assert reloaded.verification == original.verification
+        assert reloaded.provenance == original.provenance
+        assert reloaded.source == original.source
+        assert reloaded.entry_id == slug_for(original)
+
+    def test_round_trip_manual_without_verification(self, tmp_path):
+        text = _entry_text(
+            top={**DEF_TOP, "source": "manual"}, verification=None)
+        original = _load_entry_text(tmp_path, text)
+        path = save_entry(original, str(tmp_path))
+        out = open(path).read()
+        assert "[entry.verification]" not in out
+        reloaded = load_entry(path, "crystalline", {})
+        assert reloaded.verification is None
+        assert reloaded.measured == original.measured
+
+    def test_byte_deterministic(self, tmp_path):
+        entry = _load_entry_text(tmp_path, _entry_text())
+        assert (format_entry(entry, "crystalline-x")
+                == format_entry(entry, "crystalline-x"))
+
+    def test_dos_omitted_when_none(self, tmp_path):
+        measured = {k: v for k, v in DEF_MEAS.items()
+                    if k != "dos_at_fermi"}
+        entry = _load_entry_text(tmp_path,
+                                 _entry_text(measured=measured))
+        assert entry.measured.dos_at_fermi is None
+        assert "dos_at_fermi" not in format_entry(entry, "x")
+
+    def test_float_format_and_block_alignment(self, tmp_path):
+        text = format_entry(
+            _load_entry_text(tmp_path, _entry_text()), "x")
+        # %.16e floats; [entry.measured] aligns '=' to the widest
+        # key, total_magnetization (19).
+        assert ("kpoint_density".ljust(19)
+                + " = 5.0000000000000000e+01") in text
+        # [entry.context] aligns to cell_volume_per_formula_unit.
+        assert ("basis".ljust(28) + ' = "fb"') in text
+        # [entry.provenance] aligns to source_structure (16).
+        assert ("flight_id".ljust(16) + ' = "seed_2026"') in text
+
+    def test_float_arrays_multiline(self, tmp_path):
+        text = format_entry(
+            _load_entry_text(tmp_path, _entry_text()), "x")
+        # Array opener unpadded; one element per line, trailing
+        # comma; closing bracket on its own line.
+        assert "grid_values = [\n" in text
+        assert "    2.5000000000000000e+01,\n" in text
+        assert "\n]\n" in text
+        # The verification scalars align to predictor_neighbor_ids
+        # (22), not to their own shorter max.
+        assert ("converged_at".ljust(22)
+                + " = 5.0000000000000000e+01") in text
+
+    def test_save_entry_path_and_collision(self, tmp_path):
+        entry = _load_entry_text(tmp_path, _entry_text())
+        path = save_entry(entry, str(tmp_path))
+        assert path.endswith(".toml")
+        assert os.path.join("staging", "crystalline") in path
+        assert os.path.exists(path)
+        # A second save to the same slug is refused (rule 2 / 7.5).
+        with pytest.raises(ValueError, match="already exists"):
+            save_entry(entry, str(tmp_path))
+
+    def test_slug_and_short_sha(self, tmp_path):
+        entry = _load_entry_text(tmp_path, _entry_text())
+        slug = slug_for(entry)
+        assert slug.startswith("crystalline-")
+        suffix = slug.split("-", 1)[1]
+        assert len(suffix) == 6
+        assert all(c in "0123456789abcdef" for c in suffix)
+        # Deterministic, and distinct when a provenance field
+        # differs.
+        assert short_sha("f1", "s1", "g1") == short_sha(
+            "f1", "s1", "g1")
+        assert short_sha("f1", "s1", "g1") != short_sha(
+            "f2", "s1", "g1")
