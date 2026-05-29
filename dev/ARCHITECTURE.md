@@ -1424,10 +1424,11 @@ new calculation (structure, options, system_type)
     |     k-density and tell me how confident you are."
     v
 guidance_db.predict(dataspace, query_signature,
-                    basis, functional)
+                    basis, functional, kpoint_integration)
     |   (free function over the loaded Dataspace, DESIGN
     |    7.4; query_signature carries system_type, and
-    |    (basis, functional) selects the sub-model.)
+    |    (basis, functional, kpoint_integration) selects
+    |    the sub-model.)
     |   1. Switch on system_type:
     |      - amorphous, nanostructure, molecular:
     |        consult the small dedicated sub-model

@@ -64,7 +64,7 @@ save_entry(entry, root) / format_entry(entry, slug) / slug_for
     Emit an entry to ``staging/<system_type>/<slug>.toml`` with
     the byte-deterministic, %.16e hand-formatter; the slug is
     ``<system_type>-<short_sha>`` over the provenance fields.
-predict(dataspace, query, basis, functional)
+predict(dataspace, query, basis, functional, kpoint_integration)
     Predict a converged k-density and confidence for a new
     system: the canonical entry for non-crystalline systems, the
     two-stage k-NN (select_submodel -> stage1 -> stage2) for
@@ -226,6 +226,7 @@ class Context:
 
     basis: str                        # mb | fb | eb
     functional: str                   # e.g. "gga-pbe"
+    kpoint_integration: str           # e.g. "gaussian-0.1"
     scf_threshold: float
     cell_atom_count: int
     cell_volume_per_formula_unit: float    # Bohr^3
@@ -611,16 +612,20 @@ def load_entry(path: str, system_type_dir: str,
     # --- context block ----------------------------------------
     _require("context" in entry, path, "missing [entry.context]")
     c = entry["context"]
-    for field_name in ("basis", "functional", "scf_threshold",
+    for field_name in ("basis", "functional",
+                       "kpoint_integration", "scf_threshold",
                        "cell_atom_count",
                        "cell_volume_per_formula_unit"):
         _require(field_name in c, path,
                  "missing context." + field_name)
-    # Rule 8: basis valid; functional non-empty.
+    # Rule 8: basis valid; functional + kpoint_integration
+    # non-empty.
     _require(c["basis"] in VALID_BASES, path,
              "invalid basis: " + str(c["basis"]))
     _require(len(c["functional"]) > 0, path,
              "functional must be non-empty")
+    _require(len(c["kpoint_integration"]) > 0, path,
+             "kpoint_integration must be non-empty")
     # Rule 9: cell counts / volumes positive.
     _require(c["cell_atom_count"] > 0, path,
              "cell_atom_count must be > 0")
@@ -629,6 +634,7 @@ def load_entry(path: str, system_type_dir: str,
     context = Context(
         basis=c["basis"],
         functional=c["functional"],
+        kpoint_integration=c["kpoint_integration"],
         scf_threshold=c["scf_threshold"],
         cell_atom_count=c["cell_atom_count"],
         cell_volume_per_formula_unit=c[
@@ -907,6 +913,7 @@ def format_entry(entry: GuidanceEntry, slug: str) -> str:
     _emit_scalars(lines, [
         ("basis", entry.context.basis),
         ("functional", entry.context.functional),
+        ("kpoint_integration", entry.context.kpoint_integration),
         ("scf_threshold", entry.context.scf_threshold),
         ("cell_atom_count", entry.context.cell_atom_count),
         ("cell_volume_per_formula_unit",
@@ -970,14 +977,17 @@ def format_entry(entry: GuidanceEntry, slug: str) -> str:
 # how much to widen its verification grid.
 
 
-def predict(dataspace: Dataspace, query: Signature,
-            basis: str, functional: str) -> PredictionResult:
+def predict(dataspace: Dataspace, query: Signature, basis: str,
+            functional: str,
+            kpoint_integration: str) -> PredictionResult:
     """Predict the converged k-point density for ``query``.
 
-    ``basis`` and ``functional`` select the predictor sub-model
-    (DESIGN 7.6 step 2): the dataspace is conditioned on the
-    calculation settings the new run will use, so a prediction
-    never interpolates across incompatible settings.
+    ``basis``, ``functional``, and ``kpoint_integration`` select
+    the predictor sub-model (DESIGN 7.6 step 2): the dataspace is
+    conditioned on the calculation settings the new run will use,
+    so a prediction never interpolates across incompatible
+    settings -- in particular a tetrahedral-integration density
+    is never mixed with a Gaussian-smeared one.
     """
 
     pool = dataspace.entries_by_system_type.get(
@@ -986,7 +996,8 @@ def predict(dataspace: Dataspace, query: Signature,
     if query.system_type in NON_CRYSTALLINE_TYPES:
         return predict_non_crystalline(pool)
 
-    entries, under_trained = select_submodel(pool, basis, functional)
+    entries, under_trained = select_submodel(
+        pool, basis, functional, kpoint_integration)
     if under_trained:
         # No usable sub-model: the caller falls back to the
         # wide-grid default (DESIGN 7.9).  The density field is
@@ -1061,18 +1072,24 @@ def most_populous_submodel(
 
 
 def select_submodel(pool: list[GuidanceEntry], basis: str,
-                    functional: str) -> tuple[list[GuidanceEntry], bool]:
+                    functional: str, kpoint_integration: str
+                    ) -> tuple[list[GuidanceEntry], bool]:
     """Pick the entries the k-NN runs over, via the
-    (basis, functional) -> functional-family -> overall-pool
-    fallback chain (DESIGN 7.6 step 2).  Returns
+    (basis, functional, kpoint_integration) -> functional-family
+    -> overall-pool fallback chain (DESIGN 7.6 step 2).  Returns
     ``(entries, is_under_trained)``; ``is_under_trained`` is True
     only when even the whole system_type pool has fewer than
-    :data:`k_min` entries."""
+    :data:`k_min` entries.  The family/pool fallbacks ignore
+    basis and integration -- they are the degraded best-effort
+    path when no exact sub-model is populous enough."""
 
-    # 1. The exact (basis, functional) sub-model.
+    # 1. The exact (basis, functional, kpoint_integration)
+    #    sub-model.
     exact = [entry for entry in pool
              if entry.context.basis == basis
-             and entry.context.functional == functional]
+             and entry.context.functional == functional
+             and entry.context.kpoint_integration
+             == kpoint_integration]
     if len(exact) >= k_min:
         return exact, False
 

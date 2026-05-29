@@ -295,7 +295,8 @@ DEF_MEAS = {
     "total_magnetization": 0.0, "kpoint_density": 50.0,
     "dos_at_fermi": 0.0}
 DEF_CTX = {
-    "basis": "fb", "functional": "gga-pbe", "scf_threshold": 1.0e-6,
+    "basis": "fb", "functional": "gga-pbe",
+    "kpoint_integration": "gaussian-0.1", "scf_threshold": 1.0e-6,
     "cell_atom_count": 6, "cell_volume_per_formula_unit": 100.0}
 DEF_VER = {
     "grid_values": [25.0, 50.0, 100.0],
@@ -723,7 +724,8 @@ def _comp(**weights):
 
 def _pentry(entry_id, *, comp=None, lattice="cubic", gap=1.0,
             spin=0.0, kpd=50.0, basis="fb", functional="gga-pbe",
-            source="flight", system_type="crystalline",
+            integration="gaussian-0.1", source="flight",
+            system_type="crystalline",
             generated_at="2026-01-01"):
     """Construct an in-memory GuidanceEntry for predictor tests
     (no file I/O -- the predictor operates on loaded entries)."""
@@ -741,7 +743,8 @@ def _pentry(entry_id, *, comp=None, lattice="cubic", gap=1.0,
         signature=Signature(system_type, vector, family, onehot),
         measured=Measured(gap, "none" if gap == 0.0 else "direct",
                           spin, 0.0, kpd, None),
-        context=Context(basis, functional, 1.0e-6, 6, 100.0),
+        context=Context(basis, functional, integration, 1.0e-6,
+                        6, 100.0),
         verification=None,
         provenance=Provenance("f", "s", "c", "cur"))
 
@@ -762,7 +765,8 @@ class TestPredictorNonCrystalline:
             kpd=80.0)])
         query = Signature("amorphous", _comp(hydrogen=1.0), "",
                           (0.0,) * 6)
-        result = predict(space, query, "fb", "gga-pbe")
+        result = predict(space, query, "fb", "gga-pbe",
+                         "gaussian-0.1")
         assert result.predicted_kpoint_density == 80.0
         assert result.confidence == 1.0
         assert not result.is_under_trained
@@ -774,7 +778,8 @@ class TestPredictorNonCrystalline:
             "amorphous-1", system_type="amorphous", source="flight")])
         query = Signature("amorphous", _comp(hydrogen=1.0), "",
                           (0.0,) * 6)
-        result = predict(space, query, "fb", "gga-pbe")
+        result = predict(space, query, "fb", "gga-pbe",
+                         "gaussian-0.1")
         assert result.is_under_trained
         assert result.confidence == 0.0
 
@@ -787,7 +792,8 @@ class TestSubmodelSelection:
 
     def test_exact_submodel(self):
         pool = [_pentry("e%d" % i) for i in range(3)]   # fb,gga-pbe
-        entries, under = select_submodel(pool, "fb", "gga-pbe")
+        entries, under = select_submodel(
+            pool, "fb", "gga-pbe", "gaussian-0.1")
         assert not under
         assert len(entries) == 3
 
@@ -798,7 +804,8 @@ class TestSubmodelSelection:
                 + [_pentry("fb%d" % i, basis="fb") for i in range(3)]
                 + [_pentry("lda%d" % i, functional="lda")
                    for i in range(2)])
-        entries, under = select_submodel(pool, "mb", "gga-pbe")
+        entries, under = select_submodel(
+            pool, "mb", "gga-pbe", "gaussian-0.1")
         assert not under
         assert len(entries) == 3
         assert all(e.context.basis == "fb"
@@ -811,14 +818,31 @@ class TestSubmodelSelection:
                  _pentry("b", basis="mb", functional="lda"),
                  _pentry("c", basis="fb", functional="gga-pbe"),
                  _pentry("d", basis="mb", functional="gga-pbe")])
-        entries, under = select_submodel(pool, "eb", "scan")
+        entries, under = select_submodel(
+            pool, "eb", "scan", "gaussian-0.1")
         assert not under
         assert len(entries) == 4
 
     def test_under_trained_when_pool_too_thin(self):
         pool = [_pentry("a"), _pentry("b")]      # 2 < k_min (3)
-        entries, under = select_submodel(pool, "fb", "gga-pbe")
+        entries, under = select_submodel(
+            pool, "fb", "gga-pbe", "gaussian-0.1")
         assert under
+
+    def test_integration_separates_exact_submodel(self):
+        # Same basis + functional, different integration: a query
+        # for one method must not pull the other's entries into
+        # the exact sub-model.
+        pool = ([_pentry("g%d" % i, integration="gaussian-0.1")
+                 for i in range(3)]
+                + [_pentry("t%d" % i, integration="tetrahedral")
+                   for i in range(3)])
+        entries, under = select_submodel(
+            pool, "fb", "gga-pbe", "tetrahedral")
+        assert not under
+        assert len(entries) == 3
+        assert all(e.context.kpoint_integration == "tetrahedral"
+                   for e in entries)
 
 
 class TestKnnWeights:
@@ -879,7 +903,8 @@ class TestPredictEndToEnd:
             "crystalline", comp, "cubic",
             tuple(1.0 if n == "cubic" else 0.0
                   for n in CANONICAL_LATTICE_ORDER))
-        result = predict(space, query, "fb", "gga-pbe")
+        result = predict(space, query, "fb", "gga-pbe",
+                         "gaussian-0.1")
         assert not result.is_under_trained
         assert result.predicted_kpoint_density == pytest.approx(60.0)
         assert result.predicted_gap == pytest.approx(2.0)
@@ -899,7 +924,8 @@ class TestPredictEndToEnd:
             "crystalline", comp, "cubic",
             tuple(1.0 if n == "cubic" else 0.0
                   for n in CANONICAL_LATTICE_ORDER))
-        result = predict(space, query, "fb", "gga-pbe")
+        result = predict(space, query, "fb", "gga-pbe",
+                         "gaussian-0.1")
         assert result.predicted_kpoint_density == pytest.approx(55.0)
         assert result.confidence < 1.0
 
@@ -909,7 +935,8 @@ class TestPredictEndToEnd:
             "crystalline", _comp(), "cubic",
             tuple(1.0 if n == "cubic" else 0.0
                   for n in CANONICAL_LATTICE_ORDER))
-        result = predict(space, query, "fb", "gga-pbe")
+        result = predict(space, query, "fb", "gga-pbe",
+                         "gaussian-0.1")
         assert result.is_under_trained
         assert result.confidence == 0.0
         assert result.neighbor_entry_ids == ()

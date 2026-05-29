@@ -1986,23 +1986,29 @@ the C48.3 wiring (C74) is the first major consumer.
   sub-project of its own: stratified-sampling design,
   COD query scripting, allocation budget, post-seed
   calibration of the k-NN tuning knobs per DESIGN 7.10.
-- [ ] C76. Extend imago.py's result.toml output to expose
-  the post-SCF electronic-structure quantities the
-  guidance harvest (C72) needs: `gap_ev` and `gap_kind`
-  (computed from the eigenvalue spectrum -- direct vs
-  indirect by comparing band-edge k-points),
-  `total_magnetization` (already computed for spin-
-  polarized runs; closed-shell runs report 0.0),
-  `spin_polarization` (fractional at the Fermi level for
-  metals; 0.0 otherwise), and `dos_at_fermi` for metals
-  (per eV per formula unit, computed from the DOS
-  histogram or LAT integration when available).  Each
-  field is optional in the schema -- a closed-shell
-  molecular calc with no spin polarization simply omits
-  spin/dos.  Small Fortran-side extension: post-SCF
-  analysis step + new fields written into the existing
-  result.toml emitter (DESIGN 6.1).  Prerequisite for
-  C72.
+- [ ] C76. Surface the electronic-structure quantities the
+  guidance harvest (C72) needs by making the **iteration
+  file the single primary read surface** (programmer
+  guidance, 2026-05-29).  It already carries `total_energy`
+  and -- spin-polarized runs only -- the magnetization
+  column.  Add to the iteration data: `gap_ev` + `gap_kind`,
+  and a **raw `dos_at_fermi`** (E_f DOS) -- deliberately
+  crude, just the metal/semiconductor/insulator signal that
+  feeds the two-stage predictor.  Putting these in the
+  iteration data means any plain SCF run yields them, so the
+  harvest never has to decide whether to run `-scfdos`; the
+  accurate `.60` DOS from `-scfdos` stays available but is
+  not required.  `imago.py` extends its iteration-file
+  parser (the primary read), populating `result.toml` from
+  it.  Each field optional in the guidance schema (a
+  non-spin / non-metal calc omits magnetization / dos).
+  Small Fortran-side change to the iteration-file writer +
+  the imago.py parser (DESIGN 6.1).  Prerequisite for C72.
+  NOTE: gap / Fermi-DOS / spin depend on the k-point
+  integration method, now recorded as Context
+  `kpoint_integration` and part of the predictor sub-model
+  key (DESIGN 7.2/7.6); the harvest fills it from the flight
+  options.
 
 ### Phase L -- resource & cost dataspace (VISION 6, ARCH 11, DESIGN 8)
 

@@ -4805,11 +4805,13 @@ predict_settings(
 
 2.  Query the predictor.  `predict` is the DESIGN 7.4
     free function over the loaded Dataspace, not a method
-    on a `db` object; the (basis, functional) sub-model
-    is selected from the options dict (DESIGN 7.6 step 2):
+    on a `db` object; the
+    (basis, functional, kpoint_integration) sub-model is
+    selected from the options dict (DESIGN 7.6 step 2):
         result = predict(dataspace, query_sig,
                          options["basis"],
-                         options["functional"])
+                         options["functional"],
+                         options["kpoint_integration"])
 
     `result` is a PredictionResult (DESIGN 7.4) carrying
     the predicted converged k-density, a combined
@@ -4905,8 +4907,11 @@ predict_settings(
 
       sweep = SweepRecord(
           varied_axes = ("kpt-density",),
-          fixed_axes  = { "basis":      options["basis"],
-                          "functional": options["functional"] },
+          fixed_axes  = {
+              "basis":              options["basis"],
+              "functional":         options["functional"],
+              "kpoint_integration": options["kpoint_integration"],
+          },
       )
 
     Return (Flight(units=units, sweep=sweep, ...),
@@ -4931,8 +4936,9 @@ can stage it manually per DESIGN 7.4 / 7.8.
 
 - DESIGN 7.4 -- signature computation
   (`compute_signature`, returning a `Signature`) and the
-  `predict(dataspace, query, basis, functional)` free
-  function (not a method on a `db` object).
+  `predict(dataspace, query, basis, functional,
+  kpoint_integration)` free function (not a method on a
+  `db` object).
 - DESIGN 7.6 -- the k-NN regression `predict()` runs over
   the dataspace, with the variance-aware confidence.
 - DESIGN 7.7 -- `build_verification_grid` widening
@@ -5496,6 +5502,12 @@ electronic-structure quantities that drive it (`gap_ev`,
                                       predictor groups by
                                       this value into
                                       sub-models.
+  kpoint_integration          string  The Brillouin-zone integration method
+                                      (e.g. `"tetrahedral"`,
+                                      `"gaussian-0.1"`).  Part of the
+                                      predictor sub-model key with basis and
+                                      functional, because gap and Fermi-DOS
+                                      depend on it.
   scf_threshold               real    The SCF threshold
                                       used (e.g.
                                       `1.0e-6`).
@@ -5634,7 +5646,7 @@ decide whether to refuse a file.  Day-1 contents:
    "none"` if and only if `gap_ev == 0.0` (a metal).
 7. `kpoint_density` must be `> 0`.
 8. `basis` must equal one of `"mb"`, `"fb"`, `"eb"`.
-   `functional` must be non-empty.
+   `functional` and `kpoint_integration` must be non-empty.
 9. `cell_atom_count` must be `> 0`;
    `cell_volume_per_formula_unit` must be `> 0`.
 10. If `[entry.verification]` is present (required for
@@ -5712,6 +5724,7 @@ dos_at_fermi        = 0.0000000000000000e+00
 [entry.context]
 basis                        = "fb"
 functional                   = "gga-pbe"
+kpoint_integration           = "gaussian-0.1"
 scf_threshold                = 1.0000000000000000e-06
 cell_atom_count              = 6
 cell_volume_per_formula_unit = 4.6253846153846157e+02
@@ -5933,6 +5946,7 @@ class Context:
     """Calculation context recorded with each entry."""
     basis:                        str     # "mb" | "fb" | "eb"
     functional:                   str     # e.g. "gga-pbe"
+    kpoint_integration:           str     # e.g. "gaussian-0.1"
     scf_threshold:                float
     cell_atom_count:              int
     cell_volume_per_formula_unit: float   # Bohr^3
@@ -6157,20 +6171,27 @@ predictor first switches on the query's system_type:
 
 The rest of this section describes the crystalline path.
 
-**Step 2 -- sub-model selection by (basis, functional).**
+**Step 2 -- sub-model selection by (basis, functional,
+kpoint_integration).**
 The predictor maintains a sub-model per (basis,
-functional) pair: the k-NN draws only on entries whose
-context matches.  Justification: changing the basis or
-the functional can shift the converged k-density and
-the measured gap meaningfully, and we do not want
-cross-functional interpolation to wash out that signal.
+functional, kpoint_integration) triple: the k-NN draws only
+on entries whose context matches.  Justification: changing
+the basis, the functional, or the Brillouin-zone integration
+method can shift the converged k-density and the measured
+gap / Fermi-DOS meaningfully, and we do not want
+interpolation across them to wash out that signal -- a
+density converged under analytic tetrahedral integration is
+not interchangeable with one converged under Gaussian
+smearing.
 
-If the queried (basis, functional) sub-model has
-fewer than `k_min = 3` entries, the predictor:
+If the queried (basis, functional, kpoint_integration)
+sub-model has fewer than `k_min = 3` entries, the predictor:
 
 - Falls back to the most-populous sub-model under the
-  same functional family (e.g. `(mb, gga-pbe)` ->
-  `(fb, gga-pbe)` if mb is sparse).
+  same functional family (e.g. `(mb, gga-pbe, *)` ->
+  `(fb, gga-pbe, *)` if mb is sparse).  This degraded
+  fallback ignores basis and integration; it is the
+  best-effort path when an exact sub-model is too thin.
 - If no functional-family fallback exists, falls back
   to the system_type's overall pool (ignoring context).
 - If the overall pool also has fewer than `k_min`
@@ -6380,7 +6401,8 @@ below is what it executes.
 1.  query_sig = compute_signature(target, system_type,
                                   dataspace.group_table)
 
-2.  pred = predict(dataspace, query_sig, basis, functional)
+2.  pred = predict(dataspace, query_sig, basis,
+                   functional, kpoint_integration)
 
 3.  if not verify:
         # trust mode (DESIGN 6.2.1).
@@ -6671,8 +6693,8 @@ The dataspace starts empty.  Several things must work
 gracefully in that state and as the dataspace fills.
 
 **Empty-dataspace prediction.**  `predict(dataspace,
-query, basis, functional)` over an empty Dataspace
-returns
+query, basis, functional, kpoint_integration)` over an
+empty Dataspace returns
 `PredictionResult(is_under_trained = True, ...)`.  The
 flight-builder helper (DESIGN 6.2.8) then falls back to
 the wide-grid default per 7.7 step 3.  The under-trained

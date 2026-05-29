@@ -5274,6 +5274,7 @@ dataclass Measured:
 dataclass Context:
     basis                        : str  # mb|fb|eb
     functional                   : str  # e.g. "gga-pbe"
+    kpoint_integration           : str  # e.g. "gaussian-0.1"
     scf_threshold                : float
     cell_atom_count              : int
     cell_volume_per_formula_unit : float   # Bohr^3
@@ -5566,21 +5567,25 @@ function load_entry(path, system_type_dir, seen_ids):
     require("context" in raw["entry"], path,
         "missing [entry.context]")
     c = raw["entry"]["context"]
-    for f in ("basis", "functional", "scf_threshold",
-              "cell_atom_count", "cell_volume_per_formula_unit"):
+    for f in ("basis", "functional", "kpoint_integration",
+              "scf_threshold", "cell_atom_count",
+              "cell_volume_per_formula_unit"):
         require(f in c, path, "missing context." + f)
-    # Rule 8: basis valid; functional non-empty.
+    # Rule 8: basis valid; functional + kpoint_integration
+    # non-empty.
     require(c["basis"] in VALID_BASES, path,
         "invalid basis: " + c["basis"])
     require(len(c["functional"]) > 0, path,
         "functional must be non-empty")
+    require(len(c["kpoint_integration"]) > 0, path,
+        "kpoint_integration must be non-empty")
     # Rule 9: cell counts/volumes positive.
     require(c["cell_atom_count"] > 0, path,
         "cell_atom_count must be > 0")
     require(c["cell_volume_per_formula_unit"] > 0.0, path,
         "cell_volume_per_formula_unit must be > 0")
     context = Context(
-        c["basis"], c["functional"],
+        c["basis"], c["functional"], c["kpoint_integration"],
         c["scf_threshold"], c["cell_atom_count"],
         c["cell_volume_per_formula_unit"])
 
@@ -5753,6 +5758,8 @@ function format_entry(entry, slug):
     out.append("[entry.context]")
     emit_kv(out, "basis",      entry.context.basis)
     emit_kv(out, "functional", entry.context.functional)
+    emit_kv(out, "kpoint_integration",
+            entry.context.kpoint_integration)
     emit_kv(out, "scf_threshold", entry.context.scf_threshold)
     emit_kv(out, "cell_atom_count",
             entry.context.cell_atom_count)
@@ -5824,7 +5831,8 @@ It always returns a `PredictionResult` (never None); the
 how seriously to take it (DESIGN 7.4).
 
 ```
-function predict(dataspace, query, basis, functional):
+function predict(dataspace, query, basis, functional,
+                 kpoint_integration):
     pool = dataspace.entries_by_system_type.get(
                query.system_type, [])
 
@@ -5832,7 +5840,7 @@ function predict(dataspace, query, basis, functional):
         return predict_non_crystalline(pool)
 
     entries, under_trained = select_submodel(
-        pool, basis, functional)
+        pool, basis, functional, kpoint_integration)
     if under_trained:
         # No usable sub-model: the caller (15.6) falls back
         # to the wide-grid default (DESIGN 7.9).  The
@@ -5878,17 +5886,22 @@ function predict_non_crystalline(pool):
         predicted_spin_pol       = None)
 ```
 
-Sub-model selection is the (basis, functional) ->
+Sub-model selection is the
+(basis, functional, kpoint_integration) ->
 functional-family -> overall-pool fallback chain of DESIGN
 7.6 step 2.  `is_under_trained` is set only when even the
 overall pool is too thin.
 
 ```
-function select_submodel(pool, basis, functional):
-    # 1. Exact (basis, functional) sub-model.
+function select_submodel(pool, basis, functional,
+                         kpoint_integration):
+    # 1. Exact (basis, functional, kpoint_integration)
+    #    sub-model.
     exact = [e for e in pool
              if e.context.basis == basis
-             and e.context.functional == functional]
+             and e.context.functional == functional
+             and e.context.kpoint_integration
+                 == kpoint_integration]
     if len(exact) >= k_min:
         return exact, False
 
@@ -6077,7 +6090,8 @@ function predict_settings(structure, options, dataspace,
         sc, system_type, dataspace.group_table)
 
     result = predict(dataspace, query_sig,
-                     options["basis"], options["functional"])
+                     options["basis"], options["functional"],
+                     options["kpoint_integration"])
 
     # Decide the grid + policy (DESIGN 7.7 step 3).
     if not verify:
@@ -6114,8 +6128,10 @@ function predict_settings(structure, options, dataspace,
     # recovers the varied axis without path-parsing.
     sweep = SweepRecord(
         varied_axes = ("kpt-density",),
-        fixed_axes  = { "basis":      options["basis"],
-                        "functional": options["functional"] })
+        fixed_axes  = {
+            "basis":              options["basis"],
+            "functional":         options["functional"],
+            "kpoint_integration": options["kpoint_integration"]})
 
     record = PredictionRecord(
         policy             = policy,
@@ -6249,6 +6265,8 @@ function harvest_flight(workspace_root, db_root, dataspace):
             context      = Context(
                 basis      = flight.sweep.fixed_axes["basis"],
                 functional = flight.sweep.fixed_axes["functional"],
+                kpoint_integration = flight.sweep.fixed_axes[
+                    "kpoint_integration"],
                 scf_threshold = grid[0].options["scf_threshold"],
                 cell_atom_count = chosen_rt["cell_atom_count"],
                 cell_volume_per_formula_unit = chosen_rt[
