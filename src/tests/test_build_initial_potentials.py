@@ -193,7 +193,7 @@ class TestRule2RequiredSolidFields:
                            match="manifest rule 2.*reference_id"):
             load_manifest_v2(path)
 
-    def test_missing_convergence_raises(self, tmp_path):
+    def test_missing_scf_threshold_raises(self, tmp_path):
         path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
             "scf_threshold = 1.0e-6\n", ""))
         with pytest.raises(

@@ -4606,8 +4606,8 @@ all domain harvest is client-side (13.6).
 ```
 dataclass KeyFields:
     scalars : dict   # verbatim-compared identity fields,
-                     #   e.g. {kpoint_spec, convergence_
-                     #   threshold, imago_commit}
+                     #   e.g. {kpoint_spec, scf_threshold,
+                     #   imago_commit}
     files   : list   # logical names of key files to
                      #   byte-compare, e.g. ["structure"]
 
@@ -4625,15 +4625,15 @@ dataclass CalcUnit:
     key_fields  : KeyFields    # client-declared identity
 
 dataclass Flight:
-    root           : str       # workspace root directory
-    units          : list      # list[CalcUnit]
+    root             : str     # workspace root directory
+    units            : list    # list[CalcUnit]
     default_wingbeat : str     # wingbeat name for None units
-    parsl_config   : object    # a Parsl Config (deployment)
-    sweep          : SweepRecord | None  # varied/fixed axes
+    parsl_config     : object  # a Parsl Config (deployment)
+    sweep            : SweepRecord | None  # varied/fixed axes
                                #   when built by the predict-
                                #   then-verify helper (DESIGN
                                #   6.2.8); None otherwise
-    on_outcome     : callable | None  # per-unit callback
+    on_outcome       : callable | None  # per-unit callback
 
 dataclass SweepRecord:
     varied_axes : tuple[str,...]  # axis names, in the order
