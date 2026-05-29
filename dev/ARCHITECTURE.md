@@ -1733,3 +1733,311 @@ read entries.
   default approach in DESIGN 7.6 is sub-models per
   combination, with fallback to the most-similar
   combination when the queried one is empty.
+
+## 11. Resource & Cost Guidance Dataspace
+
+### 11.1 Overview and Relationship to Section 10
+
+VISION Goal 6 adds a second curated dataspace that records,
+for every imago run, what it *cost* to compute -- peak
+memory, disk footprint, and walltime -- as a function of the
+problem size and the parallel configuration the run used.
+It is a deliberate sibling of the historical-guidance
+dataspace (section 10), not an extension of it: the two
+share the library / producer / consumer discipline
+(Principle 11), the staging-then-promote curation flow, the
+schema-versioning-plus-migration pattern, and the
+registry-validated key discipline -- but they are
+independent artifacts with independent schemas, predictors,
+and lifetimes.
+
+The reason they must stay separate is portability.  A
+section-10 entry ("MgO converges at k-density 60") is
+hardware-independent: it is equally true on a laptop and a
+national supercomputer, so that dataspace accumulates
+globally and never goes stale when hardware changes.  A
+resource entry ("this run used 42 GB and 3.1 h") is the
+opposite -- it is meaningful *only* on the machine that
+produced it.  Folding cost fields into section-10 entries
+would contaminate the one artifact whose value depends on
+being portable.  The resource dataspace is therefore
+partitioned by a **hardware fingerprint** (11.2), the way
+section 10 partitions by `system_type`.
+
+### 11.2 Layout
+
+The artifact lives under its own root in `share/` (proposed
+`share/resourceGuidance/`, final name in DESIGN 8),
+mirroring section 10's `entries/` + `staging/` split and
+its `SCHEMA_VERSION` marker.  Entries are partitioned one
+directory level down by hardware fingerprint rather than by
+system_type:
+
+```
+<root>/
+  SCHEMA_VERSION                bare-integer marker.
+  hardware_registry.toml        known fingerprints + the
+                                probed attributes that
+                                define each (analogous to
+                                section 10's gap_groups).
+  entries/<fingerprint>/*.toml  promoted observations.
+  staging/<fingerprint>/*.toml  harvested, awaiting a
+                                curator.
+```
+
+The **hardware fingerprint** is a short stable key (e.g.
+`<cpu-model>-<cores-per-node>-<mem-per-node>`, exact recipe
+in DESIGN 8) naming the node type a run executed on.  It is
+the coarse partition within which cost is comparable.  The
+finer parallel-configuration knobs (rank/thread counts,
+pinning) and the build configuration (11.3) instead live
+inside each observation and feed the predictor as features,
+not partitions: hardware is partitioned because cost is never
+comparable across machines, but parallel-config and build
+choices are kept comparable on purpose -- the whole point of
+recording them is to learn which configuration, and which
+build, is cheapest.
+
+The **atomic unit is one execution observation** -- a single
+run under a single configuration -- never collapsed to a
+per-system or per-fingerprint summary (VISION Goal 6).  Two
+runs of the same structure under different rank counts are
+two observations.  This granularity is what lets the same
+artifact answer "how much will *this* configuration need"
+(provisioning, near-term) and, later, "which configuration
+is most efficient" (optimization) and "how does cost scale
+with size" (scaling studies), with no schema change.
+
+### 11.3 The Four Blocks of an Observation
+
+Each observation TOML carries four content blocks plus
+provenance (field-level schema in DESIGN 8):
+
+- **Size signature** -- the cost-driving dimensions of the
+  problem: atom count, electron count (with the core/valence
+  split, since the orthogonalized secular dimension is the
+  real driver), basis-function count, wave-function
+  representation (1-component Schrodinger vs 4-component
+  Dirac -- the 4-spinor structure multiplies the secular
+  dimension), k-point count, and spin channels.  Derived
+  from the makeinput inputs and the structure; known before
+  the run.
+- **Execution configuration** -- how the run was launched:
+  node count, cores per node, total cores, MPI rank count,
+  OpenMP threads per rank, and process/thread binding (core-
+  or socket-pinning).  Captured as an **extensible,
+  registry-validated key-value table**: a checked-in
+  `EXECUTION_KNOB_REGISTRY` enumerates the recognized knobs,
+  and a new knob (a GPU count, a NUMA policy) is added by
+  extending the registry and bumping the schema version --
+  never by silently redefining fields.  Known at dispatch
+  time from the flight's Parsl provider / launch spec.
+- **Build configuration** -- the toolchain the binary was
+  compiled with, recorded in *two layers* so it serves both
+  the accumulating artifact and a targeted experiment.  The
+  **coarse layer** is a registry-validated set of normalized
+  knobs that act as predictor features and the axis the
+  artifact groups by: compiler family and major version,
+  optimization level and a coarse arch/SIMD tag, and for each
+  key library (HDF5, ScaLAPACK, BLAS/LAPACK, MPI) its
+  implementation, major version, and cost-relevant variant
+  (HDF5 parallel vs serial, BLAS threaded vs sequential).
+  Like the execution configuration this is an extensible
+  `BUILD_KNOB_REGISTRY`, but deliberately bucketed (an
+  optimization *level*, not a flag string; a *major* version,
+  not a patch) so a build is a comparable feature, not a
+  fragmenting one.  The **fidelity layer** is the complete
+  compile string and full library build details, stored
+  verbatim as provenance (never a predictor feature, just a
+  string -- cheap to keep), so nothing is lost.  A later
+  study of one specific flag then has two routes: mine its
+  state out of the verbatim string post-hoc, or *promote* the
+  flag to a named knob in the registry so it becomes a
+  first-class comparable feature for that study -- without
+  coarsening the global artifact.  Such a study is itself
+  just a flight whose varied axis is the flag (on/off) across
+  a limited grid of systems (the DESIGN 6 sweep).  Known at
+  compile time (11.4).
+- **Measured resources** -- what the run actually used: peak
+  resident memory, disk footprint (output plus scratch
+  high-water mark), and walltime, with optional per-phase
+  timings (setup, SCF iteration, eigensolve,
+  post-processing).  Like section 10's `METRIC_REGISTRY`,
+  the metric set is itself a registry so new measurements
+  append cleanly.  Captured after the run (11.4).
+
+### 11.4 Data Flow and Capture
+
+The producer is again the flight layer; the consumer is the
+provisioner.  Capture draws from four sources, joined at
+harvest:
+
+1. **Dispatch-time (known before the run):** the size
+   signature (from makeinput + structure) and the execution
+   configuration (from the kaleidoscope flight's Parsl
+   provider and launch spec).  The wingbeat records these
+   into the run directory alongside its inputs.
+2. **Build manifest (compile time):** the CMake build emits a
+   `build_info.toml` -- compiler and full flag string, plus
+   the detected versions and variants of HDF5, ScaLAPACK,
+   BLAS/LAPACK, and MPI -- installed beside the binary, and
+   imago can echo its compiled-in configuration.  The harvest
+   reads this for both layers of the build block (11.3): the
+   coarse knobs and the verbatim compile string.
+3. **Scheduler accounting (after the run):** SLURM `sacct`
+   supplies `MaxRSS` (peak memory), disk read/write
+   high-water marks, and `Elapsed` (walltime); a
+   `/usr/bin/time -v` wrapper is the fallback off-scheduler.
+4. **Imago self-report (optional, after the run):** the
+   Fortran side may write its own peak allocation and
+   per-phase wall timings into `result.toml`, which is more
+   precise than scheduler granularity for the eigensolve
+   phase specifically.
+
+A dedicated harvest helper (`resource_harvest.py`, parallel
+to section 10's harvest) walks the finished flight's
+workspace, assembles one observation per run dir from these
+sources, and writes it to `staging/<fingerprint>/`.  A
+curator promotes with the same staging-then-promote
+discipline as section 10.  The two harvests are separate
+tools reading the *same* workspace; a single completed run
+can feed both a section-10 convergence observation and a
+section-11 cost observation.
+
+Unlike section 10, **failed runs are not always discarded**:
+an out-of-memory or walltime-exceeded run is positive
+evidence that a configuration is insufficient at that size,
+which is exactly the signal a provisioner needs.  How much
+of that negative data to retain -- and how to mark a
+censored "needed at least X" so the predictor treats it
+differently from a measured "used exactly X" -- is an open
+question (11.8).
+
+### 11.5 Feature Space and the Predictor
+
+Within a hardware fingerprint, cost is a smooth,
+physics-grounded function of the size signature and the
+execution configuration.  This argues for a
+**physics-informed regressor** rather than the pure k-NN of
+section 10: memory grows roughly as the square of the
+secular dimension and the eigensolve as its cube, so the
+model can fit scaling exponents (a power law in the secular
+dimension, scaled by the parallel configuration) instead of
+interpolating raw neighbors.  A k-NN fallback is reasonable
+when a fingerprint is thinly populated.  The predictor
+choice is deferred to DESIGN 8 and is explicitly *not*
+required for the artifact to begin accumulating data.
+
+The **near-term consumer is provisioning** (VISION Goal 6):
+given a chosen parallel configuration for a new run, the
+predictor estimates the memory, disk, and walltime the run
+will need, and the flight layer turns those into SLURM
+resource requests with a safety margin.  This directly
+serves Principle 6 (cost discipline at SCF setup) and
+replaces today's hand-guessed requests, whose failure modes
+are wasted allocation (over-request) or killed jobs
+(under-request).
+
+Because every observation stores its full configuration, the
+same artifact later supports three forward-looking consumers
+with no schema change: **configuration optimization**
+(compare predicted cost across candidate configurations to
+recommend the most efficient), **build comparison** (compare
+cost across compiler flags or library builds on one
+fingerprint -- the targeted flag study of 11.3), and
+**scaling studies** (fit and report cost-vs-size curves).
+These are not near-term, but the granular-observation design
+(11.2) is chosen precisely so they need no migration.
+
+### 11.6 Module and Script Impact
+
+- `src/scripts/resource_db.py` (new): the library --
+  load / validate / hand-formatted emit, the hardware
+  fingerprint plus registries, and the predictor.  Built on
+  the same patterns as `guidance_db.py` (section 10 / C70).
+- `src/scripts/resource_harvest.py` (new): the harvest
+  producer (11.4).
+- A provisioning consumer in the flight layer (the
+  kaleidoscope flight-builder helper, DESIGN 6.2.8, or a thin
+  sibling) that reads the predictor and annotates the Parsl
+  provider's resource request.  As with section 10, the
+  dependency is one-way: the flight layer reads the
+  dataspace; the dataspace does not depend on the flight
+  layer.
+- `src/scripts/resource_migrate.py` (future): the schema
+  migration tool, mirroring the planned `guidance_migrate`.
+  Not day-1 scope.
+- CMake build-system hook: emit `build_info.toml` (compiler
+  and full flag string, detected library versions/variants)
+  at configure/install time, so the build block is captured
+  without hand-entry (11.4).
+- Wingbeat / `imago.py` capture hooks (11.4) to record the
+  dispatch-time config and scrape scheduler accounting into
+  the run directory.
+
+### 11.7 Relationship to Other Prongs
+
+- **Section 10 (historical guidance):** orthogonal axes of
+  the same run.  Section 10 answers "what operating point is
+  *accurate*" (portable, chemistry-keyed); section 11
+  answers "what will it *cost*" (hardware-keyed).  One
+  completed run can produce one observation in each.  They
+  share library scaffolding and curation discipline only,
+  never contents or cross-references -- the same boundary
+  section 10 draws against DESIGN 5 (10.7).
+- **DESIGN 6 (kaleidoscope):** the flight layer is the
+  producer (it captures config + accounting) and the home of
+  the provisioning consumer.  The dataspace does not depend
+  on kaleidoscope; flights run fine without it (callers
+  request resources manually).
+- **DESIGN 5 (initial-potential build) / C48.3:** a heavy
+  batch consumer.  Once seeded, the potential-DB build can
+  size its many per-solid SCF jobs from predicted cost
+  rather than a one-size-fits-all request, cutting both
+  queue rejection and wasted allocation across a large
+  flight.
+
+### 11.8 Open Architectural Questions
+
+- **Hardware fingerprint granularity.**  Too coarse (just
+  CPU model) lumps differently-provisioned partitions
+  together; too fine (every BIOS/microcode revision)
+  fragments the data so no fingerprint accumulates enough
+  observations to predict from.  The right granularity is
+  empirical; DESIGN 8 proposes a default recipe and a
+  fallback when a fingerprint is under-populated.
+- **Reliable peak-memory capture.**  `sacct MaxRSS` is
+  sampled and can miss short-lived spikes; `/usr/bin/time`
+  is per-process, not per-job; the Fortran self-report is
+  precise but only for what imago itself allocates (not MPI
+  buffers or libraries).  Which source is authoritative, and
+  how to reconcile them, is open.
+- **Node sharing and contention noise.**  A run that shares a
+  node with other jobs sees inflated, noisy walltime and
+  memory pressure.  Whether to record an exclusivity flag and
+  weight or filter shared-node observations is open.
+- **Censored (failed-run) data.**  As in 11.4, an OOM or
+  timeout is a bound, not a point measurement.  Whether and
+  how the schema and predictor represent censored
+  observations is open.
+- **Any portable normalization.**  Walltime is not portable,
+  but core-hours or a hardware-normalized cost index might
+  transfer partially across fingerprints.  Whether a
+  normalized cost is worth recording (to bootstrap a new
+  fingerprint from related ones) is open.
+- **Which build knobs deserve coarse-layer promotion.**  The
+  two-layer build record (11.3) bounds this -- the full
+  compile string is always kept, so nothing is lost -- but
+  *which* knobs are stable and cost-relevant enough to live
+  in the coarse `BUILD_KNOB_REGISTRY` (and thus drive the
+  predictor by default) is a judgment call DESIGN 8 must
+  seed and the curator revisits as evidence accumulates.
+- **Build effects on numerics, not just cost.**  A build
+  block primarily conditions cost here, but the same choices
+  (fast-math, a different BLAS summation order) can perturb
+  low-order digits of the result.  That is a reproducibility
+  concern straddling section 10, where today only
+  `imago_commit` keys the binary's identity.  Whether the
+  build block should also be referenced from the convergence
+  side -- against the no-cross-reference boundary (11.7) --
+  is an open question to settle in DESIGN, not assume now.

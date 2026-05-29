@@ -117,6 +117,56 @@ flight instead of an exhaustive grid search.
    a guesser of settings, and it makes routine
    convergence work on new systems vastly cheaper than
    today's full-grid sweeps.
+6. **Accumulate resource-and-cost guidance as a
+   hardware-aware dataspace.** Build a second curated
+   dataspace -- a sibling of Goal 5, sharing its library
+   scaffolding but kept deliberately separate -- that
+   records, for every imago run, how much it *cost*: the
+   problem-size signature (atom count, electron count with
+   the core/valence split that an orthogonalized method
+   cares about, basis-function count, the wave-function
+   representation -- 1-component Schrodinger versus
+   4-component Dirac, which multiplies the secular
+   dimension -- k-point count, and spin channels), the
+   execution configuration it ran under
+   (cores, nodes, cores-per-node, MPI ranks, OpenMP threads
+   per rank, core/socket pinning -- captured as an
+   extensible, registry-validated set so new knobs like
+   GPUs or NUMA policies append rather than break the
+   schema), the build and toolchain it was compiled with
+   (compiler family and version, optimization level, and how
+   the key libraries -- HDF5, ScaLAPACK, BLAS/LAPACK, MPI --
+   were built, e.g. parallel versus serial or threaded versus
+   sequential), recorded at a deliberately coarse granularity
+   so build choices become a comparable feature rather than a
+   source of fragmentation, while the full compile string is
+   retained as provenance so a targeted study of one specific
+   flag can still recover it; and the measured resources (peak
+   memory, disk footprint, walltime, and optionally per-phase
+   timings).
+   The atomic record is a single *execution observation* --
+   one run under one configuration -- never collapsed to a
+   per-system summary, so the same artifact answers several
+   questions.  Crucially, unlike the convergence dataspace,
+   this data is hardware-specific and *not* portable across
+   machines: a walltime measured on one cluster is
+   misinformation on another.  The dataspace is therefore
+   partitioned by a hardware fingerprint, and a
+   physics-informed regressor (memory grows like the square
+   of the secular dimension, the eigensolve like its cube)
+   learns the cost surface within each fingerprint.  The
+   near-term consumer is *provisioning*: given a chosen
+   parallel configuration, predict the memory, disk, and
+   walltime a run will need so the flight layer fills SLURM
+   resource requests that neither overflow memory nor hit
+   the walltime limit -- replacing today's hand-guessed
+   requests and advancing the cost discipline of Principle
+   6.  Because every observation records its full
+   configuration, the same artifact later supports
+   recommending the most efficient parallel configuration
+   and pure scaling studies, with no schema change.  Like
+   Goal 5, it grows monotonically through a staging step
+   that a curator promotes.
 
 ## Design Principles
 
