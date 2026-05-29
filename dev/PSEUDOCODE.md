@@ -4634,6 +4634,11 @@ dataclass Flight:
                                #   then-verify helper (DESIGN
                                #   6.2.8); None otherwise
     on_outcome       : callable | None  # per-unit callback
+    metadata         : dict    # opaque per-key tables the
+                               #   core round-trips verbatim
+                               #   as [flight.<key>] and never
+                               #   reads (Principle 9); 6.2.8
+                               #   stashes the prediction here
 
 dataclass SweepRecord:
     varied_axes : tuple[str,...]  # axis names, in the order
@@ -4658,6 +4663,11 @@ function serialize_flight(flight):
                units = [ as_dict(u) for u in flight.units ] }
     if flight.sweep is not None:
         record["sweep"] = as_dict(flight.sweep)
+    # Each metadata[key] becomes a verbatim [flight.<key>]
+    # table; the core never reads the contents (Principle 9).
+    # The 6.2.8 helper stashes [flight.prediction] this way.
+    for key, table in flight.metadata.items():
+        record[key] = table
     write_toml(join(flight.root, "flight.toml"), record)
 ```
 
@@ -6151,11 +6161,11 @@ function attach_prediction_record(flight, record):
     flight.metadata["prediction"] = as_dict(record)
 ```
 
-This requires one small addition flagged for DESIGN 6.2.1 /
-PSEUDOCODE 13.1: the generic `metadata` field on `Flight`
-plus the `serialize_flight` line that emits each
-`metadata[key]` as a `[flight.<key>]` block.  It keeps the
-core domain-agnostic while letting the §7 helper persist the
+This rests on the generic `metadata` field on `Flight` plus
+the `serialize_flight` loop that emits each `metadata[key]`
+as a `[flight.<key>]` block -- both now defined canonically
+in DESIGN 6.2.1 / PSEUDOCODE 13.1.  It keeps the core
+domain-agnostic while letting the §7 helper persist the
 prediction provenance the harvest needs.
 
 ### 15.7 Harvest and promote (DESIGN 7.8)

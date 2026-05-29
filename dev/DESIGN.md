@@ -4243,6 +4243,13 @@ Flight
                   helper (6.2.8); None for hand-built
                   flights that did not declare a sweep
   on_outcome    optional per-unit callback (6.2.6)
+  metadata      dict[str, dict]: opaque per-key tables the
+                  dispatch core round-trips verbatim into
+                  flight.toml as [flight.<key>] blocks but
+                  never interprets (Principle 9).  Default
+                  empty; the predict-then-verify helper
+                  (6.2.8) stashes its PredictionRecord as
+                  metadata["prediction"]
 
 SweepRecord
   varied_axes   tuple[str, ...]: axis names in the

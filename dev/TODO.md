@@ -637,13 +637,15 @@
   functional), not a stale db.predict method) and the
   grid_energies array (so auto-promote runs from a staging
   file alone).  One smaller pinning surfaced WHILE writing
-  P9 and is recorded inside 15.6 + carried into C71: the
-  PredictionRecord reaches flight.toml via a generic
-  opaque Flight.metadata dict that serialize_flight
-  emits verbatim as [flight.<key>], keeping the dispatch
-  core domain-agnostic (Principle 9) -- this needs the
-  matching Flight.metadata field added in C71's model
-  catch-up.
+  P9 and is recorded inside 15.6: the PredictionRecord
+  reaches flight.toml via a generic opaque Flight.metadata
+  dict that serialize_flight emits verbatim as
+  [flight.<key>], keeping the dispatch core domain-agnostic
+  (Principle 9).  The doc-level definition is now in place
+  (the metadata field + serialize loop added to DESIGN 6.2.1
+  + PSEUDOCODE 13.1, 2026-05-29); only the model.py
+  implementation of that field remains, as part of C71's
+  model catch-up.
 
 ### Resource & cost dataspace (VISION 6, ARCH 11, DESIGN 8)
 
