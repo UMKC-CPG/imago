@@ -5745,7 +5745,16 @@ curator          = "guidance_harvest.py"
 ```
 
 The sketch uses 16-significant-digit float formatting per
-the emitter contract in 7.5.  Reading this entry:
+the emitter contract in 7.5.  Note that the float values
+above are shown in their idealized decimal form for
+readability; the bytes the emitter actually writes are the
+exact binary64 `%.16e` expansion, so a value like
+`gap_ev = 3.05` appears on disk as
+`3.0499999999999998e+00`, and `scf_threshold = 1e-6` as
+`9.9999999999999995e-07`.  Exactly-representable values
+(`0.0`, `5.0000000000000000e+01`, the 2/3 and 1/3
+composition weights) are byte-identical either way.
+Reading this entry:
 
 - The composition vector says TiO2 = 2/3 chalcogen (O,
   oxygen) + 1/3 transition metal (Ti).  Exactly two
