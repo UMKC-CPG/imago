@@ -166,6 +166,11 @@ def test_harvest_converged(tmp_path):
     assert abs(r.total_energy - (-10.5)) < 1e-12
     assert r.outputs["iteration"].endswith("gs_iter-fb.dat")
     assert r.runtime_seconds == 1.23
+    # The 5-column fixture predates the gap/magnetization
+    # columns; the length-gated reads leave the new fields None.
+    assert r.total_magnetization is None
+    assert r.gap_ev is None
+    assert r.gap_kind is None
 
 
 def test_harvest_not_converged(tmp_path):
@@ -191,6 +196,40 @@ def test_harvest_no_scf_is_converged(tmp_path):
     assert r.status is RunStatus.CONVERGED
     assert r.scf_iterations is None
     assert r.total_energy is None
+
+
+def test_harvest_reads_gap_and_magnetization(tmp_path):
+    """The fixed 8-column iteration row surfaces magnetization
+    (col 6), the band gap (col 7, Hartree -> eV), and gap_kind
+    (col 8 integer code)."""
+    (tmp_path / "imago.dat").write_text(
+        "CONVERGENCE_TEST\n  1.0e-4\n")
+    # iter c2 c3 delta energy mag gap_hartree gap_code
+    (tmp_path / "gs_iter-fb.dat").write_text(
+        "# iter c2 c3 conv energy mag gap_ha gap_code\n"
+        "1 0.0 0.0 0.01    -10.0 0.0 0.10 1\n"
+        "2 0.0 0.0 0.00005 -10.5 1.5 0.10 1\n")
+    r = imago._harvest_result(str(tmp_path), "/tmp/x",
+                              _settings(), 1.0, reused=False)
+    assert r.converged is True
+    assert r.total_energy == pytest.approx(-10.5)
+    assert r.total_magnetization == pytest.approx(1.5)
+    assert r.gap_ev == pytest.approx(0.10 * 27.21138386)
+    assert r.gap_kind == "direct"
+
+
+def test_harvest_gap_kind_metal_code_zero(tmp_path):
+    """gap_kind code 0 maps to 'none' (a metal); a 0.0-Hartree
+    gap converts to 0.0 eV."""
+    (tmp_path / "imago.dat").write_text(
+        "CONVERGENCE_TEST\n  1.0e-4\n")
+    (tmp_path / "gs_iter-fb.dat").write_text(
+        "1 0.0 0.0 0.00001 -5.0 0.0 0.0 0\n")
+    r = imago._harvest_result(str(tmp_path), "/tmp/x",
+                              _settings(), 1.0, reused=False)
+    assert r.gap_kind == "none"
+    assert r.gap_ev == pytest.approx(0.0)
+    assert r.total_magnetization == pytest.approx(0.0)
 
 
 # --------------------------------------------------------------

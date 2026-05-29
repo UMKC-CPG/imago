@@ -273,6 +273,9 @@ class ImagoResult:
     converged: bool = False
     reused_checkpoint: bool = False
     total_energy: float | None = None
+    total_magnetization: float | None = None
+    gap_ev: float | None = None        # band gap in eV
+    gap_kind: str | None = None        # none | direct | indirect
     message: str = ""
 
     @property
@@ -2502,6 +2505,12 @@ def project_home_outputs(settings):
 #                 Callable API: Result Harvesting                     #
 # ------------------------------------------------------------------ #
 
+# Integer gap_kind codes written in the iteration file's last
+# column, mapped to the guidance schema's gap_kind strings
+# (DESIGN 7.2): 0 = no gap (metal), 1 = direct, 2 = indirect.
+GAP_KIND_BY_CODE = {0: "none", 1: "direct", 2: "indirect"}
+
+
 def _read_scf_threshold(imago_dat_path):
     """Return the SCF convergence criterion: the value on the
     line immediately following the CONVERGENCE_TEST label in
@@ -2563,11 +2572,19 @@ def _harvest_result(run_dir, temp, settings, seconds, reused):
 
     iterations = None
     total_energy = None
+    total_magnetization = None
+    gap_ev = None
+    gap_kind = None
     converged = False
     if "iteration" in outputs:
-        # One read of the last data row yields everything: the
-        #   convergence metric, the total energy, and the
-        #   iteration count (all 1-based columns).
+        # One read of the last data row yields everything (all
+        #   1-based columns; the layout is the fixed 8-column
+        #   form the iteration writer emits, DESIGN 6.1):
+        #     1 iter      4 convergence   7 gap (Hartree)
+        #     5 total_E   6 mag. moment   8 gap_kind code
+        #   Columns 6-8 are length-gated so an older/shorter
+        #   iteration file (before the gap columns landed, or a
+        #   property pass) still parses cleanly.
         row = _last_data_row(outputs["iteration"])
         threshold = _read_scf_threshold(
             os.path.join(run_dir, f"{fn.imago}{fn.dat}")
@@ -2581,6 +2598,12 @@ def _harvest_result(run_dir, temp, settings, seconds, reused):
         converged = float(row[3]) < threshold
         total_energy = float(row[4])
         iterations = int(float(row[0]))
+        if len(row) >= 6:
+            total_magnetization = float(row[5])
+        if len(row) >= 8:
+            # gap is emitted in Hartree; the schema wants eV.
+            gap_ev = float(row[6]) * HARTREE_EV
+            gap_kind = GAP_KIND_BY_CODE[int(float(row[7]))]
 
     if iterations is None:
         # No SCF in this run (e.g. a -scf no property pass):
@@ -2596,7 +2619,9 @@ def _harvest_result(run_dir, temp, settings, seconds, reused):
         job=_job_identity(settings), runtime_seconds=seconds,
         outputs=outputs, scf_iterations=iterations,
         converged=converged, reused_checkpoint=reused,
-        total_energy=total_energy, message=status.value,
+        total_energy=total_energy,
+        total_magnetization=total_magnetization,
+        gap_ev=gap_ev, gap_kind=gap_kind, message=status.value,
     )
 
 

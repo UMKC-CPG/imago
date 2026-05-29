@@ -141,6 +141,12 @@ class ImagoWingbeat(Wingbeat):
                 toml_line("total_energy", result.total_energy)
             )
             result_file.write(
+                toml_line("total_magnetization",
+                          result.total_magnetization)
+            )
+            result_file.write(toml_line("gap_ev", result.gap_ev))
+            result_file.write(toml_line("gap_kind", result.gap_kind))
+            result_file.write(
                 toml_line("runtime_seconds", result.runtime_seconds)
             )
             result_file.write(toml_line("message", result.message))
