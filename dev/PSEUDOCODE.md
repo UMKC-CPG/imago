@@ -5269,7 +5269,6 @@ dataclass Measured:
     spin_polarization   : float
     total_magnetization : float
     kpoint_density      : float         # predictor target
-    dos_at_fermi        : float | None  # None when absent
 
 dataclass Context:
     basis                        : str  # mb|fb|eb
@@ -5560,8 +5559,7 @@ function load_entry(path, system_type_dir, seen_ids):
         gap_kind            = m["gap_kind"],
         spin_polarization   = m["spin_polarization"],
         total_magnetization = m["total_magnetization"],
-        kpoint_density      = m["kpoint_density"],
-        dos_at_fermi        = m.get("dos_at_fermi"))  # opt.
+        kpoint_density      = m["kpoint_density"])
 
     # --- context block ---------------------------------
     require("context" in raw["entry"], path,
@@ -5739,7 +5737,7 @@ function format_entry(entry, slug):
         out.append(pad(g, width) + " = " + fmt_float(x))
     out.append("")
 
-    # [entry.measured].  dos_at_fermi emitted only if present.
+    # [entry.measured].
     out.append("[entry.measured]")
     emit_kv(out, "gap_ev",              entry.measured.gap_ev)
     emit_kv(out, "gap_kind",            entry.measured.gap_kind)
@@ -5749,9 +5747,6 @@ function format_entry(entry, slug):
             entry.measured.total_magnetization)
     emit_kv(out, "kpoint_density",
             entry.measured.kpoint_density)
-    if entry.measured.dos_at_fermi is not None:
-        emit_kv(out, "dos_at_fermi",
-                entry.measured.dos_at_fermi)
     out.append("")
 
     # [entry.context].
@@ -6259,9 +6254,7 @@ function harvest_flight(workspace_root, db_root, dataspace):
                                         "spin_polarization", 0.0),
                 total_magnetization = chosen_rt.get(
                                         "total_magnetization", 0.0),
-                kpoint_density      = chosen_kpd,
-                dos_at_fermi        = chosen_rt.get(
-                                        "dos_at_fermi")),
+                kpoint_density      = chosen_kpd),
             context      = Context(
                 basis      = flight.sweep.fixed_axes["basis"],
                 functional = flight.sweep.fixed_axes["functional"],

@@ -292,8 +292,7 @@ DEF_COMP["transition_metal"] = 1.0 / 3.0
 DEF_COMP["chalcogen"] = 2.0 / 3.0
 DEF_MEAS = {
     "gap_ev": 3.0, "gap_kind": "direct", "spin_polarization": 0.0,
-    "total_magnetization": 0.0, "kpoint_density": 50.0,
-    "dos_at_fermi": 0.0}
+    "total_magnetization": 0.0, "kpoint_density": 50.0}
 DEF_CTX = {
     "basis": "fb", "functional": "gga-pbe",
     "kpoint_integration": "gaussian-0.1", "scf_threshold": 1.0e-6,
@@ -651,14 +650,6 @@ class TestEmitter:
         assert (format_entry(entry, "crystalline-x")
                 == format_entry(entry, "crystalline-x"))
 
-    def test_dos_omitted_when_none(self, tmp_path):
-        measured = {k: v for k, v in DEF_MEAS.items()
-                    if k != "dos_at_fermi"}
-        entry = _load_entry_text(tmp_path,
-                                 _entry_text(measured=measured))
-        assert entry.measured.dos_at_fermi is None
-        assert "dos_at_fermi" not in format_entry(entry, "x")
-
     def test_float_format_and_block_alignment(self, tmp_path):
         text = format_entry(
             _load_entry_text(tmp_path, _entry_text()), "x")
@@ -742,7 +733,7 @@ def _pentry(entry_id, *, comp=None, lattice="cubic", gap=1.0,
         entry_id=entry_id, generated_at=generated_at, source=source,
         signature=Signature(system_type, vector, family, onehot),
         measured=Measured(gap, "none" if gap == 0.0 else "direct",
-                          spin, 0.0, kpd, None),
+                          spin, 0.0, kpd),
         context=Context(basis, functional, integration, 1.0e-6,
                         6, 100.0),
         verification=None,

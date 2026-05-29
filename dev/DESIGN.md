@@ -3894,11 +3894,6 @@ MeasuredQuantities
   total_magnetization  float | None: total magnetic
                          moment per formula unit in Bohr
                          magnetons; 0.0 for non-magnetic
-  dos_at_fermi         float | None: density of states
-                         at the Fermi level per eV per
-                         formula unit; populated for
-                         metals when the histogram or
-                         LAT integration has been run
 ```
 
 The `measured` block is the C76 follow-up: a small
@@ -5477,14 +5472,6 @@ electronic-structure quantities that drive it (`gap_ev`,
                              DESIGN 3 convention).
                              This is the predictor's
                              target.
-  dos_at_fermi       real    Density of states at the
-                             Fermi level (per eV per
-                             formula unit).  Optional;
-                             recorded for metals when
-                             available.  Better metal-
-                             density predictor than
-                             `gap_ev = 0`.  May be
-                             absent.
 
 **Context block, under `[entry.context]` (required):**
 
@@ -5506,8 +5493,8 @@ electronic-structure quantities that drive it (`gap_ev`,
                                       (e.g. `"tetrahedral"`,
                                       `"gaussian-0.1"`).  Part of the
                                       predictor sub-model key with basis and
-                                      functional, because gap and Fermi-DOS
-                                      depend on it.
+                                      functional, because the gap and the
+                                      converged k-density depend on it.
   scf_threshold               real    The SCF threshold
                                       used (e.g.
                                       `1.0e-6`).
@@ -5719,7 +5706,6 @@ gap_kind            = "indirect"
 spin_polarization   = 0.0000000000000000e+00
 total_magnetization = 0.0000000000000000e+00
 kpoint_density      = 5.0000000000000000e+01
-dos_at_fermi        = 0.0000000000000000e+00
 
 [entry.context]
 basis                        = "fb"
@@ -5939,7 +5925,6 @@ class Measured:
     spin_polarization:   float
     total_magnetization: float
     kpoint_density:      float
-    dos_at_fermi:        float | None    # None when absent
 
 @dataclass(frozen=True)
 class Context:
@@ -6178,7 +6163,7 @@ functional, kpoint_integration) triple: the k-NN draws only
 on entries whose context matches.  Justification: changing
 the basis, the functional, or the Brillouin-zone integration
 method can shift the converged k-density and the measured
-gap / Fermi-DOS meaningfully, and we do not want
+gap meaningfully, and we do not want
 interpolation across them to wash out that signal -- a
 density converged under analytic tetrahedral integration is
 not interchangeable with one converged under Gaussian
@@ -6556,8 +6541,6 @@ needs to expose, on each converged calc:
 - `total_magnetization` and `spin_polarization` (already
   computed for spin-polarized runs; closed-shell runs
   report 0.0).
-- `dos_at_fermi` (optional; computed for metals when
-  available).
 - The total energy at the end of SCF (used to pick the
   converged grid point).
 
@@ -6581,8 +6564,7 @@ provenance otherwise.
          ascending.
       b. For each CalcUnit's converged run, parse
          result.toml for total_energy, gap_ev, gap_kind,
-         spin_polarization, total_magnetization,
-         dos_at_fermi.
+         spin_polarization, total_magnetization.
       c. Pick the converged grid point: the smallest
          k-density at which |E_i - E_{i+1}| <
          metric_threshold AND |E_i - E_{i-1}| <

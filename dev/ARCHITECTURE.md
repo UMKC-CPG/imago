@@ -1404,10 +1404,6 @@ Architectural invariants:
   these as additional regression features; v1's
   predictor conditions on `basis` and `functional`
   (separate sub-models) and ignores the rest.
-- **Optional extras.**
-  `dos_at_fermi` is recorded for metals when available
-  (a better metal-density predictor than `gap_ev = 0`)
-  but is permitted to be missing.
 - **Provenance is required.**  Every entry carries the
   flight id, the source structure id, the imago
   commit, and a UTC timestamp.  Non-negotiable per
@@ -1465,7 +1461,7 @@ flight harvest hook (10.5)
     | 1. Pick the converged grid point per structure
     |    (smallest density where consecutive grid
     |    points' energy delta < threshold).
-    | 2. Read measured gap, spin, dos_at_fermi from
+    | 2. Read measured gap, spin, and magnetization from
     |    the converged calc's result.toml.
     | 3. Build a richly-populated GuidanceEntry and
     |    emit it to staging/<system_type>/.
@@ -1639,13 +1635,12 @@ Python:
 Fortran:
 
 - A small extension to imago.py's harvest path so that
-  `result.toml` carries `gap_ev`, `gap_kind`,
-  `total_magnetization`, and (for metals)
-  `dos_at_fermi`.  These quantities are computable
-  from existing SCF output (eigenvalue spectrum +
-  density of states); the change is to expose them via
-  the callable API (DESIGN 6.1).  Tracked as TODO C76
-  (new under Phase K).
+  `gap_ev`, `gap_kind`, and `total_magnetization` are
+  surfaced (alongside the total energy already present).
+  These quantities are computable from existing SCF
+  output (the eigenvalue spectrum); the change exposes
+  them in the iteration data so any plain SCF run yields
+  them (DESIGN 6.1).  Tracked as TODO C76 (under Phase K).
 
 The library / producer / consumer split mirrors DESIGN 5:
 the library knows the format and runs the predictor; the

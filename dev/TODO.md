@@ -598,7 +598,7 @@
   CalcUnits by id; sort each verification sub-grid by
   k-density; parse result.toml for each converged calc
   (gap_ev, gap_kind, spin_polarization,
-  total_magnetization, dos_at_fermi, total_energy);
+  total_magnetization, total_energy);
   pick the converged grid point with the two-sided
   delta-below-threshold rule (DESIGN 7.8 step 3c);
   SKIP-and-tag-prediction_mismatch on non-convergence at
@@ -1932,7 +1932,7 @@ the C48.3 wiring (C74) is the first major consumer.
   Walks each structure's verification sub-grid, parses
   each converged calc's result.toml for the measured
   electronic-structure quantities (gap_ev, gap_kind,
-  spin_polarization, total_magnetization, dos_at_fermi)
+  spin_polarization, total_magnetization)
   plus total_energy for the convergence test, picks the
   converged grid point per the two-sided
   delta-below-threshold rule (DESIGN 7.8 step 3c),
@@ -1991,21 +1991,20 @@ the C48.3 wiring (C74) is the first major consumer.
   file the single primary read surface** (programmer
   guidance, 2026-05-29).  It already carries `total_energy`
   and -- spin-polarized runs only -- the magnetization
-  column.  Add to the iteration data: `gap_ev` + `gap_kind`,
-  and a **raw `dos_at_fermi`** (E_f DOS) -- deliberately
-  crude, just the metal/semiconductor/insulator signal that
-  feeds the two-stage predictor.  Putting these in the
-  iteration data means any plain SCF run yields them, so the
-  harvest never has to decide whether to run `-scfdos`; the
-  accurate `.60` DOS from `-scfdos` stays available but is
-  not required.  `imago.py` extends its iteration-file
-  parser (the primary read), populating `result.toml` from
-  it.  Each field optional in the guidance schema (a
-  non-spin / non-metal calc omits magnetization / dos).
+  column.  Add to the iteration data: `gap_ev` + `gap_kind`
+  -- the raw metal/semiconductor/insulator signal that feeds
+  the two-stage predictor.  (dos_at_fermi was considered and
+  dropped 2026-05-29: gap/gap_kind alone carry the character
+  signal.)  Putting these in the iteration data means any
+  plain SCF run yields them, so the harvest never has to
+  decide whether to run `-scfdos`.  `imago.py` extends its
+  iteration-file parser (the primary read), populating
+  `result.toml` from it.  Each field optional in the
+  guidance schema (a non-spin calc omits magnetization).
   Small Fortran-side change to the iteration-file writer +
   the imago.py parser (DESIGN 6.1).  Prerequisite for C72.
-  NOTE: gap / Fermi-DOS / spin depend on the k-point
-  integration method, now recorded as Context
+  NOTE: gap / spin depend on the k-point integration
+  method, now recorded as Context
   `kpoint_integration` and part of the predictor sub-model
   key (DESIGN 7.2/7.6); the harvest fills it from the flight
   options.

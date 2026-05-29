@@ -217,7 +217,6 @@ class Measured:
     spin_polarization: float
     total_magnetization: float
     kpoint_density: float             # the predictor's target
-    dos_at_fermi: float | None        # None when absent
 
 
 @dataclass(frozen=True)
@@ -606,8 +605,7 @@ def load_entry(path: str, system_type_dir: str,
         gap_kind=m["gap_kind"],
         spin_polarization=m["spin_polarization"],
         total_magnetization=m["total_magnetization"],
-        kpoint_density=m["kpoint_density"],
-        dos_at_fermi=m.get("dos_at_fermi"))      # optional
+        kpoint_density=m["kpoint_density"])
 
     # --- context block ----------------------------------------
     _require("context" in entry, path, "missing [entry.context]")
@@ -894,18 +892,14 @@ def format_entry(entry: GuidanceEntry, slug: str) -> str:
         lines.append(group.ljust(width) + " = " + _fmt_float(fraction))
     lines.append("")
 
-    # [entry.measured] -- dos_at_fermi emitted only when present.
+    # [entry.measured].
     lines.append("[entry.measured]")
-    measured_pairs = [
+    _emit_scalars(lines, [
         ("gap_ev", entry.measured.gap_ev),
         ("gap_kind", entry.measured.gap_kind),
         ("spin_polarization", entry.measured.spin_polarization),
         ("total_magnetization", entry.measured.total_magnetization),
-        ("kpoint_density", entry.measured.kpoint_density)]
-    if entry.measured.dos_at_fermi is not None:
-        measured_pairs.append(
-            ("dos_at_fermi", entry.measured.dos_at_fermi))
-    _emit_scalars(lines, measured_pairs)
+        ("kpoint_density", entry.measured.kpoint_density)])
     lines.append("")
 
     # [entry.context].
