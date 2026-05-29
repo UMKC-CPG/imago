@@ -1,0 +1,48 @@
+# Element-to-group classification for the historical guidance
+# dataspace (DESIGN 7.4 / PSEUDOCODE 15.2).  This is checked-in
+# *data*, never code (VISION Principle 11).  guidance_db.py
+# inverts it into a (lower-cased) symbol -> group lookup and
+# builds the 13-dimensional atom-fraction composition vector in
+# CANONICAL_GROUP_ORDER.
+#
+# The v1 assignment is strictly column-based (by periodic-table
+# group), NOT a metalloid diagonal: silicon and germanium are
+# group_iv, boron is group_iii, arsenic and antimony are
+# pnictogen, tellurium is chalcogen.  The `metalloid` bucket
+# therefore ships EMPTY in v1 (DESIGN 7.4 / 7.10); it exists so
+# that a future reclassification is a one-file data edit rather
+# than a schema change.
+#
+# Lanthanides are La-Lu and actinides are Ac-Lr; scandium,
+# yttrium, and the remainder of the d-block are transition_metal
+# (the 3d, 4d, and 5d rows are deliberately lumped together).
+# Every group key in CANONICAL_GROUP_ORDER must be present, even
+# the empty metalloid bucket, or the loader rejects the file.
+
+schema_version = 1
+
+[groups]
+hydrogen = ["H"]
+alkali = ["Li", "Na", "K", "Rb", "Cs", "Fr"]
+alkali_earth = ["Be", "Mg", "Ca", "Sr", "Ba", "Ra"]
+group_iii = ["B", "Al", "Ga", "In", "Tl", "Nh"]
+group_iv = ["C", "Si", "Ge", "Sn", "Pb", "Fl"]
+pnictogen = ["N", "P", "As", "Sb", "Bi", "Mc"]
+chalcogen = ["O", "S", "Se", "Te", "Po", "Lv"]
+halide = ["F", "Cl", "Br", "I", "At", "Ts"]
+noble_gas = ["He", "Ne", "Ar", "Kr", "Xe", "Rn", "Og"]
+transition_metal = [
+  "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
+  "Y", "Zr", "Nb", "Mo", "Tc", "Ru", "Rh", "Pd", "Ag", "Cd",
+  "Hf", "Ta", "W", "Re", "Os", "Ir", "Pt", "Au", "Hg",
+  "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn",
+]
+lanthanide = [
+  "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd", "Tb", "Dy",
+  "Ho", "Er", "Tm", "Yb", "Lu",
+]
+actinide = [
+  "Ac", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
+  "Es", "Fm", "Md", "No", "Lr",
+]
+metalloid = []
