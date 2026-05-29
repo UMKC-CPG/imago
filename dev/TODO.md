@@ -12,8 +12,8 @@
   cases beyond KNbO3 (VISION Principles.1)
 - [x] V2. Add Goal 5 (historical-guidance dataspace),
   Principle 11 (experience as a curated artifact, not tribal
-  knowledge), and Principle 12 (the campaign layer stays
-  dumb; campaign description lives in Python) to VISION.
+  knowledge), and Principle 12 (the flight layer stays
+  dumb; flight description lives in Python) to VISION.
   Done 2026-05-28 as part of the original DESIGN 7 / ARCH 10
   chain landing (categorical signature shape); revised
   2026-05-29 (Path B) when Goal 5 was rewritten to frame
@@ -73,7 +73,7 @@
   variance-aware widening; 10.4 feature space (13-d
   composition + 6-axis lattice family + 4-way system_type)
   and the k-NN predictor; 10.5 curation/regeneration/harvest
-  with seed-campaign auto-promote rule; 10.6 module impact
+  with seed-flight auto-promote rule; 10.6 module impact
   (guidance_db.py library, kaleidoscope helper,
   guidance_harvest.py, guidance_promote.py, future
   guidance_migrate.py, plus a small imago.py extension to
@@ -84,7 +84,7 @@
   interpretation + functional/basis as sub-models vs
   features.
 - [x] A7. Write ARCHITECTURE §9 (high-throughput
-  calculation campaigns / "kaleidoscope", VISION Goal
+  calculation flights / "kaleidoscope", VISION Goal
   4).  Layers + one-directional dependency graph (9.1);
   imago.py CLI+callable API with two entry modes (9.2);
   ase_imago.py ASE Calculator kept separate, with the
@@ -224,7 +224,7 @@
   result keys), unit conversions, and the ASE-free
   StructureControl factory in structure_control.py plus
   the adapter-layer Atoms-reading glue.
-- [x] D13. Design the kaleidoscope campaign dispatcher (ARCH
+- [x] D13. Design the kaleidoscope flight dispatcher (ARCH
   9.4, 9.6): the Parsl dispatch model, the pluggable
   wingbeat seam, complete-and-report status tracking, the
   workspace layout + id / <calc> tag / status.toml
@@ -236,7 +236,7 @@
   building on 6.1 (the default wingbeat calls the 6.1 API
   and persists the 6.1.2 ImagoResult).  Subsections:
   6.2.1 the domain-agnostic data model (CalcUnit /
-  Campaign, with campaign.toml as a generated record);
+  Flight, with flight.toml as a generated record);
   6.2.2 the pluggable wingbeat seam (Wingbeat.run -> generic
   WingbeatOutcome with an opaque wingbeat-supplied `detail`;
   ImagoWingbeat maps ImagoResult and persists result.toml);
@@ -250,7 +250,7 @@
   split; key = verbatim scalar fields + byte-compared key
   files, generalizing the producer's is_cached_v2;
   resume == re-run); 6.2.6 client-side harvest via the
-  run dir + the CampaignReport (subsumes C48.3's
+  run dir + the FlightReport (subsumes C48.3's
   producer-as-client shape); 6.2.7 open details for
   PSEUDOCODE/C68.  Key judgment: kaleidoscope stays
   domain-agnostic (Principle 9) -- it tracks generic
@@ -288,12 +288,12 @@
   inverse-distance weighting for crystalline; canonical
   entry for non-crystalline; sub-models per
   (basis, functional); variance-based confidence;
-  is_under_trained flag); 7.7 predict-then-verify campaign
+  is_under_trained flag); 7.7 predict-then-verify flight
   construction + verification-grid widening driven by
   predictor confidence + trust-mode (verify=False) for
-  nearly-identical-family campaigns; 7.8 harvest pipeline
+  nearly-identical-family flights; 7.8 harvest pipeline
   (reads gap/spin/dos from result.toml; auto-promote rule
-  for the seed campaign + interactive curator review);
+  for the seed flight + interactive curator review);
   7.9 bootstrap (canonical entries seeded by hand for
   non-crystalline; wide-grid default for under-trained
   crystalline; non-convergence recovery); 7.10 open
@@ -307,10 +307,10 @@
 - [x] D17. Patch DESIGN 6.2 for the kaleidoscope <-> guidance
   DB seam.  Done 2026-05-29 in the Path B rewrite session:
   (a) §6.2.4 extended with the **tree-per-varied-axis**
-  convention for sweep campaigns (one directory level per
+  convention for sweep flights (one directory level per
   varied axis in stable order, with single-tag rules for
   axis names / values / decimal-points, bidirectional path
-  parsing, and `campaign.toml` recording the axis order +
+  parsing, and `flight.toml` recording the axis order +
   fixed axes; chosen over a flat axis-value-string after
   the user flagged filename-length growth); (b) the §6.2.1
   worked example now describes the producer as a
@@ -319,13 +319,13 @@
   "trust mode for nearly-identical families"
   (`verify=False`) note that builds a length-1 sub-grid
   and skips auto-staging the result; (c) §6.2.8 added as
-  a new subsection describing the campaign-builder helper
+  a new subsection describing the flight-builder helper
   inside src/scripts/kaleidoscope/ (predict_settings,
   build_verification_grid, build_calc_tag, the
   PredictionRecord shape, cross-references to DESIGN 7.6 /
   7.7 / 7.9 and to 6.2.4's tag convention); (d) the §6.2
   intro paragraph now names Principles 8 / 10 / 12 and
-  documents the campaign-builder split (option-axis sweeps
+  documents the flight-builder split (option-axis sweeps
   inside kaleidoscope; structure-axis sweeps in
   structure_control / acquisition).
 - [x] D15. Design the makeinput callable build API (the
@@ -447,9 +447,9 @@
   but a refine may want to record in DESIGN 6.1.2 that
   NOT_CONVERGED is now backed by the col-4/CONVERGENCE_TEST
   mechanism.
-- [x] P7. Write PSEUDOCODE for the kaleidoscope campaign
-  wingbeat (DESIGN 6.2, D13): the `CalcUnit` / `Campaign`
-  data model and `campaign.toml` serialization (6.2.1);
+- [x] P7. Write PSEUDOCODE for the kaleidoscope flight
+  wingbeat (DESIGN 6.2, D13): the `CalcUnit` / `Flight`
+  data model and `flight.toml` serialization (6.2.1);
   the `Wingbeat` protocol and `WingbeatOutcome`, with
   `ImagoWingbeat` mapping `ImagoResult` and persisting
   `result.toml` (6.2.2); the Parsl per-unit dispatch with
@@ -457,15 +457,15 @@
   (6.2.3); the workspace id/`<calc>`/`status.toml`
   scheme (6.2.4); the cache hit-test (scalar-field
   compare + key-file byte-compare) and resume-as-re-run
-  (6.2.5); the `CampaignReport` and client-side harvest
+  (6.2.5); the `FlightReport` and client-side harvest
   handoff (6.2.6).  Foundation for C68.
 
   Done 2026-05-21.  Landed as PSEUDOCODE section 13,
   helpers-first then driver: 13.1 data model
-  (CalcUnit/KeyFields/Campaign) + serialize_campaign;
+  (CalcUnit/KeyFields/Flight) + serialize_flight;
   13.2 Wingbeat protocol + WingbeatOutcome + ImagoWingbeat (calls
   the §12 API, persists result.toml, maps status ->
-  ok/detail); 13.3 unit_run_dir + validate_campaign (slug
+  ok/detail); 13.3 unit_run_dir + validate_flight (slug
   rule, <calc> derivation, collision abort) + status.toml
   read/write; 13.4 is_cache_hit / cache_key_matches
   (verbatim scalar compare + key-file byte-compare, no
@@ -474,7 +474,7 @@
   + python_app) + execute_wingbeat_task + collect_future (the
   ParslTaskLost -> "lost" vs worker-exception -> "failed"
   split, per-future capture); 13.6 ReportEntry /
-  CampaignReport / report_entry_from_status + the
+  FlightReport / report_entry_from_status + the
   client-side harvest_converged_potentials example fixing
   the C48.3 producer contract.  All five PSEUDOCODE items
   for the kaleidoscope prong (with §12) now done; the
@@ -517,7 +517,7 @@
 ### Historical guidance dataspace (VISION 5, ARCH 10, DESIGN 7)
 
 - [x] P9. Write PSEUDOCODE for the historical-guidance
-  dataspace library, the predictor, the campaign-builder
+  dataspace library, the predictor, the flight-builder
   helper, and the harvest pipeline (DESIGN 7, D16).  Four
   blocks:
   (a) **Library + I/O.**  load() walking
@@ -544,7 +544,7 @@
   predicted_kpoint_density + confidence_2; combined
   confidence; PredictionResult assembly including the
   is_under_trained flag.
-  (c) **Campaign-builder helper in
+  (c) **Flight-builder helper in
   src/scripts/kaleidoscope/.**  predict_settings(structure,
   options, dataspace, system_type, basis, functional,
   verify, id, extra_axes) per DESIGN 6.2.8; the
@@ -553,7 +553,7 @@
   the trust-mode (verify=False) length-1 grid;
   build_calc_tag(calc_axes) emitting the
   tree-per-varied-axis paths per DESIGN 6.2.4;
-  PredictionRecord attachment to the campaign.
+  PredictionRecord attachment to the flight.
   (d) **Harvest pipeline (guidance_harvest.py).**  Group
   CalcUnits by id; sort each verification sub-grid by
   k-density; parse result.toml for each converged calc
@@ -563,7 +563,7 @@
   delta-below-threshold rule (DESIGN 7.8 step 3c);
   SKIP-and-tag-prediction_mismatch on non-convergence at
   the top; recover predictor_confidence and
-  predictor_neighbor_ids from [campaign.prediction];
+  predictor_neighbor_ids from [flight.prediction];
   build a GuidanceEntry; write it to
   staging/<system_type>/ via save_entry().  Plus a
   smaller block describing guidance_promote.py's three
@@ -585,11 +585,11 @@
   predict_non_crystalline, select_submodel three-tier
   fallback + functional_family, the shared knn_weights,
   stage1/stage2 with d1/d2 + variance confidences);
-  15.6 the campaign-builder helper (PredictionRecord,
+  15.6 the flight-builder helper (PredictionRecord,
   default_wide_kpoint_density_grid, logspace +
   build_verification_grid, encode_axis_value/
   build_calc_tag, predict_settings, standard_key_fields);
-  15.7 harvest_campaign + pick_converged and promote +
+  15.7 harvest_flight + pick_converged and promote +
   auto_promote_ok.  Two design decisions the pseudocode
   forced, both pre-cleaned in DESIGN/ARCH before P9 was
   written (commits 7976c05 + 194b041): the predict() seam
@@ -598,11 +598,11 @@
   grid_energies array (so auto-promote runs from a staging
   file alone).  One smaller pinning surfaced WHILE writing
   P9 and is recorded inside 15.6 + carried into C71: the
-  PredictionRecord reaches campaign.toml via a generic
-  opaque Campaign.metadata dict that serialize_campaign
-  emits verbatim as [campaign.<key>], keeping the dispatch
+  PredictionRecord reaches flight.toml via a generic
+  opaque Flight.metadata dict that serialize_flight
+  emits verbatim as [flight.<key>], keeping the dispatch
   core domain-agnostic (Principle 9) -- this needs the
-  matching Campaign.metadata field added in C71's model
+  matching Flight.metadata field added in C71's model
   catch-up.
 
 ---
@@ -1386,7 +1386,7 @@ keeps the common case branch-free.
     in priority order: C69 (DESIGN 5.7 / PSEUDOCODE 11.4 /
     ARCH 8.5 revisions for producer-delegates-SCF); C70
     (guidance_db.py library); C71 (kaleidoscope
-    campaign-builder helper consuming a guidance entry);
+    flight-builder helper consuming a guidance entry);
     and -- to actually deliver the acceleration -- C75
     (seed run populating share/historicalGuidanceDB/entries/
     so the producer's predict() calls return useful priors
@@ -1569,7 +1569,7 @@ shipped.
   both (a) Phase-2 base chain (C53-C61) landing
   first and (b) D10 design landing.
 
-### Phase J -- kaleidoscope campaign infrastructure (VISION 4, ARCH 9)
+### Phase J -- kaleidoscope flight infrastructure (VISION 4, ARCH 9)
 
 The shared submit / track / harvest infrastructure.
 Its first client is the C48 potential-DB producer
@@ -1630,18 +1630,18 @@ and PSEUDOCODE landed before code.
   CIF with ASE -> C64 factory -> skl write.
 - [ ] C68. Implement kaleidoscope/ (ARCH 9.4, 9.6, D13):
   Parsl dispatch, the pluggable wingbeat seam, status
-  tracking (complete-and-report), the campaign
+  tracking (complete-and-report), the flight
   workspace, and the run-reuse cache mechanism.  Also
   carries the C63 deferral: the run_structure ->
   makeinput "build a run dir" wiring (ARCH 9.4).
 
   Increment 1, 2026-05-21 (package core + both executors):
   Created src/scripts/kaleidoscope/ implementing PSEUDOCODE
-  §13 -- model.py (KeyFields/KeyFile/CalcUnit/Campaign/
-  WingbeatOutcome/ReportEntry/CampaignReport + KaleidoscopeError);
+  §13 -- model.py (KeyFields/KeyFile/CalcUnit/Flight/
+  WingbeatOutcome/ReportEntry/FlightReport + KaleidoscopeError);
   workspace.py (slug rule, unit_run_dir, <calc> derivation,
-  validate_campaign, status.toml read/merge-write,
-  serialize_campaign); cache.py (write_cache_key,
+  validate_flight, status.toml read/merge-write,
+  serialize_flight); cache.py (write_cache_key,
   cache_key_matches with verbatim scalar compare + key-file
   byte-compare, is_cache_hit); wingbeats.py (Wingbeat base,
   ImagoWingbeat mapping ImagoResult + persisting result.toml,
@@ -1651,7 +1651,7 @@ and PSEUDOCODE landed before code.
   ParslExecutor -- the programmer installed parsl
   2026.05.18, so the Parsl path is implemented and tested
   against a ThreadPoolExecutor Config).  Executor chosen by
-  campaign.parsl_config (present -> Parsl; absent -> local).
+  flight.parsl_config (present -> Parsl; absent -> local).
   Tests in src/tests/test_kaleidoscope.py with a fake
   wingbeat (no Imago binary): validate/slug/collision, cache
   hit/miss/byte-compare, dispatch under BOTH executors,
@@ -1700,7 +1700,7 @@ and PSEUDOCODE landed before code.
   _execute_wingbeat_task, WingbeatOutcome) pickles and round-trips with
   equality; (2) a fresh interpreter auto-registers ['imago'] on
   `import kaleidoscope` (DESIGN 6.2.2 holds cross-process);
-  (3) a 4-unit campaign run through the REAL dispatch /
+  (3) a 4-unit flight run through the REAL dispatch /
   ParslExecutor path on HighThroughputExecutor + LocalProvider
   (max_workers_per_node=2) came back all done+converged across
   TWO distinct worker PIDs, both != main -- proving genuine
@@ -1712,7 +1712,7 @@ and PSEUDOCODE landed before code.
   worker-count knob in this parsl is `max_workers_per_node`
   (not `max_workers`); `worker_init` lives on the provider.
   C68(b-cont) DONE -- real SlurmProvider VALIDATED 2026-05-22.
-  Hands-on 4-unit campaign (silicon/diamond/graphite/silica) from
+  Hands-on 4-unit flight (silicon/diamond/graphite/silica) from
   jobs/kaleido_slurm/ via HTEX + SlurmProvider(rulisp-lab,
   nodes_per_block=1, cores_per_node=2, exclusive=False,
   max_workers_per_node=2). Proven: submission; worker_init env
@@ -1759,12 +1759,12 @@ and PSEUDOCODE landed before code.
 The accumulation prong, post-Path-B rewrite.  Each task
 wants P9 landed and the relevant DESIGN 7 subsection
 consulted before code lands.  The library + predictor
-(C70) is foundational; the campaign-builder helper (C71)
+(C70) is foundational; the flight-builder helper (C71)
 is what makes predict-then-verify a real workflow; the
 imago result.toml extension (C76) is a small Fortran-side
 prerequisite for harvest; the harvest hook (C72) closes
 the loop back into the dataspace; the curator helper (C73)
-gates staging into canonical entries; the seed campaign
+gates staging into canonical entries; the seed flight
 (C75) trains the predictor over the chemistry surface;
 the C48.3 wiring (C74) is the first major consumer.
 
@@ -1797,7 +1797,7 @@ the C48.3 wiring (C74) is the first major consumer.
   over predicted electronic character yielding
   predicted_kpoint_density and confidence_2; combined
   confidence; the is_under_trained flag whose semantics
-  drive the campaign-builder's wide-grid fallback.
+  drive the flight-builder's wide-grid fallback.
   Tests: every validation rule fires with the expected
   message; emitter is bit-deterministic; round-trip
   load(save_entry(...)) preserves all fields; the k-NN
@@ -1806,33 +1806,33 @@ the C48.3 wiring (C74) is the first major consumer.
   exercised under sparse-data conditions; the canonical-
   non-crystalline path returns the expected canonical
   entry.
-- [ ] C71. Implement the campaign-builder helper inside
+- [ ] C71. Implement the flight-builder helper inside
   `src/scripts/kaleidoscope/` per DESIGN 6.2.8 / 7.7 and
   PSEUDOCODE P9(c).  **Prerequisite (model catch-up):** the
   C68 code shipped `CalcUnit.calc` as `Optional[str]` and
-  `Campaign` with no `sweep`, but findings 2/3 (2026-05-28
+  `Flight` with no `sweep`, but findings 2/3 (2026-05-28
   refine) moved the design to `calc: tuple[str, ...]` (one
   directory component per varied sweep axis) plus a
-  `Campaign.sweep: SweepRecord | None` field (DESIGN 6.2.1,
+  `Flight.sweep: SweepRecord | None` field (DESIGN 6.2.1,
   PSEUDOCODE 13.1).  Land that model change first --
-  `model.py` (calc -> tuple, add SweepRecord + Campaign.sweep,
-  plus a generic opaque `Campaign.metadata: dict` field per
-  PSEUDOCODE 15.6 -- the seam by which the campaign-builder
+  `model.py` (calc -> tuple, add SweepRecord + Flight.sweep,
+  plus a generic opaque `Flight.metadata: dict` field per
+  PSEUDOCODE 15.6 -- the seam by which the flight-builder
   attaches its PredictionRecord without the dispatch core
   interpreting it, Principle 9),
   `workspace.py` (unit_run_dir splats the tuple onto the path,
-  validate_campaign slugs each component and keys collisions
-  on the tuple, serialize_campaign emits calc as a TOML array,
-  a `[campaign.sweep]` block, and each `metadata[key]` as a
-  verbatim `[campaign.<key>]` table), and the test suite -- so
+  validate_flight slugs each component and keys collisions
+  on the tuple, serialize_flight emits calc as a TOML array,
+  a `[flight.sweep]` block, and each `metadata[key]` as a
+  verbatim `[flight.<key>]` table), and the test suite -- so
   build_calc_tag has a tuple-shaped target to populate and the
-  PredictionRecord round-trips through campaign.toml.  This
+  PredictionRecord round-trips through flight.toml.  This
   also implies a one-line DESIGN 6.2.1 / PSEUDOCODE 13.1
-  addition (the Campaign.metadata field + its serialize line),
+  addition (the Flight.metadata field + its serialize line),
   flagged in PSEUDOCODE 15.6.
   predict_settings(structure, options,
   dataspace, system_type, basis, functional, verify, id,
-  extra_axes) returning (Campaign, PredictionRecord).
+  extra_axes) returning (Flight, PredictionRecord).
   build_verification_grid(center, confidence) lays out
   the logspace grid whose width and point count scale
   inversely with predictor confidence (the 7.7 starting
@@ -1860,11 +1860,11 @@ the C48.3 wiring (C74) is the first major consumer.
   SKIPs and tags `prediction_mismatch = true` on
   non-convergence at the top, recovers
   predictor_confidence and predictor_neighbor_ids from
-  the campaign's [campaign.prediction] block, builds a
+  the flight's [flight.prediction] block, builds a
   rich GuidanceEntry, and writes it to
   staging/<system_type>/ via save_entry().  Depends on
   C76 (the imago.py result.toml extension).  Tests on
-  synthetic campaign workspaces (no real imago runs):
+  synthetic flight workspaces (no real imago runs):
   converged-path, two-sided-delta path, prediction-
   mismatch path, prediction-record-recovery path,
   the non-crystalline harvest path.
@@ -1876,18 +1876,18 @@ the C48.3 wiring (C74) is the first major consumer.
   Interactive printed summary covers signature,
   measured, verification, provenance.  Tests exercise
   each mode against a synthetic staging directory.
-- [ ] C74. Wire the kaleidoscope campaign-builder helper
+- [ ] C74. Wire the kaleidoscope flight-builder helper
   (C71) into the C48.3 producer.  Replaces the current
   "user picks settings up front" pattern with predict-
   then-verify: for each reference solid in the curation
   manifest, predict_settings(...) returns a verification
-  sub-grid Campaign, kaleidoscope dispatches it, the
+  sub-grid Flight, kaleidoscope dispatches it, the
   harvest hook reads back both the converged potential
   (for the C48.3 deliverable) and the rich measured
   quantities (for guidance contribution).  Bundled with
   C48.3 once C70+C71+C72+C76 are in place.
 - [ ] C75. Seed `share/historicalGuidanceDB/entries/`
-  via a deliberate stratified seed campaign.  ~150-250
+  via a deliberate stratified seed flight.  ~150-250
   calculations covering the chemistry surface
   representatively rather than at random: for each
   pair of element groups (alkali x halide, TM x

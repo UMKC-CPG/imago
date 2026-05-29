@@ -1126,7 +1126,7 @@ compounded the problem by reusing `C` *and* assuming
 the direct and reciprocal reps were identical.
 
 **Diagnostic history.**  The bug surfaced when a
-kaleidoscope SLURM campaign ran graphite (SG 186,
+kaleidoscope SLURM flight ran graphite (SG 186,
 hexagonal) and silica (SG 152, trigonal) alongside
 silicon and diamond (cubic).  The cubic cells
 converged; both 120-degree cells stopped at
@@ -3749,7 +3749,7 @@ and consumer aligned by construction.
 
 ---
 
-## 6. High-Throughput Calculation Campaigns
+## 6. High-Throughput Calculation Flights
 
 This section holds the algorithm- and contract-level
 designs for VISION Goal 4, whose architecture is laid
@@ -3797,7 +3797,7 @@ API to tell it:
    not-converged / failed verdict.  A non-converged or
    crashed reference run must never be harvested into
    the database, and per VISION Principle 10 the
-   campaign must learn this as *data* (a result it can
+   flight must learn this as *data* (a result it can
    record and skip), not as an exception that aborts
    the whole batch.
 2. **Where is the converged potential?**  An absolute
@@ -3913,7 +3913,7 @@ compute it (e.g. a band-structure-only run) cleanly
 omits it.
 
 `RunStatus` is an enum with four members, chosen so the
-campaign layer can branch on outcome without parsing
+flight layer can branch on outcome without parsing
 `message`:
 
 - `CONVERGED` -- the run completed and the SCF reached
@@ -3929,7 +3929,7 @@ campaign layer can branch on outcome without parsing
   binary aborted, the `fort.2` success file was absent,
   or a required input was missing at run time.  This is
   an *expected* run-level failure, returned (not
-  raised) so the campaign can record-and-continue.
+  raised) so the flight can record-and-continue.
 - `SKIPPED` -- there was nothing to do because
   within-run-dir checkpointing found the requested work
   already complete (6.1.5).  `success` is True;
@@ -3956,7 +3956,7 @@ important for Principle 10.  *Run-level* failures
 file) are reported as a returned `ImagoResult` with the
 appropriate status -- they are normal outcomes of
 running real calculations and must not abort a
-campaign.  *Contract* failures (the environment is not
+flight.  *Contract* failures (the environment is not
 configured: `$IMAGO_RC`/`$IMAGO_TEMP`/`$IMAGO_BIN`
 unset; the named run directory does not exist or holds
 no inputs; the lock file is already held by another
@@ -4070,7 +4070,7 @@ caller's cwd), changes into the working directory for
 the duration of the run, and **restores the original
 cwd on exit, including on failure** (a `try/finally` or
 context manager).  Without this, one failed run would
-leave a campaign worker stranded in a stale temp
+leave a flight worker stranded in a stale temp
 directory and corrupt every subsequent run's relative
 path resolution.  This is the single most important
 correctness difference between the CLI's one-shot
@@ -4083,13 +4083,13 @@ unchanged in *meaning*; the design only clarifies how
 they behave under concurrent, in-process use.
 
 **The lock file is already per-run-directory, so
-campaign concurrency is safe by construction.**  Today
+flight concurrency is safe by construction.**  Today
 the lock (`imagoLock`) lives in the `temp` directory,
 which `get_temp_dir` derives by mirroring the run
 directory's path under `$IMAGO_TEMP`.  Two different run
 directories therefore mirror to two different temp
 directories and two different lock files.  A
-kaleidoscope campaign running thousands of independent
+kaleidoscope flight running thousands of independent
 SCFs in parallel -- each in its own run directory --
 takes thousands of independent locks that never
 collide.  The API keeps the exact same acquire / mark /
@@ -4102,7 +4102,7 @@ must not have dispatched two runs into the same
 directory), whereas the CLI prints its existing
 "Is another imago script running?" message and exits
 non-zero.  The lock guards a single run directory; it
-is never a process-global or campaign-global lock.
+is never a process-global or flight-global lock.
 
 **Checkpointing stays within the run directory and is
 orthogonal to kaleidoscope's coarser cache.**  Imago's
@@ -4159,7 +4159,7 @@ the contract above.
   skip the file) is an implementation detail with no
   bearing on the returned contract.
 
-### 6.2 kaleidoscope campaign dispatcher
+### 6.2 kaleidoscope flight dispatcher
 
 This subsection designs ARCHITECTURE 9.4 and 9.6: the
 Parsl-based package that drives a *set* of Imago
@@ -4181,20 +4181,20 @@ below it (the wingbeat, 6.2.2) or above it (the client,
 6.2.6).  Three other load-bearing principles shape this
 design.  Principle 8 keeps the wingbeat seam independent of
 the execution adapter.  Principle 10 (complete-and-report)
-ensures one failed unit never aborts the campaign.  And
-Principle 12 (the campaign layer stays dumb; campaign
+ensures one failed unit never aborts the flight.  And
+Principle 12 (the flight layer stays dumb; flight
 description lives in Python) is the choice that
-kaleidoscope never grows a campaign description language
+kaleidoscope never grows a flight description language
 -- no DSL, no workflow grammar, no DAG engine.  The
-`Campaign` data model (6.2.1) is a flat list of
-independent units; higher-order campaign shape (multi-axis
+`Flight` data model (6.2.1) is a flat list of
+independent units; higher-order flight shape (multi-axis
 sweeps, dependent phases, per-unit iteration) is composed
 in client Python that builds the flat list, or absorbed
 inside a custom wingbeat that owns one unit's internal
 iteration (6.2.2).
 
 A practical corollary of Principle 12 is the
-**campaign-builder split**.  Domain-agnostic *option-axis*
+**flight-builder split**.  Domain-agnostic *option-axis*
 sweeps (sweep k-density values, sweep target atoms for
 XANES, sweep basis sizes) live as helpers inside
 kaleidoscope -- 6.2.8 is the first such helper, the
@@ -4207,7 +4207,7 @@ consumes the resulting structure paths.  Both halves
 ultimately produce flat lists of `CalcUnit`s; neither
 grows a DSL.
 
-#### 6.2.1 The unit of work and the campaign
+#### 6.2.1 The unit of work and the flight
 
 Kaleidoscope's data model is two plain, domain-agnostic
 records.
@@ -4216,32 +4216,32 @@ records.
 CalcUnit
   id            stable per-structure key (6.2.4); the
                   curation reference_id for the producer,
-                  a COD id for an acquisition campaign
+                  a COD id for an acquisition flight
   calc          tuple[str, ...] of per-axis directory
                   components (6.2.4).  The empty tuple
                   means "no second level"; a single-
                   element tuple is one calc tag; a multi-
                   element tuple is a nested-axis sweep
                   (one element per varied axis, in
-                  Campaign.sweep.varied_axes order)
+                  Flight.sweep.varied_axes order)
   structure     path to an imago.skl (or a structure
                   handle the chosen wingbeat understands)
   options       makeinput options for this unit
   wingbeat      which Wingbeat executes it (6.2.2);
-                  defaults to the campaign default
+                  defaults to the flight default
   key_fields    client-declared cache identity (6.2.5):
                   scalar fields + names of key files
 
-Campaign
+Flight
   root          workspace root directory (6.2.4)
   units         list[CalcUnit]
   default_wingbeat  Wingbeat used when a unit names none
   parsl_config  the Parsl Config (deployment, 6.2.3)
   sweep         SweepRecord | None: records varied_axes
-                  order + fixed_axes when the campaign
+                  order + fixed_axes when the flight
                   was built by the predict-then-verify
                   helper (6.2.8); None for hand-built
-                  campaigns that did not declare a sweep
+                  flights that did not declare a sweep
   on_outcome    optional per-unit callback (6.2.6)
 
 SweepRecord
@@ -4250,7 +4250,7 @@ SweepRecord
                   level of CalcUnit.calc
   fixed_axes    dict[str, str]: axis -> value for axes
                   that take the same value across every
-                  unit in the campaign (recorded as
+                  unit in the flight (recorded as
                   context, not as a calc-tag level)
 ```
 
@@ -4262,30 +4262,30 @@ top-to-bottom.  `pathlib.Path(unit.id, *unit.calc)` builds
 the unit's run-dir relative to `root/wingbeats/`; reading
 an existing path back, split on `/` to recover the tuple.
 The shape is deliberately a tuple of strings rather than
-a dict of (axis -> value): the campaign's `sweep` field
+a dict of (axis -> value): the flight's `sweep` field
 already records the axis order canonically, and
 duplicating the axis names per unit would invite drift
 between them.  Future extensions (per-axis annotations,
 floats with units) become a `tuple[CalcAxis, ...]` swap
 without changing the path-building code.
 
-A client builds a `Campaign` in process -- kaleidoscope
+A client builds a `Flight` in process -- kaleidoscope
 is a library first (Principle 9), not a CLI -- and hands
 it to the dispatch entry point.  Kaleidoscope serializes
-the campaign to `campaign.toml` in the workspace root so
-a campaign is inspectable and a resume has an
+the flight to `flight.toml` in the workspace root so
+a flight is inspectable and a resume has an
 authoritative record of *what was asked for*, separate
 from `status.toml`'s record of *what happened* (6.2.4).
-Whether `campaign.toml` may also be hand-authored as the
+Whether `flight.toml` may also be hand-authored as the
 primary surface, rather than always generated from the
-in-process `Campaign`, is left open (6.2.7).
+in-process `Flight`, is left open (6.2.7).
 
 The producer (C48.3) is the worked example throughout the
 rest of 6.2.  Under DESIGN 7's predict-then-verify
 workflow, the producer's relationship to kaleidoscope
 changes shape: rather than launching one `CalcUnit` per
 curated reference solid, the producer asks the
-campaign-builder helper (6.2.8) to expand each reference
+flight-builder helper (6.2.8) to expand each reference
 solid into a small **verification sub-grid** of
 `CalcUnit`s -- one per k-density value chosen by the
 predict-then-verify algorithm of 7.7.  Every unit in that
@@ -4310,13 +4310,13 @@ now a **predict-then-verify client** of both kaleidoscope
 and the historical-guidance DB.
 
 **Trust mode for nearly-identical families.**  Not every
-campaign warrants the verification sub-grid.  When the
+flight warrants the verification sub-grid.  When the
 curator already knows -- from prior work, from a recent
-seed campaign on a sibling solid, or from a high-similarity
+seed flight on a sibling solid, or from a high-similarity
 match they trust -- that a particular k-density value is
 the right operating point for an entire family of
 nearly-identical reference solids, requiring every solid
-to re-verify it is wasted compute.  The campaign-builder
+to re-verify it is wasted compute.  The flight-builder
 helper (6.2.8) therefore exposes a `verify=False` mode
 that collapses the sub-grid to a single `CalcUnit` at the
 trusted predicted k-density.  In that mode the producer
@@ -4383,9 +4383,9 @@ of what convergence means.
 - An **ASE wingbeat** wraps `ImagoCalculator` (D12) for
   units that need ASE-MD or ASE-relaxation semantics; it
   too ultimately calls the 6.1 API underneath.
-- A single campaign may **blend wingbeats** per unit, so
+- A single flight may **blend wingbeats** per unit, so
   plain SCFs and adapter-wrapped calculations dispatch
-  under one campaign (ARCHITECTURE 9.4).  New adapters
+  under one flight (ARCHITECTURE 9.4).  New adapters
   slot in by implementing the protocol; the dispatch
   core never changes (Principle 8).
 
@@ -4420,10 +4420,10 @@ core's contract.  Kaleidoscope gathers all futures and
 **catches exceptions per future** rather than letting
 one propagate: a unit whose app raised, or whose Parsl
 task was lost cluster-side, is recorded with the
-appropriate status (6.2.4) and the campaign continues.
+appropriate status (6.2.4) and the flight continues.
 No single unit failure aborts the batch.  When all
 futures have resolved, kaleidoscope returns a
-`CampaignReport` (6.2.6); deciding whether the aggregate
+`FlightReport` (6.2.6); deciding whether the aggregate
 is scientifically acceptable is the client's job, never
 kaleidoscope's.
 
@@ -4460,8 +4460,8 @@ committed scheme.
 
 ```
 <root>/
-  campaign.toml          generated from the Campaign
-                           (6.2.1): what to run.
+  flight.toml             generated from the Flight
+                          (6.2.1): what to run.
   structures/<id>/        acquired/curated inputs.
   wingbeats/<id>[/<calc>]/      one working dir per calc:
       <staged makeinput inputs + run outputs>
@@ -4475,12 +4475,12 @@ committed scheme.
 
 **Stable-id convention.**  `<id>` is the client-supplied
 stable per-structure key.  Kaleidoscope requires it to
-be filesystem-safe and unique within the campaign:
+be filesystem-safe and unique within the flight:
 lowercased, restricted to `[a-z0-9_-]`, with any other
-character rejected at `Campaign` build time (not
+character rejected at `Flight` build time (not
 silently rewritten -- a surprising rewrite would break
 the cache hit-test, 6.2.5).  The producer uses the
-curation `reference_id`; an acquisition campaign uses the
+curation `reference_id`; an acquisition flight uses the
 COD id.  Uniqueness collisions abort the build with the
 two offending units named.
 
@@ -4497,13 +4497,13 @@ identity (for the Imago wingbeat,
 `"<job_name>-<basis_scf>"`, e.g. `"scf-mb"`), and errors
 only if that derived tag still collides.
 
-**Sweep campaigns: one directory level per varied axis.**
-A *sweep* campaign -- the Principle-12 shape where one
+**Sweep flights: one directory level per varied axis.**
+A *sweep* flight -- the Principle-12 shape where one
 structure hosts a list of units that differ only by one
 or more swept option values -- needs more than the
 single-string tag above.  The convention is a **directory
 tree, one level per varied axis**, in a stable order the
-campaign-builder helper (6.2.8) declares.  Concrete
+flight-builder helper (6.2.8) declares.  Concrete
 examples for a graphite host with successive levels of
 sweep complexity:
 
@@ -4526,13 +4526,13 @@ Three-axis (basis x cell x k-density):
   ...
 ```
 
-The campaign's `campaign.toml` records the axis ordering
+The flight's `flight.toml` records the axis ordering
 and the *fixed* axes (axes that take the same value for
 every unit), so harvest and re-judging do not have to
 recover them from the path:
 
 ```toml
-[campaign.sweep]
+[flight.sweep]
 varied_axes = ["basis", "cell", "kpt-density"]
 fixed_axes  = { functional = "lda" }
 ```
@@ -4554,8 +4554,8 @@ parsing the path):
    `200.5` is recorded as `200p5`, parsed back as the
    real number `200.5`.  Negative numbers prefix `m`:
    `-0.3` becomes `m0p3`.
-4. The campaign's chosen `varied_axes` order is
-   authoritative -- all units in the campaign produce
+4. The flight's chosen `varied_axes` order is
+   authoritative -- all units in the flight produce
    the same tree shape (no missing levels mid-tree),
    even when one unit happens to share a value with
    another at some level.
@@ -4576,7 +4576,7 @@ convention.**  Its dispatch core stores whatever string
 (or sequence of strings, walked as nested directories) the
 client set on the unit and only validates against the
 `[a-z0-9_-]` rule.  The convention lives in the
-campaign-builder helper (6.2.8) so domain knowledge stays
+flight-builder helper (6.2.8) so domain knowledge stays
 out of kaleidoscope (Principle 9).  A sweep client that
 bypasses the helper is responsible for setting the
 per-axis directory components per these rules; the
@@ -4635,7 +4635,7 @@ deep the per-unit tree is.
    `cache_key.toml`, set `status = "queued"`, dispatch,
    and update `status.toml` through the lifecycle.
 
-Resuming a campaign is therefore *nothing more than
+Resuming a flight is therefore *nothing more than
 re-running it*: the hit-test over every unit naturally
 skips the completed ones and re-dispatches the rest.
 
@@ -4669,9 +4669,9 @@ restating: `imago.py` resumes *within* a run directory
 SCF); kaleidoscope decides whether to *launch* the run
 directory at all.  The two never overlap.
 
-#### 6.2.6 Harvest handoff and the campaign report
+#### 6.2.6 Harvest handoff and the flight report
 
-Kaleidoscope returns a `CampaignReport`: one entry per
+Kaleidoscope returns a `FlightReport`: one entry per
 unit, each carrying `id`, `calc`, `status`, `detail`,
 `wingbeat_dir`, `runtime_seconds`, and `message` -- exactly
 the generic `status.toml` fields, nothing domain-specific.
@@ -4710,14 +4710,14 @@ changes the contracts above.
   design.
 - **`lost`-unit retry policy.**  Whether a `lost` unit is
   retried automatically (Parsl's own retry, or a
-  kaleidoscope re-dispatch on the next campaign run via
+  kaleidoscope re-dispatch on the next flight run via
   its non-`done` status) versus left for the client to
   re-launch.  The cache mechanism already makes a plain
   re-run safe; the open question is only whether to
   retry *eagerly*.
-- **`campaign.toml` as an authoring surface.**  Whether
+- **`flight.toml` as an authoring surface.**  Whether
   it may be hand-written as the primary input rather than
-  always generated from the in-process `Campaign`.
+  always generated from the in-process `Flight`.
 - **Concurrency limits for tightly-iterative units.**
   Whether such units need a distinct executor or a
   resource cap so a few long inner loops do not starve a
@@ -4728,13 +4728,13 @@ changes the contracts above.
   client reads it back) is that wingbeat's contract, set
   when the wingbeat is added, not here.
 
-#### 6.2.8 Campaign-builder helper for predict-then-verify
+#### 6.2.8 Flight-builder helper for predict-then-verify
 
 This subsection designs the **first option-axis builder
 helper** living inside `src/scripts/kaleidoscope/`: a
 small factory function that turns "a structure plus an
 options dict plus a loaded `Dataspace` (DESIGN 7.4)" into
-a campaign of `CalcUnit`s laid out as a verification grid
+a flight of `CalcUnit`s laid out as a verification grid
 around the predictor's predicted operating point.  It is
 the corollary-of-Principle-12 builder split mentioned in
 the 6.2 intro: option-axis sweeps live here, and this is
@@ -4744,7 +4744,7 @@ kaleidoscope's scope.
 
 **Why this helper is in kaleidoscope's package and not
 upstream.**  Domain awareness creeps in along three axes
-when building such a campaign: which guidance entry to
+when building such a flight: which guidance entry to
 consume, how wide to make the verification grid, and how
 to spell the per-grid-point `<calc>` tag (6.2.4).  The
 first two are the historical-guidance DB's contract
@@ -4778,10 +4778,10 @@ predict_settings(
                                #   "molecular" (DESIGN 7.2)
     verify       = True,       # False -> trust mode (see
                                #   6.2.1 trust-mode note)
-    id           = None,       # campaign-level unit id; if
+    id           = None,       # flight-level unit id; if
                                #   None, derived from
                                #   structure path
-)  ->  (Campaign, PredictionRecord)
+)  ->  (Flight, PredictionRecord)
 ```
 
 **Algorithm sketch.**
@@ -4871,7 +4871,7 @@ predict_settings(
 
 5.  Assemble the PredictionRecord -- the full field set,
     identical to DESIGN 7.7 step 5 and matching the
-    [campaign.prediction] fields the harvest hook recovers
+    [flight.prediction] fields the harvest hook recovers
     (DESIGN 7.8).  `predict()` always returns a
     PredictionResult (never None, DESIGN 7.4), so no
     None-guards are needed; the under-trained case is
@@ -4889,8 +4889,8 @@ predict_settings(
           feature_vector     = query_sig,
       )
 
-6.  Record the sweep shape so serialize_campaign emits
-    the [campaign.sweep] block (PSEUDOCODE 13.1) and the
+6.  Record the sweep shape so serialize_flight emits
+    the [flight.sweep] block (PSEUDOCODE 13.1) and the
     harvest hook can recover the varied axis without
     re-deriving it from run-dir paths (DESIGN 7.8 step
     3a).  In v1 the single varied axis is k-density;
@@ -4902,15 +4902,15 @@ predict_settings(
                           "functional": options["functional"] },
       )
 
-    Return (Campaign(units=units, sweep=sweep, ...),
+    Return (Flight(units=units, sweep=sweep, ...),
     prediction_record).  The caller attaches
-    `prediction_record` to the Campaign so the harvest
+    `prediction_record` to the Flight so the harvest
     hook (DESIGN 7.8) recovers it from
-    [campaign.prediction] in campaign.toml.
+    [flight.prediction] in flight.toml.
 ```
 
 **Trust mode and the harvest contract.**  When
-`verify=False` the helper builds a single-unit campaign.
+`verify=False` the helper builds a single-unit flight.
 The producer (or any caller) still harvests the
 converged potential or other deliverables from that one
 run.  Per 6.2.1, trust-mode harvest does *not* auto-stage
@@ -4938,7 +4938,7 @@ can stage it manually per DESIGN 7.4 / 7.8.
   `PredictionRecord` to write back into the dataspace.
 
 **Single varied axis in v1.**  `predict_settings` sweeps
-exactly one axis -- k-density -- so `Campaign.sweep`
+exactly one axis -- k-density -- so `Flight.sweep`
 always has `varied_axes = ("kpt-density",)` and every
 `CalcUnit.calc` is a one-element tuple.  This matches
 DESIGN 7.2's "exactly one verified target" and DESIGN
@@ -4954,7 +4954,7 @@ a multi-entry `varied_axes`.
 this one (multi-axis sweeps, XANES-target sweeps, basis-
 size sweeps), each following the same shape: an upstream
 domain-aware library plus a small helper that turns its
-query result into a `Campaign` with the right tag
+query result into a `Flight` with the right tag
 convention.  None of those helpers belongs inside the
 dispatch core; all of them will share the path conventions
 and the `PredictionRecord` mechanism this first helper
@@ -5010,7 +5010,7 @@ entry) -- raise a `MakeinputError`.  `MakeinputError` is
 the makeinput analog of `ImagoError`: a programmer- or
 environment-level fault that no per-unit retry can fix, so
 it propagates out of the worker's wingbeat where the
-campaign records the unit `failed` and continues
+flight records the unit `failed` and continues
 (Principle 10).
 
 The one behavior that must change regardless of a fault's
@@ -5019,7 +5019,7 @@ signals several faults with `sys.exit`, but `sys.exit`
 raises `SystemExit`, which derives from `BaseException`,
 *not* `Exception` -- so it slips past the dispatch core's
 per-future `except Exception` (6.2.3) and would abort the
-campaign (the in-process executor) or kill the worker (a
+flight (the in-process executor) or kill the worker (a
 Parsl executor) rather than failing one unit.  Therefore
 **no `sys.exit` may remain on the build path**: each
 becomes a raised exception -- a `MakeinputError` when no
@@ -5123,7 +5123,7 @@ treats the cwd as a resource to acquire and release.  It
    failure.**
 
 Without step 4 a single failed build would strand a
-campaign worker in a stale directory and corrupt every
+flight worker in a stale directory and corrupt every
 subsequent build's relative-path resolution -- the same
 reentrancy hazard 6.1.4 calls the most important
 correctness difference between the one-shot CLI and the
@@ -5189,7 +5189,7 @@ function run_structure(structure, options, run_dir,
 The import is local, so `imago.py` keeps importing without
 makeinput's environment loaded -- the same lazy-import
 courtesy `ImagoWingbeat` already extends to `imago` (6.2.2).
-This is the seam that lets a kaleidoscope campaign hand a
+This is the seam that lets a kaleidoscope flight hand a
 bare `imago.skl` plus options to the default wingbeat and
 have the run directory built and run in one worker call,
 which is exactly the dependency the C48.3 potential-DB
@@ -5290,7 +5290,7 @@ structure:
       under-trained predictor -> wide-grid fallback
       (7.9).
   4.  Dispatch the grid through kaleidoscope (DESIGN 6.2)
-      using the campaign-builder helper (DESIGN 6.2.8).
+      using the flight-builder helper (DESIGN 6.2.8).
   5.  Harvest the converged grid point and the measured
       electronic-structure quantities back into the
       dataspace through staging + curator promotion
@@ -5306,16 +5306,16 @@ stores convergence-settings advice plus the electronic-
 structure character that produced it -- with different
 lifetimes (DESIGN 5 grows entry-by-entry under
 deliberate curation; DESIGN 7 accumulates from every
-successful campaign) and different consumers (DESIGN 5
+successful flight) and different consumers (DESIGN 5
 feeds `makeinput.py`; DESIGN 7 feeds kaleidoscope's
-campaign builder).  The two artifacts share only the
+flight builder).  The two artifacts share only the
 curation discipline, not their contents.  Considered and
 rejected: cross-referencing them via a `pot_label`
 parameter (closed by decision, 7.10).
 
 **Why a separate artifact from kaleidoscope itself.**
 Kaleidoscope (DESIGN 6.2) is the dispatch layer that
-runs campaigns; it is domain-agnostic.  The guidance
+runs flights; it is domain-agnostic.  The guidance
 dataspace is domain-aware (it understands element
 groups, lattice families, electronic-structure
 characters).  Putting the dataspace inside kaleidoscope
@@ -5323,7 +5323,7 @@ would violate Principle 9 (kaleidoscope stays dumb) and
 would couple two artifacts with very different rates of
 change.  The clean separation: kaleidoscope dispatches;
 the dataspace + predictor advise; the client glues them
-together via the campaign-builder helper (DESIGN 6.2.8).
+together via the flight-builder helper (DESIGN 6.2.8).
 
 **Why this accelerates the initial-potential-database
 build (Goal 3).**  The C48.3 producer is itself a
@@ -5360,9 +5360,9 @@ whose `schema_version` field disagrees with the marker.
                           contract), e.g.
                           `"crystalline-a1b2c3"`.
   generated_at    string  ISO-8601 UTC timestamp of the
-                          campaign that produced this
+                          flight that produced this
                           entry.
-  source          string  Either `"campaign"` (the entry
+  source          string  Either `"flight"` (the entry
                           came from an automated harvest)
                           or `"manual"` (a curator wrote
                           it by hand).
@@ -5500,7 +5500,7 @@ electronic-structure quantities that drive it (`gap_ev`,
                                       per cell, in Bohr^3.
 
 **Verification block, under `[entry.verification]`
-(required for `source = "campaign"`, optional for
+(required for `source = "flight"`, optional for
 `source = "manual"`):**
 
 Records the verification grid that produced the converged
@@ -5528,7 +5528,7 @@ the verification block sits at the entry level.
                                        flatness from the
                                        staging file alone,
                                        without re-reading the
-                                       campaign workspace.
+                                       flight workspace.
   converged_at                 real    The value at which
                                        the convergence
                                        metric was first
@@ -5548,12 +5548,12 @@ the verification block sits at the entry level.
                                        score in [0.0, 1.0]
                                        the predictor
                                        returned at the
-                                       time this campaign
+                                       time this flight
                                        was launched, or
                                        0.0 if launched
                                        without a
                                        prediction (e.g.,
-                                       seed campaign).
+                                       seed flight).
                                        Records the
                                        strength of the
                                        prior that
@@ -5572,22 +5572,22 @@ the verification block sits at the entry level.
 
   Field             Type    Description
   --------------------------------------------------------
-  campaign_id       string  The kaleidoscope campaign
+  flight_id         string  The kaleidoscope flight
                             identifier that produced
                             this entry.  For `source =
                             "manual"`, the curator
                             records a free-form tag.
   source_structure  string  The structure that the
-                            campaign converged.  Free-
+                            flight converged.  Free-
                             form: a COD id, a Materials
                             Project id, or a relative
                             path under `share/skl/`.
   imago_commit      string  Git SHA of imago at the time
-                            of the campaign run.
+                            of the flight run.
   curator           string  For `source = "manual"`:
                             the curator's name or
                             handle.  For `source =
-                            "campaign"`: the name of
+                            "flight"`: the name of
                             the harvest script.
 
 **The top-level `SCHEMA_VERSION` marker file format.**
@@ -5631,7 +5631,7 @@ decide whether to refuse a file.  Day-1 contents:
 9. `cell_atom_count` must be `> 0`;
    `cell_volume_per_formula_unit` must be `> 0`.
 10. If `[entry.verification]` is present (required for
-    `source = "campaign"`): `converged_at` must equal
+    `source = "flight"`): `converged_at` must equal
     `measured.kpoint_density`; `grid_values` must be
     sorted ascending and contain `converged_at`;
     `grid_energies`, when present, must have the same
@@ -5645,12 +5645,12 @@ decide whether to refuse a file.  Day-1 contents:
     (referential integrity is not enforced at load --
     a neighbor entry may have been promoted out --
     but the field is recorded for forensics).
-11. `source` must equal `"campaign"` or `"manual"`.  For
-    `source = "campaign"`, the provenance fields
-    `campaign_id`, `source_structure`, and `imago_commit`
+11. `source` must equal `"flight"` or `"manual"`.  For
+    `source = "flight"`, the provenance fields
+    `flight_id`, `source_structure`, and `imago_commit`
     must all be non-empty; `[entry.verification]` is
     required.  For `source = "manual"`, the curator's
-    `campaign_id` may be free-form;
+    `flight_id` may be free-form;
     `[entry.verification]` is optional.
 12. Every required field listed in the field tables
     above must be present.  A missing field is a hard
@@ -5673,7 +5673,7 @@ crystalline/crystalline-a1b2c3.toml`.
 schema_version = 1
 entry_id       = "crystalline-a1b2c3"
 generated_at   = "2026-05-28T10:30:00Z"
-source         = "campaign"
+source         = "flight"
 
 [entry.signature]
 system_type    = "crystalline"
@@ -5731,7 +5731,7 @@ predictor_confidence   = 0.0000000000000000e+00
 predictor_neighbor_ids = []
 
 [entry.provenance]
-campaign_id      = "guidance_seed_2026_05_28"
+flight_id        = "guidance_seed_2026_05_28"
 source_structure = "COD-1530819"
 imago_commit     = "6e17c33"
 curator          = "guidance_harvest.py"
@@ -5752,9 +5752,9 @@ the emitter contract in 7.5.  Reading this entry:
 - `kpoint_density = 50.0` is the converged density.
 - `predictor_confidence = 0.0` and
   `predictor_neighbor_ids = []` record that this
-  campaign was launched without any prior to lean on --
+  flight was launched without any prior to lean on --
   a seed run, no prediction was made.  A later
-  campaign that *did* consult the predictor would
+  flight that *did* consult the predictor would
   record a non-zero confidence and a non-empty
   neighbor list (the IDs of the k nearest neighbors
   the prediction interpolated from).
@@ -5773,7 +5773,7 @@ dependencies are `tomllib` (Python stdlib) and the
 existing `structure_control.py` (to compute composition
 vectors and lattice families from a `StructureControl`).
 
-It is imported by the campaign-builder helper (consumer,
+It is imported by the flight-builder helper (consumer,
 DESIGN 6.2.8), by `guidance_harvest.py` (producer), and
 by `guidance_promote.py` (curator helper).  The
 library / producer / consumer split keeps read-only
@@ -5942,7 +5942,7 @@ class Verification:
 @dataclass(frozen=True)
 class Provenance:
     """Where this entry came from."""
-    campaign_id:      str
+    flight_id:        str
     source_structure: str
     imago_commit:     str
     curator:          str
@@ -5952,7 +5952,7 @@ class GuidanceEntry:
     """One datapoint in the dataspace."""
     entry_id:     str
     generated_at: str             # ISO-8601 UTC
-    source:       str             # "campaign" | "manual"
+    source:       str             # "flight" | "manual"
     signature:    Signature
     measured:     Measured
     context:      Context
@@ -5978,7 +5978,7 @@ class Dataspace:
 
 @dataclass(frozen=True)
 class PredictionResult:
-    """What predict() returns to the campaign-builder
+    """What predict() returns to the flight-builder
     helper (DESIGN 6.2.8).
     """
     predicted_kpoint_density: float
@@ -6090,7 +6090,7 @@ third-party dependency.
 ```
 slug = system_type + "-" + short_sha
 short_sha = first 6 hex digits of SHA-256 over the bytes
-            (campaign_id || source_structure || generated_at)
+            (flight_id || source_structure || generated_at)
 ```
 
 Two virtues of putting `system_type` in the slug rather
@@ -6102,9 +6102,9 @@ length elements_part of the previous design, so every
 slug is exactly the same length (about 20 chars).
 
 The `short_sha` is the collision guard discussed in
-ARCH 10.8: two campaigns harvesting an entry at the same
+ARCH 10.8: two flights harvesting an entry at the same
 instant produce different hashes (because either
-`campaign_id` or `source_structure` will differ), so
+`flight_id` or `source_structure` will differ), so
 their files do not collide.  If by extreme coincidence
 they do, `save_entry` raises a hard error (rule 2) and
 the harvest script retries with a fresh `generated_at`.
@@ -6204,7 +6204,7 @@ Default weights: `w_comp = 1.0`, `w_latt = 0.25`.  These
 make composition the dominant signal and let lattice
 family separate polytypes (rutile-TiO2 from anatase-TiO2)
 without dominating.  Both are tunable; calibration after
-the seed campaign may shift them.
+the seed flight may shift them.
 
 Find the `k = 5` nearest neighbors by `d1`.  Stage-1
 predictions are inverse-distance-weighted means:
@@ -6294,7 +6294,7 @@ the intermediate `predicted_gap` and
 
 **Tuning knobs and their defaults.**  All of these are
 named module-level constants in `guidance_db.py`, so
-calibration after the seed campaign is a one-file
+calibration after the seed flight is a one-file
 change:
 
 ```
@@ -6323,15 +6323,15 @@ low confidence rather than failing); and stays auditable
 listed neighbors").  Linear regression would assume
 smoothness we cannot defend across polytypes; neural
 networks would obscure the audit trail and require more
-data than the seed campaign produces.  Calibration after
-the seed campaign will tell us whether k-NN's accuracy
+data than the seed flight produces.  Calibration after
+the seed flight will tell us whether k-NN's accuracy
 floor is acceptable or whether a more sophisticated
 model is warranted.
 
-### 7.7 Predict-then-Verify Campaign Construction
+### 7.7 Predict-then-Verify Flight Construction
 
 This subsection covers the bridge from a single prediction
-to a concrete kaleidoscope campaign.  The campaign-builder
+to a concrete kaleidoscope flight.  The flight-builder
 helper that lives in `src/scripts/kaleidoscope/` (DESIGN
 6.2.8) is what calls into this design rung; the algorithm
 below is what it executes.
@@ -6344,7 +6344,7 @@ below is what it executes.
 - `system_type`: one of the four valid values, declared by
   the caller.
 - `basis`, `functional`: the (basis, functional) under
-  which the campaign will run; selects the predictor's
+  which the flight will run; selects the predictor's
   sub-model (7.6 step 2).
 - `dataspace`: the loaded `Dataspace` (7.4).
 - `verify`: optional bool, default True; False triggers
@@ -6353,7 +6353,7 @@ below is what it executes.
 
 **Outputs:**
 
-- A `Campaign` of `CalcUnit`s (DESIGN 6.2.1) ready to
+- A `Flight` of `CalcUnit`s (DESIGN 6.2.1) ready to
   dispatch.
 - A `PredictionRecord` (7.4-derived) the harvest hook
   recovers later.
@@ -6404,10 +6404,10 @@ below is what it executes.
       anywhere the value is passed to makeinput.
     - `kpt-density` is the display name used inside
       the calc-tag tree (per 6.2.4's tag convention)
-      and inside Campaign.sweep.varied_axes.  Used
+      and inside Flight.sweep.varied_axes.  Used
       anywhere the axis appears as a directory level
       or as a sweep-axis name humans inspect.
-    The campaign-builder helper (6.2.8) is the
+    The flight-builder helper (6.2.8) is the
     translation point between the two names.
 
 5.  prediction_record = PredictionRecord(
@@ -6429,7 +6429,7 @@ below is what it executes.
         feature_vector     = query_sig,
     )
 
-6.  campaign = Campaign(
+6.  flight = Flight(
         units = units,
         sweep = SweepRecord(
             varied_axes = ("kpt-density",),
@@ -6438,13 +6438,13 @@ below is what it executes.
         ),
         ...
     )
-    attach_prediction_record(campaign, prediction_record)
+    attach_prediction_record(flight, prediction_record)
     The `sweep` field (DESIGN 6.2.1) makes
-    serialize_campaign emit [campaign.sweep], so harvest
+    serialize_flight emit [flight.sweep], so harvest
     (7.8 step 3a) recovers the varied axis without parsing
     run-dir paths.
 
-7.  return campaign, prediction_record
+7.  return flight, prediction_record
 ```
 
 **The verification-grid widening function.**  Now driven
@@ -6483,13 +6483,13 @@ Behavior at the extremes:
   the true converged point is still likely in range.
 
 The exact constants (`1.2`, `1.5`, `3`, `4`) are starting
-heuristics; calibration after the seed campaign may
+heuristics; calibration after the seed flight may
 adjust them.  They are tunable knobs in
 `src/scripts/kaleidoscope/`, kept in the one function so
 calibration is a one-file change.
 
 **The prediction record** is persisted alongside the
-campaign (in `campaign.toml` as `[campaign.prediction]`)
+flight (in `flight.toml` as `[flight.prediction]`)
 so the harvest hook (7.8) can recover the predicting
 neighbors and the confidence score that drove the grid
 choice.  Without it, the harvested
@@ -6498,16 +6498,16 @@ fields would be unrecoverable.
 
 ### 7.8 Harvest Pipeline (Staging and Promotion)
 
-The harvest hook turns a finished campaign into a staged
+The harvest hook turns a finished flight into a staged
 guidance entry rich enough to feed the predictor.  It
 runs after the verification grid has finished (or as a
 separate post-step the user invokes).
 
 **Inputs:**
 
-- A finished campaign's workspace directory.
-- The campaign's `[campaign.prediction]` block recovered
-  from `campaign.toml` (7.7).
+- A finished flight's workspace directory.
+- The flight's `[flight.prediction]` block recovered
+  from `flight.toml` (7.7).
 
 **What gets read out of each converged run's
 `result.toml`.**  The imago callable API (DESIGN 6.1)
@@ -6532,8 +6532,8 @@ provenance otherwise.
 **Algorithm** (`guidance_harvest.py`):
 
 ```
-1.  Load the campaign report (DESIGN 6.2.6) and the
-    [campaign.prediction] block from campaign.toml.
+1.  Load the flight report (DESIGN 6.2.6) and the
+    [flight.prediction] block from flight.toml.
 
 2.  Group CalcUnits by id (one group per structure).
 
@@ -6555,20 +6555,20 @@ provenance otherwise.
          numerical fluke.
       d. If no point satisfies the criterion (energy
          still moving at the top of the grid), log a
-         warning, tag the campaign with
+         warning, tag the flight with
          `prediction_mismatch = true`, and SKIP this
          structure.  Non-converged sweeps do not earn
          an entry.  The user must widen the grid and
          re-run.
       e. Compute the structure's signature: system_type
-         from the campaign's [campaign.prediction]
+         from the flight's [flight.prediction]
          (which carries it from 7.7); composition_vector
          and lattice_family via compute_signature().
       f. Build a GuidanceEntry:
             - signature: from step (e)
             - measured: from the chosen converged
               CalcUnit's result.toml
-            - context: from the campaign's options
+            - context: from the flight's options
               (basis, functional, threshold, cell info)
             - verification: grid_values,
               grid_energies (the parallel total-energy
@@ -6579,8 +6579,8 @@ provenance otherwise.
               metric/metric_threshold,
               predictor_confidence and
               predictor_neighbor_ids from
-              [campaign.prediction].
-            - provenance: campaign_id, source_structure,
+              [flight.prediction].
+            - provenance: flight_id, source_structure,
               imago_commit, curator = "guidance_harvest.py".
       g. Write the entry to
          share/historicalGuidanceDB/staging/<system_type>/
@@ -6622,7 +6622,7 @@ A curator helper.  Four modes of operation:
     (`gap_kind == "none"` iff `gap_ev == 0.0`).
   Files failing the rule stay in staging for the
   curator's review.  In practice this auto-promotes
-  ~80% of seed-campaign entries with the curator
+  ~80% of seed-flight entries with the curator
   reviewing only the ~20% outliers.
 - *Batch promote all* (`--all`).  Promotes every
   staging file without checking the rule.  Intended
@@ -6646,7 +6646,7 @@ that should not propagate.  Staging gives the curator
 a checkpoint to catch these before they influence
 future predictions.  The friction is the point; the
 `--auto-promote` rule lets the friction scale to a
-500-entry seed campaign without overwhelming the
+500-entry seed flight without overwhelming the
 curator.
 
 ### 7.9 Bootstrap and Day-1 Behavior
@@ -6658,7 +6658,7 @@ gracefully in that state and as the dataspace fills.
 query, basis, functional)` over an empty Dataspace
 returns
 `PredictionResult(is_under_trained = True, ...)`.  The
-campaign-builder helper (DESIGN 6.2.8) then falls back to
+flight-builder helper (DESIGN 6.2.8) then falls back to
 the wide-grid default per 7.7 step 3.  The under-trained
 path is unified with the no-sub-model and the sparse-
 sub-model paths -- 7.6's step 2 fallback decides under
@@ -6706,8 +6706,8 @@ Eight points spanning a factor of 16, chosen to bracket
 the k-density range commonly seen across published OLCAO
 results.  This is deliberately broader than any "verify
 around a prediction" grid: with no usable predictor, the
-campaign has to find the converged point unaided.  The
-list lives in the campaign-builder helper, not in the
+flight has to find the converged point unaided.  The
+list lives in the flight-builder helper, not in the
 dataspace itself (an empty crystalline subtree means no
 dataspace content to consult).
 
@@ -6736,11 +6736,11 @@ their swept bounds.  Two distinct shapes:
   system requires a k-density above 400.0.  Diagnostic:
   the energy is still moving between the top two grid
   points.  The harvest hook (7.8) logs a warning, tags
-  the campaign with `prediction_mismatch = true`, and
+  the flight with `prediction_mismatch = true`, and
   SKIPs the structure -- no entry is staged.  The user
   re-runs with a manually-extended grid (e.g., adds
-  `kpoint_density = 600.0` to the campaign builder's
-  options), the second campaign converges, and the
+  `kpoint_density = 600.0` to the flight builder's
+  options), the second flight converges, and the
   staged entry then carries the higher value as the
   canonical k-density for that signature.  No automatic
   retry is built in for v1: silent re-dispatch with
@@ -6766,13 +6766,13 @@ kaleidoscope.  A researcher (or future tier-3 custom
 wingbeat) wraps the dispatch in a re-run loop when needed;
 the core stays single-shot.
 
-**The seed campaign (TODO C75).**  The first useful
+**The seed flight (TODO C75).**  The first useful
 entries for the crystalline subtree come from a
 deliberate stratified seed run: ~150-250 calculations
 spanning element-group pairs and common stoichiometry
 patterns (binary AB, A2B, ABO3 perovskite, etc.) so the
 predictor has broad chemistry coverage from day-2 on.
-The seed campaign uses the wide-grid default per
+The seed flight uses the wide-grid default per
 structure, runs through kaleidoscope, and feeds into the
 `--auto-promote` rule of `guidance_promote.py` (7.8)
 which lets the curator review only the ~20% outliers
@@ -6805,18 +6805,18 @@ the DESIGN 5.7 regeneration discipline.
   double-counting).  Day-1 we keep them in their
   column-based groups and leave `metalloid` empty,
   documenting the choice in `gap_groups.toml`'s
-  comments.  Real seed-campaign data will tell us
+  comments.  Real seed-flight data will tell us
   whether metalloid-as-a-group meaningfully separates
   borderline-band semiconductors from their column
   neighbors; if yes, a curator moves them on a v2
   schema bump.
-- **k-NN tuning knobs after the seed campaign.**  All of
+- **k-NN tuning knobs after the seed flight.**  All of
   `k_neighbors`, the distance weights (`w_comp`,
   `w_latt`, `w_gap`, `w_spin`), and the confidence
   normalizations (`sigma_gap_ref`, `sigma_kpd_ref`) are
   named constants in `guidance_db.py` (7.6).  Their
   defaults are educated guesses.  Calibration after the
-  seed campaign should pick values that minimize the
+  seed flight should pick values that minimize the
   predict-then-verify miss rate (how often does the
   verification grid land its converged point at an
   endpoint rather than the middle?).  The calibration
@@ -6833,7 +6833,7 @@ the DESIGN 5.7 regeneration discipline.
   the safety net, but a recurring problem here would
   motivate adding a space-group integer as a side
   feature or extending lattice_family to a finer
-  taxonomy.  Deferred until seed campaign reveals
+  taxonomy.  Deferred until seed flight reveals
   whether this matters in practice.
 - **Spin-polarization interpretation across magnetic
   orderings.**  `total_magnetization` is recorded per
@@ -6853,7 +6853,7 @@ the DESIGN 5.7 regeneration discipline.
   features identifying the family).  Deferred until
   k-density predictor has proven out.
 - **Multi-metric verification.**  Day-1's `metric` is
-  `total_energy`.  Future campaigns may need forces
+  `total_energy`.  Future flights may need forces
   or density-change.  The schema's `metric` field is
   registry-keyed (rule 10) so adding new metrics is a
   registry addition.  Open: how to record a *vector*

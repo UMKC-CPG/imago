@@ -101,7 +101,7 @@ class MakeinputError(Exception):
     bare ``sys.exit`` deep inside a build would terminate a long-lived
     kaleidoscope Parsl worker driving thousands of builds.  By raising
     instead, the exception propagates out of the worker's runner, the
-    campaign records that unit as ``failed``, and the rest of the batch
+    flight records that unit as ``failed``, and the rest of the batch
     continues (VISION Principle 10).  The thin CLI wrapper (``main``) is the
     only layer that catches it and translates it into a non-zero process
     exit, preserving today's user-facing diagnostics.
@@ -3255,7 +3255,7 @@ def initialize_emu(settings, sc):
        .. warning::
 
           This is intentionally destructive.  The ``-emu`` flag is meant to
-          be used at the very start of a new EMU campaign, before any
+          be used at the very start of a new EMU flight, before any
           production files have been generated.  If you have results you
           want to keep, back them up **before** running with ``-emu``.
 
@@ -6353,7 +6353,7 @@ def build_run_dir(structure, options, run_dir, settings=None):
     This is makeinput's callable entry point: the in-process counterpart of
     invoking the CLI on a directory.  ``imago.run_structure`` chains its
     result straight into ``imago.run_prepared`` (DESIGN 6.3.6), which is
-    what lets a kaleidoscope campaign hand a bare ``imago.skl`` plus options
+    what lets a kaleidoscope flight hand a bare ``imago.skl`` plus options
     to the default runner and have the run directory both built and run in
     one worker call.
 

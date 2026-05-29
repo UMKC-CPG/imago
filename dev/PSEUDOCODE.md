@@ -4242,7 +4242,7 @@ class ImagoError(Exception):
     # process.  Run-level failures (non-convergence, a
     # Fortran abort, a missing-at-run-time input) are NOT
     # raised -- they come back as a FAILED / NOT_CONVERGED
-    # ImagoResult so a campaign can record-and-continue
+    # ImagoResult so a flight can record-and-continue
     # (VISION Principle 10).
     pass
 ```
@@ -4329,7 +4329,7 @@ function property_outputs(prop, edge, jn, basis):
 
 The producer (the first client) reads only `scfV`,
 `energy`, and `iteration`; the property keys exist so
-later clients (DOS sweeps, bond-order campaigns) reach
+later clients (DOS sweeps, bond-order flights) reach
 their outputs through the same contract.
 
 ### 12.3 Entry points and CLI wrapper (DESIGN 6.1.3)
@@ -4420,7 +4420,7 @@ function _run_core(run_dir, settings):
 
     # Per-run-dir lock.  Because temp mirrors run_dir, two
     # different run dirs take two different locks, so a
-    # campaign of parallel runs never collides (DESIGN
+    # flight of parallel runs never collides (DESIGN
     # 6.1.5).  An already-held lock is a contract fault
     # in API mode -> raise.
     if exists(lock_path):
@@ -4582,13 +4582,13 @@ the verdict reuses the convergence metric the SCF already
 writes per cycle.  Everything else in §12 is a faithful
 restructuring of behavior that `imago.py` already has.
 
-## 13. kaleidoscope Campaign Dispatch (DESIGN 6.2)
+## 13. kaleidoscope Flight Dispatch (DESIGN 6.2)
 
 The Parsl-based dispatcher that drives a *set* of Imago
 calculations, per DESIGN 6.2.  It builds on §12: the
 default wingbeat calls the §12 callable API and persists
 its `ImagoResult`.  The pieces, helpers first then the
-driver: the data model and `campaign.toml` (13.1); the
+driver: the data model and `flight.toml` (13.1); the
 wingbeat protocol and the Imago wingbeat (13.2); the
 workspace paths, id rules, and `status.toml` (13.3); the
 cache hit-test (13.4); the dispatch driver with
@@ -4601,7 +4601,7 @@ never interprets what a run computed.  The wingbeat's
 `detail` string is recorded verbatim and never parsed;
 all domain harvest is client-side (13.6).
 
-### 13.1 Data model and campaign.toml (DESIGN 6.2.1)
+### 13.1 Data model and flight.toml (DESIGN 6.2.1)
 
 ```
 dataclass KeyFields:
@@ -4621,10 +4621,10 @@ dataclass CalcUnit:
     structure   : str          # path to an imago.skl
     options     : dict         # makeinput options
     wingbeat    : str | None   # wingbeat name; None -> the
-                               #   campaign default
+                               #   flight default
     key_fields  : KeyFields    # client-declared identity
 
-dataclass Campaign:
+dataclass Flight:
     root           : str       # workspace root directory
     units          : list      # list[CalcUnit]
     default_wingbeat : str     # wingbeat name for None units
@@ -4640,25 +4640,25 @@ dataclass SweepRecord:
                                #   they appear at each level
                                #   of CalcUnit.calc
     fixed_axes  : dict         # axis -> value for axes held
-                               #   constant across the campaign
+                               #   constant across the flight
 ```
 
 ```
-function serialize_campaign(campaign):
-    # Write campaign.toml: the authoritative record of
+function serialize_flight(flight):
+    # Write flight.toml: the authoritative record of
     # WHAT was asked for, separate from each run's
     # status.toml record of WHAT HAPPENED (13.3).  A resume
     # (13.5) reads the units back from here.  The optional
-    # [campaign.sweep] block is emitted only when the
-    # campaign was built by the predict-then-verify helper
+    # [flight.sweep] block is emitted only when the
+    # flight was built by the predict-then-verify helper
     # (DESIGN 6.2.1/6.2.8); each unit's calc tuple serializes
     # as a TOML array of directory-component strings.
-    record = { root = campaign.root,
-               default_wingbeat = campaign.default_wingbeat,
-               units = [ as_dict(u) for u in campaign.units ] }
-    if campaign.sweep is not None:
-        record["sweep"] = as_dict(campaign.sweep)
-    write_toml(join(campaign.root, "campaign.toml"), record)
+    record = { root = flight.root,
+               default_wingbeat = flight.default_wingbeat,
+               units = [ as_dict(u) for u in flight.units ] }
+    if flight.sweep is not None:
+        record["sweep"] = as_dict(flight.sweep)
+    write_toml(join(flight.root, "flight.toml"), record)
 ```
 
 ### 13.2 Wingbeat protocol and ImagoWingbeat (DESIGN 6.2.2)
@@ -4717,8 +4717,8 @@ when one is added.
 ### 13.3 Workspace paths, ids, status.toml (DESIGN 6.2.4)
 
 ```
-function unit_run_dir(campaign, unit):
-    base = join(campaign.root, "wingbeats", unit.id)
+function unit_run_dir(flight, unit):
+    base = join(flight.root, "wingbeats", unit.id)
     # The optional <calc> level(s) exist only when a
     # structure hosts more than one calculation.  calc is a
     # tuple of per-axis directory components (one level per
@@ -4728,13 +4728,13 @@ function unit_run_dir(campaign, unit):
 ```
 
 ```
-function validate_campaign(campaign):
+function validate_flight(flight):
     # Enforce the id/<calc> scheme of DESIGN 6.2.4 at build
     # time; abort (raise) on any violation, naming the
     # offenders -- a silent rewrite would break the cache
     # hit-test (13.4).
     seen = {}                       # id -> set of calc tuples
-    for unit in campaign.units:
+    for unit in flight.units:
         require_slug(unit.id)       # lowercased [a-z0-9_-]
         for component in unit.calc:  # each directory level
             require_slug(component)  #   is its own slug
@@ -4743,7 +4743,7 @@ function validate_campaign(campaign):
         # multiple units but a unit gave no tag (DESIGN
         # 6.2.4): a one-element tuple holding
         # "<job_name>-<basis_scf>" for the Imago wingbeat.
-        if tag == () and id_hosts_multiple(campaign,
+        if tag == () and id_hosts_multiple(flight,
                                            unit.id):
             tag = (derive_calc_tag(unit),)
             unit.calc = tag
@@ -4833,37 +4833,37 @@ function write_cache_key(wingbeat_dir, unit):
 ### 13.5 Dispatch driver (DESIGN 6.2.3)
 
 One Parsl app per unit; per-future exception capture so a
-single failure never aborts the campaign (Principle 10).
-Resuming a campaign is just re-running it: the hit-test
+single failure never aborts the flight (Principle 10).
+Resuming a flight is just re-running it: the hit-test
 skips the `done` units and re-dispatches the rest.
 
 ```
-function dispatch(campaign):
-    validate_campaign(campaign)            # 13.3
-    makedirs(campaign.root, exist_ok=True)
-    serialize_campaign(campaign)           # 13.1
+function dispatch(flight):
+    validate_flight(flight)            # 13.3
+    makedirs(flight.root, exist_ok=True)
+    serialize_flight(flight)           # 13.1
 
-    with parsl_loaded(campaign.parsl_config):
+    with parsl_loaded(flight.parsl_config):
         pending = []                  # list of (unit, future)
-        for unit in campaign.units:
+        for unit in flight.units:
             pending.append(
-                (unit, dispatch_unit(campaign, unit)))
+                (unit, dispatch_unit(flight, unit)))
 
         # Gather.  Catch PER future; never let one failure
         # propagate out of the loop.
         entries = []
         for (unit, fut) in pending:
-            entry = collect_future(campaign, unit, fut)
+            entry = collect_future(flight, unit, fut)
             entries.append(entry)
-            if campaign.on_outcome is not None:
-                campaign.on_outcome(entry)    # stream hook
+            if flight.on_outcome is not None:
+                flight.on_outcome(entry)    # stream hook
 
-    return CampaignReport(entries = entries)
+    return FlightReport(entries = entries)
 ```
 
 ```
-function dispatch_unit(campaign, unit):
-    wingbeat_dir = unit_run_dir(campaign, unit)
+function dispatch_unit(flight, unit):
+    wingbeat_dir = unit_run_dir(flight, unit)
     if is_cache_hit(unit, wingbeat_dir):         # 13.4
         # Hit: no Parsl app; resolve immediately from the
         # existing status.toml.
@@ -4875,20 +4875,20 @@ function dispatch_unit(campaign, unit):
     write_cache_key(wingbeat_dir, unit)          # 13.4
     write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status="queued",
-        wingbeat=(unit.wingbeat or campaign.default_wingbeat),
+        wingbeat=(unit.wingbeat or flight.default_wingbeat),
         submitted_at=now())
-    return submit_app(execute_wingbeat_task, campaign, unit, wingbeat_dir)
+    return submit_app(execute_wingbeat_task, flight, unit, wingbeat_dir)
 ```
 
 ```
 @parsl_python_app
-function execute_wingbeat_task(campaign, unit, wingbeat_dir):
+function execute_wingbeat_task(flight, unit, wingbeat_dir):
     # Runs on a worker.  Returns the WingbeatOutcome; raising
     # here surfaces to collect_future as a worker-side
     # failure.
     write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status="running", started_at=now())
-    wingbeat  = resolve_wingbeat(campaign, unit)   # name->Wingbeat
+    wingbeat  = resolve_wingbeat(flight, unit)   # name->Wingbeat
     outcome = wingbeat.run(unit, wingbeat_dir)         # 13.2
     write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status=("done" if outcome.ok else "failed"),
@@ -4900,8 +4900,8 @@ function execute_wingbeat_task(campaign, unit, wingbeat_dir):
 ```
 
 ```
-function collect_future(campaign, unit, fut):
-    wingbeat_dir = unit_run_dir(campaign, unit)
+function collect_future(flight, unit, fut):
+    wingbeat_dir = unit_run_dir(flight, unit)
     try:
         fut.result()       # re-raises any worker exception
     except ParslTaskLost:
@@ -4927,7 +4927,7 @@ dataclass ReportEntry:
     id, calc, status, detail, wingbeat_dir,
     runtime_seconds, message
 
-dataclass CampaignReport:
+dataclass FlightReport:
     entries : list      # list[ReportEntry]
 
 function report_entry_from_status(unit, wingbeat_dir):
@@ -4970,7 +4970,7 @@ function harvest_converged_potentials(report, manifest):
 ```
 
 This closes the loop with §12 and with the producer: the
-campaign runs and tracks the batch and owns the cache;
+flight runs and tracks the batch and owns the cache;
 the client declares the units and the key, then harvests
 converged potentials from the run directories the report
 points at.
@@ -5104,7 +5104,7 @@ function build_run_dir(structure, options, run_dir,
 
     # cwd discipline: acquire the cwd for the build and
     # restore it on EVERY exit, so a failed build cannot
-    # strand a campaign worker in run_dir (DESIGN 6.3.4).
+    # strand a flight worker in run_dir (DESIGN 6.3.4).
     original_cwd = getcwd()
     sc = StructureControl()
     try:
@@ -5169,7 +5169,7 @@ function run_structure(structure, options, run_dir,
     return run_prepared(run_dir, settings = settings)
 ```
 
-This is what lets a kaleidoscope campaign hand a bare
+This is what lets a kaleidoscope flight hand a bare
 `imago.skl` plus options to the default wingbeat (§13.2) and
 have the run directory built and run in one worker call --
 the dependency the C48.3 producer is waiting on.
@@ -5179,12 +5179,12 @@ the dependency the C48.3 producer is waiting on.
 The accumulation prong: a dataspace of converged
 calculations plus a small two-stage k-NN predictor that
 turns a new system's chemistry into a predicted converged
-k-density and an uncertainty, so a new campaign verifies a
+k-density and an uncertainty, so a new flight verifies a
 small grid around the prediction instead of scanning a wide
 one (DESIGN 7.1).  Four blocks, helpers first then drivers:
 the file-format-and-predictor library `guidance_db.py`
 (15.1 shapes, 15.2 signatures, 15.3 reader, 15.4 emitter,
-15.5 predictor); the campaign-builder helper inside
+15.5 predictor); the flight-builder helper inside
 `src/scripts/kaleidoscope/` (15.6); the harvest and curator
 producers `guidance_harvest.py` / `guidance_promote.py`
 (15.7).  All Python under `src/scripts/`; the Fortran side
@@ -5224,7 +5224,7 @@ CANONICAL_LATTICE_ORDER     = (   # 6 Bravais families
     "cubic", "hex", "tet", "ortho", "mono", "tri")
 
 # Predictor tuning knobs (DESIGN 7.6).  All named here so a
-# post-seed-campaign calibration is a one-file change.
+# post-seed-flight calibration is a one-file change.
 k_min          = 3        # below this, refuse the sub-model
 k_neighbors    = 5        # neighbors used at each k-NN stage
 epsilon        = 1e-6     # numerical floor on distance
@@ -5279,7 +5279,7 @@ dataclass Verification:
     predictor_neighbor_ids : tuple[str]
 
 dataclass Provenance:
-    campaign_id      : str
+    flight_id        : str
     source_structure : str
     imago_commit     : str
     curator          : str
@@ -5287,7 +5287,7 @@ dataclass Provenance:
 dataclass GuidanceEntry:
     entry_id     : str
     generated_at : str               # ISO-8601 UTC
-    source       : str               # campaign|manual
+    source       : str               # flight|manual
     signature    : Signature
     measured     : Measured
     context      : Context
@@ -5467,8 +5467,8 @@ function load_entry(path, system_type_dir, seen_ids):
     # Rule 11: source domain + provenance/verification
     # coupling.
     source = raw["source"]
-    require(source in ("campaign", "manual"), path,
-        "source must be campaign|manual, got " + source)
+    require(source in ("flight", "manual"), path,
+        "source must be flight|manual, got " + source)
 
     # Rule 2: entry_id unique across the whole entries tree.
     eid = raw["entry_id"]
@@ -5575,31 +5575,31 @@ function load_entry(path, system_type_dir, seen_ids):
         c["cell_volume_per_formula_unit"])
 
     # --- verification block ----------------------------
-    # Required for source=campaign (rule 11); optional for
+    # Required for source=flight (rule 11); optional for
     # source=manual.
     verification = None
     if "verification" in raw["entry"]:
         v = raw["entry"]["verification"]
         verification = load_verification(v, measured, path)
     require(verification is not None or source == "manual",
-        path, "source=campaign requires [entry.verification]")
+        path, "source=flight requires [entry.verification]")
 
     # --- provenance block ------------------------------
     require("provenance" in raw["entry"], path,
         "missing [entry.provenance]")
     p = raw["entry"]["provenance"]
-    for f in ("campaign_id", "source_structure",
+    for f in ("flight_id", "source_structure",
               "imago_commit", "curator"):
         require(f in p, path, "missing provenance." + f)
-    if source == "campaign":
-        # Rule 11: campaign entries need non-empty source +
-        # commit + campaign id.
-        for f in ("campaign_id", "source_structure",
+    if source == "flight":
+        # Rule 11: flight entries need non-empty source +
+        # commit + flight id.
+        for f in ("flight_id", "source_structure",
                   "imago_commit"):
             require(len(p[f]) > 0, path,
-                "source=campaign needs non-empty " + f)
+                "source=flight needs non-empty " + f)
     provenance = Provenance(
-        p["campaign_id"], p["source_structure"],
+        p["flight_id"], p["source_structure"],
         p["imago_commit"], p["curator"])
 
     return GuidanceEntry(
@@ -5666,19 +5666,19 @@ function fmt_string(s):
 ```
 
 ```
-function short_sha(campaign_id, source_structure,
+function short_sha(flight_id, source_structure,
                    generated_at):
     # DESIGN 7.5 slug guard: first 6 hex of SHA-256 over the
     # three provenance fields concatenated.  Two simultaneous
-    # harvests differ in campaign_id or source_structure, so
+    # harvests differ in flight_id or source_structure, so
     # their hashes (and files) differ.
-    blob = (campaign_id + source_structure
+    blob = (flight_id + source_structure
             + generated_at).encode("utf-8")
     return sha256_hex(blob)[:6]
 
 function slug_for(entry):
     return (entry.signature.system_type + "-"
-            + short_sha(entry.provenance.campaign_id,
+            + short_sha(entry.provenance.flight_id,
                         entry.provenance.source_structure,
                         entry.generated_at))
 ```
@@ -5772,7 +5772,7 @@ function format_entry(entry, slug):
 
     # [entry.provenance].
     out.append("[entry.provenance]")
-    emit_kv(out, "campaign_id",      entry.provenance.campaign_id)
+    emit_kv(out, "flight_id",      entry.provenance.flight_id)
     emit_kv(out, "source_structure",
             entry.provenance.source_structure)
     emit_kv(out, "imago_commit",     entry.provenance.imago_commit)
@@ -5975,17 +5975,17 @@ function stage2(pgap, pspin, entries):
     return pkpd, conf2, [e.entry_id for e, _ in nbrs]
 ```
 
-### 15.6 Campaign-builder helper (DESIGN 6.2.8 / 7.7)
+### 15.6 Flight-builder helper (DESIGN 6.2.8 / 7.7)
 
 Lives in `src/scripts/kaleidoscope/` (a domain-aware
 optional convenience; the dispatch core stays dumb,
 Principle 12).  It turns a structure + options + loaded
-Dataspace into a verification-grid `Campaign` plus a
+Dataspace into a verification-grid `Flight` plus a
 `PredictionRecord` the harvest hook later recovers.
 
 ```
 dataclass PredictionRecord:    # 7.7-derived; serialized as
-                               # [campaign.prediction]
+                               # [flight.prediction]
     policy             : str        # trust_no_verify |
                                     #   wide_grid_no_prior |
                                     #   verify_around_prediction
@@ -6029,7 +6029,7 @@ function build_verification_grid(center, confidence):
 ```
 function encode_axis_value(v):
     # DESIGN 6.2.4 rule 3: '.' -> 'p', leading '-' -> 'm'.
-    # The campaign builder rounds k-density to an integer
+    # The flight builder rounds k-density to an integer
     # first (below), so in v1 this is just the decimal int;
     # the general encoder is kept for future axes.
     if v == round(v):
@@ -6044,7 +6044,7 @@ function encode_axis_value(v):
 
 function build_calc_tag(calc_axes):
     # calc_axes is an ORDERED mapping {axis: value}; the
-    # order must match Campaign.sweep.varied_axes.  Returns a
+    # order must match Flight.sweep.varied_axes.  Returns a
     # tuple of "<axis>-<encoded-value>" directory components
     # (DESIGN 6.2.1 / 6.2.4).  In v1 it is one component.
     components = []
@@ -6100,7 +6100,7 @@ function predict_settings(structure, options, dataspace,
             key_fields = standard_key_fields()))
 
     # Record the sweep shape (DESIGN 6.2.8 step 6) so
-    # serialize_campaign emits [campaign.sweep] and harvest
+    # serialize_flight emits [flight.sweep] and harvest
     # recovers the varied axis without path-parsing.
     sweep = SweepRecord(
         varied_axes = ("kpt-density",),
@@ -6118,9 +6118,9 @@ function predict_settings(structure, options, dataspace,
         system_type        = system_type,
         feature_vector     = query_sig)
 
-    campaign = Campaign(units = units, sweep = sweep, ...)
-    attach_prediction_record(campaign, record)
-    return campaign, record
+    flight = Flight(units = units, sweep = sweep, ...)
+    attach_prediction_record(flight, record)
+    return flight, record
 ```
 
 ```
@@ -6135,43 +6135,43 @@ function standard_key_fields():
 
 **Attaching the PredictionRecord without teaching the core
 about it.**  DESIGN 6.2.8 step 6 / 7.7 step 6 say the record
-is attached to "the Campaign's metadata" and serialized as
-`[campaign.prediction]`, but the §13.1 `Campaign` has no
+is attached to "the Flight's metadata" and serialized as
+`[flight.prediction]`, but the §13.1 `Flight` has no
 field for it, and the dispatch core must not interpret
 domain data (Principle 9).  The pseudocode pins this the way
-the opaque `WingbeatOutcome.detail` is handled: `Campaign`
+the opaque `WingbeatOutcome.detail` is handled: `Flight`
 carries a generic `metadata: dict[str, dict]` (default
-empty) that `serialize_campaign` (§13.1) emits VERBATIM as
-`[campaign.<key>]` tables, never reading the contents.
+empty) that `serialize_flight` (§13.1) emits VERBATIM as
+`[flight.<key>]` tables, never reading the contents.
 
 ```
-function attach_prediction_record(campaign, record):
+function attach_prediction_record(flight, record):
     # Domain-aware helper stashes a plain dict; the core only
     # round-trips it.  Harvest (15.7) reads it back.
-    campaign.metadata["prediction"] = as_dict(record)
+    flight.metadata["prediction"] = as_dict(record)
 ```
 
 This requires one small addition flagged for DESIGN 6.2.1 /
-PSEUDOCODE 13.1: the generic `metadata` field on `Campaign`
-plus the `serialize_campaign` line that emits each
-`metadata[key]` as a `[campaign.<key>]` block.  It keeps the
+PSEUDOCODE 13.1: the generic `metadata` field on `Flight`
+plus the `serialize_flight` line that emits each
+`metadata[key]` as a `[flight.<key>]` block.  It keeps the
 core domain-agnostic while letting the §7 helper persist the
 prediction provenance the harvest needs.
 
 ### 15.7 Harvest and promote (DESIGN 7.8)
 
-**`guidance_harvest.py`** turns a finished campaign into
-staged guidance entries.  It reads the campaign workspace
+**`guidance_harvest.py`** turns a finished flight into
+staged guidance entries.  It reads the flight workspace
 (it is the producer that has workspace access; the curator
 later works on staging files alone).
 
 ```
-function harvest_campaign(workspace_root, db_root, dataspace):
-    campaign = read_campaign_toml(
-        join(workspace_root, "campaign.toml"))
-    prediction = campaign.metadata.get("prediction")  # 15.6
+function harvest_flight(workspace_root, db_root, dataspace):
+    flight = read_flight_toml(
+        join(workspace_root, "flight.toml"))
+    prediction = flight.metadata.get("prediction")  # 15.6
 
-    for unit_id, units in group_by_id(campaign.units):
+    for unit_id, units in group_by_id(flight.units):
         # a. The verification sub-grid for this structure,
         #    sorted by swept k-density (v1: every unit).
         grid = sort(units, key = lambda u: u.options["kpd"])
@@ -6224,7 +6224,7 @@ function harvest_campaign(workspace_root, db_root, dataspace):
         entry = GuidanceEntry(
             entry_id     = "",                # set by save_entry
             generated_at = now_iso8601_utc(),
-            source       = "campaign",
+            source       = "flight",
             signature    = sig,
             measured     = Measured(
                 gap_ev              = chosen_rt["gap_ev"],
@@ -6237,8 +6237,8 @@ function harvest_campaign(workspace_root, db_root, dataspace):
                 dos_at_fermi        = chosen_rt.get(
                                         "dos_at_fermi")),
             context      = Context(
-                basis      = campaign.sweep.fixed_axes["basis"],
-                functional = campaign.sweep.fixed_axes["functional"],
+                basis      = flight.sweep.fixed_axes["basis"],
+                functional = flight.sweep.fixed_axes["functional"],
                 scf_threshold = grid[0].options["scf_threshold"],
                 cell_atom_count = chosen_rt["cell_atom_count"],
                 cell_volume_per_formula_unit = chosen_rt[
@@ -6256,7 +6256,7 @@ function harvest_campaign(workspace_root, db_root, dataspace):
                     prediction["neighbor_entry_ids"]
                     if prediction is not None else [])),
             provenance   = Provenance(
-                campaign_id      = campaign_id_of(workspace_root),
+                flight_id        = flight_id_of(workspace_root),
                 source_structure = grid[0].structure,
                 imago_commit     = chosen_rt["imago_commit"],
                 curator          = "guidance_harvest.py"))
@@ -6347,7 +6347,7 @@ function auto_promote_ok(entry):
     return True
 ```
 
-In practice the rule auto-promotes ~80% of a seed campaign
+In practice the rule auto-promotes ~80% of a seed flight
 (TODO C75) and leaves the ~20% endpoint-converged or
 not-yet-flat outliers for the curator's interactive review
 -- the friction that makes a 250-entry seed tractable

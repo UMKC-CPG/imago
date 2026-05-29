@@ -221,7 +221,7 @@ BASIS_CODE_MAP = {"mb": 1, "fb": 2, "eb": 3}
 #   ImagoResult describing its outcome, and the CLI (main,
 #   below) becomes a thin wrapper that translates that result
 #   into a process exit code. Higher layers -- the ASE adapter
-#   and the kaleidoscope campaign runner -- call the API
+#   and the kaleidoscope flight runner -- call the API
 #   directly and must never be killed by a sys.exit from deep
 #   inside a run, so run-level failures come back as a status
 #   while only environment/programmer faults raise ImagoError.
@@ -242,7 +242,7 @@ class ImagoError(Exception):
     process. Run-level failures (non-convergence, a Fortran
     abort, a missing-at-run-time input) are NOT raised; they
     come back as a FAILED / NOT_CONVERGED ImagoResult so a
-    campaign can record-and-continue (VISION Principle 10)."""
+    flight can record-and-continue (VISION Principle 10)."""
     pass
 
 
@@ -2659,7 +2659,7 @@ def _run_core(run_dir, settings):
 
         # Per-run-dir lock. Because temp mirrors run_dir, two
         #   different run dirs take two different locks, so a
-        #   campaign of parallel runs never collides. A lock
+        #   flight of parallel runs never collides. A lock
         #   already held means another process owns this run
         #   directory -- a contract fault (DESIGN 6.1.5).
         lock_path = os.path.join(temp, fn.imago_lock)
@@ -2807,7 +2807,7 @@ def run_structure(structure, options, run_dir, settings=None):
 
     A makeinput contract fault (a missing structure file, an
     unsupported build) raises MakeinputError, which propagates
-    to the campaign as a failed unit (VISION Principle 10), just
+    to the flight as a failed unit (VISION Principle 10), just
     as an ImagoError from the run does."""
     import makeinput
     if settings is None:
@@ -2831,7 +2831,7 @@ def main():
     The actual orchestration -- staging inputs, locking, running
     the Fortran binary, collecting outputs -- now lives in the
     callable API (_run_core, run_prepared) so that the cluster
-    jobs, the ASE adapter, and the kaleidoscope campaign runner
+    jobs, the ASE adapter, and the kaleidoscope flight runner
     can reach it without a command line.
 
     Note: with the convergence verdict now available (PSEUDOCODE

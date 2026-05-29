@@ -5,7 +5,7 @@ The mechanism is owned by kaleidoscope; the key *fields* are
 supplied by the client on each ``CalcUnit`` (DESIGN 6.2.5).
 Before launching a unit the dispatcher asks ``is_cache_hit``;
 on a hit it skips the launch and reports the existing outcome,
-so resuming a campaign is nothing more than re-running it.
+so resuming a flight is nothing more than re-running it.
 
 The key has two parts, mirroring the producer's original
 ``is_cached_v2`` (DESIGN 5.7) and generalizing it:

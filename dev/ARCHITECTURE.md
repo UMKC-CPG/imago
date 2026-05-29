@@ -26,7 +26,7 @@ src/
     ase_imago.py       ASE Calculator, ImagoCalculator (9.3)
     cod_fish.py        COD acquisition front-end -> CIF (9.5)
     cif2skl.py         CIF -> imago.skl converter (9.5)
-    kaleidoscope/      Parsl campaign dispatcher, "kaleidoscope" (9.4)
+    kaleidoscope/      Parsl flight dispatcher, "kaleidoscope" (9.4)
   kinds.f90            Shared precision kinds
   constants.f90        Shared physical/mathematical constants
 dev/
@@ -933,7 +933,7 @@ that contract down before code lands.
 
 ---
 
-## 9. High-Throughput Calculation Campaigns
+## 9. High-Throughput Calculation Flights
 
 This section specifies the infrastructure of VISION
 Goal 4: shared machinery for submitting, tracking, and
@@ -943,7 +943,7 @@ the initial-potential database build (Section 8.5),
 convergence sweeps, validation harnesses, and future
 ab-initio molecular dynamics and high-throughput
 screening -- do not each reinvent *how* to submit and
-watch jobs on a cluster.  The campaign dispatcher is named
+watch jobs on a cluster.  The flight dispatcher is named
 **kaleidoscope**.
 
 The layers and the four scripts/packages that realize
@@ -954,7 +954,7 @@ them:
 - `ase_imago.py` -- an ASE Calculator,
   `ImagoCalculator`, adapting Imago to the
   materials-simulation community (9.3).
-- `kaleidoscope/` -- a Parsl-based campaign dispatcher that
+- `kaleidoscope/` -- a Parsl-based flight dispatcher that
   drives many calculations in parallel and/or series
   batches (9.4).
 - `cod_fish.py` + `cif2skl.py` -- the structure-
@@ -966,11 +966,11 @@ Three VISION principles are the load-bearing
 constraints.  Principle 8 (decouple adapter from
 orchestrator) keeps 9.3 and 9.4 independent.  Principle
 9 (domain-specific machinery lives at the adapter
-layer; the campaign layer is ordinary scientific
+layer; the flight layer is ordinary scientific
 Python) keeps kaleidoscope free of materials-specific
 coupling.  Principle 10 (complete-and-report at the
-campaign level) means one failed calculation never
-fails the whole campaign by default.
+flight level) means one failed calculation never
+fails the whole flight by default.
 
 ### 9.1 Layering and dependency direction
 
@@ -990,7 +990,7 @@ cod_fish.py --> cif2skl.py --> imago.skl
 ```
 
 `imago.py` is the foundation: it has no dependency on
-ASE, on Parsl, or on the campaign layer.  The ASE
+ASE, on Parsl, or on the flight layer.  The ASE
 adapter and kaleidoscope both sit *above* it and call
 *down* into it.  This is what lets the cluster jobs and
 kaleidoscope run without ASE installed, and lets a
@@ -1100,10 +1100,10 @@ Principle 9 and keeps `import ase` confined to the
 modules that genuinely need it.  `cif2skl.py` (9.5)
 reuses the same factory.
 
-### 9.4 kaleidoscope: the campaign dispatcher
+### 9.4 kaleidoscope: the flight dispatcher
 
 `kaleidoscope/` is a Parsl-based package that drives a
-*set* of calculations.  Given a campaign specification
+*set* of calculations.  Given a flight specification
 (which structures, with which makeinput options), it
 dispatches the per-structure work -- makeinput to build
 inputs, then the 9.2 `imago.py` API to run -- across
@@ -1114,16 +1114,16 @@ AIMD) under one model.
 
 Kaleidoscope dispatches a *unit of work* through a
 pluggable wingbeat seam.  The default wingbeat is the
-`imago.py` API directly -- the campaign layer is
+`imago.py` API directly -- the flight layer is
 ordinary scientific Python (Principle 9), and most
-campaigns (the database build, convergence sweeps) need
+flights (the database build, convergence sweeps) need
 nothing more.  But a unit may also be dispatched
 *through the ASE adapter* (for ASE-MD or ASE relaxation
 semantics), or through a future adapter, and a single
-campaign may blend wingbeats -- some units plain Imago
+flight may blend wingbeats -- some units plain Imago
 SCF, others adapter-wrapped -- so that Imago
 calculations can be mixed with other ASE-compatible
-calculations and dispatch activities under one campaign.
+calculations and dispatch activities under one flight.
 Keeping the wingbeat pluggable is what lets new adapters
 and new blends slot in without changing kaleidoscope's
 dispatch core (Principle 8).
@@ -1131,7 +1131,7 @@ dispatch core (Principle 8).
 Per Principle 10, kaleidoscope records and surfaces
 per-job outcomes (converged, non-converged,
 cluster-side loss, post-processing error) but does not
-abort the campaign on a single failure; the client
+abort the flight on a single failure; the client
 script decides whether the aggregate result is
 acceptable for its scientific purpose.  It is a package
 (not a flat module) because it carries real substance:
@@ -1141,7 +1141,7 @@ management (9.6).
 ### 9.5 Structure acquisition: cod_fish.py + cif2skl.py
 
 Structure acquisition is a front-end, separate from the
-campaign dispatcher, in two small CLI tools:
+flight dispatcher, in two small CLI tools:
 
 - `cod_fish.py` pulls a structure from the
   Crystallography Open Database by `cod_id` at a pinned
@@ -1163,18 +1163,18 @@ campaign dispatcher, in two small CLI tools:
   gains no ASE dependency.
 
 Splitting acquisition from kaleidoscope keeps the
-campaign layer agnostic about *where* a structure came
+flight layer agnostic about *where* a structure came
 from: kaleidoscope consumes `imago.skl` files, whether
 they came from COD via this front-end, from a
 hand-authored `structure_path`, or from any other
 source.
 
-### 9.6 Organizational layout (campaign workspace)
+### 9.6 Organizational layout (flight workspace)
 
-A campaign that touches hundreds or thousands of
+A flight that touches hundreds or thousands of
 structures needs a directory and naming scheme so the
 inputs and outputs do not become an unnavigable mess.
-A campaign owns a workspace rooted at a single
+A flight owns a workspace rooted at a single
 directory, keyed throughout by a stable per-structure
 id (e.g., a COD id or a curation `reference_id`).
 The layout is pinned in DESIGN 6.2.4 (the id
@@ -1182,8 +1182,8 @@ charset/uniqueness rule, the `<calc>` tag format, and
 the `status.toml` schema); the shape is:
 
 ```
-<campaign_root>/
-  campaign.toml          What to run + global options.
+<flight_root>/
+  flight.toml            What to run + global options.
   structures/<id>/       Acquired inputs.
       <id>.cif
       <id>.skl
@@ -1217,7 +1217,7 @@ cost correctness:
 - *Mechanism (kaleidoscope).*  Write a key snapshot into
   the run directory, compare it on the hit-test, skip a
   run whose snapshot still matches, and resume a
-  campaign over already-completed runs.
+  flight over already-completed runs.
 - *Policy (client).*  The client supplies the *key
   fields* -- only it knows which inputs define identity
   for its calculations.  The database producer, for
@@ -1228,7 +1228,7 @@ cost correctness:
 This keeps kaleidoscope from guessing input identity (a
 too-broad key risks false hits and wrong results; a
 too-narrow key risks needless re-runs) while still
-giving every campaign one cache implementation.  The
+giving every flight one cache implementation.  The
 boundary with `imago.py`'s existing checkpointing is
 clean: `imago.py` resumes *within* a run directory;
 kaleidoscope decides whether to *launch* the run
@@ -1240,7 +1240,7 @@ Kaleidoscope's clients are the *what-to-compute*
 scripts: `build_initial_potentials.py` (the
 initial-potential producer, C48),
 `bench_initial_potential.py` (the validation harness,
-C50), and the future AIMD and screening campaigns.
+C50), and the future AIMD and screening flights.
 
 This reshapes the producer.  As currently written,
 DESIGN 5.7 / PSEUDOCODE 11.4 / ARCHITECTURE 8.5 have
@@ -1303,11 +1303,11 @@ predicts the k-density from the electronic character.  New
 calculations query the predictor, get a predicted operating
 point plus an uncertainty, and run a verification grid
 whose width is set by the uncertainty.  Each successful
-campaign appends back into the dataspace, so the predictor
+flight appends back into the dataspace, so the predictor
 gets better as it accumulates evidence.
 
 This section covers on-disk layout, file format choice,
-the data-flow through kaleidoscope's campaign builder, the
+the data-flow through kaleidoscope's flight builder, the
 harvest pipeline, and the module boundaries.
 Algorithmic details (feature-vector definition, k-NN
 metric, predictor stages, confidence measure, grid
@@ -1409,7 +1409,7 @@ Architectural invariants:
   (a better metal-density predictor than `gap_ev = 0`)
   but is permitted to be missing.
 - **Provenance is required.**  Every entry carries the
-  campaign id, the source structure id, the imago
+  flight id, the source structure id, the imago
   commit, and a UTC timestamp.  Non-negotiable per
   Principle 11.
 
@@ -1418,7 +1418,7 @@ Architectural invariants:
 ```
 new calculation (structure, options, system_type)
     |
-    | The kaleidoscope campaign-builder helper
+    | The kaleidoscope flight-builder helper
     | (DESIGN 6.2.8) asks the predictor:
     |    "given this structure, predict the converged
     |     k-density and tell me how confident you are."
@@ -1459,7 +1459,7 @@ fallback when `is_under_trained` is set.
     |
     | Kaleidoscope dispatches the grid (DESIGN 6.2).
     v
-campaign harvest hook (10.5)
+flight harvest hook (10.5)
     |
     | 1. Pick the converged grid point per structure
     |    (smallest density where consecutive grid
@@ -1470,7 +1470,7 @@ campaign harvest hook (10.5)
     |    emit it to staging/<system_type>/.
     v
 Curator promotion (manual one-at-a-time, batch-promote
-for trusted automated campaigns, or dry-run preview)
+for trusted automated flights, or dry-run preview)
 moves staging entries into entries/<system_type>/.
     |
     v
@@ -1479,8 +1479,8 @@ the next library load and is visible to all future
 predict() calls.
 ```
 
-The predictor runs at campaign-construction time -- well
-before any Imago run.  The harvest runs at campaign-
+The predictor runs at flight-construction time -- well
+before any Imago run.  The harvest runs at flight-
 completion time.  Imago itself is unaware of the
 dataspace.  All format awareness lives in the new helper
 module (10.6).
@@ -1537,7 +1537,7 @@ DESIGN 7.9.
 
 The dataspace is a build product like the initial-
 potential database (8.5), but with one key difference:
-every successful campaign is a *potential contributor*,
+every successful flight is a *potential contributor*,
 not just a hand-curated reference set.  This makes the
 harvest hook central machinery:
 
@@ -1551,7 +1551,7 @@ src/scripts/
                                      orchestration.
   guidance_harvest.py                Producer-side
                                      helper: given a
-                                     finished campaign,
+                                     finished flight,
                                      examine each
                                      structure's
                                      verification grid,
@@ -1567,10 +1567,10 @@ src/scripts/
                                      entries directory.
 ```
 
-- `guidance_harvest.py` is invoked at campaign-completion
-  time (either as a post-step the campaign driver calls,
+- `guidance_harvest.py` is invoked at flight-completion
+  time (either as a post-step the flight driver calls,
   or as a standalone CLI run after the fact).  It reads
-  the campaign's workspace, identifies each verification
+  the flight's workspace, identifies each verification
   grid, picks the converged point per structure, reads
   the measured electronic-structure quantities from the
   converged calc's result.toml, and emits one staged
@@ -1579,7 +1579,7 @@ src/scripts/
   subdirectory.
 - `guidance_promote.py` is the curator's tool.  Four
   modes: interactive one-at-a-time review (default);
-  batch `--auto-promote` for trusted automated campaigns
+  batch `--auto-promote` for trusted automated flights
   meeting an objective acceptance rule (the converged
   k-density landed in the middle 60% of the verification
   grid AND the top three grid points' total-energy
@@ -1587,7 +1587,7 @@ src/scripts/
   array -- is below threshold); `--all` to promote the
   whole staging directory after manual review; `--dry-run`
   preview.
-  The auto-promotion rule lets a 500-entry seed campaign
+  The auto-promotion rule lets a 500-entry seed flight
   promote ~80% of entries unattended, with the curator
   reviewing only the ~20% outliers.
 - Unlike the initial-potential DB, there is no manifest
@@ -1596,13 +1596,13 @@ src/scripts/
   entries are not deleted on schema bumps; a migration
   tool (`guidance_migrate.py`) rewrites them in place.
 
-The **seed campaign** (TODO C75) is what populates the
+The **seed flight** (TODO C75) is what populates the
 initial dataspace.  It is a one-time stratified sweep
 across element-group pairs and common stoichiometry
 patterns (~150-250 calculations covering the chemistry
 surface representatively rather than at random) feeding
 the auto-promotion rule above.  After the seed lands,
-ongoing campaigns (the C48.3 producer, future
+ongoing flights (the C48.3 producer, future
 characterization runs, etc.) contribute additional
 entries as they finish.
 
@@ -1620,9 +1620,9 @@ Python:
   `structure_control.py`.  Module-level docstring
   describes its role as the **library** half of the
   library/producer/consumer split (10.5).
-- `src/scripts/kaleidoscope/` campaign-builder helper
+- `src/scripts/kaleidoscope/` flight-builder helper
   (DESIGN 6.2.8): consumes a `PredictionResult` and
-  builds a `Campaign` of `CalcUnit`s laid out per the
+  builds a `Flight` of `CalcUnit`s laid out per the
   tag convention of DESIGN 6.2.4.  This is the
   option-axis half of the builder split per VISION
   Principle 12; the structure-axis half remains
@@ -1672,7 +1672,7 @@ read entries.
 - **DESIGN 6 (kaleidoscope):** kaleidoscope is the
   dispatch layer that runs the verification grid the
   predictor produces.  The dependency goes one way:
-  the kaleidoscope campaign-builder helper (6.2.8)
+  the kaleidoscope flight-builder helper (6.2.8)
   reads the dataspace; the dataspace does not depend
   on kaleidoscope.  Kaleidoscope still works without
   the dataspace -- callers can construct `CalcUnit`s
@@ -1691,18 +1691,18 @@ read entries.
   dataspace seeded, this would run as a wide-grid
   sweep per solid; with the seed in place, the sub-
   grid shrinks to 3-5 points per solid (predict-then-
-  verify acceleration).  The seed campaign (C75)
+  verify acceleration).  The seed flight (C75)
   therefore directly accelerates Goal 3.
 
 ### 10.8 Open Architectural Questions
 
 - **File naming uniqueness under parallel harvest.**
-  Two campaigns finishing nearly simultaneously could
+  Two flights finishing nearly simultaneously could
   collide on a slug.  Plan: include a short SHA over
-  (campaign_id, source_structure, generated_at) in the
-  filename; the campaign+structure pair is unique by
+  (flight_id, source_structure, generated_at) in the
+  filename; the flight+structure pair is unique by
   construction, so collisions only occur if two threads
-  in the same campaign harvest the same structure at
+  in the same flight harvest the same structure at
   the same instant.  Detailed slug algorithm in DESIGN
   7.5.
 - **Polytype confusion within the predictor.**  Two
@@ -1712,7 +1712,7 @@ read entries.
   different lattice features.  The k-NN distance metric
   weights these features; whether the default weights
   separate polytypes cleanly enough is an empirical
-  question that won't be settled until the seed campaign
+  question that won't be settled until the seed flight
   lands.  Open knob: the relative weight of composition
   vs lattice in the stage-1 distance metric.  Reasonable
   default in DESIGN 7.6; calibration after seed.

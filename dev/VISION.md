@@ -28,7 +28,7 @@ together: a curated historical-guidance database that records
 which convergence settings worked on which families of systems,
 so that future calculations can predict a converged operating
 point from past experience and verify it with a small targeted
-campaign instead of an exhaustive grid search.
+flight instead of an exhaustive grid search.
 
 ## Goals
 
@@ -63,7 +63,7 @@ campaign instead of an exhaustive grid search.
    typical systems, and the ability to run useful non-SCF
    (single-pass) calculations whose results remain informative
    for many purposes.
-4. **Enable high-throughput Imago calculation campaigns.**
+4. **Enable high-throughput Imago calculation flights.**
    Provide shared infrastructure for submitting, tracking, and
    harvesting batches of Imago calculations on an HPC cluster,
    so that scripts whose purpose is *what* to compute and *what*
@@ -106,7 +106,7 @@ campaign instead of an exhaustive grid search.
    then run a verification grid around the predicted
    point -- narrow when the predictor is confident, wide
    when it is not -- rather than scanning a convergence
-   surface from scratch.  Each successful campaign
+   surface from scratch.  Each successful flight
    appends its result back into the dataspace (via a
    staging step that a curator promotes), so the
    artifact grows monotonically with use and the
@@ -186,13 +186,13 @@ campaign instead of an exhaustive grid search.
 9. **General-purpose orchestration.** Workflow tools are chosen
    so that the skills students acquire while developing or running
    Imago transfer beyond computational materials. Domain-specific
-   machinery lives at the adapter layer (ASE); the campaign layer
+   machinery lives at the adapter layer (ASE); the flight layer
    (Parsl) is ordinary scientific Python. A student who leaves
    the field carries portable workflow skills rather than
    Imago-specific muscle memory.
-10. **Complete-and-report at the campaign level.** A single
-    failed calculation never fails an entire campaign by default.
-    Per-job failures are recorded and surfaced; the campaign
+10. **Complete-and-report at the flight level.** A single
+    failed calculation never fails an entire flight by default.
+    Per-job failures are recorded and surfaced; the flight
     driver script decides whether the aggregate outcome is
     acceptable for its scientific purpose. This applies whether
     the cause is convergence non-attainment, cluster-side job
@@ -204,7 +204,7 @@ campaign instead of an exhaustive grid search.
     coordination environment -- belongs in a checked-in, schema-
     governed, regeneratable database, not embedded in scripts or
     held in researchers' heads.  Tools consult that database to
-    predict; campaigns verify the prediction; the verified
+    predict; flights verify the prediction; the verified
     result feeds back into the database through a deliberate
     curation step.  This applies equally to the initial-
     potential database (Goal 3) and the historical-guidance
@@ -213,15 +213,15 @@ campaign instead of an exhaustive grid search.
     never silently encode "experience" as hardcoded constants;
     anything tunable enough to need empirical justification
     belongs in a database that future readers can audit and
-    future campaigns can update.
-12. **The campaign layer stays dumb; description lives in
+    future flights can update.
+12. **The flight layer stays dumb; description lives in
     Python.**  The kaleidoscope dispatcher is thin: it drives
     a flat list of independent `CalcUnit` records.  It
     does not interpret per-calculation options, has no notion
     of "this calc depends on that calc," and does not grow a
-    campaign description language (no campaign DSL, no
+    flight description language (no flight DSL, no
     YAML/TOML workflow grammar, no DAG engine).  Higher-order
-    campaign shape -- multi-axis sweeps, dependent phases,
+    flight shape -- multi-axis sweeps, dependent phases,
     per-unit internal iteration -- lives in ordinary client-
     side Python that *builds* the flat list before handing it
     off, or in custom wingbeats that own the iteration for
@@ -229,9 +229,9 @@ campaign instead of an exhaustive grid search.
     distinguishes kaleidoscope from workflow engines like
     Snakemake or LAMMPS' input language: by refusing to grow
     a domain language, kaleidoscope stays open to every
-    campaign shape its clients invent, and the skills a
-    student picks up while building campaigns are ordinary
+    flight shape its clients invent, and the skills a
+    student picks up while building flights are ordinary
     Python rather than a one-off DSL.  Principle 9 says
     "domain-specific machinery lives at the adapter layer";
-    Principle 12 says specifically what the campaign layer
+    Principle 12 says specifically what the flight layer
     refuses to absorb.

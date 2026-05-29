@@ -1,21 +1,21 @@
-"""kaleidoscope.dispatch -- the campaign driver
+"""kaleidoscope.dispatch -- the flight driver
 (DESIGN 6.2.3; PSEUDOCODE 13.5).
 
 ``dispatch`` walks the units, consults the cache, dispatches
 the misses through an executor, and gathers the results with
 per-future exception capture so a single failure never aborts
-the campaign (VISION Principle 10).  Resuming a campaign is just
+the flight (VISION Principle 10).  Resuming a flight is just
 re-running it: the cache hit-test skips the units already
 ``done`` and re-dispatches the rest.
 
 Two executors realize the dispatch:
 
 - ``LocalExecutor`` runs units synchronously, in process -- no
-  parallelism, no Parsl.  It is the default when a campaign
+  parallelism, no Parsl.  It is the default when a flight
   carries no ``parsl_config``, and is what tests and Parsl-less
   environments use.
 - ``ParslExecutor`` dispatches units as Parsl ``python_app``\\s
-  (DESIGN 6.2.3) and is selected when the campaign supplies a
+  (DESIGN 6.2.3) and is selected when the flight supplies a
   Parsl ``Config``.  Choosing the executor by the presence of
   ``parsl_config`` keeps Parsl central (VISION Goal 4) without
   making it a hard import-time dependency.
@@ -24,9 +24,9 @@ Two executors realize the dispatch:
 import os
 from datetime import datetime
 
-from .model import CampaignReport, ReportEntry
-from .workspace import (unit_run_dir, validate_campaign,
-                        serialize_campaign, write_status,
+from .model import FlightReport, ReportEntry
+from .workspace import (unit_run_dir, validate_flight,
+                        serialize_flight, write_status,
                         read_status)
 from .cache import is_cache_hit, write_cache_key
 from .wingbeats import resolve_wingbeat
@@ -160,7 +160,7 @@ class ParslExecutor:
         )
 
     def close(self):
-        # Clean up the data-flow kernel so a later campaign can
+        # Clean up the data-flow kernel so a later flight can
         #   load a fresh config in this process.
         self._parsl.dfk().cleanup()
         self._parsl.clear()
@@ -170,7 +170,7 @@ class ParslExecutor:
 #  Dispatch helpers
 # ------------------------------------------------------------------
 
-def _prepare_miss(campaign, unit, wingbeat_dir):
+def _prepare_miss(flight, unit, wingbeat_dir):
     """Set up a cache miss for launch: create the run directory,
     snapshot the cache key, and mark the unit ``queued`` (DESIGN
     6.2.5)."""
@@ -178,7 +178,7 @@ def _prepare_miss(campaign, unit, wingbeat_dir):
     write_cache_key(wingbeat_dir, unit)
     write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
                  status="queued",
-                 wingbeat=(unit.wingbeat or campaign.default_wingbeat),
+                 wingbeat=(unit.wingbeat or flight.default_wingbeat),
                  submitted_at=now_iso())
 
 
@@ -197,13 +197,13 @@ def report_entry_from_status(unit, wingbeat_dir):
     )
 
 
-def _collect(campaign, unit, future):
+def _collect(flight, unit, future):
     """Resolve one future, recording its terminal status.  A
     ``TaskLost`` becomes the ``lost`` status; any other exception
     (including a wingbeat that raised on the worker) becomes
     ``failed``; a clean return leaves the terminal status the
     task itself already wrote (DESIGN 6.2.3, 6.2.4)."""
-    wingbeat_dir = unit_run_dir(campaign, unit)
+    wingbeat_dir = unit_run_dir(flight, unit)
     try:
         future.result()
     except TaskLost as lost:
@@ -217,63 +217,63 @@ def _collect(campaign, unit, future):
     return report_entry_from_status(unit, wingbeat_dir)
 
 
-def _fire(campaign, entry):
+def _fire(flight, entry):
     """Invoke the optional per-unit outcome callback."""
-    if campaign.on_outcome is not None:
-        campaign.on_outcome(entry)
+    if flight.on_outcome is not None:
+        flight.on_outcome(entry)
 
 
 # ------------------------------------------------------------------
-#  The campaign driver
+#  The flight driver
 # ------------------------------------------------------------------
 
-def dispatch(campaign, executor=None):
-    """Run every unit in the campaign and return a CampaignReport
+def dispatch(flight, executor=None):
+    """Run every unit in the flight and return a FlightReport
     (DESIGN 6.2.3).  Cache hits are reported straight from their
     existing ``status.toml``; misses are prepared, dispatched
     through the executor, and gathered with per-future exception
     capture so no single failure aborts the batch.  Entries are
     returned in unit order.
 
-    When ``executor`` is None one is chosen from the campaign:
+    When ``executor`` is None one is chosen from the flight:
     a ``ParslExecutor`` if it carries a ``parsl_config``, else a
     ``LocalExecutor``.  A caller may pass an executor explicitly
     (tests do, to pin the path)."""
-    validate_campaign(campaign)
-    os.makedirs(campaign.root, exist_ok=True)
-    serialize_campaign(campaign)
+    validate_flight(flight)
+    os.makedirs(flight.root, exist_ok=True)
+    serialize_flight(flight)
 
     owns_executor = executor is None
     if executor is None:
-        if campaign.parsl_config is not None:
-            executor = ParslExecutor(campaign.parsl_config)
+        if flight.parsl_config is not None:
+            executor = ParslExecutor(flight.parsl_config)
         else:
             executor = LocalExecutor()
 
-    results = [None] * len(campaign.units)
+    results = [None] * len(flight.units)
     try:
         # Pass 1: report hits immediately, dispatch misses.
         pending = []                  # (index, unit, future)
-        for index, unit in enumerate(campaign.units):
-            wingbeat_dir = unit_run_dir(campaign, unit)
+        for index, unit in enumerate(flight.units):
+            wingbeat_dir = unit_run_dir(flight, unit)
             if is_cache_hit(unit, wingbeat_dir):
                 entry = report_entry_from_status(unit, wingbeat_dir)
                 results[index] = entry
-                _fire(campaign, entry)
+                _fire(flight, entry)
             else:
-                _prepare_miss(campaign, unit, wingbeat_dir)
+                _prepare_miss(flight, unit, wingbeat_dir)
                 future = executor.submit_unit(
-                    unit, wingbeat_dir, campaign.default_wingbeat
+                    unit, wingbeat_dir, flight.default_wingbeat
                 )
                 pending.append((index, unit, future))
 
         # Pass 2: gather the dispatched units.
         for index, unit, future in pending:
-            entry = _collect(campaign, unit, future)
+            entry = _collect(flight, unit, future)
             results[index] = entry
-            _fire(campaign, entry)
+            _fire(flight, entry)
     finally:
         if owns_executor:
             executor.close()
 
-    return CampaignReport(entries=results)
+    return FlightReport(entries=results)

@@ -1,9 +1,9 @@
 """test_kaleidoscope.py -- Unit tests for the kaleidoscope
-campaign dispatcher (C68; DESIGN 6.2; PSEUDOCODE 13).
+flight dispatcher (C68; DESIGN 6.2; PSEUDOCODE 13).
 
 kaleidoscope drives a *set* of Imago calculations: it dispatches
 the per-structure work, tracks each one's outcome, caches
-completed runs so a campaign resumes by re-running, and surfaces
+completed runs so a flight resumes by re-running, and surfaces
 a report the client harvests.  Per VISION Principle 9 it is
 domain-agnostic -- it never interprets what a run computed.  That
 is exactly what lets these tests exercise the whole machinery
@@ -11,7 +11,7 @@ is exactly what lets these tests exercise the whole machinery
 for the real one and reports whatever generic outcome a test
 wants.  The pieces pinned here, helpers-first then the driver:
 
-* ``validate_campaign`` -- the slug rule, the derived ``<calc>``
+* ``validate_flight`` -- the slug rule, the derived ``<calc>``
   tag when one id hosts several units, and the run-directory
   collision guard (PSEUDOCODE 13.3).
 * ``unit_run_dir`` -- the ``<root>/wingbeats/<id>[/<calc>]`` layout.
@@ -39,10 +39,10 @@ import os
 import pytest
 
 from kaleidoscope import (
-    Campaign, CalcUnit, KeyFields, KeyFile, WingbeatOutcome,
-    CampaignReport, ReportEntry, KaleidoscopeError,
+    Flight, CalcUnit, KeyFields, KeyFile, WingbeatOutcome,
+    FlightReport, ReportEntry, KaleidoscopeError,
     dispatch, register_wingbeat, resolve_wingbeat,
-    validate_campaign, unit_run_dir,
+    validate_flight, unit_run_dir,
     is_cache_hit, cache_key_matches, write_cache_key,
     read_status, write_status, ImagoWingbeat,
 )
@@ -77,7 +77,7 @@ class CountingRunner(Wingbeat):
 
 class ModalRunner(Wingbeat):
     """A wingbeat whose behavior a unit selects through its
-    options, so one campaign can mix outcomes.  ``fake_mode`` is
+    options, so one flight can mix outcomes.  ``fake_mode`` is
     one of: ``ok`` (completes, detail "converged"); ``not_ok``
     (completes but WingbeatOutcome.ok is False -> status "failed");
     ``raise`` (raises on the worker, exercising the dispatcher's
@@ -123,29 +123,29 @@ def parsl_config(request):
 
 
 # ==============================================================
-#  13.3 -- workspace: slugs, run dirs, validate_campaign
+#  13.3 -- workspace: slugs, run dirs, validate_flight
 # ==============================================================
 
 def test_unit_run_dir_with_and_without_calc(tmp_path):
     """The run directory is ``<root>/wingbeats/<id>``; the ``<calc>``
     level appears only when the unit carries a calc tag."""
-    campaign = Campaign(root=str(tmp_path), units=[])
+    flight = Flight(root=str(tmp_path), units=[])
     plain = CalcUnit(id="s1", structure="a.skl")
-    assert unit_run_dir(campaign, plain) == os.path.join(
+    assert unit_run_dir(flight, plain) == os.path.join(
         str(tmp_path), "wingbeats", "s1")
     tagged = CalcUnit(id="s1", structure="a.skl", calc="v2")
-    assert unit_run_dir(campaign, tagged) == os.path.join(
+    assert unit_run_dir(flight, tagged) == os.path.join(
         str(tmp_path), "wingbeats", "s1", "v2")
 
 
 def test_validate_rejects_non_slug_id():
     """An id that is not a filesystem-safe slug aborts the
-    campaign rather than being silently rewritten -- a rewrite
+    flight rather than being silently rewritten -- a rewrite
     would break the cache hit-test (different directory)."""
-    campaign = Campaign(root="/tmp",
+    flight = Flight(root="/tmp",
                         units=[CalcUnit(id="Bad ID!", structure="a")])
     with pytest.raises(KaleidoscopeError):
-        validate_campaign(campaign)
+        validate_flight(flight)
 
 
 def test_validate_derives_calc_for_shared_id():
@@ -156,7 +156,7 @@ def test_validate_derives_calc_for_shared_id():
                      options={"job": "scf", "scf_basis": "fb"})
     second = CalcUnit(id="s1", structure="a",
                       options={"job": "pscf", "scf_basis": "mb"})
-    validate_campaign(Campaign(root="/tmp",
+    validate_flight(Flight(root="/tmp",
                                units=[first, second]))
     assert first.calc == "scf-fb"
     assert second.calc == "pscf-mb"
@@ -175,13 +175,13 @@ def test_validate_duplicate_run_dir_raises():
     first = CalcUnit(id="s1", structure="a", calc="v1")
     second = CalcUnit(id="s1", structure="a", calc="v1")
     with pytest.raises(KaleidoscopeError):
-        validate_campaign(Campaign(root="/tmp",
+        validate_flight(Flight(root="/tmp",
                                    units=[first, second]))
 
 
 def test_resolve_unknown_runner_raises():
     """Asking for a wingbeat that was never registered is a
-    campaign-construction fault, not a silent default."""
+    flight-construction fault, not a silent default."""
     with pytest.raises(KaleidoscopeError):
         resolve_wingbeat("no-such-wingbeat-name")
 
@@ -285,16 +285,16 @@ def test_is_cache_hit_requires_done_status(tmp_path):
 #  13.5 -- the dispatch driver, on BOTH executors
 # ==============================================================
 
-def test_campaign_runs_and_reports_done(tmp_path, parsl_config):
+def test_flight_runs_and_reports_done(tmp_path, parsl_config):
     """A clean unit runs to ``done`` with the wingbeat's ``detail``
-    recorded, campaign.toml is written, and the report carries
+    recorded, flight.toml is written, and the report carries
     the entry in unit order."""
     register_wingbeat("fake_ok", CountingRunner())
     unit = CalcUnit(id="u1", structure="s.skl", wingbeat="fake_ok",
                     key_fields=KeyFields(scalars={"v": 1}))
-    campaign = Campaign(root=str(tmp_path), units=[unit],
+    flight = Flight(root=str(tmp_path), units=[unit],
                         parsl_config=parsl_config)
-    report = dispatch(campaign)
+    report = dispatch(flight)
 
     assert len(report.entries) == 1
     entry = report.entries[0]
@@ -302,7 +302,7 @@ def test_campaign_runs_and_reports_done(tmp_path, parsl_config):
     assert entry.status == "done"
     assert entry.detail == "converged"
     assert os.path.exists(os.path.join(str(tmp_path),
-                                       "campaign.toml"))
+                                       "flight.toml"))
 
 
 def test_status_lifecycle_fields_present(tmp_path, parsl_config):
@@ -313,11 +313,11 @@ def test_status_lifecycle_fields_present(tmp_path, parsl_config):
     register_wingbeat("fake_ok", CountingRunner())
     unit = CalcUnit(id="u1", structure="s.skl", wingbeat="fake_ok",
                     key_fields=KeyFields(scalars={"v": 1}))
-    campaign = Campaign(root=str(tmp_path), units=[unit],
+    flight = Flight(root=str(tmp_path), units=[unit],
                         parsl_config=parsl_config)
-    dispatch(campaign)
+    dispatch(flight)
 
-    status = read_status(unit_run_dir(campaign, unit))
+    status = read_status(unit_run_dir(flight, unit))
     assert status["status"] == "done"
     assert status["detail"] == "converged"
     for field in ("submitted_at", "started_at", "finished_at",
@@ -342,9 +342,9 @@ def test_one_failure_does_not_abort_batch(tmp_path, parsl_config):
                  options={"fake_mode": "not_ok"},
                  key_fields=KeyFields(scalars={"v": 1})),
     ]
-    campaign = Campaign(root=str(tmp_path), units=units,
+    flight = Flight(root=str(tmp_path), units=units,
                         parsl_config=parsl_config)
-    report = dispatch(campaign)
+    report = dispatch(flight)
 
     by_id = {e.id: e for e in report.entries}
     assert by_id["ok1"].status == "done"
@@ -356,7 +356,7 @@ def test_one_failure_does_not_abort_batch(tmp_path, parsl_config):
 
 
 def test_resume_skips_done_units(tmp_path):
-    """Re-running a campaign is its resume: a unit already
+    """Re-running a flight is its resume: a unit already
     ``done`` with a still-matching key is a cache hit and the
     wingbeat is NOT called again (LocalExecutor path)."""
     wingbeat = CountingRunner()
@@ -364,13 +364,13 @@ def test_resume_skips_done_units(tmp_path):
     unit = CalcUnit(id="u1", structure="s.skl",
                     wingbeat="fake_count",
                     key_fields=KeyFields(scalars={"v": 1}))
-    campaign = Campaign(root=str(tmp_path), units=[unit])
+    flight = Flight(root=str(tmp_path), units=[unit])
 
-    first = dispatch(campaign)
+    first = dispatch(flight)
     assert first.entries[0].status == "done"
     assert wingbeat.calls == 1
 
-    second = dispatch(campaign)        # resume == re-run
+    second = dispatch(flight)        # resume == re-run
     assert second.entries[0].status == "done"
     assert wingbeat.calls == 1               # hit: not re-run
 
@@ -384,9 +384,9 @@ def test_on_outcome_callback_fires_per_unit(tmp_path):
                       wingbeat="fake_ok",
                       key_fields=KeyFields(scalars={"v": i}))
              for i in range(3)]
-    campaign = Campaign(root=str(tmp_path), units=units,
+    flight = Flight(root=str(tmp_path), units=units,
                         on_outcome=seen.append)
-    dispatch(campaign)
+    dispatch(flight)
     assert [e.id for e in seen] == ["u0", "u1", "u2"]
 
 
@@ -506,7 +506,7 @@ def test_report_views_select_correctly():
     ``with_detail`` on the wingbeat-supplied detail (how a client
     selects converged units), and ``failures`` collects the
     failed/lost entries."""
-    report = CampaignReport(entries=[
+    report = FlightReport(entries=[
         _entry("a", "done", "converged"),
         _entry("b", "done", "not_converged"),
         _entry("c", "failed", None),

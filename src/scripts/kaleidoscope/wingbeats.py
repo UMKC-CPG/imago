@@ -39,7 +39,7 @@ class Wingbeat:
 
 # name -> Wingbeat instance.  The default wingbeat is registered at
 #   import (below), so a freshly imported worker process can
-#   resolve "imago" without any campaign-side setup.
+#   resolve "imago" without any flight-side setup.
 WINGBEATS = {}
 
 
@@ -91,7 +91,7 @@ class ImagoWingbeat(Wingbeat):
         # Map the Imago-native status onto the generic outcome:
         #   "ran" covers CONVERGED / NOT_CONVERGED / SKIPPED;
         #   only a hard FAILED is not-ok.  The status value
-        #   becomes the opaque detail string the campaign records.
+        #   becomes the opaque detail string the flight records.
         ok = result.status in (
             imago.RunStatus.CONVERGED,
             imago.RunStatus.NOT_CONVERGED,

@@ -1,13 +1,13 @@
-"""kaleidoscope.model -- the campaign data model
+"""kaleidoscope.model -- the flight data model
 (DESIGN 6.2.1, 6.2.2, 6.2.6; PSEUDOCODE 13.1, 13.2, 13.6).
 
 These are plain, domain-agnostic records.  Per VISION
-Principle 9 the campaign layer is ordinary scientific Python:
+Principle 9 the flight layer is ordinary scientific Python:
 kaleidoscope dispatches, tracks, and caches calculations
 without knowing what any of them computes.  The Imago-specific
 meaning of a run lives one level down in the wingbeat
 (``wingbeats.py``) and one level up in the client that reads each
-run directory after the campaign (the harvest, DESIGN 6.2.6).
+run directory after the flight (the harvest, DESIGN 6.2.6).
 """
 
 from dataclasses import dataclass, field
@@ -15,7 +15,7 @@ from typing import Any, Callable, Optional
 
 
 class KaleidoscopeError(Exception):
-    """A campaign-construction or workspace fault -- for
+    """A flight-construction or workspace fault -- for
     example an ``id`` that is not a filesystem-safe slug, two
     units colliding on one run directory, or a request for an
     unregistered wingbeat.  Distinct from ``imago.ImagoError``,
@@ -63,7 +63,7 @@ class CalcUnit:
                       run directory (passed to the wingbeat).
     - ``calc``      : an optional variant tag, used only when one
                       structure hosts more than one calculation.
-    - ``wingbeat``    : the wingbeat name, or None for the campaign
+    - ``wingbeat``    : the wingbeat name, or None for the flight
                       default.
     - ``key_fields``: the cache identity (DESIGN 6.2.5).
     """
@@ -76,7 +76,7 @@ class CalcUnit:
 
 
 @dataclass
-class Campaign:
+class Flight:
     """A set of calculations plus global options
     (DESIGN 6.2.1).
 
@@ -84,7 +84,7 @@ class Campaign:
     - ``units``          : the list of CalcUnit to run.
     - ``default_wingbeat`` : the wingbeat for units naming none.
     - ``parsl_config``   : an optional Parsl ``Config``.  When
-                           present the campaign dispatches
+                           present the flight dispatches
                            through Parsl (cluster parallelism);
                            when None it runs locally and
                            serially.  Keeping Parsl behind this
@@ -110,7 +110,7 @@ class WingbeatOutcome:
     not whether it "succeeded scientifically".  ``detail`` is an
     opaque string the wingbeat chooses (e.g. "converged",
     "not_converged") that kaleidoscope records verbatim and
-    never interprets -- which is what lets the campaign layer
+    never interprets -- which is what lets the flight layer
     surface convergence in ``status.toml`` while staying
     ignorant of what convergence means."""
     ok: bool
@@ -121,7 +121,7 @@ class WingbeatOutcome:
 
 @dataclass
 class ReportEntry:
-    """One unit's terminal record in the campaign report
+    """One unit's terminal record in the flight report
     (DESIGN 6.2.6).  Mirrors the generic ``status.toml`` fields
     and carries nothing domain-specific; the client reads each
     ``wingbeat_dir`` itself to harvest results."""
@@ -135,7 +135,7 @@ class ReportEntry:
 
 
 @dataclass
-class CampaignReport:
+class FlightReport:
     """The result of ``dispatch``: one ReportEntry per unit,
     in unit order, plus convenience views (DESIGN 6.2.6).
     kaleidoscope never decides whether the aggregate is

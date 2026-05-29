@@ -46,7 +46,7 @@ set (RC_FILES
 
 install (PROGRAMS ${SCRIPTS} DESTINATION bin)
 
-# Install the kaleidoscope campaign-runner package (DESIGN 6.2)
+# Install the kaleidoscope flight-runner package (DESIGN 6.2)
 # as a directory under bin/.  Unlike the flat scripts above it is
 # a Python *package*, so the whole directory is copied; it becomes
 # importable as `kaleidoscope` by any script run out of bin/

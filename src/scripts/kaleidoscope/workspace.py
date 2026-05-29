@@ -64,11 +64,11 @@ def require_slug(value, what):
         )
 
 
-def unit_run_dir(campaign, unit):
+def unit_run_dir(flight, unit):
     """Absolute path of a unit's run directory:
     ``<root>/wingbeats/<id>[/<calc>]``.  The ``<calc>`` level exists
     only when the unit carries a calc tag (DESIGN 6.2.4)."""
-    base = os.path.join(campaign.root, "wingbeats", unit.id)
+    base = os.path.join(flight.root, "wingbeats", unit.id)
     return os.path.join(base, unit.calc) if unit.calc else base
 
 
@@ -83,17 +83,17 @@ def derive_calc_tag(unit):
     return f"{job}-{basis}".lower()
 
 
-def validate_campaign(campaign):
-    """Enforce the id/``<calc>`` scheme at campaign-build time
+def validate_flight(flight):
+    """Enforce the id/``<calc>`` scheme at flight-build time
     (DESIGN 6.2.4) and abort on any violation, naming the
     offenders -- a silent fix would break the cache hit-test.
 
     Side effect: a unit that gave no ``calc`` but shares its id
     with another unit has a derived tag assigned in place, so
     the two no longer collide on one run directory."""
-    id_counts = Counter(unit.id for unit in campaign.units)
+    id_counts = Counter(unit.id for unit in flight.units)
     seen = {}                       # id -> set of calc tags used
-    for unit in campaign.units:
+    for unit in flight.units:
         require_slug(unit.id, "id")
         if unit.calc is not None:
             require_slug(unit.calc, "calc")
@@ -152,32 +152,32 @@ def read_status(wingbeat_dir):
 
 
 # ------------------------------------------------------------------
-#  campaign.toml -- the inspectable record of what was asked
+#  flight.toml -- the inspectable record of what was asked
 # ------------------------------------------------------------------
 
-def serialize_campaign(campaign):
-    """Write ``<root>/campaign.toml``: the authoritative record
+def serialize_flight(flight):
+    """Write ``<root>/flight.toml``: the authoritative record
     of *what was asked for*, kept separate from each run's
     ``status.toml`` record of *what happened* (DESIGN 6.2.1).
 
     This slice records the per-unit identity fields (id,
     structure, calc, wingbeat); the makeinput options and the
     cache key live with the run (cache_key.toml) and are not
-    round-tripped here.  campaign.toml is for inspection and as a
+    round-tripped here.  flight.toml is for inspection and as a
     resume record; a resume itself is just re-running the
-    campaign, whose cache hit-test skips the done units."""
-    os.makedirs(campaign.root, exist_ok=True)
-    path = os.path.join(campaign.root, "campaign.toml")
-    with open(path, "w") as campaign_file:
-        campaign_file.write(toml_line("root", campaign.root))
-        campaign_file.write(
-            toml_line("default_wingbeat", campaign.default_wingbeat)
+    flight, whose cache hit-test skips the done units."""
+    os.makedirs(flight.root, exist_ok=True)
+    path = os.path.join(flight.root, "flight.toml")
+    with open(path, "w") as flight_file:
+        flight_file.write(toml_line("root", flight.root))
+        flight_file.write(
+            toml_line("default_wingbeat", flight.default_wingbeat)
         )
-        for unit in campaign.units:
-            campaign_file.write("\n[[unit]]\n")
-            campaign_file.write(toml_line("id", unit.id))
-            campaign_file.write(
+        for unit in flight.units:
+            flight_file.write("\n[[unit]]\n")
+            flight_file.write(toml_line("id", unit.id))
+            flight_file.write(
                 toml_line("structure", unit.structure)
             )
-            campaign_file.write(toml_line("calc", unit.calc))
-            campaign_file.write(toml_line("wingbeat", unit.wingbeat))
+            flight_file.write(toml_line("calc", unit.calc))
+            flight_file.write(toml_line("wingbeat", unit.wingbeat))
