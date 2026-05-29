@@ -98,7 +98,7 @@ def _imago_provenance() -> dict:
         "reference_id": "COD-1011098",
         "atom_site": 1,
         "kpoint_spec": "12 12 12 0 0 0",
-        "convergence_threshold": 1.0e-6,
+        "scf_threshold": 1.0e-6,
         "scf_iterations": 28,
     }
 
@@ -373,7 +373,7 @@ class TestRule3RequiredFieldsPresent:
         path = _path_for(tmp_path, "Au")
         save(_valid_db("Au"), path)
         text = open(path).read().replace(
-            "scf_iterations        = 28\n", "", 1)
+            "scf_iterations = 28\n", "", 1)
         _write_toml(path, text)
         with pytest.raises(ValueError) as excinfo:
             load(path)
@@ -624,11 +624,11 @@ class TestEmitterFormat:
         path = _path_for(tmp_path, "Au")
         save(_valid_db("Au"), path)
         text = open(path).read()
-        # The default_solid provenance carries
-        # "convergence_threshold" (21 chars), which sets the
-        # alignment width for that block.  "source" (6 chars)
-        # then needs 15 spaces of padding.
-        assert ("source                = \"Imago\"\n"
+        # The default_solid provenance carries the extras, the
+        # widest of which is now "scf_iterations" (14 chars).
+        # That key sets the alignment width for the block, so
+        # "source" (6 chars) needs 8 spaces of padding.
+        assert ("source         = \"Imago\"\n"
                 in text)
         # The atomSCF provenance has only base keys, so the
         # alignment width is just "generated_at" (12 chars).
@@ -780,9 +780,9 @@ class TestRoundTrip:
         assert isinstance(prov_def["atom_site"], int)
         assert isinstance(
             prov_def["scf_iterations"], int)
-        # convergence_threshold stays as a float.
+        # scf_threshold stays as a float.
         assert isinstance(
-            prov_def["convergence_threshold"], float)
+            prov_def["scf_threshold"], float)
 
     def test_round_trip_idempotent_save(self, tmp_path):
         """save(load(save(db)), path2) produces byte-identical

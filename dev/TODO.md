@@ -1592,7 +1592,7 @@ and PSEUDOCODE landed before code.
   ScriptSettings split into from_command_line /
   from_options sharing reconcile(), with parse_command_line
   taking optional argv (12.3); project_home_outputs (12.2);
-  the harvest helpers _read_convergence_threshold /
+  the harvest helpers _read_scf_threshold /
   _last_data_row / _harvest_result reading the iteration
   file's last row for verdict/energy/count (12.5); the
   reentrant _run_core with the per-run-dir lock, cwd

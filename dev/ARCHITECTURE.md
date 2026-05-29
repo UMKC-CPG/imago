@@ -1222,7 +1222,7 @@ cost correctness:
   fields* -- only it knows which inputs define identity
   for its calculations.  The database producer, for
   instance, declares its key as `kpoint_spec` +
-  `convergence_threshold` + `imago_commit` + the
+  `scf_threshold` + `imago_commit` + the
   structure bytes (DESIGN 5.7).
 
 This keeps kaleidoscope from guessing input identity (a
@@ -1400,7 +1400,7 @@ Architectural invariants:
 - **Context block.**  `[entry.context]` carries
   parameters that influenced the measurement: `basis`
   (`mb`/`fb`/`eb`), `functional`, and
-  `convergence_threshold`.  Future predictors may use
+  `scf_threshold`.  Future predictors may use
   these as additional regression features; v1's
   predictor conditions on `basis` and `functional`
   (separate sub-models) and ignores the rest.

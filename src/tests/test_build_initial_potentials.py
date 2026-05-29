@@ -53,7 +53,7 @@ reference_id = "au_fcc"
 cod_id = 9008463
 cod_revision = "2023-04-12"
 kpoint_spec = { density = 60.0, shift = [0.0, 0.0, 0.0] }
-convergence_threshold = 1.0e-6
+scf_threshold = 1.0e-6
 
   [[reference_solid.entry]]
   element = "Au"
@@ -93,7 +93,7 @@ class TestLoadHappyPath:
         assert solid.cod_id == 9008463
         assert solid.cod_revision == "2023-04-12"
         assert solid.structure_path is None
-        assert solid.convergence_threshold == pytest.approx(1e-6)
+        assert solid.scf_threshold == pytest.approx(1e-6)
         assert solid.kpoint_spec["density"] == pytest.approx(60.0)
         assert len(solid.entries) == 1
         entry = solid.entries[0]
@@ -121,7 +121,7 @@ class TestLoadHappyPath:
             "reference_id = \"x_local\"\n"
             "structure_path = \"x.skel\"\n"
             "kpoint_spec = { density = 60.0 }\n"
-            "convergence_threshold = 1.0e-6\n\n"
+            "scf_threshold = 1.0e-6\n\n"
             "  [[reference_solid.entry]]\n"
             "  element = \"Si\"\n"
             "  atom_site = 1\n"
@@ -195,10 +195,10 @@ class TestRule2RequiredSolidFields:
 
     def test_missing_convergence_raises(self, tmp_path):
         path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
-            "convergence_threshold = 1.0e-6\n", ""))
+            "scf_threshold = 1.0e-6\n", ""))
         with pytest.raises(
                 ValueError,
-                match="manifest rule 2.*convergence_threshold"):
+                match="manifest rule 2.*scf_threshold"):
             load_manifest_v2(path)
 
 
@@ -254,7 +254,7 @@ class TestRule4StructureSource:
             "reference_id = \"x_local\"\n"
             "structure_path = \"absent.skel\"\n"
             "kpoint_spec = { density = 60.0 }\n"
-            "convergence_threshold = 1.0e-6\n\n"
+            "scf_threshold = 1.0e-6\n\n"
             "  [[reference_solid.entry]]\n"
             "  element = \"Si\"\n"
             "  atom_site = 1\n"
@@ -277,7 +277,7 @@ class TestRule5ReferenceIdUniqueness:
             "cod_id = 1234567\n"
             "cod_revision = \"2023-01-01\"\n"
             "kpoint_spec = { density = 60.0 }\n"
-            "convergence_threshold = 1.0e-6\n\n"
+            "scf_threshold = 1.0e-6\n\n"
             "  [[reference_solid.entry]]\n"
             "  element = \"Ag\"\n"
             "  atom_site = 1\n"
@@ -298,7 +298,7 @@ class TestRule6ElementLabelUniqueness:
             "cod_id = 1234567\n"
             "cod_revision = \"2023-01-01\"\n"
             "kpoint_spec = { density = 60.0 }\n"
-            "convergence_threshold = 1.0e-6\n\n"
+            "scf_threshold = 1.0e-6\n\n"
             "  [[reference_solid.entry]]\n"
             "  element = \"Au\"\n"
             "  atom_site = 1\n"
@@ -490,7 +490,7 @@ def _manifest_curating_au() -> CurationManifest:
         reference_solids=[ReferenceSolid(
             reference_id="au_fcc",
             kpoint_spec={"density": 60.0},
-            convergence_threshold=1e-6,
+            scf_threshold=1e-6,
             cod_id=9008463, cod_revision="2023-04-12",
             structure_path=None,
             entries=[ReferenceEntry(
@@ -682,7 +682,7 @@ class TestRefreshIsolatedEntries:
             {"source": "Imago", "commit": "old",
              "generated_at": "old", "reference_id": "au_fcc",
              "atom_site": 1, "kpoint_spec": "k",
-             "convergence_threshold": 1e-6, "scf_iterations": 9}))
+             "scf_threshold": 1e-6, "scf_iterations": 9}))
         ipdb.save(seed, element_path(root, "au"))
 
         dbs = refresh_isolated_entries(

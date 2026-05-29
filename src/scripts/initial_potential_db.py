@@ -485,7 +485,7 @@ def require_provenance(prov: dict[str, Any], path: str,
     ``generated_at``.  ``source`` must be either ``"atomSCF"``
     or ``"Imago"``.  Imago-source entries additionally require
     the reference-run fields (``reference_id``, ``atom_site``,
-    ``kpoint_spec``, ``convergence_threshold``,
+    ``kpoint_spec``, ``scf_threshold``,
     ``scf_iterations``) so the validation harness in DESIGN 5.8
     can identify and re-run the originating SCF on demand.
 
@@ -509,7 +509,7 @@ def require_provenance(prov: dict[str, Any], path: str,
     if prov["source"] == "Imago":
         imago_required = (
             "reference_id", "atom_site", "kpoint_spec",
-            "convergence_threshold", "scf_iterations",
+            "scf_threshold", "scf_iterations",
         )
         for field_name in imago_required:
             if field_name not in prov:
@@ -956,7 +956,7 @@ def _ordered_provenance_keys(
     base = ["source", "commit", "generated_at"]
     extras = [
         "reference_id", "atom_site", "kpoint_spec",
-        "convergence_threshold", "scf_iterations",
+        "scf_threshold", "scf_iterations",
     ]
     if prov.get("source") == "Imago":
         return base + extras

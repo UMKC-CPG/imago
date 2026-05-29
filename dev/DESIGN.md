@@ -2441,7 +2441,7 @@ fingerprint.
                                  shifts, density value,
                                  etc.).  Recorded for
                                  provenance only.
-  convergence_threshold  float   SCF convergence
+  scf_threshold          float   SCF convergence
                                  threshold of the
                                  reference run.
   scf_iterations         int     Iteration count of the
@@ -2541,14 +2541,14 @@ coefficients  = [ ... ]
 alphas        = [ ... ]
 
 [potential.provenance]
-source                = "Imago"
-commit                = "fedcba2"
-generated_at          = "2026-05-08T14:30:00Z"
-reference_id          = "COD-1011098"
-atom_site             = 1
-kpoint_spec           = "12 12 12 0 0 0"
-convergence_threshold = 1.0e-6
-scf_iterations        = 28
+source         = "Imago"
+commit         = "fedcba2"
+generated_at   = "2026-05-08T14:30:00Z"
+reference_id   = "COD-1011098"
+atom_site      = 1
+kpoint_spec    = "12 12 12 0 0 0"
+scf_threshold  = 1.0e-6
+scf_iterations = 28
 
 [[potential.fingerprint]]
 method   = "bispectrum"
@@ -3008,7 +3008,7 @@ build).
 **What it contains** (per the schema sketched
 below): per-solid fields the SCF run needs
 (`structure_path`, `kpoint_spec`,
-`convergence_threshold`) plus a stable
+`scf_threshold`) plus a stable
 `reference_id`; per-entry harvest declarations
 (`atom_site`, expected `element`, `label`,
 `description`).
@@ -3102,7 +3102,7 @@ cod_id                = 9008463
 cod_revision          = "2023-04-12"
 # structure_path      = "au_fcc.skel"     # alternative form
 kpoint_spec           = { density = 60.0, shift = [0.0, 0.0, 0.0] }
-convergence_threshold = 1.0e-6
+scf_threshold         = 1.0e-6
 
   [[reference_solid.entry]]
   element     = "Au"
@@ -3165,7 +3165,7 @@ convergence_threshold = 1.0e-6
       under- or over-sample.
     - `shift` (array of three reals): fractional shift along the
       a, b, c reciprocal axes.
-- `convergence_threshold` (real): SCF convergence threshold for
+- `scf_threshold` (real): SCF convergence threshold for
   the reference run.  Recorded in provenance.
 
 **Per-entry fields (`[[reference_solid.entry]]`).**
@@ -3219,7 +3219,7 @@ file (5.2):
 
 1. `schema_version == 2`.
 2. Every `[[reference_solid]]` carries `reference_id`,
-   `kpoint_spec`, `convergence_threshold`, and *exactly one* of
+   `kpoint_spec`, `scf_threshold`, and *exactly one* of
    `{(cod_id, cod_revision), structure_path}` (see rule 4 for
    details).
 3. Every `[[reference_solid.entry]]` carries `element`,
@@ -3264,7 +3264,7 @@ one directory per solid keyed by `reference_id`:
 share/atomicBDB/cache/scf/
   au_fcc/
     inputs.toml        Snapshot of the per-solid SCF inputs:
-                       kpoint_spec, convergence_threshold,
+                       kpoint_spec, scf_threshold,
                        imago_commit (plus cod_id + cod_revision,
                        or structure_path, for diagnostic
                        reporting on a miss).
@@ -3293,7 +3293,7 @@ share/atomicBDB/cache/scf/
    miss.
 2. Read `inputs.toml`; compare each scalar field against `ref`
    and `imago_commit`.  If any field differs, miss; log which
-   field changed (e.g., "`convergence_threshold` 1e-6 → 1e-7 —
+   field changed (e.g., "`scf_threshold` 1e-6 → 1e-7 —
    re-running SCF").
 3. Materialize the current structure file for `ref` (fetch from
    COD if `cod_id`, read from disk if `structure_path`).  Compare
@@ -3359,7 +3359,7 @@ Explicitly excluded from the cache comparison:
            entries, read it from disk.  Write the bytes to
            `cache/scf/<reference_id>/structure.<ext>`.
          - Run Imago SCF on that structure using `kpoint_spec`
-           and `convergence_threshold` from the manifest.
+           and `scf_threshold` from the manifest.
          - Write `cache/scf/<reference_id>/inputs.toml` and
            `cache/scf/<reference_id>/imago.out`.
    b. Record SCF iteration count and convergence metrics in the
@@ -3815,7 +3815,7 @@ API to tell it:
    convergence threshold, Imago build commit -- so the
    producer can fill the provenance fields of 5.2 and
    so kaleidoscope can form its run-reuse cache key
-   (`kpoint_spec` + `convergence_threshold` +
+   (`kpoint_spec` + `scf_threshold` +
    `imago_commit` + structure bytes, ARCHITECTURE 9.6).
 4. **How much work did it take?**  The SCF iteration
    count, both for the producer's run log and for the
@@ -4291,7 +4291,7 @@ solid into a small **verification sub-grid** of
 predict-then-verify algorithm of 7.7.  Every unit in that
 sub-grid shares `id = reference_id`, the curated skl as
 `structure`, the default (Imago) wingbeat, and the same
-`key_fields` (scalar `convergence_threshold` and
+`key_fields` (scalar `scf_threshold` and
 `imago_commit`; the structure file as a key file); they
 differ in `calc` (the per-grid-point tag per 6.2.4) and in
 the swept k-density value carried in `options`.
@@ -4644,7 +4644,7 @@ existing `is_cached_v2` (DESIGN 5.7) and generalizing it:
 
 - **Scalar fields** -- written verbatim into
   `cache_key.toml` as TOML and compared field-by-field
-  (the producer's `kpoint_spec`, `convergence_threshold`,
+  (the producer's `kpoint_spec`, `scf_threshold`,
   `imago_commit`).
 - **Key files** -- declared by name in `key_fields`;
   compared by **byte-comparison against the copy already
@@ -4767,7 +4767,7 @@ predict_settings(
                                #   and "functional" -- they
                                #   select the predictor sub-
                                #   model (DESIGN 7.6 step 2) --
-                               #   plus the usual scf_tolerance,
+                               #   plus the usual scf_threshold,
                                #   ... held fixed across the grid
     dataspace,                 # Dataspace loaded by
                                #   guidance_db.load() from
@@ -5489,7 +5489,7 @@ electronic-structure quantities that drive it (`gap_ev`,
                                       predictor groups by
                                       this value into
                                       sub-models.
-  convergence_threshold       real    The SCF threshold
+  scf_threshold               real    The SCF threshold
                                       used (e.g.
                                       `1.0e-6`).
   cell_atom_count             int     Number of atoms in
@@ -5705,7 +5705,7 @@ dos_at_fermi        = 0.0000000000000000e+00
 [entry.context]
 basis                        = "fb"
 functional                   = "gga-pbe"
-convergence_threshold        = 1.0000000000000000e-06
+scf_threshold                = 1.0000000000000000e-06
 cell_atom_count              = 6
 cell_volume_per_formula_unit = 4.6253846153846157e+02
 
@@ -5917,7 +5917,7 @@ class Context:
     """Calculation context recorded with each entry."""
     basis:                        str     # "mb" | "fb" | "eb"
     functional:                   str     # e.g. "gga-pbe"
-    convergence_threshold:        float
+    scf_threshold:                float
     cell_atom_count:              int
     cell_volume_per_formula_unit: float   # Bohr^3
 

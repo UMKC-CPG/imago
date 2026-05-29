@@ -147,7 +147,7 @@ class ReferenceSolid:
     """One ``[[reference_solid]]`` -- a curated reference system.
 
     Carries everything the SCF run needs (the structure source,
-    ``kpoint_spec``, ``convergence_threshold``) plus the list of
+    ``kpoint_spec``, ``scf_threshold``) plus the list of
     per-site harvest declarations.  Exactly one of ``cod_id`` (with
     ``cod_revision``) or ``structure_path`` is set (rule 4); the
     unused alternative is ``None``.
@@ -155,7 +155,7 @@ class ReferenceSolid:
 
     reference_id: str
     kpoint_spec: dict[str, Any]
-    convergence_threshold: float
+    scf_threshold: float
     cod_id: int | None
     cod_revision: str | None
     structure_path: str | None
@@ -221,7 +221,7 @@ def load_manifest_v2(path: str,
 
     1. ``schema_version`` must equal 2.
     2. Every ``[[reference_solid]]`` carries ``reference_id``,
-       ``kpoint_spec``, and ``convergence_threshold``.
+       ``kpoint_spec``, and ``scf_threshold``.
     3. Every ``[[reference_solid.entry]]`` carries ``element``,
        ``atom_site``, ``label``, ``default``, ``description``.
     4. Exactly one of ``cod_id`` / ``structure_path`` per solid;
@@ -264,7 +264,7 @@ def load_manifest_v2(path: str,
     for ref in raw.get("reference_solid", []):
         # ----- Rule 2: required per-solid fields.
         for field_name in ("reference_id", "kpoint_spec",
-                            "convergence_threshold"):
+                            "scf_threshold"):
             _require(field_name in ref, path,
                      f"manifest rule 2: [[reference_solid]] "
                      f"missing field: {field_name}")
@@ -379,7 +379,7 @@ def load_manifest_v2(path: str,
         reference_solids.append(ReferenceSolid(
             reference_id=rid,
             kpoint_spec=dict(ref["kpoint_spec"]),
-            convergence_threshold=ref["convergence_threshold"],
+            scf_threshold=ref["scf_threshold"],
             cod_id=ref.get("cod_id"),
             cod_revision=ref.get("cod_revision"),
             structure_path=ref.get("structure_path"),

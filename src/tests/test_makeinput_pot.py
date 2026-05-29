@@ -62,7 +62,7 @@ def _imago_provenance() -> dict:
         "reference_id": "COD-1011098",
         "atom_site": 1,
         "kpoint_spec": "12 12 12 0 0 0",
-        "convergence_threshold": 1.0e-6,
+        "scf_threshold": 1.0e-6,
         "scf_iterations": 28,
     }
 

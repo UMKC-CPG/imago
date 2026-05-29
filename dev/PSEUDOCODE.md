@@ -2358,7 +2358,7 @@ function require_provenance(prov, path, lbl):
     if prov["source"] == "Imago":
         for f in ("reference_id", "atom_site",
                   "kpoint_spec",
-                  "convergence_threshold",
+                  "scf_threshold",
                   "scf_iterations"):
             require(f in prov, path, lbl,
                 "Imago provenance missing: " + f)
@@ -2585,7 +2585,7 @@ function fmt_float(x):
 function ordered_provenance_keys(prov):
     base = ["source", "commit", "generated_at"]
     extras = ["reference_id", "atom_site",
-              "kpoint_spec", "convergence_threshold",
+              "kpoint_spec", "scf_threshold",
               "scf_iterations"]
     if prov["source"] == "Imago":
         return base + extras
@@ -3791,7 +3791,7 @@ function load_manifest_v2(path):
     for ref in solids:
         # Rule 2: required per-solid fields.
         for f in ("reference_id", "kpoint_spec",
-                  "convergence_threshold"):
+                  "scf_threshold"):
             require(f in ref, path,
                 "manifest rule 2: [[reference_solid"
                 + "]] missing field: " + f)
@@ -3926,7 +3926,7 @@ function is_cached_v2(ref, imago_commit):
     # (so adding a new harvest target reuses the
     # cached SCF) and `reference_id` (used only as
     # the cache directory name).
-    for f in ("kpoint_spec", "convergence_threshold",
+    for f in ("kpoint_spec", "scf_threshold",
               "imago_commit"):
         expected = current_field_value(ref, f,
             imago_commit)
@@ -4530,7 +4530,7 @@ function _harvest_result(run_dir, temp, settings, reused,
         # convergence metric, the total energy, and the
         # iteration count together (all 1-based columns).
         row       = last_data_row(outputs["iteration"])
-        threshold = read_convergence_threshold(
+        threshold = read_scf_threshold(
                         join(run_dir, "imago.dat"))
         # Column 4 is the SCF convergence metric;
         # converged iff it is below the imago.dat criterion.
@@ -4562,7 +4562,7 @@ function _harvest_result(run_dir, temp, settings, reused,
 ```
 
 ```
-function read_convergence_threshold(imago_dat_path):
+function read_scf_threshold(imago_dat_path):
     # The SCF convergence criterion is the value on the
     # line immediately following the "CONVERGENCE_TEST"
     # label in imago.dat (the run's own input), so the
@@ -5264,7 +5264,7 @@ dataclass Measured:
 dataclass Context:
     basis                        : str  # mb|fb|eb
     functional                   : str  # e.g. "gga-pbe"
-    convergence_threshold        : float
+    scf_threshold                : float
     cell_atom_count              : int
     cell_volume_per_formula_unit : float   # Bohr^3
 
@@ -5556,7 +5556,7 @@ function load_entry(path, system_type_dir, seen_ids):
     require("context" in raw["entry"], path,
         "missing [entry.context]")
     c = raw["entry"]["context"]
-    for f in ("basis", "functional", "convergence_threshold",
+    for f in ("basis", "functional", "scf_threshold",
               "cell_atom_count", "cell_volume_per_formula_unit"):
         require(f in c, path, "missing context." + f)
     # Rule 8: basis valid; functional non-empty.
@@ -5571,7 +5571,7 @@ function load_entry(path, system_type_dir, seen_ids):
         "cell_volume_per_formula_unit must be > 0")
     context = Context(
         c["basis"], c["functional"],
-        c["convergence_threshold"], c["cell_atom_count"],
+        c["scf_threshold"], c["cell_atom_count"],
         c["cell_volume_per_formula_unit"])
 
     # --- verification block ----------------------------
@@ -5743,8 +5743,7 @@ function format_entry(entry, slug):
     out.append("[entry.context]")
     emit_kv(out, "basis",      entry.context.basis)
     emit_kv(out, "functional", entry.context.functional)
-    emit_kv(out, "convergence_threshold",
-            entry.context.convergence_threshold)
+    emit_kv(out, "scf_threshold", entry.context.scf_threshold)
     emit_kv(out, "cell_atom_count",
             entry.context.cell_atom_count)
     emit_kv(out, "cell_volume_per_formula_unit",
@@ -6127,10 +6126,10 @@ function predict_settings(structure, options, dataspace,
 ```
 function standard_key_fields():
     # DESIGN 6.2.1: the producer's cache identity -- scalar
-    # convergence_threshold + imago_commit, with the
+    # scf_threshold + imago_commit, with the
     # structure file byte-compared.
     return KeyFields(
-        scalars = {"convergence_threshold", "imago_commit"},
+        scalars = {"scf_threshold", "imago_commit"},
         files   = ["structure"])
 ```
 
@@ -6187,12 +6186,23 @@ function harvest_campaign(workspace_root, db_root, dataspace):
             energies.append(rt["total_energy"])
             rts.append(rt)
 
+        # c. Trust mode harvests deliverables but does NOT
+        #    auto-stage a guidance entry (DESIGN 6.2.1 / 7.7):
+        #    one converged calc is weaker evidence than a grid.
+        #    This MUST precede pick_converged: a trust grid is a
+        #    single point, so the convergence test below would
+        #    return None and misreport it as "energy moving."
+        if prediction is not None \
+           and prediction["policy"] == "trust_no_verify":
+            log(unit_id + ": trusted point (not staged)")
+            continue
+
         thr = prediction_metric_threshold(prediction)
 
-        # c. Pick the converged grid point (DESIGN 7.8 3c).
+        # d. Pick the converged grid point (DESIGN 7.8 3c).
         idx = pick_converged(energies, thr)
 
-        # d. Non-convergence at the top of the range: tag and
+        # e. Non-convergence at the top of the range: tag and
         #    SKIP -- a non-converged sweep earns no entry.
         if idx is None:
             warn(unit_id + ": energy still moving at top of"
@@ -6200,15 +6210,7 @@ function harvest_campaign(workspace_root, db_root, dataspace):
             tag_prediction_mismatch(workspace_root, unit_id)
             continue
 
-        # Trust mode harvests deliverables but does NOT
-        # auto-stage a guidance entry (DESIGN 6.2.1 / 7.7):
-        # one converged calc is weaker evidence than a grid.
-        if prediction is not None \
-           and prediction["policy"] == "trust_no_verify":
-            log(unit_id + ": trusted point (not staged)")
-            continue
-
-        # e. Signature: system_type from the prediction
+        # f. Signature: system_type from the prediction
         #    record (it carries it from 7.7); composition +
         #    lattice via compute_signature.
         st = (prediction["system_type"] if prediction is not None
@@ -6216,7 +6218,7 @@ function harvest_campaign(workspace_root, db_root, dataspace):
         sc = load_skl(grid[0].structure)
         sig = compute_signature(sc, st, dataspace.group_table)
 
-        # f. Build the rich GuidanceEntry.
+        # g. Build the rich GuidanceEntry.
         chosen_rt  = rts[idx]
         chosen_kpd = kpds[idx]
         entry = GuidanceEntry(
@@ -6237,8 +6239,7 @@ function harvest_campaign(workspace_root, db_root, dataspace):
             context      = Context(
                 basis      = campaign.sweep.fixed_axes["basis"],
                 functional = campaign.sweep.fixed_axes["functional"],
-                convergence_threshold = grid[0].options[
-                    "scf_tolerance"],
+                scf_threshold = grid[0].options["scf_threshold"],
                 cell_atom_count = chosen_rt["cell_atom_count"],
                 cell_volume_per_formula_unit = chosen_rt[
                     "cell_volume_per_formula_unit"]),
@@ -6260,7 +6261,7 @@ function harvest_campaign(workspace_root, db_root, dataspace):
                 imago_commit     = chosen_rt["imago_commit"],
                 curator          = "guidance_harvest.py"))
 
-        # g. Stage it.  save_entry fills entry_id = slug.
+        # h. Stage it.  save_entry fills entry_id = slug.
         path = save_entry(entry, db_root)
         log(unit_id + ": staged " + path)
 ```

@@ -17,7 +17,7 @@ neither a binary nor $IMAGO_RC:
   (column 4 vs the CONVERGENCE_TEST criterion), the total
   energy (column 5), and the per-run iteration count (column 1)
   (PSEUDOCODE 12.5).
-* ``_read_convergence_threshold`` / ``_last_data_row`` -- the
+* ``_read_scf_threshold`` / ``_last_data_row`` -- the
   small parse helpers behind the harvest.
 * ``run_structure`` -- now wired (C68(a)): it drives
   makeinput.build_run_dir then run_prepared (DESIGN 6.3.6),
@@ -102,23 +102,23 @@ def test_outputs_loen_key():
 
 
 # --------------------------------------------------------------
-#  _read_convergence_threshold / _last_data_row (12.5)
+#  _read_scf_threshold / _last_data_row (12.5)
 # --------------------------------------------------------------
 
-def test_read_convergence_threshold(tmp_path):
+def test_read_scf_threshold(tmp_path):
     """The criterion is the value on the line right after the
     CONVERGENCE_TEST label."""
     p = tmp_path / "imago.dat"
     p.write_text("OTHER\nCONVERGENCE_TEST\n  1.0e-4\nMORE\n")
-    assert imago._read_convergence_threshold(str(p)) == 1.0e-4
+    assert imago._read_scf_threshold(str(p)) == 1.0e-4
 
 
-def test_read_convergence_threshold_missing(tmp_path):
+def test_read_scf_threshold_missing(tmp_path):
     """A missing label raises ImagoError naming the file."""
     p = tmp_path / "imago.dat"
     p.write_text("NO LABEL HERE\n")
     with pytest.raises(ImagoError):
-        imago._read_convergence_threshold(str(p))
+        imago._read_scf_threshold(str(p))
 
 
 def test_last_data_row_skips_trailing_blanks(tmp_path):

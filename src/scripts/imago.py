@@ -2502,7 +2502,7 @@ def project_home_outputs(settings):
 #                 Callable API: Result Harvesting                     #
 # ------------------------------------------------------------------ #
 
-def _read_convergence_threshold(imago_dat_path):
+def _read_scf_threshold(imago_dat_path):
     """Return the SCF convergence criterion: the value on the
     line immediately following the CONVERGENCE_TEST label in
     imago.dat (PSEUDOCODE 12.5), so the verdict uses the same
@@ -2569,7 +2569,7 @@ def _harvest_result(run_dir, temp, settings, seconds, reused):
         #   convergence metric, the total energy, and the
         #   iteration count (all 1-based columns).
         row = _last_data_row(outputs["iteration"])
-        threshold = _read_convergence_threshold(
+        threshold = _read_scf_threshold(
             os.path.join(run_dir, f"{fn.imago}{fn.dat}")
         )
         # Column 4 is the SCF convergence metric: converged iff
