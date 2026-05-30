@@ -45,9 +45,18 @@ def emit_scalar(value):
 
 def toml_line(key, value):
     """Render one ``key = value`` TOML line, or the empty string
-    when value is None (so callers can omit absent fields)."""
+    when value is None (so callers can omit absent fields).
+
+    A list or tuple value renders as a TOML array
+    (``key = [a, b, ...]``), each element passed through
+    ``emit_scalar``; an empty sequence renders as ``key = []``.
+    This is what lets a unit's ``calc`` tuple round-trip through
+    both ``status.toml`` and ``flight.toml`` as an array."""
     if value is None:
         return ""
+    if isinstance(value, (list, tuple)):
+        rendered = ", ".join(emit_scalar(item) for item in value)
+        return f"{key} = [{rendered}]\n"
     return f"{key} = {emit_scalar(value)}\n"
 
 
@@ -66,10 +75,14 @@ def require_slug(value, what):
 
 def unit_run_dir(flight, unit):
     """Absolute path of a unit's run directory:
-    ``<root>/wingbeats/<id>[/<calc>]``.  The ``<calc>`` level exists
-    only when the unit carries a calc tag (DESIGN 6.2.4)."""
-    base = os.path.join(flight.root, "wingbeats", unit.id)
-    return os.path.join(base, unit.calc) if unit.calc else base
+    ``<root>/wingbeats/<id>[/<calc components...>]``.  Each element
+    of the unit's ``calc`` tuple becomes one nested directory
+    level (DESIGN 6.2.1/6.2.4), so a one-axis sweep adds a single
+    ``<axis>-<value>`` level and an empty tuple adds none -- the
+    common single-calculation case resolves to
+    ``<root>/wingbeats/<id>``."""
+    return os.path.join(
+        flight.root, "wingbeats", unit.id, *unit.calc)
 
 
 def derive_calc_tag(unit):
@@ -77,10 +90,12 @@ def derive_calc_tag(unit):
     but shares its id with other units (DESIGN 6.2.4).  For the
     Imago wingbeat this is ``"<job>-<scf_basis>"`` read from the
     makeinput options, falling back to ``scf``/``fb`` when those
-    keys are absent."""
+    keys are absent.  Returned as a one-element tuple to match the
+    ``CalcUnit.calc`` tuple shape (one component per axis); the
+    derived tag is the single distinguishing directory level."""
     job = str(unit.options.get("job", "scf"))
     basis = str(unit.options.get("scf_basis", "fb"))
-    return f"{job}-{basis}".lower()
+    return (f"{job}-{basis}".lower(),)
 
 
 def validate_flight(flight):
@@ -92,20 +107,27 @@ def validate_flight(flight):
     with another unit has a derived tag assigned in place, so
     the two no longer collide on one run directory."""
     id_counts = Counter(unit.id for unit in flight.units)
-    seen = {}                       # id -> set of calc tags used
+    seen = {}                       # id -> set of calc tuples used
     for unit in flight.units:
         require_slug(unit.id, "id")
-        if unit.calc is not None:
-            require_slug(unit.calc, "calc")
+        # Every component of the calc tuple is its own directory
+        #   level, so each must independently be a slug.
+        for component in unit.calc:
+            require_slug(component, "calc")
 
         tag = unit.calc
         # One id with several units needs a distinguishing tag;
-        #   derive one when the client did not supply it.
-        if tag is None and id_counts[unit.id] > 1:
+        #   derive one (a one-element tuple) when the client gave
+        #   no calc at all (the empty tuple).
+        if tag == () and id_counts[unit.id] > 1:
             tag = derive_calc_tag(unit)
-            require_slug(tag, "derived calc")
+            for component in tag:
+                require_slug(component, "derived calc")
             unit.calc = tag
 
+        # The full calc tuple is the per-id collision key: two
+        #   units sharing an id must differ in their calc tuple or
+        #   they would resolve to the same run directory.
         used = seen.setdefault(unit.id, set())
         if tag in used:
             raise KaleidoscopeError(
@@ -155,6 +177,31 @@ def read_status(wingbeat_dir):
 #  flight.toml -- the inspectable record of what was asked
 # ------------------------------------------------------------------
 
+def _serialize_table(flight_file, header, table):
+    """Write a TOML table ``[header]`` from a plain dict of
+    scalars, arrays, and (recursively) nested dicts.  All scalar
+    and array lines are emitted first, then each nested-dict value
+    as a ``[header.<subkey>]`` sub-table -- the order TOML
+    requires, since within a table every bare ``key = value`` must
+    precede any sub-table header.
+
+    This emits the optional ``[flight.sweep]`` block and each
+    opaque ``[flight.<key>]`` metadata table.  Metadata tables are
+    written VERBATIM: the dispatch core never inspects their
+    contents (Principle 9), it only round-trips them so a
+    domain-aware client (the 6.2.8 helper's PredictionRecord) can
+    read them back after the flight."""
+    flight_file.write(f"\n[{header}]\n")
+    nested = []
+    for key, value in table.items():
+        if isinstance(value, dict):
+            nested.append((key, value))
+        else:
+            flight_file.write(toml_line(key, value))
+    for key, value in nested:
+        _serialize_table(flight_file, f"{header}.{key}", value)
+
+
 def serialize_flight(flight):
     """Write ``<root>/flight.toml``: the authoritative record
     of *what was asked for*, kept separate from each run's
@@ -165,7 +212,14 @@ def serialize_flight(flight):
     cache key live with the run (cache_key.toml) and are not
     round-tripped here.  flight.toml is for inspection and as a
     resume record; a resume itself is just re-running the
-    flight, whose cache hit-test skips the done units."""
+    flight, whose cache hit-test skips the done units.
+
+    When the flight carries a ``sweep`` (it was built by the
+    predict-then-verify helper, DESIGN 6.2.8) a ``[flight.sweep]``
+    block records the varied and fixed axes, and every
+    ``metadata[key]`` is emitted as a verbatim ``[flight.<key>]``
+    table (e.g. ``[flight.prediction]``) so the harvest step can
+    recover it without path-parsing."""
     os.makedirs(flight.root, exist_ok=True)
     path = os.path.join(flight.root, "flight.toml")
     with open(path, "w") as flight_file:
@@ -179,5 +233,21 @@ def serialize_flight(flight):
             flight_file.write(
                 toml_line("structure", unit.structure)
             )
+            # calc renders as a TOML array of directory components
+            #   (``calc = []`` for a unit with no second level).
             flight_file.write(toml_line("calc", unit.calc))
             flight_file.write(toml_line("wingbeat", unit.wingbeat))
+
+        # The optional sweep description (DESIGN 6.2.1/6.2.8): its
+        #   fixed_axes dict nests as a [flight.sweep.fixed_axes]
+        #   sub-table.
+        if flight.sweep is not None:
+            _serialize_table(flight_file, "flight.sweep", {
+                "varied_axes": flight.sweep.varied_axes,
+                "fixed_axes": flight.sweep.fixed_axes,
+            })
+
+        # Opaque metadata tables, each emitted verbatim (the
+        #   6.2.8 helper stashes its prediction under "prediction").
+        for key, table in flight.metadata.items():
+            _serialize_table(flight_file, f"flight.{key}", table)

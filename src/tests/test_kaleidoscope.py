@@ -35,19 +35,20 @@ package.
 """
 
 import os
+import tomllib
 
 import pytest
 
 from kaleidoscope import (
     Flight, CalcUnit, KeyFields, KeyFile, WingbeatOutcome,
-    FlightReport, ReportEntry, KaleidoscopeError,
+    FlightReport, ReportEntry, KaleidoscopeError, SweepRecord,
     dispatch, register_wingbeat, resolve_wingbeat,
     validate_flight, unit_run_dir,
     is_cache_hit, cache_key_matches, write_cache_key,
     read_status, write_status, ImagoWingbeat,
 )
 from kaleidoscope.wingbeats import Wingbeat
-from kaleidoscope.workspace import derive_calc_tag
+from kaleidoscope.workspace import derive_calc_tag, serialize_flight
 
 
 # Pure-computation / temp-file tests -- they read no fixture
@@ -133,9 +134,16 @@ def test_unit_run_dir_with_and_without_calc(tmp_path):
     plain = CalcUnit(id="s1", structure="a.skl")
     assert unit_run_dir(flight, plain) == os.path.join(
         str(tmp_path), "wingbeats", "s1")
-    tagged = CalcUnit(id="s1", structure="a.skl", calc="v2")
+    tagged = CalcUnit(id="s1", structure="a.skl", calc=("v2",))
     assert unit_run_dir(flight, tagged) == os.path.join(
         str(tmp_path), "wingbeats", "s1", "v2")
+    # A multi-axis calc tuple nests one directory level per
+    #   component, in tuple order (DESIGN 6.2.1/6.2.4).
+    multi = CalcUnit(id="s1", structure="a.skl",
+                     calc=("kpt-density-50", "smear-gauss"))
+    assert unit_run_dir(flight, multi) == os.path.join(
+        str(tmp_path), "wingbeats", "s1",
+        "kpt-density-50", "smear-gauss")
 
 
 def test_validate_rejects_non_slug_id():
@@ -158,25 +166,75 @@ def test_validate_derives_calc_for_shared_id():
                       options={"job": "pscf", "scf_basis": "mb"})
     validate_flight(Flight(root="/tmp",
                                units=[first, second]))
-    assert first.calc == "scf-fb"
-    assert second.calc == "pscf-mb"
+    assert first.calc == ("scf-fb",)
+    assert second.calc == ("pscf-mb",)
 
 
 def test_derive_calc_tag_defaults():
     """With no makeinput options the derived tag falls back to
-    the documented ``scf``/``fb`` defaults."""
+    the documented ``scf``/``fb`` defaults, as a one-element
+    tuple matching the CalcUnit.calc shape."""
     assert derive_calc_tag(CalcUnit(id="s1", structure="a")) == \
-        "scf-fb"
+        ("scf-fb",)
 
 
 def test_validate_duplicate_run_dir_raises():
     """Two units that resolve to the same id+calc would clobber
     one run directory, so validation aborts and names them."""
-    first = CalcUnit(id="s1", structure="a", calc="v1")
-    second = CalcUnit(id="s1", structure="a", calc="v1")
+    first = CalcUnit(id="s1", structure="a", calc=("v1",))
+    second = CalcUnit(id="s1", structure="a", calc=("v1",))
     with pytest.raises(KaleidoscopeError):
         validate_flight(Flight(root="/tmp",
                                    units=[first, second]))
+
+
+def test_serialize_flight_calc_array_and_no_calc(tmp_path):
+    """Each unit's calc tuple serializes as a TOML array that
+    parses back to a list; a unit with no calc emits ``calc =
+    []`` (DESIGN 6.2.1)."""
+    swept = CalcUnit(id="s1", structure="a.skl",
+                     calc=("kpt-density-50",))
+    plain = CalcUnit(id="s2", structure="b.skl")
+    serialize_flight(Flight(root=str(tmp_path),
+                            units=[swept, plain]))
+    with open(os.path.join(str(tmp_path), "flight.toml"),
+              "rb") as flight_file:
+        data = tomllib.load(flight_file)
+    assert data["unit"][0]["calc"] == ["kpt-density-50"]
+    assert data["unit"][1]["calc"] == []
+
+
+def test_serialize_flight_sweep_and_metadata_round_trip(tmp_path):
+    """A predict-then-verify flight emits a [flight.sweep] block
+    (with its nested fixed_axes sub-table) and each metadata key
+    as a verbatim [flight.<key>] table that round-trips through
+    tomllib unchanged (DESIGN 6.2.8; the harvest recovers these
+    without parsing run-dir paths)."""
+    sweep = SweepRecord(
+        varied_axes=("kpt-density",),
+        fixed_axes={"basis": "fb", "functional": "ldau"})
+    # A flat prediction table standing in for the 6.2.8 helper's
+    #   PredictionRecord: scalars plus a string array.
+    prediction = {
+        "policy": "verify_around_prediction",
+        "predicted_value": 50.0,
+        "confidence": 0.83,
+        "is_under_trained": False,
+        "neighbor_entry_ids": ["mp-1", "mp-2"],
+    }
+    unit = CalcUnit(id="s1", structure="a.skl",
+                    calc=("kpt-density-50",))
+    flight = Flight(root=str(tmp_path), units=[unit], sweep=sweep,
+                    metadata={"prediction": prediction})
+    serialize_flight(flight)
+    with open(os.path.join(str(tmp_path), "flight.toml"),
+              "rb") as flight_file:
+        data = tomllib.load(flight_file)
+
+    assert data["flight"]["sweep"]["varied_axes"] == ["kpt-density"]
+    assert data["flight"]["sweep"]["fixed_axes"] == {
+        "basis": "fb", "functional": "ldau"}
+    assert data["flight"]["prediction"] == prediction
 
 
 def test_resolve_unknown_runner_raises():
@@ -496,7 +554,7 @@ def test_imago_runner_prepared_detection_under_inputs(tmp_path,
 
 def _entry(id, status, detail):
     """A minimal ReportEntry for the view tests."""
-    return ReportEntry(id=id, calc=None, status=status,
+    return ReportEntry(id=id, calc=(), status=status,
                        detail=detail, wingbeat_dir=f"/wingbeats/{id}",
                        runtime_seconds=0.0, message="")
 

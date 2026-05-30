@@ -61,8 +61,14 @@ class CalcUnit:
     - ``structure`` : path to an ``imago.skl`` for the run.
     - ``options``   : the makeinput options used to build the
                       run directory (passed to the wingbeat).
-    - ``calc``      : an optional variant tag, used only when one
-                      structure hosts more than one calculation.
+    - ``calc``      : the per-axis directory components for this
+                      unit -- a tuple carrying one
+                      ``<axis>-<value>`` slug per varied sweep axis
+                      (DESIGN 6.2.1).  The empty tuple ``()`` means
+                      "no second directory level", which is the
+                      common single-calculation case; the
+                      predict-then-verify helper (DESIGN 6.2.8)
+                      fills it with one component per swept knob.
     - ``wingbeat``    : the wingbeat name, or None for the flight
                       default.
     - ``key_fields``: the cache identity (DESIGN 6.2.5).
@@ -70,9 +76,32 @@ class CalcUnit:
     id: str
     structure: str
     options: dict = field(default_factory=dict)
-    calc: Optional[str] = None
+    calc: tuple = ()
     wingbeat: Optional[str] = None
     key_fields: KeyFields = field(default_factory=KeyFields)
+
+
+@dataclass
+class SweepRecord:
+    """Description of the option-axis sweep a flight performs
+    (DESIGN 6.2.1).  It is attached only when the flight was
+    built by the predict-then-verify helper (DESIGN 6.2.8);
+    a flight assembled by hand leaves ``Flight.sweep`` None.
+
+    - ``varied_axes`` : the axis names that change from one unit
+                        to the next, in the SAME order they appear
+                        as directory components in each
+                        ``CalcUnit.calc`` tuple.  In v1 this is the
+                        single ``("kpt-density",)``.
+    - ``fixed_axes``  : a mapping from each axis held constant
+                        across the whole flight to its single
+                        value (e.g. ``basis``, ``functional``).
+
+    The harvest step (DESIGN 7.8) reads this to learn what was
+    swept without having to reverse-engineer run-directory paths.
+    """
+    varied_axes: tuple = ()
+    fixed_axes: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -95,12 +124,29 @@ class Flight:
                            unit's ReportEntry as it reaches a
                            terminal state, for streaming
                            progress.
+    - ``sweep``          : a SweepRecord describing the varied and
+                           fixed axes, set only when the flight was
+                           built by the predict-then-verify helper
+                           (DESIGN 6.2.8); None for a hand-built
+                           flight.  When present, serialize_flight
+                           emits a ``[flight.sweep]`` block.
+    - ``metadata``       : opaque per-key tables that
+                           serialize_flight round-trips VERBATIM as
+                           ``[flight.<key>]`` blocks and the
+                           dispatch core never reads (Principle 9).
+                           This is the seam by which the 6.2.8
+                           helper stashes its PredictionRecord
+                           (under key ``"prediction"``) without the
+                           domain-agnostic core having to interpret
+                           it.
     """
     root: str
     units: list = field(default_factory=list)
     default_wingbeat: str = "imago"
     parsl_config: Any = None
     on_outcome: Optional[Callable] = None
+    sweep: Optional[SweepRecord] = None
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -124,9 +170,11 @@ class ReportEntry:
     """One unit's terminal record in the flight report
     (DESIGN 6.2.6).  Mirrors the generic ``status.toml`` fields
     and carries nothing domain-specific; the client reads each
-    ``wingbeat_dir`` itself to harvest results."""
+    ``wingbeat_dir`` itself to harvest results.  ``calc`` carries
+    the unit's per-axis directory tuple verbatim (``()`` when the
+    unit has no second directory level)."""
     id: str
-    calc: Optional[str]
+    calc: tuple
     status: str
     detail: Optional[str]
     wingbeat_dir: str

@@ -32,6 +32,7 @@ from .model import (
     KeyFile,
     KeyFields,
     CalcUnit,
+    SweepRecord,
     Flight,
     WingbeatOutcome,
     ReportEntry,
@@ -65,7 +66,8 @@ from .cache import (
 
 __all__ = [
     "KaleidoscopeError", "KeyFile", "KeyFields", "CalcUnit",
-    "Flight", "WingbeatOutcome", "ReportEntry", "FlightReport",
+    "SweepRecord", "Flight", "WingbeatOutcome", "ReportEntry",
+    "FlightReport",
     "Wingbeat", "ImagoWingbeat", "register_wingbeat", "resolve_wingbeat",
     "WINGBEATS", "dispatch", "LocalExecutor", "ParslExecutor",
     "TaskLost", "report_entry_from_status", "unit_run_dir",
