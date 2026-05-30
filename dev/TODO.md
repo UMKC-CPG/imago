@@ -1986,7 +1986,7 @@ the C48.3 wiring (C74) is the first major consumer.
   sub-project of its own: stratified-sampling design,
   COD query scripting, allocation budget, post-seed
   calibration of the k-NN tuning knobs per DESIGN 7.10.
-- [ ] C76. Surface the electronic-structure quantities the
+- [x] C76. Surface the electronic-structure quantities the
   guidance harvest (C72) needs by making the **iteration
   file the single primary read surface** (programmer
   guidance, 2026-05-29).  It already carries `total_energy`
@@ -2013,10 +2013,20 @@ the C48.3 wiring (C74) is the first major consumer.
   gap Hartree -> gap_ev in eV, col 8 code -> gap_kind via
   {0:none,1:direct,2:indirect}), length-gated for pre-gap
   files; ImagoResult + the wingbeat result.toml serializer
-  carry the fields.  PENDING: the Fortran iteration-file
-  writer (programmer, in progress) emitting cols 6-8 + always
-  printing the magnetization column; then confirm the gap_kind
-  code order and verify end to end.
+  carry the fields.
+  **Fortran half DONE (f44e6dd):** populate.F90 computes the raw
+  gap (CBM-VBM, a.u.) + kind from the sorted spectrum (kpoint
+  recovered via the existing 1+(index-1)/(numStates*spin)
+  idiom); potentialUpdate.F90 writes the fixed 8-column row in
+  both spin branches with explicit 1x field separators (no
+  column collisions); imago.F90 emits a single 8-column header.
+  Metal detection uses a dedicated `metalGapThresh = 1.0e-3`
+  a.u. (~0.027 eV ~ kT, NOT smallThresh) so finite-mesh metal
+  artifacts collapse to a zero-gap metal -- see DESIGN 6.1.
+  gap_kind code order confirmed against GAP_KIND_BY_CODE
+  (0 metal/1 direct/2 indirect).  Verified end to end: diamond
+  -> 0.184 a.u. ~ 5.0 eV, kind 2 (indirect); aluminum -> 0.0,
+  kind 0 (metal).  C76 COMPLETE; unblocks C72.
 
 ### Phase L -- resource & cost dataspace (VISION 6, ARCH 11, DESIGN 8)
 

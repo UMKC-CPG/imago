@@ -3945,6 +3945,30 @@ and -- because column 1 is a per-run cycle counter that
 resets each SCF invocation -- the `scf_iterations` count
 robust to the file's append-on-rerun behavior.
 
+C76 widens this same row to a fixed eight columns so a
+plain SCF run also surfaces the electronic-structure
+signal the guidance harvest (C72) needs: column 6 is the
+magnetization (0.0 and always emitted for a non-spin run,
+the total magnetic moment otherwise), column 7 the raw
+band gap in Hartree, and column 8 an integer gap-kind
+code (0 = metal/no gap, 1 = direct, 2 = indirect) that
+the parser maps via `GAP_KIND_BY_CODE`.  The writer
+prefixes every field with an explicit blank so adjacent
+values can never abut even when one fills its full field
+width, keeping the columns whitespace-delimited for the
+`split()`-based reader.  Metal detection uses a dedicated
+cutoff `metalGapThresh = 1.0e-3` a.u. (about 0.027 eV, of
+order room-temperature kT), deliberately far larger than
+the 1e-8 numerical-degeneracy threshold: a true metal
+sampled on a discrete k-point mesh shows a small finite
+gap on the order of the level spacing at the Fermi energy
+(~1e-4 to 1e-2 a.u.), and the kT-scale cutoff collapses
+these mesh artifacts to a zero-gap metal while staying
+well below any genuine semiconductor gap.  A coarse-mesh
+metal whose artificial gap exceeds the cutoff is a
+k-point convergence problem to cure with a denser mesh,
+not a reason to raise the threshold.
+
 The boundary on error handling is deliberate and
 important for Principle 10.  *Run-level* failures
 (non-convergence, a Fortran abort, a missing input
