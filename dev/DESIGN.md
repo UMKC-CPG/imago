@@ -4217,7 +4217,13 @@ A practical corollary of Principle 12 is the
 sweeps (sweep k-density values, sweep target atoms for
 XANES, sweep basis sizes) live as helpers inside
 kaleidoscope -- 6.2.8 is the first such helper, the
-predict-then-verify constructor for DESIGN 7.  Domain-aware
+predict-then-verify constructor for DESIGN 7.  These
+builders live in a `kaleidoscope/builders/` subpackage (one
+module per builder: the first is
+`builders/predict_verify.py`), imported explicitly by a
+client so the dumb core's import graph never pulls the
+physics layer (`guidance_db`, `structure_control`) that a
+builder depends on.  Domain-aware
 *structure-axis* sweeps (supercell expansion, LAMMPS-
 snapshot per-frame splitting, defect-site enumeration)
 generate skl files and therefore live in
