@@ -1992,10 +1992,11 @@ the C48.3 wiring (C74) is the first major consumer.
   guidance, 2026-05-29).  It already carries `total_energy`
   and -- spin-polarized runs only -- the magnetization
   column.  Add to the iteration data: `gap_ev` + `gap_kind`
-  -- the raw metal/semiconductor/insulator signal that feeds
-  the two-stage predictor.  (dos_at_fermi was considered and
-  dropped 2026-05-29: gap/gap_kind alone carry the character
-  signal.)  Putting these in the iteration data means any
+  -- the raw none/direct/indirect electronic-character
+  signal that feeds the two-stage predictor.  (dos_at_fermi
+  was considered and dropped 2026-05-29: gap/gap_kind alone
+  carry the character signal.)  Putting these in the
+  iteration data means any
   plain SCF run yields them, so the harvest never has to
   decide whether to run `-scfdos`.  `imago.py` extends its
   iteration-file parser (the primary read), populating
