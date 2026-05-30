@@ -58,7 +58,7 @@ subroutine makeSCFPot (totalEnergy)
    use O_LAPACKDPOSVX
    use O_TimeStamps
    use O_Input, only: numElectrons
-   use O_Populate, only: occupiedEnergy
+   use O_Populate, only: occupiedEnergy, bandGap, gapKindCode
    use O_KPoints, only: numKPoints
    use O_Constants, only: smallThresh
    use O_AtomicTypes, only: atomTypes
@@ -1796,13 +1796,20 @@ subroutine makeSCFPot (totalEnergy)
       enddo
    endif
 
-   ! Record the key iteration information to a seperate file.
+   ! Record the key iteration information to a seperate file.  Each
+   !   field is preceded by an explicit "1x" blank so that adjacent
+   !   numbers can never abut even when a value fills its entire field
+   !   width (e.g. a very large total energy filling all of f17.8).
+   !   This guarantees the whitespace-delimited columns that the
+   !   downstream imago.py iteration-file parser relies on.
    if (spin == 1) then
-      write (7,fmt="(i5,3f13.8,f17.8)") currIteration, occupiedEnergy, &
-            & electronDiff, testableDelta, totalEnergy
+      write (7,fmt="(i5,3(1x,f13.8),3(1x,f17.8),1x,i3)") currIteration, &
+            & occupiedEnergy, electronDiff, testableDelta, &
+            & totalEnergy, 0.0d0, bandGap, gapKindCode
    else
-      write (7,fmt="(i5,3f13.8,2f17.8)") currIteration, occupiedEnergy, &
-            & electronDiff, testableDelta, totalEnergy, totalMagneticMoment
+      write (7,fmt="(i5,3(1x,f13.8),3(1x,f17.8),1x,i3)") currIteration, &
+            & occupiedEnergy, electronDiff, testableDelta, &
+            & totalEnergy, totalMagneticMoment, bandGap, gapKindCode
    endif
    call flush (7)
 

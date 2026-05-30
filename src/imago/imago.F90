@@ -460,13 +460,9 @@ subroutine mainSCF
 
    ! Note the columns that record statistics for each iteration.  The first is
    !   the iteration
-   if (spin == 1) then
-      write (7,*) "Iter. Occ._Energy   El._Error    ", &
-            & "Convergence     Total_Energy"
-   else
-      write (7,*) "Iter. Occ. Energy   El. Error    ", &
-            & "Convergence     Total_Energy      Mag._Mom."
-   endif
+   write (7,*) "Iter. Occ._Energy   El._Error   ", &
+         & "Convergence   Total_Energy(au)      Mag._Mom.          ", &
+         & "Gap(au)  Gap_Kind"
    call flush (7)
 
    ! Note the columns that record energy statistics for each iteration.

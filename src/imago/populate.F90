@@ -20,6 +20,10 @@ module O_Populate
          ! state in the sorted list.
    real (kind=double) :: occupiedEnergy ! The energy (in a.u.) that is the
          ! highest occupied state.
+   real (kind=double) :: bandGap ! Raw band gap (a.u.): conduction band
+         ! minimum (CBM) - valence band maximum (VBM) at the
+         ! integer-electron boundary; 0.0 for a metal.
+   integer :: gapKindCode ! 0 = none (metal), 1 = direct, 2 = indirect.
    real (kind=double), allocatable, dimension (:) :: sortedEnergyEigenValues
          ! This array holds all the energy eigen values of all kpoints and all
          ! spin states in sorted order from lowest to highest.
@@ -218,6 +222,25 @@ subroutine populateStandard
    real (kind=double) :: possibleDegenCharge
    real (kind=double) :: degenerateCharge
 
+   ! Define variables for the band-gap kind determination.
+   integer :: vbmKPoint ! valence band minimum kpoint index
+   integer :: cbmKPoint ! conduction band maximum kpoint index
+
+   ! Threshold (in a.u.) below which the system is reported as a metal
+   !   with a zero gap.  This is deliberately much larger than the
+   !   numerical-degeneracy threshold smallThresh (1e-8) because a true
+   !   metal sampled on a discrete k-point mesh does not yield an exactly
+   !   zero spacing between the highest occupied and lowest unoccupied
+   !   sorted eigenvalues; instead it shows a small "gap" on the order of
+   !   the level spacing at the Fermi energy, ~1e-4 to 1e-2 a.u. depending
+   !   on mesh density.  A cutoff near room-temperature kT (0.001 a.u. is
+   !   approximately 0.027 eV) collapses these finite-mesh artifacts to a
+   !   metal while remaining well below any genuine semiconductor gap
+   !   (typically >= 0.5 eV).  A coarse-mesh metal whose artificial gap
+   !   exceeds this cutoff is really a k-point convergence problem to be
+   !   cured with a denser mesh, not by raising this threshold further.
+   real (kind=double), parameter :: metalGapThresh = 1.0e-3_double
+
 
    ! Allocate arrays and matrices for populating the electron levels
    ! These arrays will be deallocated in makeValenceRho after the kpoint
@@ -237,7 +260,7 @@ subroutine populateStandard
    !   used to populate the levels for both phases.
 
    ! Copy the energyEigenValues into the tempEnergyEigenValues single dimension
-   !   array.  It is important to have the kpoints be the outer loop even if it
+   !   array. It is important to have the kpoints be the outer loop even if it
    !   is slower because we need the energyEigenValues sorted into groups based
    !   on their kpoint to assign the electron population easily later.
    tripletCounter = 0
@@ -418,6 +441,37 @@ subroutine populateStandard
    ! Adjust the occupied energy and occupied energy index.
    occupiedEnergyIndex = maxStateIndex
    occupiedEnergy = sortedEnergyEigenValues(occupiedEnergyIndex)
+
+   ! Now compute the raw band gap (CBM - VBM in a.u.) and its kind.
+   !   The kpoint of a sorted state is recovered from its original
+   !   (unsorted) index, which is grouped by kpoint in blocks of
+   !   numStates*spin.  Overlapping bands, a gap at or below the metal
+   !   cutoff metalGapThresh (the metallic / finite-mesh case), or a
+   !   fully-occupied spectrum is a metal (kind 0, zero gap); otherwise
+   !   the gap is direct (kind 1) when the last occupied state and the
+   !   first unoccupied state share a kpoint, and indirect (kind 2)
+   !   when they do not.
+   if (occupiedEnergyIndex >= numStates*numKPoints*spin) then
+      bandGap     = 0.0_double
+      gapKindCode = 0
+   else
+      bandGap = sortedEnergyEigenValues(occupiedEnergyIndex+1) &
+            & - sortedEnergyEigenValues(occupiedEnergyIndex)
+      if (bandGap <= metalGapThresh) then
+         bandGap     = 0.0_double
+         gapKindCode = 0
+      else
+         vbmKPoint = 1 + (indexEnergyEigenValues( &
+               & occupiedEnergyIndex)-1) / (numStates*spin)
+         cbmKPoint = 1 + (indexEnergyEigenValues( &
+               & occupiedEnergyIndex+1)-1) / (numStates*spin)
+         if (vbmKPoint == cbmKPoint) then
+            gapKindCode = 1
+         else
+            gapKindCode = 2
+         endif
+      endif
+   endif
 
 
    ! Now that all the levels have been populated we remove an electron from
