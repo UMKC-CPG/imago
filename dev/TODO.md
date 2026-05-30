@@ -1885,7 +1885,7 @@ the C48.3 wiring (C74) is the first major consumer.
   IT space_group_num ranges (hard error on the 0 = "no space
   group"); element symbols matched case-insensitively (SC
   stores them lower-cased).
-- [ ] C71. Implement the flight-builder helper inside
+- [x] C71. Implement the flight-builder helper inside
   `src/scripts/kaleidoscope/` per DESIGN 6.2.8 / 7.7 and
   PSEUDOCODE P9(c).  **Prerequisite (model catch-up):** the
   C68 code shipped `CalcUnit.calc` as `Optional[str]` and
@@ -1927,6 +1927,29 @@ the C48.3 wiring (C74) is the first major consumer.
   returns the wide-grid default with
   policy = "wide_grid_no_prior"; trust mode returns
   length 1; tag derivation matches the 6.2.4 examples.
+  **DONE.** Part A model catch-up (72a67b6): calc->tuple,
+  SweepRecord, Flight.sweep/metadata, toml_line arrays,
+  serialize_flight [flight.sweep]/[flight.<key>] tables.
+  Part B builder (8c37c42): organized as a
+  `kaleidoscope/builders/` subpackage (one module per
+  builder, anticipating XANES/basis-size siblings);
+  `builders/predict_verify.py` with predict_settings +
+  build_verification_grid + the wide/trust paths +
+  build_calc_tag.  16 tests, physics layer monkeypatched
+  (no $IMAGO_DATA); full src/tests 576 passed.  C70
+  predictor confirmed present (the §15.5 "in progress" note
+  was stale).  Unblocks C72.
+  **Deferred to C74** (PSEUDOCODE-15.6 elisions resolved with
+  documented defaults, none affecting C71's tested logic):
+  (a) `imago_commit` is producer-injected via options, not
+  yet sourced -- a build-identity concern shared with C78;
+  (b) when `structure` is a pre-loaded StructureControl the
+  caller must pass an explicit `id` and the key-file source
+  falls back to `imago_skl`; (c) `predict_settings` takes an
+  optional `root` kwarg (15.6 left the flight root to the
+  caller).  Also (from C76, still open for C72): the
+  predictor's spin character should key on
+  total_magnetization, not spin_polarization.
 - [ ] C72. Implement `src/scripts/guidance_harvest.py`
   per DESIGN 7.8 (harvest half) and PSEUDOCODE P9(d).
   Walks each structure's verification sub-grid, parses
