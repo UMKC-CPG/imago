@@ -125,9 +125,10 @@ epsilon = 1.0e-6     # numerical floor on a distance
 w_comp = 1.0         # composition weight in the stage-1 metric
 w_latt = 0.25        # lattice-family weight in the stage-1 metric
 w_gap = 1.0          # gap weight in the stage-2 metric
-w_spin = 0.5         # spin weight in the stage-2 metric
+w_spin = 0.5         # magnetization weight in the stage-2 metric
 sigma_gap = 1.0      # gap normalization (eV) in the stage-2 metric
-sigma_spin = 0.5     # spin normalization in the stage-2 metric
+sigma_spin = 0.5     # magnetization normalization (Bohr magnetons
+#                      per atom) in the stage-2 metric
 sigma_gap_ref = 1.0  # gap spread -> confidence_1 reference (eV)
 sigma_kpd_ref = 50.0  # kpd spread -> confidence_2 reference
 
@@ -291,7 +292,9 @@ class PredictionResult:
     is_under_trained: bool
     neighbor_entry_ids: tuple[str, ...]
     predicted_gap: float | None       # None if non-crystalline
-    predicted_spin_pol: float | None
+    predicted_magnetization: float | None  # intensive moment,
+    #                                  Bohr magnetons per atom;
+    #                                  None if non-crystalline
 
 
 # ============================================================
@@ -962,10 +965,11 @@ def format_entry(entry: GuidanceEntry, slug: str) -> str:
 # the single hand-seeded canonical entry (k-density there is set
 # by a cell-volume convention, not chemistry).  Crystalline
 # systems run a two-stage k-NN: stage 1 maps chemistry to the
-# electronic character (gap, spin) the system is likely to
-# produce, and stage 2 maps that predicted character to a
-# k-density -- "find calcs whose gap/spin look like what this
-# query will produce, and copy their converged density."
+# electronic character (gap, intensive magnetization) the system
+# is likely to produce, and stage 2 maps that predicted character
+# to a k-density -- "find calcs whose gap and magnetization look
+# like what this query will produce, and copy their converged
+# density."
 # predict always returns a PredictionResult; is_under_trained +
 # confidence tell the caller (the flight-builder helper, 15.6)
 # how much to widen its verification grid.
@@ -1002,18 +1006,18 @@ def predict(dataspace: Dataspace, query: Signature, basis: str,
             is_under_trained=True,
             neighbor_entry_ids=(),
             predicted_gap=None,
-            predicted_spin_pol=None)
+            predicted_magnetization=None)
 
-    predicted_gap, predicted_spin, conf1, ids1 = stage1(query, entries)
+    predicted_gap, predicted_mag, conf1, ids1 = stage1(query, entries)
     predicted_kpd, conf2, ids2 = stage2(
-        predicted_gap, predicted_spin, entries)
+        predicted_gap, predicted_mag, entries)
     return PredictionResult(
         predicted_kpoint_density=predicted_kpd,
         confidence=conf1 * conf2,
         is_under_trained=False,
         neighbor_entry_ids=_dedup(ids1 + ids2),
         predicted_gap=predicted_gap,
-        predicted_spin_pol=predicted_spin)
+        predicted_magnetization=predicted_mag)
 
 
 def predict_non_crystalline(
@@ -1030,7 +1034,7 @@ def predict_non_crystalline(
         return PredictionResult(
             predicted_kpoint_density=0.0, confidence=0.0,
             is_under_trained=True, neighbor_entry_ids=(),
-            predicted_gap=None, predicted_spin_pol=None)
+            predicted_gap=None, predicted_magnetization=None)
     entry = max(canonical, key=lambda e: e.generated_at)
     return PredictionResult(
         predicted_kpoint_density=entry.measured.kpoint_density,
@@ -1038,7 +1042,7 @@ def predict_non_crystalline(
         is_under_trained=False,
         neighbor_entry_ids=(entry.entry_id,),
         predicted_gap=None,
-        predicted_spin_pol=None)
+        predicted_magnetization=None)
 
 
 def functional_family(functional: str) -> str:
@@ -1121,15 +1125,50 @@ def knn_weights(entries: list[GuidanceEntry],
             for entry, weight in zip(nearest, raw)]
 
 
+def intensive_magnetization(entry: GuidanceEntry) -> float:
+    """The entry's net magnetic moment per atom (|M| / N_atoms),
+    in Bohr magnetons per atom -- the predictor's spin-character
+    feature (DESIGN 7.6).
+
+    Three deliberate choices make this a sound similarity feature
+    where the raw cell moment is not:
+
+    - **Per-atom (intensive).**  The total moment ``M`` is
+      extensive -- a primitive cell and an N-fold supercell of the
+      same magnetic material report N-fold-different totals while
+      needing the SAME converged k-density (a reciprocal-space
+      property of the primitive physics).  Dividing by the atom
+      count puts cells of different sizes on one footing for the
+      k-NN.
+    - **Magnitude.**  The up/down labeling of the two spin
+      channels is an arbitrary SCF choice, so only ``|M|`` carries
+      physical information about integration difficulty.
+    - **From the measured moment, not a polarization.**  imago
+      surfaces the magnetic moment (iteration-file column 6), never
+      a spin-polarization fraction, so ``Measured.spin_polarization``
+      is structurally 0.0 for harvested entries; keying on the
+      moment is what keeps this feature alive (the C72 decision).
+
+    v1 limitation: an antiferromagnet has ``M = 0`` total yet is
+    locally spin-polarized, so this feature reads it as
+    non-magnetic (DESIGN 7.6 / 7.10)."""
+
+    count = entry.context.cell_atom_count
+    if count <= 0:
+        return 0.0
+    return abs(entry.measured.total_magnetization) / count
+
+
 def stage1(query: Signature, entries: list[GuidanceEntry]
            ) -> tuple[float, float, float, list[str]]:
     """Chemistry -> electronic character.  The distance ``d1``
     combines the composition L2 distance with the lattice-family
     one-hot term, the latter halved so a full lattice mismatch
     maps into the same [0, 1] range as composition (DESIGN 7.6
-    step 3).  Returns the inverse-distance-weighted predicted
-    gap and spin, a confidence from the weighted gap variance,
-    and the neighbor entry_ids."""
+    step 3).  Returns the inverse-distance-weighted predicted gap
+    and predicted intensive magnetization (Bohr magnetons per
+    atom), a confidence from the weighted gap variance, and the
+    neighbor entry_ids."""
 
     def d1(entry: GuidanceEntry) -> float:
         comp_sq = sum(
@@ -1146,35 +1185,36 @@ def stage1(query: Signature, entries: list[GuidanceEntry]
     predicted_gap = sum(
         weight * entry.measured.gap_ev
         for entry, weight in neighbors)
-    predicted_spin = sum(
-        weight * entry.measured.spin_polarization
+    predicted_mag = sum(
+        weight * intensive_magnetization(entry)
         for entry, weight in neighbors)
     variance = sum(
         weight * (entry.measured.gap_ev - predicted_gap) ** 2
         for entry, weight in neighbors)
     confidence = math.exp(-math.sqrt(variance) / sigma_gap_ref)
     neighbor_ids = [entry.entry_id for entry, _ in neighbors]
-    return predicted_gap, predicted_spin, confidence, neighbor_ids
+    return predicted_gap, predicted_mag, confidence, neighbor_ids
 
 
-def stage2(predicted_gap: float, predicted_spin: float,
+def stage2(predicted_gap: float, predicted_mag: float,
            entries: list[GuidanceEntry]
            ) -> tuple[float, float, list[str]]:
     """Electronic character -> k-density.  The distance ``d2``
     uses the PREDICTED character from stage 1, not the query's
-    chemistry: find calcs whose gap/spin resemble what this query
-    is likely to produce, and copy their converged density.
-    Returns the weighted predicted k-density, a confidence from
-    the weighted k-density variance, and the neighbor ids."""
+    chemistry: find calcs whose gap and intensive magnetization
+    resemble what this query is likely to produce, and copy their
+    converged density.  Returns the weighted predicted k-density,
+    a confidence from the weighted k-density variance, and the
+    neighbor ids."""
 
     def d2(entry: GuidanceEntry) -> float:
         gap_term = (w_gap * (predicted_gap - entry.measured.gap_ev) ** 2
                     / sigma_gap ** 2)
-        spin_term = (w_spin
-                     * (predicted_spin
-                        - entry.measured.spin_polarization) ** 2
-                     / sigma_spin ** 2)
-        return math.sqrt(gap_term + spin_term)
+        mag_term = (w_spin
+                    * (predicted_mag
+                       - intensive_magnetization(entry)) ** 2
+                    / sigma_spin ** 2)
+        return math.sqrt(gap_term + mag_term)
 
     neighbors = knn_weights(entries, d2)
     predicted_kpd = sum(

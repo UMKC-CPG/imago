@@ -32,6 +32,7 @@ from guidance_db import (
     compute_signature,
     format_entry,
     functional_family,
+    intensive_magnetization,
     k_neighbors,
     knn_weights,
     load,
@@ -43,6 +44,7 @@ from guidance_db import (
     short_sha,
     slug_for,
     stage1,
+    stage2,
     _crystal_system_of,
 )
 
@@ -714,12 +716,17 @@ def _comp(**weights):
 
 
 def _pentry(entry_id, *, comp=None, lattice="cubic", gap=1.0,
-            spin=0.0, kpd=50.0, basis="fb", functional="gga-pbe",
-            integration="gaussian-0.1", source="flight",
-            system_type="crystalline",
+            mag=0.0, atoms=6, kpd=50.0, basis="fb",
+            functional="gga-pbe", integration="gaussian-0.1",
+            source="flight", system_type="crystalline",
             generated_at="2026-01-01"):
     """Construct an in-memory GuidanceEntry for predictor tests
-    (no file I/O -- the predictor operates on loaded entries)."""
+    (no file I/O -- the predictor operates on loaded entries).
+    ``mag`` is the cell's total magnetic moment and ``atoms`` its
+    atom count, so the predictor's spin feature works out to
+    ``mag / atoms`` Bohr magnetons per atom (the intensive moment,
+    DESIGN 7.6).  ``spin_polarization`` is fixed at 0.0 because the
+    predictor no longer reads it."""
 
     vector = comp if comp is not None else _comp()
     if system_type == "crystalline":
@@ -733,9 +740,9 @@ def _pentry(entry_id, *, comp=None, lattice="cubic", gap=1.0,
         entry_id=entry_id, generated_at=generated_at, source=source,
         signature=Signature(system_type, vector, family, onehot),
         measured=Measured(gap, "none" if gap == 0.0 else "direct",
-                          spin, 0.0, kpd),
+                          0.0, mag, kpd),
         context=Context(basis, functional, integration, 1.0e-6,
-                        6, 100.0),
+                        atoms, 100.0),
         verification=None,
         provenance=Provenance("f", "s", "c", "cur"))
 
@@ -883,6 +890,38 @@ class TestStages:
                   for n in CANONICAL_LATTICE_ORDER))
         pgap, _, _, _ = stage1(query, [cubic, tet])
         assert pgap == pytest.approx(1.0, abs=1e-3)
+
+    def test_intensive_magnetization_is_moment_per_atom(self):
+        # |M| / N_atoms, sign-independent; a zero-atom guard
+        #   returns 0.0 rather than dividing by zero.
+        assert intensive_magnetization(
+            _pentry("m", mag=12.0, atoms=6)) == pytest.approx(2.0)
+        assert intensive_magnetization(
+            _pentry("m", mag=-12.0, atoms=6)) == pytest.approx(2.0)
+
+    def test_stage1_predicts_intensive_magnetization(self):
+        # Two neighbours, each 2.0 muB/atom (different cell sizes,
+        #   same intensive moment) -> predicted 2.0, proving the
+        #   feature is per-atom, not the raw cell total.
+        small = _pentry("small", gap=1.0, mag=4.0, atoms=2)
+        big = _pentry("big", gap=1.0, mag=16.0, atoms=8)
+        query = Signature(
+            "crystalline", _comp(), "cubic",
+            tuple(1.0 if n == "cubic" else 0.0
+                  for n in CANONICAL_LATTICE_ORDER))
+        _, pmag, _, _ = stage1(query, [small, big])
+        assert pmag == pytest.approx(2.0)
+
+    def test_stage2_keys_on_magnetization_when_gaps_tie(self):
+        # Same gap, so only the magnetization term separates the
+        #   two: a high-moment query is pulled to the high-moment
+        #   entry's denser k-density.
+        nonmag = _pentry("nonmag", gap=2.0, mag=0.0, atoms=4,
+                         kpd=50.0)
+        magnetic = _pentry("magnetic", gap=2.0, mag=8.0, atoms=4,
+                           kpd=200.0)             # 2.0 muB/atom
+        kpd, _, _ = stage2(2.0, 2.0, [nonmag, magnetic])
+        assert kpd > 125.0          # weighted toward the 200 entry
 
 
 class TestPredictEndToEnd:

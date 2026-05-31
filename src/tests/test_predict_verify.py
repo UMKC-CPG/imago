@@ -52,13 +52,14 @@ def _signature():
 
 
 def _result(kpd=100.0, confidence=0.9, under_trained=False,
-            neighbor_ids=("mp-1", "mp-2"), gap=1.2, spin_pol=0.0):
+            neighbor_ids=("mp-1", "mp-2"), gap=1.2,
+            magnetization=0.0):
     """Build a PredictionResult for the patched predictor."""
     return PredictionResult(
         predicted_kpoint_density=kpd, confidence=confidence,
         is_under_trained=under_trained,
         neighbor_entry_ids=neighbor_ids,
-        predicted_gap=gap, predicted_spin_pol=spin_pol)
+        predicted_gap=gap, predicted_magnetization=magnetization)
 
 
 @pytest.fixture
@@ -227,7 +228,7 @@ def test_prediction_record_shape_and_stash(patched):
     the harvest recovers it (PSEUDOCODE 15.6)."""
     patched(_result(kpd=100.0, confidence=0.83,
                     neighbor_ids=("mp-1", "mp-2"), gap=1.2,
-                    spin_pol=0.0))
+                    magnetization=0.0))
     flight, record = _build(verify=True)
     assert record.predicted_value == 100.0
     assert record.confidence == 0.83

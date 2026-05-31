@@ -85,8 +85,11 @@ class PredictionRecord:
     - ``neighbor_entry_ids`` : the guidance entries the prediction
                                drew on (provenance).
     - ``predicted_gap`` /
-      ``predicted_spin_pol`` : the intermediate stage-1 quantities
-                               (None for non-crystalline systems).
+      ``predicted_magnetization`` : the intermediate stage-1
+                               quantities -- the predicted gap (eV)
+                               and the predicted intensive moment
+                               (Bohr magnetons per atom); None for
+                               non-crystalline systems.
     - ``system_type``        : the declared system type.
     - ``feature_vector``     : the query Signature the prediction
                                was made for.
@@ -97,7 +100,7 @@ class PredictionRecord:
     is_under_trained: bool
     neighbor_entry_ids: tuple = ()
     predicted_gap: float | None = None
-    predicted_spin_pol: float | None = None
+    predicted_magnetization: float | None = None
     system_type: str = ""
     feature_vector: object = None
 
@@ -399,7 +402,7 @@ def predict_settings(structure, options, dataspace, system_type,
         is_under_trained=result.is_under_trained,
         neighbor_entry_ids=result.neighbor_entry_ids,
         predicted_gap=result.predicted_gap,
-        predicted_spin_pol=result.predicted_spin_pol,
+        predicted_magnetization=result.predicted_magnetization,
         system_type=system_type,
         feature_vector=query_sig)
 
