@@ -10,7 +10,7 @@ set (SCRIPTS
    deadmd.py dump2skl.py
    element_data.py element_pct.py
    graspElems.py
-   guidance_db.py guidance_harvest.py
+   guidance_db.py guidance_harvest.py guidance_promote.py
    hdf5Comp.py
    imago.py initial_potential_db.py interFit.py
    lmp2skl.py

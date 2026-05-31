@@ -1990,7 +1990,7 @@ the C48.3 wiring (C74) is the first major consumer.
   read_flight_toml round-trip + 3 intensive-magnetization
   predictor tests.  Full src/tests 594 passed.  Registered
   guidance_harvest.py in scripts CMakeLists.
-- [ ] C73. Implement `src/scripts/guidance_promote.py`
+- [x] C73. Implement `src/scripts/guidance_promote.py`
   per DESIGN 7.8 (curator half).  Four modes:
   interactive review (default), `--auto-promote` (with
   the middle-60%-of-grid + top-three-energy-variance
@@ -1998,6 +1998,23 @@ the C48.3 wiring (C74) is the first major consumer.
   Interactive printed summary covers signature,
   measured, verification, provenance.  Tests exercise
   each mode against a synthetic staging directory.
+  **DONE.**  Implemented faithfully to PSEUDOCODE 15.7
+  (no design deviation): `auto_promote_ok` (the three
+  conditions: mid-60%-of-grid convergence,
+  top-three-energy population variance <
+  metric_threshold*10, gap_ev/gap_kind consistency, all
+  read from the staged file alone); `move_to_entries`
+  (a rename, refusing a destination collision);
+  `format_summary`; `_ask_choice` (p/s/d, empty ->
+  SKIP); the `promote(db_root, mode, *, ask, output)`
+  driver returning (entry_id, action) records with
+  `ask`/`output` injected for testability.  Reuses
+  `guidance_db.load_entry` for schema validation.
+  Registered in scripts CMakeLists.  Tests:
+  test_guidance_promote.py (14) -- the rule's accept +
+  four reject paths, variance, move/collision, and all
+  four driver modes against a save_entry-built staging
+  dir.  Full src/tests 608 passed.
 - [ ] C74. Wire the kaleidoscope flight-builder helper
   (C71) into the C48.3 producer.  Replaces the current
   "user picks settings up front" pattern with predict-
