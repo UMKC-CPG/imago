@@ -276,6 +276,8 @@ class ImagoResult:
     total_magnetization: float | None = None
     gap_ev: float | None = None        # band gap in eV
     gap_kind: str | None = None        # none | direct | indirect
+    scf_threshold: float | None = None  # SCF convergence criterion
+    #                                     used (from imago.dat)
     message: str = ""
 
     @property
@@ -2575,6 +2577,7 @@ def _harvest_result(run_dir, temp, settings, seconds, reused):
     total_magnetization = None
     gap_ev = None
     gap_kind = None
+    scf_threshold = None
     converged = False
     if "iteration" in outputs:
         # One read of the last data row yields everything (all
@@ -2589,6 +2592,11 @@ def _harvest_result(run_dir, temp, settings, seconds, reused):
         threshold = _read_scf_threshold(
             os.path.join(run_dir, f"{fn.imago}{fn.dat}")
         )
+        # Surface the criterion on the result so the guidance
+        #   harvest (C72) can record it as the entry's
+        #   metric_threshold without re-reading imago.dat -- the
+        #   per-run record is self-contained (DESIGN 7.8, Model 1).
+        scf_threshold = threshold
         # Column 4 is the SCF convergence metric: converged iff
         #   it is below the imago.dat criterion. Column 5 is the
         #   last iteration's total energy. Column 1 is a per-run
@@ -2621,7 +2629,8 @@ def _harvest_result(run_dir, temp, settings, seconds, reused):
         converged=converged, reused_checkpoint=reused,
         total_energy=total_energy,
         total_magnetization=total_magnetization,
-        gap_ev=gap_ev, gap_kind=gap_kind, message=status.value,
+        gap_ev=gap_ev, gap_kind=gap_kind,
+        scf_threshold=scf_threshold, message=status.value,
     )
 
 

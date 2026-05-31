@@ -48,7 +48,8 @@ from kaleidoscope import (
     read_status, write_status, ImagoWingbeat,
 )
 from kaleidoscope.wingbeats import Wingbeat
-from kaleidoscope.workspace import derive_calc_tag, serialize_flight
+from kaleidoscope.workspace import (
+    derive_calc_tag, serialize_flight, read_flight_toml, flight_id_of)
 
 
 # Pure-computation / temp-file tests -- they read no fixture
@@ -235,6 +236,59 @@ def test_serialize_flight_sweep_and_metadata_round_trip(tmp_path):
     assert data["flight"]["sweep"]["fixed_axes"] == {
         "basis": "fb", "functional": "ldau"}
     assert data["flight"]["prediction"] == prediction
+
+
+def test_read_flight_toml_round_trips_units_sweep_metadata(tmp_path):
+    """read_flight_toml is the disk-side inverse of
+    serialize_flight: it restores each unit's identity (id,
+    structure, calc tuple, wingbeat), the SweepRecord, and the
+    opaque metadata tables -- the fields the harvest reads back
+    (DESIGN 7.8).  options/key_fields are deliberately NOT
+    persisted, so they come back empty."""
+    sweep = SweepRecord(
+        varied_axes=("kpt-density",),
+        fixed_axes={"basis": "fb", "functional": "gga-pbe",
+                    "kpoint_integration": "gaussian-0.1"})
+    prediction = {
+        "policy": "verify_around_prediction",
+        "confidence": 0.9,
+        "is_under_trained": False,
+        "neighbor_entry_ids": ["mp-1", "mp-2"],
+        "system_type": "crystalline",
+    }
+    units = [
+        CalcUnit(id="si", structure="si.skl",
+                 calc=("kpt-density-50",), wingbeat="imago"),
+        CalcUnit(id="si", structure="si.skl",
+                 calc=("kpt-density-100",), wingbeat="imago"),
+    ]
+    serialize_flight(Flight(root=str(tmp_path), units=units,
+                            sweep=sweep,
+                            metadata={"prediction": prediction}))
+
+    flight = read_flight_toml(
+        os.path.join(str(tmp_path), "flight.toml"))
+    assert flight.root == str(tmp_path)
+    assert [u.calc for u in flight.units] == [
+        ("kpt-density-50",), ("kpt-density-100",)]
+    assert all(u.id == "si" and u.structure == "si.skl"
+               and u.wingbeat == "imago" for u in flight.units)
+    # calc came back as a tuple (not a list) so unit_run_dir can
+    #   splat it; options were not persisted.
+    assert isinstance(flight.units[0].calc, tuple)
+    assert flight.units[0].options == {}
+    assert flight.sweep.varied_axes == ("kpt-density",)
+    assert flight.sweep.fixed_axes["functional"] == "gga-pbe"
+    assert flight.metadata["prediction"] == prediction
+
+
+def test_flight_id_of_is_the_workspace_basename():
+    """The provenance flight_id is the workspace root's basename,
+    trailing slash and all (DESIGN 7.8)."""
+    assert flight_id_of("/work/flights/diamond-seed") == \
+        "diamond-seed"
+    assert flight_id_of("/work/flights/diamond-seed/") == \
+        "diamond-seed"
 
 
 def test_resolve_unknown_runner_raises():

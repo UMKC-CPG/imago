@@ -15,7 +15,7 @@ import re
 import tomllib
 from collections import Counter
 
-from .model import KaleidoscopeError
+from .model import CalcUnit, Flight, KaleidoscopeError, SweepRecord
 
 
 # A run-directory id (and any <calc> tag) must be a slug:
@@ -251,3 +251,64 @@ def serialize_flight(flight):
         #   6.2.8 helper stashes its prediction under "prediction").
         for key, table in flight.metadata.items():
             _serialize_table(flight_file, f"flight.{key}", table)
+
+
+def read_flight_toml(path):
+    """Parse ``flight.toml`` back into a :class:`Flight` -- the
+    disk-side inverse of :func:`serialize_flight` (DESIGN 6.2.1).
+
+    The harvest step (DESIGN 7.8) is a separate process from the
+    one that dispatched the flight, so it recovers the plan from
+    disk rather than from an in-memory object.  Only the fields
+    ``serialize_flight`` persists are restored: each unit's
+    identity (id, structure, calc tuple, wingbeat) -- but NOT its
+    makeinput ``options`` or ``key_fields``, which live with the
+    run, not the plan -- plus the optional ``[flight.sweep]``
+    block and every opaque ``[flight.<key>]`` metadata table
+    (e.g. ``[flight.prediction]``).  The sweep's ordered
+    ``varied_axes`` is what lets the harvest read each swept value
+    out of the calc tag without guessing the axis name.
+    """
+    with open(path, "rb") as flight_file:
+        data = tomllib.load(flight_file)
+
+    units = []
+    for raw_unit in data.get("unit", []):
+        units.append(CalcUnit(
+            id=raw_unit["id"],
+            structure=raw_unit["structure"],
+            # calc is stored as a TOML array; restore the tuple
+            #   shape so unit_run_dir can splat it (empty == no
+            #   second directory level).
+            calc=tuple(raw_unit.get("calc", [])),
+            wingbeat=raw_unit.get("wingbeat")))
+
+    # Everything under the [flight] table: the optional sweep
+    #   description plus the opaque metadata tables.  The sweep is
+    #   pulled out into a SweepRecord; the rest stay as plain dicts
+    #   in metadata, exactly as the dispatch core round-trips them.
+    flight_block = data.get("flight", {})
+    sweep = None
+    if "sweep" in flight_block:
+        raw_sweep = flight_block["sweep"]
+        sweep = SweepRecord(
+            varied_axes=tuple(raw_sweep.get("varied_axes", [])),
+            fixed_axes=dict(raw_sweep.get("fixed_axes", {})))
+    metadata = {key: value for key, value in flight_block.items()
+                if key != "sweep"}
+
+    return Flight(
+        root=data["root"],
+        units=units,
+        default_wingbeat=data.get("default_wingbeat", "imago"),
+        sweep=sweep,
+        metadata=metadata)
+
+
+def flight_id_of(workspace_root):
+    """The flight's identifier for provenance (DESIGN 7.8): the
+    basename of its workspace root directory.  A flight dispatched
+    into ``.../flights/diamond-seed`` has flight_id
+    ``"diamond-seed"``.  Kept as a one-liner here so the harvest
+    and any future consumer agree on the convention."""
+    return os.path.basename(os.path.normpath(workspace_root))

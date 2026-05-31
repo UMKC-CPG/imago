@@ -147,6 +147,9 @@ class ImagoWingbeat(Wingbeat):
             result_file.write(toml_line("gap_ev", result.gap_ev))
             result_file.write(toml_line("gap_kind", result.gap_kind))
             result_file.write(
+                toml_line("scf_threshold", result.scf_threshold)
+            )
+            result_file.write(
                 toml_line("runtime_seconds", result.runtime_seconds)
             )
             result_file.write(toml_line("message", result.message))

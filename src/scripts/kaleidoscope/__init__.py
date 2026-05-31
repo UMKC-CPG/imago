@@ -57,6 +57,9 @@ from .workspace import (
     validate_flight,
     read_status,
     write_status,
+    serialize_flight,
+    read_flight_toml,
+    flight_id_of,
 )
 from .cache import (
     is_cache_hit,
@@ -72,5 +75,6 @@ __all__ = [
     "WINGBEATS", "dispatch", "LocalExecutor", "ParslExecutor",
     "TaskLost", "report_entry_from_status", "unit_run_dir",
     "validate_flight", "read_status", "write_status",
+    "serialize_flight", "read_flight_toml", "flight_id_of",
     "is_cache_hit", "cache_key_matches", "write_cache_key",
 ]
