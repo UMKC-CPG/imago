@@ -5241,9 +5241,10 @@ epsilon        = 1e-6     # numerical floor on distance
 w_comp         = 1.0      # composition weight in d1
 w_latt         = 0.25     # lattice-family weight in d1
 w_gap          = 1.0      # gap weight in d2
-w_spin         = 0.5      # spin weight in d2
+w_spin         = 0.5      # magnetization weight in d2
 sigma_gap      = 1.0      # gap normalization (eV) in d2
-sigma_spin     = 0.5      # spin normalization in d2
+sigma_spin     = 0.5      # magnetization normalization in d2
+#                           (Bohr magnetons per atom)
 sigma_gap_ref  = 1.0      # gap-spread -> confidence_1 (eV)
 sigma_kpd_ref  = 50.0     # kpd-spread -> confidence_2
 ```
@@ -5317,7 +5318,8 @@ dataclass PredictionResult:    # what predict() returns
     is_under_trained         : bool
     neighbor_entry_ids       : tuple[str]
     predicted_gap            : float | None  # None if non-
-    predicted_spin_pol       : float | None  #   crystalline
+    predicted_magnetization  : float | None  #   crystalline
+#                              (intensive moment, muB/atom)
 ```
 
 ### 15.2 Element groups and compute_signature (DESIGN 7.4)
@@ -5846,17 +5848,17 @@ function predict(dataspace, query, basis, functional,
             is_under_trained         = True,
             neighbor_entry_ids       = (),
             predicted_gap            = None,
-            predicted_spin_pol       = None)
+            predicted_magnetization  = None)
 
-    pgap, pspin, conf1, n1 = stage1(query, entries)
-    pkpd, conf2, n2        = stage2(pgap, pspin, entries)
+    pgap, pmag, conf1, n1 = stage1(query, entries)
+    pkpd, conf2, n2       = stage2(pgap, pmag, entries)
     return PredictionResult(
         predicted_kpoint_density = pkpd,
         confidence               = conf1 * conf2,
         is_under_trained         = False,
         neighbor_entry_ids       = dedup(n1 + n2),
         predicted_gap            = pgap,
-        predicted_spin_pol       = pspin)
+        predicted_magnetization  = pmag)
 ```
 
 ```
@@ -5878,7 +5880,7 @@ function predict_non_crystalline(pool):
         is_under_trained         = False,
         neighbor_entry_ids       = (entry.entry_id,),
         predicted_gap            = None,
-        predicted_spin_pol       = None)
+        predicted_magnetization  = None)
 ```
 
 Sub-model selection is the
@@ -5962,28 +5964,37 @@ function stage1(query, entries):
                     + w_latt * latt_sq / 2.0)
 
     nbrs = knn_weights(entries, d1)
-    pgap  = sum(w * e.measured.gap_ev            for e, w in nbrs)
-    pspin = sum(w * e.measured.spin_polarization for e, w in nbrs)
+    pgap = sum(w * e.measured.gap_ev   for e, w in nbrs)
+    pmag = sum(w * intensive_mag(e)    for e, w in nbrs)
     # Confidence_1 from the weighted gap variance (7.6).
     var = sum(w * (e.measured.gap_ev - pgap) ** 2
               for e, w in nbrs)
     conf1 = exp(-sqrt(var) / sigma_gap_ref)
-    return pgap, pspin, conf1, [e.entry_id for e, _ in nbrs]
+    return pgap, pmag, conf1, [e.entry_id for e, _ in nbrs]
 ```
 
+`intensive_mag(e)` is the entry's net moment per atom --
+`abs(e.measured.total_magnetization) / e.context.cell_atom_count`
+(Bohr magnetons per atom) -- the predictor's spin-character
+feature (DESIGN 7.6).  It is per-atom (intensive, so a cell and
+its supercell compare equal), taken in magnitude (the up/down
+labeling is arbitrary), and built from the measured moment
+rather than `spin_polarization` (which imago never surfaces, so
+it is always 0.0).
+
 ```
-function stage2(pgap, pspin, entries):
+function stage2(pgap, pmag, entries):
     # Electronic character -> k-density.  d2 uses the
     # PREDICTED character (from stage 1), not the query's
-    # chemistry: "find calcs whose gap/spin look like what
-    # this query is likely to produce" (DESIGN 7.6 step 4).
+    # chemistry: "find calcs whose gap-and-magnetization look
+    # like what this query is likely to produce"
+    # (DESIGN 7.6 step 4).
     function d2(e):
-        gap_term  = w_gap  * (pgap  - e.measured.gap_ev) ** 2 \
-                    / sigma_gap ** 2
-        spin_term = w_spin * (pspin
-                    - e.measured.spin_polarization) ** 2 \
-                    / sigma_spin ** 2
-        return sqrt(gap_term + spin_term)
+        gap_term = w_gap  * (pgap - e.measured.gap_ev) ** 2 \
+                   / sigma_gap ** 2
+        mag_term = w_spin * (pmag - intensive_mag(e)) ** 2 \
+                   / sigma_spin ** 2
+        return sqrt(gap_term + mag_term)
 
     nbrs = knn_weights(entries, d2)
     pkpd = sum(w * e.measured.kpoint_density for e, w in nbrs)
@@ -6012,7 +6023,7 @@ dataclass PredictionRecord:    # 7.7-derived; serialized as
     is_under_trained   : bool
     neighbor_entry_ids : tuple[str]
     predicted_gap      : float | None
-    predicted_spin_pol : float | None
+    predicted_magnetization : float | None
     system_type        : str
     feature_vector     : Signature
 ```
@@ -6135,7 +6146,7 @@ function predict_settings(structure, options, dataspace,
         is_under_trained   = result.is_under_trained,
         neighbor_entry_ids = result.neighbor_entry_ids,
         predicted_gap      = result.predicted_gap,
-        predicted_spin_pol = result.predicted_spin_pol,
+        predicted_magnetization = result.predicted_magnetization,
         system_type        = system_type,
         feature_vector     = query_sig)
 
@@ -6186,16 +6197,53 @@ staged guidance entries.  It reads the flight workspace
 (it is the producer that has workspace access; the curator
 later works on staging files alone).
 
+**The three-source rule (Model 1, settled 2026-05-30).**  Each
+entry field is filled from exactly ONE of three inputs, so the
+information flow stays simple:
+
+- **`flight.toml`** -- the *plan*: the unit list (id, structure,
+  calc tags), the `[flight.sweep]` block (which axis varied and
+  the sub-model axes held fixed), and the `[flight.prediction]`
+  block.  Each grid point's swept k-density is read out of its
+  calc tag (`kpt-density-<int>`) using the sweep's ordered
+  `varied_axes` -- the makeinput `options` are deliberately NOT
+  persisted in `flight.toml`, so the calc tag is the on-disk
+  source of the swept value.
+- **each run's `result.toml`** -- the *per-run facts*: the final
+  SCF `total_energy`, the measured `gap_ev` / `gap_kind` /
+  `total_magnetization`, and the `scf_threshold` the run used
+  (imago.py writes all of these; the per-run record is
+  self-contained, DESIGN 6.1).
+- **the structure `.skl`** -- the *structural facts*: the harvest
+  loads it anyway for `compute_signature`, and the same load
+  yields `cell_atom_count` (`num_atoms`) and
+  `cell_volume_per_formula_unit` (the cell volume in Bohr^3,
+  formula-unit count Z = 1 in v1).
+
+Two v1 conventions: `metric_threshold = scf_threshold` (the
+same criterion the SCF converged to is reused as the
+grid-flatness threshold), and `imago_commit` falls back to
+`"unknown"` when the producer injected none.  `spin_polarization`
+is recorded as `0.0` -- imago surfaces the magnetic *moment*, not
+a polarization, so the predictor keys its spin character on
+`total_magnetization` instead (DESIGN 7.6).
+
 ```
 function harvest_flight(workspace_root, db_root, dataspace):
     flight = read_flight_toml(
         join(workspace_root, "flight.toml"))
     prediction = flight.metadata.get("prediction")  # 15.6
 
+    # The swept axis names which calc-tag component carries each
+    #   grid point's value; the fixed axes carry the sub-model
+    #   context.  A flight with no sweep cannot be harvested.
+    axis       = flight.sweep.varied_axes[0]      # v1: single axis
+    fixed_axes = flight.sweep.fixed_axes
+
     for unit_id, units in group_by_id(flight.units):
-        # a. The verification sub-grid for this structure,
-        #    sorted by swept k-density (v1: every unit).
-        grid = sort(units, key = lambda u: u.options["kpd"])
+        # a. The verification sub-grid for this structure, sorted
+        #    by swept k-density (read out of each unit's calc tag).
+        grid = sort(units, key = lambda u: swept_value_of(u, axis))
 
         # b. Parse each converged run's result.toml.
         kpds, energies, rts = [], [], []
@@ -6203,7 +6251,7 @@ function harvest_flight(workspace_root, db_root, dataspace):
             rt = read_result_toml(
                 join(workspace_root, "wingbeats", u.id, *u.calc,
                      "result.toml"))
-            kpds.append(u.options["kpd"])
+            kpds.append(swept_value_of(u, axis))
             energies.append(rt["total_energy"])
             rts.append(rt)
 
@@ -6218,7 +6266,9 @@ function harvest_flight(workspace_root, db_root, dataspace):
             log(unit_id + ": trusted point (not staged)")
             continue
 
-        thr = prediction_metric_threshold(prediction)
+        # metric_threshold = the SCF criterion the runs used (the
+        #   v1 convention); it is a per-run fact in result.toml.
+        thr = rts[0]["scf_threshold"]
 
         # d. Pick the converged grid point (DESIGN 7.8 3c).
         idx = pick_converged(energies, thr)
@@ -6231,15 +6281,16 @@ function harvest_flight(workspace_root, db_root, dataspace):
             tag_prediction_mismatch(workspace_root, unit_id)
             continue
 
-        # f. Signature: system_type from the prediction
-        #    record (it carries it from 7.7); composition +
-        #    lattice via compute_signature.
+        # f. Signature: system_type from the prediction record (it
+        #    carries it from 7.7); composition + lattice via
+        #    compute_signature.  The SAME loaded structure also
+        #    supplies the cell facts in (g).
         st = (prediction["system_type"] if prediction is not None
               else "crystalline")
-        sc = load_skl(grid[0].structure)
+        sc  = load_skl(grid[0].structure)        # read_input_file
         sig = compute_signature(sc, st, dataspace.group_table)
 
-        # g. Build the rich GuidanceEntry.
+        # g. Build the rich GuidanceEntry from the three sources.
         chosen_rt  = rts[idx]
         chosen_kpd = kpds[idx]
         entry = GuidanceEntry(
@@ -6250,20 +6301,20 @@ function harvest_flight(workspace_root, db_root, dataspace):
             measured     = Measured(
                 gap_ev              = chosen_rt["gap_ev"],
                 gap_kind            = chosen_rt["gap_kind"],
-                spin_polarization   = chosen_rt.get(
-                                        "spin_polarization", 0.0),
+                spin_polarization   = 0.0,    # not measured; see
+                #                               DESIGN 7.6
                 total_magnetization = chosen_rt.get(
                                         "total_magnetization", 0.0),
                 kpoint_density      = chosen_kpd),
             context      = Context(
-                basis      = flight.sweep.fixed_axes["basis"],
-                functional = flight.sweep.fixed_axes["functional"],
-                kpoint_integration = flight.sweep.fixed_axes[
+                basis      = fixed_axes["basis"],
+                functional = fixed_axes["functional"],
+                kpoint_integration = fixed_axes[
                     "kpoint_integration"],
-                scf_threshold = grid[0].options["scf_threshold"],
-                cell_atom_count = chosen_rt["cell_atom_count"],
-                cell_volume_per_formula_unit = chosen_rt[
-                    "cell_volume_per_formula_unit"]),
+                scf_threshold = thr,          # result.toml
+                cell_atom_count = sc.num_atoms,
+                cell_volume_per_formula_unit =
+                    sc.real_cell_volume * ANGSTROM3_TO_BOHR3),
             verification = Verification(
                 grid_values   = tuple(kpds),
                 grid_energies = tuple(energies),  # 7.8 / 7.2
@@ -6279,13 +6330,22 @@ function harvest_flight(workspace_root, db_root, dataspace):
             provenance   = Provenance(
                 flight_id        = flight_id_of(workspace_root),
                 source_structure = grid[0].structure,
-                imago_commit     = chosen_rt["imago_commit"],
+                imago_commit     = chosen_rt.get("imago_commit")
+                                   or "unknown",
                 curator          = "guidance_harvest.py"))
 
         # h. Stage it.  save_entry fills entry_id = slug.
         path = save_entry(entry, db_root)
         log(unit_id + ": staged " + path)
 ```
+
+`swept_value_of(unit, axis)` reads the value out of the calc
+component whose prefix matches `axis` (each component is
+`"<axis>-<encoded-value>"`, DESIGN 6.2.4), inverting the
+builder's `encode_axis_value` (`"p"` -> decimal point, leading
+`"m"` -> minus).  `flight_id_of(workspace_root)` is the
+workspace root's basename; both live in
+`kaleidoscope.workspace` alongside `read_flight_toml`.
 
 ```
 function pick_converged(energies, threshold):

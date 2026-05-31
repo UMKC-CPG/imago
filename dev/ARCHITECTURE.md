@@ -1435,9 +1435,10 @@ guidance_db.predict(dataspace, query_signature,
     |        below.
     |   2. Stage 1 (chemistry -> electronic character):
     |      k-NN regression in composition+lattice
-    |      feature space, predicting (gap, spin_pol).
+    |      feature space, predicting (gap, intensive
+    |      magnetization = |M|/atom).
     |   3. Stage 2 (electronic character -> k-density):
-    |      k-NN regression in (gap, spin_pol) space,
+    |      k-NN regression in (gap, magnetization) space,
     |      predicting kpoint_density.
     |   4. Confidence: variance over the k nearest
     |      neighbors at each stage, combined into one
@@ -1445,7 +1446,7 @@ guidance_db.predict(dataspace, query_signature,
     |   5. Return PredictionResult(
     |        predicted_kpoint_density, confidence,
     |        neighbor_entry_ids, predicted_gap,
-    |        predicted_spin_pol,
+    |        predicted_magnetization,
     |        is_under_trained,
     |      ).
     v
@@ -1461,8 +1462,9 @@ flight harvest hook (10.5)
     | 1. Pick the converged grid point per structure
     |    (smallest density where consecutive grid
     |    points' energy delta < threshold).
-    | 2. Read measured gap, spin, and magnetization from
-    |    the converged calc's result.toml.
+    | 2. Read measured gap and total magnetization from
+    |    the converged calc's result.toml (the kpd comes
+    |    from the calc tag; cell facts from the structure).
     | 3. Build a richly-populated GuidanceEntry and
     |    emit it to staging/<system_type>/.
     v
@@ -1508,8 +1510,9 @@ combines a chemistry vector with a lattice-family vector
 
 The predictor is **k-nearest-neighbor with inverse-
 distance weighting**, in two stages for crystalline:
-stage 1 maps composition+lattice → (gap, spin_pol);
-stage 2 maps (gap, spin_pol) → k-density.  The split
+stage 1 maps composition+lattice → (gap, intensive
+magnetization); stage 2 maps (gap, magnetization) →
+k-density.  The split
 exploits transferability: stage 1 is chemistry-heavy and
 needs broad chemistry coverage; stage 2 is physics-heavy
 and is roughly material-independent.  Each stage carries

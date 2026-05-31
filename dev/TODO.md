@@ -578,8 +578,8 @@
   with the (basis -> functional-family -> overall pool)
   fallback chain; stage-1 distance d1 over composition +
   lattice_family with inverse-distance weights;
-  predicted_gap + predicted_spin_pol + confidence_1 via
-  weighted variance; stage-2 distance d2 over predicted
+  predicted_gap + predicted_magnetization + confidence_1
+  via weighted variance; stage-2 distance d2 over predicted
   electronic character with inverse-distance weights;
   predicted_kpoint_density + confidence_2; combined
   confidence; PredictionResult assembly including the
@@ -1861,7 +1861,7 @@ the C48.3 wiring (C74) is the first major consumer.
   by (basis, functional) with the fallback chain;
   stage-1 distance d1 over composition + lattice_family
   with inverse-distance weights yielding predicted_gap,
-  predicted_spin_pol, confidence_1; stage-2 distance d2
+  predicted_magnetization, confidence_1; stage-2 distance d2
   over predicted electronic character yielding
   predicted_kpoint_density and confidence_2; combined
   confidence; the is_under_trained flag whose semantics
@@ -1950,26 +1950,46 @@ the C48.3 wiring (C74) is the first major consumer.
   caller).  Also (from C76, still open for C72): the
   predictor's spin character should key on
   total_magnetization, not spin_polarization.
-- [ ] C72. Implement `src/scripts/guidance_harvest.py`
+- [x] C72. Implement `src/scripts/guidance_harvest.py`
   per DESIGN 7.8 (harvest half) and PSEUDOCODE P9(d).
   Walks each structure's verification sub-grid, parses
   each converged calc's result.toml for the measured
   electronic-structure quantities (gap_ev, gap_kind,
-  spin_polarization, total_magnetization)
-  plus total_energy for the convergence test, picks the
-  converged grid point per the two-sided
-  delta-below-threshold rule (DESIGN 7.8 step 3c),
-  SKIPs and tags `prediction_mismatch = true` on
-  non-convergence at the top, recovers
+  total_magnetization) plus total_energy for the
+  convergence test, picks the converged grid point per
+  the two-sided delta-below-threshold rule (DESIGN 7.8
+  step 3c), SKIPs and tags `prediction_mismatch = true`
+  on non-convergence at the top, recovers
   predictor_confidence and predictor_neighbor_ids from
   the flight's [flight.prediction] block, builds a
   rich GuidanceEntry, and writes it to
-  staging/<system_type>/ via save_entry().  Depends on
-  C76 (the imago.py result.toml extension).  Tests on
-  synthetic flight workspaces (no real imago runs):
-  converged-path, two-sided-delta path, prediction-
-  mismatch path, prediction-record-recovery path,
-  the non-crystalline harvest path.
+  staging/<system_type>/ via save_entry().
+  **DONE.**  Settled the three-source "Model 1" sourcing
+  with the programmer (2026-05-30): flight.toml = the
+  plan (units, sweep, prediction; each grid point's kpd
+  decoded from its `kpt-density-<int>` calc tag, since
+  options are not persisted); result.toml = per-run facts
+  (total_energy, gap_ev, gap_kind, total_magnetization,
+  and a NEW `scf_threshold` field added to ImagoResult +
+  the wingbeat writer); the structure .skl = structural
+  facts (cell_atom_count, cell_volume_per_formula_unit in
+  Bohr^3, Z=1).  Conventions: `metric_threshold =
+  scf_threshold`; `imago_commit` falls back to "unknown".
+  `spin_polarization` is recorded as 0.0 (not measured) --
+  the predictor's spin character was switched to the
+  intensive magnetization `|M|/N_atoms` (guidance_db
+  stage1/stage2; `predicted_spin_pol` renamed
+  `predicted_magnetization` across guidance_db /
+  predict_verify / DESIGN 7.6-7.7 / ARCH 10 / PSEUDOCODE
+  15; AFM-blindness noted in DESIGN 7.10).  Added
+  `read_flight_toml` + `flight_id_of` to
+  kaleidoscope.workspace.  Tests: test_guidance_harvest.py
+  (16, synthetic workspaces, no $IMAGO_DATA) covering the
+  converged / two-sided-delta / mismatch / record-recovery
+  / trust-mode / non-crystalline / no-sweep paths, plus
+  read_flight_toml round-trip + 3 intensive-magnetization
+  predictor tests.  Full src/tests 594 passed.  Registered
+  guidance_harvest.py in scripts CMakeLists.
 - [ ] C73. Implement `src/scripts/guidance_promote.py`
   per DESIGN 7.8 (curator half).  Four modes:
   interactive review (default), `--auto-promote` (with

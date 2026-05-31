@@ -4842,7 +4842,7 @@ predict_settings(
     the predicted converged k-density, a combined
     confidence score (stage-1 x stage-2 variance, DESIGN
     7.6), an `is_under_trained` flag, the intermediate
-    `predicted_gap` / `predicted_spin_pol`, and the
+    `predicted_gap` / `predicted_magnetization`, and the
     neighbor entry_ids that produced the prediction.
 
 3.  Decide the verification grid:
@@ -4918,7 +4918,8 @@ predict_settings(
           is_under_trained   = result.is_under_trained,
           neighbor_entry_ids = result.neighbor_entry_ids,
           predicted_gap      = result.predicted_gap,
-          predicted_spin_pol = result.predicted_spin_pol,
+          predicted_magnetization =
+              result.predicted_magnetization,
           system_type        = system_type,
           feature_vector     = query_sig,
       )
@@ -6038,8 +6039,9 @@ class PredictionResult:
     neighbor_entry_ids:       tuple[str, ...]
     predicted_gap:            float | None # None for
                                            #   non-crystalline
-    predicted_spin_pol:       float | None # None for
-                                           #   non-crystalline
+    predicted_magnetization:  float | None # intensive moment
+                                           #   (muB/atom); None
+                                           #   for non-crystalline
 ```
 
 **Public surface (top-level functions):**
@@ -6265,11 +6267,30 @@ predictions are inverse-distance-weighted means:
 weights:      w_i = 1.0 / (d1(Q, E_i) + epsilon)
               normalized so sum(w_i) = 1.0
 predicted_gap        = sum(w_i * E_i.measured.gap_ev)
-predicted_spin_pol   = sum(w_i * E_i.measured.spin_polarization)
+predicted_magnetization =
+    sum(w_i * |E_i.measured.total_magnetization|
+              / E_i.context.cell_atom_count)
 ```
 
 with `epsilon = 1e-6` to avoid division by zero on an
 exact match.
+
+**Why the intensive magnetization (`|M| / N_atoms`) and not
+`spin_polarization`.**  The second character feature is a
+proxy for "is this a magnetic metal whose Fermi surface needs
+a denser mesh."  imago surfaces the magnetic *moment* (the
+iteration file's column 6, always written), never a
+spin-polarization fraction, so `measured.spin_polarization` is
+structurally 0.0 for every harvested entry -- keying on it
+would be keying on a dead feature.  The moment itself is
+*extensive* (a primitive cell and its N-fold supercell of the
+same magnet report N-fold-different totals while needing the
+same k-density), so it is divided by the cell atom count to
+make it intensive, and taken in magnitude because the up/down
+spin labeling is an arbitrary SCF choice.  v1 limitation: an
+antiferromagnet has `M = 0` total yet is locally
+spin-polarized, so this feature reads it as non-magnetic
+(7.10).
 
 Stage-1 **confidence** is derived from the weighted
 variance of the neighbors' gap values:
@@ -6292,20 +6313,22 @@ stage-2 distance over the predicted electronic character:
 
 ```
 d2(Q, E) = sqrt(
-    w_gap  * (predicted_gap        - E.measured.gap_ev      )^2
+    w_gap  * (predicted_gap - E.measured.gap_ev)^2
               / sigma_gap^2
-  + w_spin * (predicted_spin_pol   - E.measured.spin_polarization)^2
+  + w_spin * (predicted_magnetization
+              - |E.measured.total_magnetization|
+                / E.context.cell_atom_count)^2
               / sigma_spin^2
 )
 ```
 
-with `sigma_gap = 1.0` eV and `sigma_spin = 0.5`.  Note
-the asymmetry: stage 2's distance uses the **predicted**
-character (from stage 1), not the query's chemistry,
-because the goal is "find calculations whose
-gap-and-spin look like what this query is likely to
-produce."  Default weights: `w_gap = 1.0`,
-`w_spin = 0.5`.
+with `sigma_gap = 1.0` eV and `sigma_spin = 0.5` (Bohr
+magnetons per atom).  Note the asymmetry: stage 2's
+distance uses the **predicted** character (from stage 1),
+not the query's chemistry, because the goal is "find
+calculations whose gap-and-magnetization look like what
+this query is likely to produce."  Default weights:
+`w_gap = 1.0`, `w_spin = 0.5`.
 
 Find the `k = 5` nearest neighbors by `d2`.  Predicted
 k-density is the inverse-distance-weighted mean:
@@ -6342,7 +6365,7 @@ both in (0.0, 1.0], product also in (0.0, 1.0].
 `is_under_trained = False`, the union of the stage-1
 and stage-2 neighbors' `entry_id`s (deduplicated), and
 the intermediate `predicted_gap` and
-`predicted_spin_pol` for forensics.
+`predicted_magnetization` for forensics.
 
 **Tuning knobs and their defaults.**  All of these are
 named module-level constants in `guidance_db.py`, so
@@ -6476,7 +6499,8 @@ below is what it executes.
                               if pred is not None else [],
         predicted_gap      = pred.predicted_gap
                               if pred is not None else None,
-        predicted_spin_pol = pred.predicted_spin_pol
+        predicted_magnetization =
+            pred.predicted_magnetization
                               if pred is not None else None,
         system_type        = system_type,
         feature_vector     = query_sig,
@@ -6562,23 +6586,45 @@ separate post-step the user invokes).
 - The flight's `[flight.prediction]` block recovered
   from `flight.toml` (7.7).
 
-**What gets read out of each converged run's
-`result.toml`.**  The imago callable API (DESIGN 6.1)
-needs to expose, on each converged calc:
+**The three-source rule (Model 1).**  Every entry field is
+filled from exactly one of three on-disk inputs, so the
+information flow stays simple and homogeneous:
 
-- `gap_ev`, `gap_kind` (read off the eigenvalue spectrum;
-  see TODO C76 for the imago-side wire-up).
-- `total_magnetization` and `spin_polarization` (already
-  computed for spin-polarized runs; closed-shell runs
-  report 0.0).
-- The total energy at the end of SCF (used to pick the
-  converged grid point).
+- **`flight.toml`** -- the *plan*: the unit list, the
+  `[flight.sweep]` block (the varied axis + the fixed
+  sub-model axes), and the `[flight.prediction]` block.
+  Each grid point's swept k-density is read out of its calc
+  tag (`kpt-density-<int>`) via the sweep's ordered
+  `varied_axes`; the makeinput `options` are not persisted
+  in `flight.toml`, so the calc tag is the on-disk source of
+  the swept value.
+- **each converged run's `result.toml`** -- the *per-run
+  facts* the imago callable API (DESIGN 6.1) exposes:
+  - `gap_ev`, `gap_kind` (read off the eigenvalue spectrum;
+    TODO C76 for the imago-side wire-up).
+  - `total_magnetization` (always written; closed-shell runs
+    report 0.0).  `spin_polarization` is NOT surfaced -- the
+    iteration file carries the magnetic *moment*, not a
+    polarization -- so the entry records `spin_polarization =
+    0.0` and the predictor keys its spin character on
+    `total_magnetization` (DESIGN 7.6).
+  - the SCF total energy (used to pick the converged grid
+    point).
+  - `scf_threshold` -- the SCF criterion the run converged
+    to, reused as the entry's `metric_threshold` (the v1
+    convention).
+- **the structure `.skl`** -- the *structural facts*: the
+  harvest loads it anyway for `compute_signature`, and the
+  same load yields `cell_atom_count` (`num_atoms`) and
+  `cell_volume_per_formula_unit` (the cell volume in Bohr^3,
+  formula-unit count Z = 1 in v1; curator-facing metadata
+  the predictor never reads).
 
-When any of these is absent (a closed-shell molecular
-that did not run a spin-polarized SCF, an unsupported
-imago version), the harvest records the absent value as
-`null` if the schema permits or 0.0 with a flag in the
-provenance otherwise.
+When a per-run quantity is absent (a closed-shell run, an
+older imago version), the harvest records 0.0 for the
+measured value and falls back to `"unknown"` for an absent
+`imago_commit` (non-empty, so the schema's rule-11 check
+still passes and the curator can spot it on review).
 
 **Algorithm** (`guidance_harvest.py`):
 
@@ -6594,7 +6640,8 @@ provenance otherwise.
          ascending.
       b. For each CalcUnit's converged run, parse
          result.toml for total_energy, gap_ev, gap_kind,
-         spin_polarization, total_magnetization.
+         total_magnetization, and scf_threshold; read the
+         swept k-density out of the CalcUnit's calc tag.
       c. Pick the converged grid point: the smallest
          k-density at which |E_i - E_{i+1}| <
          metric_threshold AND |E_i - E_{i-1}| <
@@ -6614,12 +6661,16 @@ provenance otherwise.
          from the flight's [flight.prediction]
          (which carries it from 7.7); composition_vector
          and lattice_family via compute_signature().
-      f. Build a GuidanceEntry:
+      f. Build a GuidanceEntry (per the three-source rule):
             - signature: from step (e)
-            - measured: from the chosen converged
-              CalcUnit's result.toml
-            - context: from the flight's options
-              (basis, functional, threshold, cell info)
+            - measured: gap/magnetization from the chosen
+              run's result.toml; kpoint_density = the
+              chosen calc tag's k-density
+            - context: basis/functional/kpoint_integration
+              from the sweep's fixed_axes; scf_threshold
+              from result.toml; cell_atom_count and
+              cell_volume_per_formula_unit from the loaded
+              structure (step e)
             - verification: grid_values,
               grid_energies (the parallel total-energy
               array gathered in step b, so the
@@ -6846,6 +6897,21 @@ the DESIGN 5.7 regeneration discipline.
 
 ### 7.10 Open Design Questions
 
+- **Antiferromagnets are invisible to the spin feature.**
+  The predictor's second character feature is the intensive
+  magnetization `|M| / N_atoms` (7.6), built from the cell's
+  net moment because that is what imago surfaces (the
+  iteration file's column 6).  An antiferromagnet has zero
+  net moment yet ordered local moments and can need careful
+  BZ sampling, so this feature reads it as non-magnetic.
+  Capturing it would require a sum of *absolute local*
+  moments (`sum |m_i|`), which imago does not currently
+  report per atom; a v2 schema could add an
+  `abs_local_moment` measured field and switch the spin
+  feature to it.  The verification grid is the day-1 safety
+  net (an AFM whose density is mispredicted is still caught
+  by the sweep), so this is a sharpness limitation, not a
+  correctness one.
 - **Metalloid assignment in `elemental_groups.toml`.**  The
   canonical metalloids (Si, B, Ge, As, Sb, Te) are also
   members of group_iv (Si, Ge), group_iii (B), pnictogen
