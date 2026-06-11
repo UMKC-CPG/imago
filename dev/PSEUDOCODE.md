@@ -3634,31 +3634,48 @@ function first_environment_matcher(methods):
 Reproducible rebuild of all affected
 `s_gaussian_pot.toml` files (see DESIGN 5.7 for the
 layered reproducibility contract: bit-level emitter,
-precision-level numerics, free metadata).  Step 1
-always rebuilds the "isolated" entries from current
-`pot1`/`coeff1` files (so atomSCF changes propagate);
-step 2 layers curated solid-state entries on top from
-each cached or freshly-run reference SCF, with one
-`FingerprintRecord` harvested per declared
-`[[reference_solid.entry.fingerprint]]`.
+precision-level numerics, free metadata).  The
+producer is a **kaleidoscope client**: it runs no SCF
+itself.  It works in three phases -- *build*,
+*dispatch*, *harvest*.  The build phase always rebuilds
+the "isolated" entries from current `pot1`/`coeff1`
+files (so atomSCF changes propagate), then, per
+reference solid, materializes the structure, asks the
+guidance predictor for a verification grid
+(`predict_settings`, 15.6), and emits one `CalcUnit`
+per k-density grid point plus one structure-only
+`imago.py -loen -scf no` unit per Fortran-side
+fingerprint.  The dispatch phase hands every collected
+unit to kaleidoscope as one flat batch.  The harvest
+phase picks each solid's converged grid point, extracts
+the potential, harvests one `FingerprintRecord` per
+declared `[[reference_solid.entry.fingerprint]]`, and
+contributes the same converged point back to the
+guidance dataspace.
 
 The v2 manifest reader (`load_manifest_v2` below)
 enforces the nine validation rules of DESIGN 5.7 --
 the v1-era three-rule reader has been retired with
 the rest of schema v1.  Producer-side fingerprint
 harvest splits Python-side matchers (in-process,
-descriptor-agnostic) from Fortran-side matchers
-(cached `imago.py -loen -scf no` runs producing
-`loen-<m>-<s>.out` files alongside the SCF cache).
+descriptor-agnostic) from Fortran-side matchers, which
+read the `fort.21` of the `-loen` unit kaleidoscope
+already dispatched (no separate loen cache; the
+kaleidoscope run-reuse cache of DESIGN 6.2.5 subsumes
+it).
 
 ```
 function buildInitialPotentials(manifest_path,
         force, single_element):
     manifest     = load_manifest_v2(manifest_path)
+    dataspace    = guidance_db.load(
+        "share/historicalGuidanceDB/")
     imago_commit = git_sha("HEAD")
     timestamp    = iso8601_now_utc()
+    workspace    = curation_workspace_root()
 
-    # Step 1: refresh "isolated" entries.  atomSCF
+    # ===== Phase 1: build =============================
+    # Step 1a: refresh "isolated" entries.  atomSCF
     # changes propagate every run.  The isolated
     # entry's `default` flag is computed at build
     # time per is_isolated_default_for() below: true
@@ -3692,40 +3709,109 @@ function buildInitialPotentials(manifest_path,
                 timestamp, manifest))
         databases[elem] = db
 
-    # Step 2: process each reference solid.
+    # Step 1b: per reference solid, materialize the
+    # structure and build its verification grid.  Every
+    # solid's units accumulate into ONE flight so the
+    # whole producer run dispatches as a single flat
+    # parallel batch (DESIGN 5.7 / 6.2.1).
+    all_units   = []
+    predictions = {}    # reference_id -> PredictionRecord
+    struct_of   = {}    # reference_id -> local struct path
+    for ref in manifest.reference_solids:
+        struct = materialize_structure(ref)
+        struct_of[ref.reference_id] = struct
+
+        # Fixed (non-swept) makeinput options.  basis,
+        # functional, and kpoint_integration select the
+        # predictor sub-model; kpoint_spec.shift and
+        # scf_threshold ride along unchanged.
+        options = make_producer_options(ref)
+
+        if ref.kpoint_spec.density is not None:
+            # Curator override: pin/centre the grid on
+            # the supplied density (a length-1 trust
+            # grid, or a tight verify around it).  No
+            # prediction is consulted (DESIGN 5.7 /
+            # 6.2.8).
+            flight_i, record_i = pin_to_density(
+                struct, options, ref.system_type,
+                ref.kpoint_spec.density,
+                id   = ref.reference_id,
+                root = workspace)
+        else:
+            # Full predict-then-verify.  predict_settings
+            # falls back to the wide default grid inside
+            # itself when the dataspace cannot predict.
+            flight_i, record_i = predict_settings(
+                struct, options, dataspace,
+                ref.system_type,
+                id   = ref.reference_id,
+                root = workspace)
+
+        # Domain-specific loen units: the generic builder
+        # knows nothing about fingerprints, so the
+        # producer appends one structure-only
+        # `-loen -scf no` unit per Fortran-side
+        # declaration.  The bispectrum fingerprint
+        # depends on geometry alone, so these need not
+        # wait for the converged grid point.
+        loen_units = build_loen_units(ref, struct,
+            workspace)
+
+        all_units.extend(flight_i.units)
+        all_units.extend(loen_units)
+        predictions[ref.reference_id] = record_i
+
+    # The combined flight carries every solid's units and
+    # stashes the per-solid prediction records in the
+    # opaque metadata dict so the harvest recovers them
+    # without re-reading the dataspace.
+    flight = Flight(
+        units    = all_units,
+        root     = workspace,
+        sweep    = SweepRecord(
+            varied_axes = ("kpt-density",),
+            fixed_axes  = {}),
+        metadata = {"predictions": predictions})
+
+    # ===== Phase 2: dispatch ==========================
+    # Kaleidoscope runs and tracks every unit through the
+    # wingbeat seam and its run-reuse cache (DESIGN
+    # 6.2.5).  `force` bypasses cached runs so they
+    # re-run; fresh results still repopulate the cache.
+    dispatch(flight,
+        executor = curation_executor(force))
+
+    # ===== Phase 3: harvest ===========================
     log = []
     for ref in manifest.reference_solids:
-        if not force and is_cached_v2(ref,
-                imago_commit):
-            scf = load_cache(ref)
-        else:
-            # Materialize the structure (COD fetch
-            # on cache miss for cod_id refs; disk
-            # read for structure_path refs).  Cache
-            # the bytes before running SCF so the
-            # cache directory is self-describing.
-            structure_bytes = materialize_structure(
-                ref)
-            write_cache_structure(ref,
-                structure_bytes)
-            scf = run_imago_scf(ref, structure_bytes)
-            write_cache_inputs(ref, imago_commit)
-            store_cache(ref, scf)
-        log.append(make_run_log_entry(ref, scf))
+        struct = struct_of[ref.reference_id]
+        # Two-sided delta-below-threshold rule (DESIGN
+        # 7.8): the converged grid point's run, or None
+        # if nothing converged.
+        converged = pick_converged_unit(flight, ref,
+            scf_threshold = ref.scf_threshold)
+        if converged is None:
+            # Non-convergence (e.g. at the top of the
+            # range): flag it, harvest no potential.
+            log.append(
+                make_nonconverged_log_entry(ref))
+            continue
+        log.append(make_run_log_entry(ref, converged))
 
         for spec in ref.entries:
             elem = spec.element
             if elem not in databases:
                 continue   # filtered out by --element
-            coeffs, alphas = extract_potential(scf,
-                spec.atom_site)
-            # Harvest one FingerprintRecord per
-            # declared [[reference_solid.entry.
-            # fingerprint]] declaration.  Python-side
-            # matchers compute in-process; Fortran-
-            # side matchers run cached loen jobs.
-            fingerprints = harvestFingerprints(ref,
-                spec, imago_commit)
+            coeffs, alphas = extract_potential(
+                converged, spec.atom_site)
+            # One FingerprintRecord per declared
+            # [[reference_solid.entry.fingerprint]].
+            # Python-side matchers compute in-process
+            # from `struct`; Fortran-side matchers read
+            # the loen unit kaleidoscope already ran.
+            fingerprints = harvestFingerprints(flight,
+                ref, spec, struct)
             new = PotentialEntry(
                 label         = spec.label,
                 default       = spec.default,
@@ -3735,30 +3821,44 @@ function buildInitialPotentials(manifest_path,
                 alpha_max     = max(alphas),
                 coefficients  = coeffs,
                 alphas        = alphas,
+                # Provenance records ref.system_type for
+                # forensics (DESIGN 5.7 rule 2).
                 provenance    = make_imago_provenance(
                     imago_commit, timestamp,
                     ref, spec.atom_site,
-                    scf.iterations),
+                    converged.iterations),
                 fingerprints  = fingerprints)
             db = databases[elem]
             # Replace any prior entry with the same
             # label.  Manifest rule 6 enforces
-            # cross-solid (element, label)
-            # uniqueness, so the only possible prior
-            # is the same entry from a previous run.
+            # cross-solid (element, label) uniqueness,
+            # so the only possible prior is the same
+            # entry from a previous run.
             db.potentials = [e for e in db.potentials
                              if e.label != spec.label]
             db.potentials.append(new)
 
-    # Step 3: write all affected element files via
-    # the deterministic emitter (5.5).
+    # Step 3b: guidance contribution.  The same
+    # converged grid points feed the historical guidance
+    # dataspace staging, so every solid the producer
+    # converges sharpens the predictor.  harvest_flight
+    # recovers each solid's prediction from
+    # flight.metadata["predictions"] and skips trust-mode
+    # (length-1) solids -- a single point is weak
+    # evidence (DESIGN 7).
+    harvest_flight(workspace,
+        "share/historicalGuidanceDB/", dataspace)
+
+    # ===== Write outputs ==============================
+    # All affected element files via the deterministic
+    # emitter (5.5).
     for elem, db in databases.items():
         save(db, element_path(elem))
 
-    # Step 4: run log capturing the manifest
-    # snapshot, per-run iteration counts, and the
-    # Imago commit.  The validation harness (11.5)
-    # reads this log.
+    # Run log capturing the manifest snapshot, per-run
+    # iteration counts, the converged k-density per
+    # solid, and the Imago commit.  The validation
+    # harness (11.5) reads this log.
     write_run_log(
         "share/curation/run_log.toml",
         manifest_snapshot = manifest,
@@ -3790,13 +3890,26 @@ function load_manifest_v2(path):
 
     for ref in solids:
         # Rule 2: required per-solid fields.
-        for f in ("reference_id", "kpoint_spec",
-                  "scf_threshold"):
+        for f in ("reference_id", "system_type",
+                  "kpoint_spec", "scf_threshold"):
             require(f in ref, path,
                 "manifest rule 2: [[reference_solid"
                 + "]] missing field: " + f)
 
         rid = ref["reference_id"]
+
+        # Rule 2 (domain): system_type must be one of
+        # the four valid values; the guidance predictor
+        # (DESIGN 7) switches its sub-model on it.
+        require(ref["system_type"] in (
+                "crystalline", "amorphous",
+                "nanostructure", "molecular"),
+            path,
+            "manifest rule 2: [[reference_solid "
+            + rid + "]] system_type must be one of"
+            + " crystalline / amorphous /"
+            + " nanostructure / molecular (found "
+            + str(ref["system_type"]) + ")")
 
         # Rule 4: exactly one of cod_id /
         # structure_path; cod_revision required and
@@ -3907,71 +4020,57 @@ function load_manifest_v2(path):
     return parse_manifest_object(raw)
 
 
-function is_cached_v2(ref, imago_commit):
-    # Cache hit / miss per DESIGN 5.7's contract:
-    # field-by-field compare on the snapshotted
-    # inputs, then byte-for-byte compare of the
-    # structure file.  Reports the specific field
-    # that drove a miss for debuggability.
-    cache_dir = ("share/atomicBDB/cache/scf/"
-                 + ref.reference_id)
-    inputs    = path_join(cache_dir, "inputs.toml")
-    if not file_exists(inputs):
-        return False
+function materialize_structure(ref):
+    # Option A (DESIGN 5.7): guarantee that the
+    # reference solid's structure exists as a local
+    # file and return its path.  This is the producer's
+    # ONLY network access and is deliberately decoupled
+    # from any run cache -- it carries no SCF state and
+    # makes no hit/miss decision.  Recompute avoidance
+    # belongs to kaleidoscope's run-reuse cache (DESIGN
+    # 6.2.5), which keys on this file's contents.
+    if ref.structure_path is not None:
+        # Disk read; the loader already resolved the
+        # path under the manifest directory (rule 4).
+        # No network.
+        return ref.structure_path
 
-    cached = tomllib.load(inputs)
-
-    # Field-by-field compare on scalar SCF inputs.
-    # The cache deliberately excludes `entries`
-    # (so adding a new harvest target reuses the
-    # cached SCF) and `reference_id` (used only as
-    # the cache directory name).
-    for f in ("kpoint_spec", "scf_threshold",
-              "imago_commit"):
-        expected = current_field_value(ref, f,
-            imago_commit)
-        if cached.get(f) != expected:
-            log("cache miss for " + ref.reference_id
-                + ": field " + f + " differs ("
-                + str(cached.get(f)) + " -> "
-                + str(expected) + ")")
-            return False
-
-    # Structure-file byte compare.  COD entries
-    # fetch at the pinned cod_revision; structure_
-    # path entries read from disk.  Cached bytes
-    # are the source of truth for the cached SCF
-    # result by construction.
-    cached_struct  = find_cached_structure(cache_dir)
-    current_bytes  = materialize_structure(ref)
-    if read_bytes(cached_struct) != current_bytes:
-        log("cache miss for " + ref.reference_id
-            + ": structure file changed")
-        return False
-
-    return True
+    # cod_id ref: fetch the pinned revision once to a
+    # plain local location.  Strict on failure (network
+    # down / COD outage / pinned revision missing) --
+    # never falls back to another revision, because a
+    # silent fallback would desync the build from the
+    # pinned manifest (DESIGN 5.7).
+    local = ("share/atomicBDB/cache/structures/"
+             + ref.reference_id + cod_extension(ref))
+    if not file_exists(local):
+        fetch_cod_structure(
+            cod_id       = ref.cod_id,
+            cod_revision = ref.cod_revision,
+            dest         = local)
+    return local
 
 
-function harvestFingerprints(ref, spec,
-        imago_commit):
+function harvestFingerprints(flight, ref, spec,
+        struct_path):
     # Build one FingerprintRecord per declared
     # [[reference_solid.entry.fingerprint]].  The
     # Python-side / Fortran-side split mirrors the
-    # consumer's matcher dispatch (11.3.a): the
-    # matcher knows whether it computes in process
-    # or needs a loen run.
+    # consumer's matcher dispatch (11.3.a): the matcher
+    # knows whether it computes in process or was
+    # dispatched as a -loen unit.
     fingerprints = []
     for fp_decl in spec.fingerprints:
         method   = fp_decl["method"]
         sub_spec = fp_decl["sub_spec"]
         matcher  = MATCHERS[method]()
         if matcher.needs_loen_run:
-            payload = harvestLoenFingerprint(ref,
-                spec.atom_site, matcher, sub_spec,
-                imago_commit)
+            payload = harvestLoenFingerprint(flight,
+                ref, spec.atom_site, matcher, sub_spec)
         else:
-            payload = harvestPythonFingerprint(ref,
-                spec.atom_site, matcher, sub_spec)
+            payload = harvestPythonFingerprint(
+                struct_path, spec.atom_site, matcher,
+                sub_spec)
         fingerprints.append(FingerprintRecord(
             method   = method,
             sub_spec = sub_spec,
@@ -3979,76 +4078,49 @@ function harvestFingerprints(ref, spec,
     return fingerprints
 
 
-function harvestLoenFingerprint(ref, atom_site,
-        matcher, sub_spec, imago_commit):
-    # Cache one fort.21 per (method, sub_spec)
-    # alongside the SCF cache.  The sub_spec is
-    # slugged deterministically so the file name
-    # encodes the parameters; two declarations whose
-    # sub_spec differs in any key (or value)
-    # produce different slugs and different cache
-    # files by construction.
-    cache_dir = ("share/atomicBDB/cache/scf/"
-                 + ref.reference_id)
-    slug      = sub_spec_slug(sub_spec)
-    out_path  = path_join(cache_dir,
-        "loen-" + matcher.name + "-" + slug
-        + ".out")
-
-    if not is_cached_loen(out_path, ref,
-            imago_commit):
-        # Run imago.py -loen -scf no against the
-        # cached SCF directory.  The matcher's
-        # loen-side parameters flow into the
-        # LOEN_INPUT_DATA block; the SCF result
-        # itself is reused from the cache.
-        run_imago_loen(
-            workdir  = cache_dir,
-            sub_spec = sub_spec,
-            matcher  = matcher,
-            output   = out_path)
+function harvestLoenFingerprint(flight, ref,
+        atom_site, matcher, sub_spec):
+    # Read the fort.21 of the `-loen -scf no` unit that
+    # kaleidoscope already dispatched for this
+    # (solid, method, sub_spec) back in step 1b.  No
+    # loen run happens here and there is no separate
+    # loen cache -- kaleidoscope's run-reuse cache
+    # (DESIGN 6.2.5) already owns recompute avoidance.
+    # The unit's run directory follows the calc-tag
+    # convention (DESIGN 6.2.4): id = reference_id,
+    # calc = "loen-<method>-<slug>"; the slug encodes
+    # the sub_spec so two declarations differing in any
+    # key or value land in different run directories by
+    # construction.
+    slug     = sub_spec_slug(sub_spec)
+    calc_tag = "loen-" + matcher.name + "-" + slug
+    run_dir  = unit_run_dir(flight.root,
+        ref.reference_id, calc_tag)
+    out_path = path_join(run_dir, "fort.21")
 
     rows = matcher.parse_loen_output(out_path,
         sub_spec)
-    # atom_site is 1-based per the manifest
-    # contract; the row list is 0-indexed.  The
-    # matcher's build_payload accessor wraps the
-    # vector in the per-matcher payload shape
-    # (DESIGN 5.2: bispec uses `values`, reduce
-    # uses `shell_code`) so the producer and
-    # consumer stay symmetric on field naming.
+    # atom_site is 1-based per the manifest contract;
+    # the row list is 0-indexed.  The matcher's
+    # build_payload accessor wraps the vector in the
+    # per-matcher payload shape (DESIGN 5.2: bispec
+    # uses `values`, reduce uses `shell_code`) so the
+    # producer and consumer stay symmetric on field
+    # naming.
     return matcher.build_payload(
         rows[atom_site - 1])
 
 
-function is_cached_loen(out_path, ref, imago_commit):
-    # Loen output is valid iff (a) the file exists
-    # and (b) the parent SCF cache it depends on is
-    # also still a hit.  The (method, sub_spec) are
-    # already encoded in the file name (via
-    # sub_spec_slug, see above) so no separate
-    # parameter comparison is needed -- a sub_spec
-    # change produces a different slug and a
-    # different cache path by construction.
-    if not file_exists(out_path):
-        return False
-    return is_cached_v2(ref, imago_commit)
-
-
-function harvestPythonFingerprint(ref, atom_site,
-        matcher, sub_spec):
-    # In-process matcher call against the cached
-    # structure file.  No subprocess, no on-disk
-    # cache file -- recomputing in-process is
-    # cheaper than the cache bookkeeping would be.
-    # Wraps the result via matcher.build_payload so
-    # the per-matcher payload field name (DESIGN
-    # 5.2) flows through the same accessor the
-    # loen-side branch uses.
-    cached_struct = find_cached_structure(
-        "share/atomicBDB/cache/scf/"
-        + ref.reference_id)
-    structure = read_structure(cached_struct)
+function harvestPythonFingerprint(struct_path,
+        atom_site, matcher, sub_spec):
+    # In-process matcher call against the materialized
+    # structure file.  No subprocess, no on-disk cache
+    # file -- recomputing in-process is cheaper than the
+    # cache bookkeeping would be.  Wraps the result via
+    # matcher.build_payload so the per-matcher payload
+    # field name (DESIGN 5.2) flows through the same
+    # accessor the loen-side branch uses.
+    structure = read_structure(struct_path)
     vectors = matcher.compute_query(structure,
         sub_spec)
     return matcher.build_payload(
@@ -4056,12 +4128,12 @@ function harvestPythonFingerprint(ref, atom_site,
 
 
 function sub_spec_slug(sub_spec):
-    # Deterministic file-name slug.  Keys in
-    # alphabetical order, joined as "key_value"
-    # segments, hyphen-separated.  Floats format
-    # as "%.6g" -- long enough to disambiguate the
-    # parameters humans actually pick, short
-    # enough to fit on a file-name line.
+    # Deterministic slug for the -loen unit's calc tag
+    # (DESIGN 6.2.4).  Keys in alphabetical order,
+    # joined as "key_value" segments, hyphen-separated.
+    # Floats format as "%.6g" -- long enough to
+    # disambiguate the parameters humans actually pick,
+    # short enough to fit on a calc-tag line.
     parts = []
     for k in sorted(sub_spec.keys()):
         v = sub_spec[k]

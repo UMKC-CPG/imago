@@ -2962,12 +2962,17 @@ is the script that **produces** the augmented
 per-element database files
 (`share/atomicPDB/<elem>/s_gaussian_pot.toml`).  It
 takes a curated set of reference solids as input,
-runs Imago SCF on each (or loads cached results),
-harvests converged potentials at named atom sites,
-and writes the results into per-element database
-files via `initial_potential_db.save()`.  It is the
+**delegates each solid's SCF run to kaleidoscope**
+(section 6.2) as a small *predict-then-verify*
+flight, harvests the converged potential at each
+named atom site, and writes the results into
+per-element database files via
+`initial_potential_db.save()`.  It is the
 **producer** half of the library / producer /
-consumer split documented in 5.4.
+consumer split documented in 5.4, and a *client* of
+kaleidoscope in the sense of ARCHITECTURE 9.7: it
+decides *what* to compute, while kaleidoscope owns
+*running*, *caching*, and *tracking* the batch.
 
 **The curation manifest -- what it is, what it
 contains, why.**  The pipeline's primary input is
@@ -3067,16 +3072,28 @@ the inputs can actually support:
 
 **Inputs:**
 
-- A curation manifest (TOML; schema v1 specified below).  Default
+- A curation manifest (TOML; schema v2 specified below).  Default
   location is `share/atomicBDB/manifest.toml`; alternate via the
   `--manifest` flag.
+- The historical guidance dataspace (`share/historicalGuidanceDB/`,
+  DESIGN 7).  Consulted per reference solid to predict the
+  converged k-point density and to size the verification grid
+  around that prediction.  When the dataspace cannot predict for a
+  solid (too few neighbors), the producer falls back to the wide
+  default grid defined in the flight builder (DESIGN 6.2.8).
 - The existing `share/atomicPDB/` tree (for `pot1` and `coeff1`
   reads when refreshing each element's `"isolated"` baseline
   entry).
-- An Imago build location, for running reference SCF calculations.
-- Network access to the Crystallography Open Database (COD).  Only
-  consulted on cache miss for `[[reference_solid]]` entries that
-  declare a `cod_id`; cache hits never touch the network.
+- An Imago build location.  The producer does not invoke it
+  directly; kaleidoscope drives it through the wingbeat seam when
+  dispatching the verification flights (and the follow-on
+  `imago.py -loen -scf no` runs for Fortran-side fingerprint
+  matchers).
+- Network access to the Crystallography Open Database (COD).  Used
+  only by the structure-materialization step (below) for
+  `[[reference_solid]]` entries that declare a `cod_id`, to fetch
+  the pinned revision once to a local file.  `structure_path`
+  entries need no network.
 
 **Manifest schema (version 2).**
 
@@ -3131,8 +3148,10 @@ scf_threshold         = 1.0e-6
 **Per-solid fields.**
 
 - `reference_id` (string): stable, human-readable identifier for
-  the reference solid.  Used as the cache directory name; must
-  match `[A-Za-z0-9_-]+` and be unique across the manifest.
+  the reference solid.  Used as the kaleidoscope flight/run stable
+  id (DESIGN 6.2.4) and as the filename stem of the materialized
+  local structure; must match `[A-Za-z0-9_-]+` and be unique
+  across the manifest.
 - `system_type` (string): one of `"crystalline"`, `"amorphous"`,
   `"nanostructure"`, `"molecular"`.  Required field: the producer
   must declare this so the guidance-dataspace predictor (DESIGN
@@ -3142,8 +3161,10 @@ scf_threshold         = 1.0e-6
   amorphous and molecular references are rare in this manifest
   but supported for completeness.
 - `cod_id` (positive integer, optional iff `structure_path` is
-  set): Crystallography Open Database entry ID.  The pipeline
-  fetches the structure at regeneration time on cache miss.
+  set): Crystallography Open Database entry ID.  The
+  structure-materialization step fetches the structure once, at
+  the pinned `cod_revision`, to a local file before the solid's
+  flight is dispatched.
 - `cod_revision` (non-empty string, required iff `cod_id` is set):
   pinned COD revision token (an ISO date or COD-supplied revision
   identifier).  Pinning keeps the build deterministic against
@@ -3219,9 +3240,13 @@ file (5.2):
 
 1. `schema_version == 2`.
 2. Every `[[reference_solid]]` carries `reference_id`,
-   `kpoint_spec`, `scf_threshold`, and *exactly one* of
-   `{(cod_id, cod_revision), structure_path}` (see rule 4 for
-   details).
+   `system_type`, `kpoint_spec`, `scf_threshold`, and *exactly
+   one* of `{(cod_id, cod_revision), structure_path}` (see rule 4
+   for details).  `system_type` must be one of the four allowed
+   values `{"crystalline", "amorphous", "nanostructure",
+   "molecular"}`; any other value is a hard error, since the
+   guidance predictor (DESIGN 7) switches its sub-model on it and
+   the produced entry records it for forensics.
 3. Every `[[reference_solid.entry]]` carries `element`,
    `atom_site`, `label`, `default`, `description`.
 4. Exactly one of `cod_id` or `structure_path` is set on each
@@ -3251,98 +3276,73 @@ file (5.2):
    in `makeinput.py` (8.9).  Unknown methods are a hard
    error rather than a silent skip.
 
-**Cache layout and contract.**
+**Structure materialization.**
 
-SCF runs are expensive (minutes to hours).  The pipeline caches
-results per reference solid so that adding or editing
-`[[reference_solid.entry]]` declarations does not re-trigger SCF
-— only the cheap harvest step (`extract_potential` in PSEUDOCODE
-11.4) re-runs.  The cache lives under `share/atomicBDB/cache/scf/`,
-one directory per solid keyed by `reference_id`:
+Before a reference solid can be handed to kaleidoscope its
+structure must exist as a local file, because kaleidoscope keys
+its run-reuse cache on the structure file's contents (DESIGN
+6.2.5).  `materialize_structure(ref)` produces that file and
+returns its path:
 
-```
-share/atomicBDB/cache/scf/
-  au_fcc/
-    inputs.toml        Snapshot of the per-solid SCF inputs:
-                       kpoint_spec, scf_threshold,
-                       imago_commit (plus cod_id + cod_revision,
-                       or structure_path, for diagnostic
-                       reporting on a miss).
-    structure.<ext>    Byte-for-byte copy of the structure file
-                       used.  For COD entries this is the file
-                       fetched from COD; for structure_path
-                       entries it is a copy of the on-disk file.
-                       Compared byte-for-byte on every cache
-                       check.
-    imago.out          Cached SCF output (and any peer files
-                       extract_potential needs).
-    loen-<m>-<s>.out   One file per declared fingerprint:
-                       `<m>` is the matcher name (e.g.,
-                       `bispec`); `<s>` is a deterministic
-                       slug derived from the `sub_spec` keys
-                       and values (e.g., `twoj1_8-twoj2_8`).
-                       Only present for Fortran-side
-                       matchers; Python-side matchers
-                       (`reduce`) compute in-process and
-                       leave no cache file.
-```
+- For a `structure_path` entry it reads the on-disk file named by
+  the manifest (resolved under the manifest's directory).  No
+  network.
+- For a `cod_id` entry it fetches the structure once from the
+  Crystallography Open Database at the pinned `cod_revision` and
+  writes it to a plain local location, e.g.
+  `share/atomicBDB/cache/structures/<reference_id>.<ext>`.
 
-`is_cached(ref, imago_commit)` (PSEUDOCODE 11.4) is defined as:
+This step is the producer's only network access and is
+**deliberately decoupled from any run cache**: its sole job is to
+guarantee a local structure file and hand back its path.  It
+carries no SCF results, no convergence state, and no
+hit/miss comparison logic — those now belong to kaleidoscope's
+run-reuse cache.  Pinning `cod_revision` keeps the build
+deterministic against upstream COD edits: re-running months later
+fetches the same bytes by construction.
 
-1. If `cache/scf/<reference_id>/inputs.toml` does not exist,
-   miss.
-2. Read `inputs.toml`; compare each scalar field against `ref`
-   and `imago_commit`.  If any field differs, miss; log which
-   field changed (e.g., "`scf_threshold` 1e-6 → 1e-7 —
-   re-running SCF").
-3. Materialize the current structure file for `ref` (fetch from
-   COD if `cod_id`, read from disk if `structure_path`).  Compare
-   it byte-for-byte against
-   `cache/scf/<reference_id>/structure.<ext>`.  If different,
-   miss; log "structure file changed for `<reference_id>`."
-4. Otherwise, hit; return cached `imago.out`.
+*COD-fetch is strict.*  Fetch failures (network down, COD outage,
+the pinned revision missing) error out, name the failing fetch,
+and refuse to fall back to any other revision.  A silent fallback
+would produce a structure inconsistent with the pinned manifest —
+exactly the failure mode pinning exists to prevent.
 
-**Direct comparison over hashing.**  At our scale (~100 reference
-solids, regeneration run by hand) a content hash buys nothing —
-storage is trivial, lookup is one disk read — and costs
-debuggability.  A hash miss tells the curator "different hash";
-a direct-comparison miss can name the exact field that changed.
-Storing a literal copy of the structure file also makes the
-cache directory fully self-describing: open it and see exactly
-what produced the cached result.
+**Run-reuse caching is kaleidoscope's job, not the producer's.**
 
-Explicitly excluded from the cache comparison:
+Earlier drafts of this section gave the producer its own
+per-solid SCF cache under `share/atomicBDB/cache/scf/`, with an
+`is_cached(ref, imago_commit)` check that compared a snapshot of
+the SCF inputs plus a byte-for-byte copy of the structure file.
+That machinery is **removed**.  Now that the producer delegates
+SCF to kaleidoscope, the avoid-recompute responsibility moves to
+kaleidoscope's run-reuse cache (DESIGN 6.2.5), which keys each run
+on the structure file's contents together with the makeinput
+options and the Imago build identity.  The properties the old
+producer cache provided are preserved by that one mechanism:
 
-- The `entries` list.  Adding a new `[[reference_solid.entry]]`
-  must reuse the cached SCF result; only the harvest step
-  re-runs.
-- `reference_id` itself.  Used only as the cache directory name;
-  the comparison logic never reads it from `inputs.toml`.
-  Renaming a reference solid in the manifest will *appear* as a
-  miss because the cache directory is new — the curator can
-  rename the cache directory by hand if they want to preserve
-  the hit.
-- `structure_path` as a string.  We compare file *contents*, not
-  paths, so a curator can rename `au_fcc.skel` →
-  `gold_fcc.skel` on disk without re-running SCF.
+- *Edits to harvest declarations stay cheap.*  Adding or changing
+  a `[[reference_solid.entry]]` changes neither the structure nor
+  the flight options, so the run is a cache hit and only the
+  harvest step (`extract_potential`, PSEUDOCODE 11.4) re-runs.
+- *Content, not path.*  The cache compares structure file
+  *contents*, so renaming a `structure_path` file on disk does
+  not force a re-run.
+- *Build- and threshold-sensitive.*  Changing `scf_threshold`,
+  the k-point grid, or the Imago build identity invalidates the
+  cached run, as it must.
 
-**COD-fetch contract.**
+The reason the old design preferred direct comparison over a
+content hash still holds — at ~100 reference solids run by hand,
+naming the exact field that changed beats a bare "different hash"
+— and DESIGN 6.2.5 carries that reasoning for the kaleidoscope
+cache.
 
-- On cache miss for a `cod_id` reference solid, the pipeline
-  fetches the structure at the pinned `cod_revision` from the
-  Crystallography Open Database and writes it to
-  `cache/scf/<reference_id>/structure.<ext>` before running SCF.
-- On cache hit the network is never touched.  The cached
-  `structure.<ext>` is the source of truth for the cached SCF
-  result, by construction.
-- Fetch failures (network down, COD outage, revision missing)
-  are strict: the pipeline errors out, names the failing fetch,
-  and refuses to fall back to any other revision.  Silent
-  fallback would produce an SCF result inconsistent with the
-  pinned manifest — exactly the failure mode the cache contract
-  is designed to prevent.
+**Procedure.**
 
-**Procedure:**
+The pipeline runs in three phases — *build*, *dispatch*,
+*harvest* — so that every reference solid's verification runs are
+launched as one flat parallel batch (the predict-then-verify
+shape of DESIGN 6.2.1) rather than one solid at a time.
 
 1. Load and validate the manifest (nine rules above).
 2. For every element with a directory in `share/atomicPDB/`,
@@ -3350,64 +3350,97 @@ Explicitly excluded from the cache comparison:
    `s_gaussian_pot.toml` directly from the current `pot1` and
    `coeff1` files.  Guarantees the baseline is always present
    (rule 6 of 5.2) and tracks any changes in atomSCF output.
-3. For each `[[reference_solid]]` in the manifest:
-   a. If `is_cached(ref, imago_commit)` succeeds (and `--force`
-      was not passed), load
-      `cache/scf/<reference_id>/imago.out`.  Otherwise:
-         - For `cod_id` entries, fetch the structure at
-           `cod_revision` from COD; for `structure_path`
-           entries, read it from disk.  Write the bytes to
-           `cache/scf/<reference_id>/structure.<ext>`.
-         - Run Imago SCF on that structure using `kpoint_spec`
-           and `scf_threshold` from the manifest.
-         - Write `cache/scf/<reference_id>/inputs.toml` and
-           `cache/scf/<reference_id>/imago.out`.
-   b. Record SCF iteration count and convergence metrics in the
-      run log.
+3. **Build.**  For each `[[reference_solid]]` in the manifest:
+   a. `materialize_structure(ref)` → a local structure file
+      (read from disk for `structure_path`, or fetched once from
+      COD at the pinned `cod_revision` for `cod_id`).
+   b. `predict_settings(structure, options, dataspace,
+      system_type, …)` (DESIGN 6.2.8 / 7) consults the guidance
+      dataspace and returns the **verification grid**: a set of
+      k-point densities bracketing the predicted converged
+      density, widened by the prediction's uncertainty (a
+      length-1 grid in trust mode; the wide default grid when the
+      dataspace cannot predict).  A manifest `kpoint_spec.density`
+      acts as a curator override that pins or centres the grid;
+      `kpoint_spec.shift` is always passed through as a fixed
+      option.
+   c. Emit one `CalcUnit` per grid point — each carrying the
+      materialized structure, `scf_threshold`, and the k-density
+      for that point — plus one structure-only
+      `imago.py -loen -scf no` unit per declared Fortran-side
+      fingerprint (the bispectrum fingerprint depends on geometry
+      alone, not on SCF convergence, so it need not wait for the
+      converged grid point).  Tag the `<calc>` level by k-density
+      per DESIGN 6.2.4 and collect every solid's units into a
+      single `Flight`.
+4. **Dispatch.**  Hand the whole `Flight` to kaleidoscope, which
+   runs and tracks the batch through the wingbeat seam and its
+   run-reuse cache (DESIGN 6.2.5).  The producer runs no SCF or
+   loen calculation itself.
+5. **Harvest.**  For each `[[reference_solid]]`:
+   a. Pick the converged grid point from the solid's units with
+      the two-sided delta-below-threshold rule (DESIGN 7.8 / the
+      C72 harvest).  If no grid point converges (for example,
+      non-convergence at the top of the range), skip the solid's
+      entries and flag it in the run log rather than harvesting a
+      non-converged potential.
+   b. Record that run's SCF iteration count and convergence
+      metrics in the run log.
    c. For each `[[reference_solid.entry]]`:
-      i.   Extract converged potential coefficients and alphas
-           for the named `atom_site`.
+      i.   `extract_potential` for the named `atom_site` from the
+           converged run.  The harvest format is settled (ARCH
+           9.7): the converged `scfV` matches the input `scfV`,
+           the alphas come from the input min/max/number, and the
+           coefficients and alphas are taken together.
       ii.  For each `[[reference_solid.entry.fingerprint]]`
-           declaration:
-              - Compute the fingerprint at `atom_site` for the
-                requested `(method, sub_spec)`.  Python-side
-                matchers (e.g., `reduce`) compute in-process
-                from the reference structure.  Fortran-side
-                matchers (e.g., `bispectrum`) run `imago.py
-                -loen -scf no` on the reference structure,
-                cached as
-                `cache/scf/<reference_id>/loen-<m>-<s>.out`,
-                and parse the row for `atom_site` from
-                `fort.21`.
-              - Build a `FingerprintRecord` (5.4) and attach
-                it to the entry-in-progress.
+           declaration, compute the fingerprint at `atom_site`
+           for the requested `(method, sub_spec)`.  Python-side
+           matchers (e.g., `reduce`) compute in-process from the
+           reference structure; Fortran-side matchers (e.g.,
+           `bispectrum`) read the matching `-loen` unit that
+           kaleidoscope already dispatched in step 3c and parse
+           the row for `atom_site` from `fort.21`.  Build a
+           `FingerprintRecord` (5.4) and attach it to the
+           entry-in-progress.
       iii. Construct a `PotentialEntry` (5.2) with the
            manifest-supplied `label`, `default`, and
-           `description`, the run-supplied numerical fields,
-           the run-supplied provenance, and the
+           `description`, the run-supplied numerical fields, the
+           run-supplied provenance (which records the solid's
+           `system_type` for forensics, per rule 2), and the
            `FingerprintRecord` list assembled in step ii.
       iv.  Insert the entry into the in-memory `ElementDatabase`
            for its element.  If an entry with the same label
            already exists, replace it.
-4. Save each affected `ElementDatabase` to disk via
+   d. **Guidance contribution.**  Harvest the same converged grid
+      point into the historical guidance dataspace's staging area
+      (`share/historicalGuidanceDB/staging/<system_type>/`, via
+      the C72 `harvest_flight` hook), so every reference solid the
+      producer converges becomes training data that sharpens the
+      predictor for the next solid.  Trust-mode (length-1 grid)
+      runs harvest the potential but do *not* auto-stage a
+      guidance entry — a single point is weaker evidence than a
+      converged grid (DESIGN 7).
+6. Save each affected `ElementDatabase` to disk via
    `initial_potential_db.save()` (5.5).
-5. Write `share/curation/run_log.toml` capturing the manifest
-   snapshot, per-run iteration counts, and the Imago commit.
-   The validation harness (5.8) reads this log.
+7. Write `share/curation/run_log.toml` capturing the manifest
+   snapshot, per-run iteration counts, the converged k-density
+   chosen for each solid, and the Imago commit.  The validation
+   harness (5.8) reads this log.
 
 **Flags:**
 
-- `--force`: re-run every manifest entry from scratch, bypassing
-  the cache check.  Cache entries are still written afresh
-  afterwards, so the next ordinary run benefits from the warm
-  cache.
+- `--force`: forward a cache-bypass to kaleidoscope so every
+  dispatched unit re-runs from scratch instead of reusing the
+  run-reuse cache (DESIGN 6.2.5).  Fresh results are still written
+  into that cache afterwards, so the next ordinary run is a
+  warm-cache hit.
 - `--manifest PATH`: alternate manifest location (default:
   `share/atomicBDB/manifest.toml`).
 - `--element ELEM`: restrict regeneration to a single element's
   `s_gaussian_pot.toml`.  Reference solids whose entries
-  contribute only to other elements are skipped at the harvest
-  step, but their SCF cache is still warmed so a follow-up run
-  without `--element` benefits.
+  contribute only to other elements are still dispatched (so the
+  run-reuse cache is warmed and a follow-up run without
+  `--element` benefits) but are skipped at the harvest step.
 
 ### 5.8 Validation Harness Algorithm
 

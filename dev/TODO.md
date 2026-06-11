@@ -1810,7 +1810,7 @@ and PSEUDOCODE landed before code.
   ManagerLost/WorkerLost/BadState names). Plus a diversity-of-
   options study (multi-node, workers/node, exclusive, launcher)
   per the user goal -- off critical path, later cluster session.
-- [ ] C69. Revise DESIGN 5.7 / PSEUDOCODE 11.4 /
+- [x] C69. Revise DESIGN 5.7 / PSEUDOCODE 11.4 /
   ARCHITECTURE 8.5 so the producer delegates SCF running
   to kaleidoscope (drops the bespoke run_imago_scf, COD
   fetch, and per-solid cache).  Pairs with C48.3.
@@ -1821,6 +1821,26 @@ and PSEUDOCODE landed before code.
   it to the guidance-dataspace predictor as the
   `system_type` argument when calling predict(), record
   it on the produced potential-DB entry for forensics).
+  DONE (2026-06-11): all three docs rewritten to the
+  three-phase build/dispatch/harvest shape.  Settled
+  decisions: COD materialization = **Option A** (thin
+  `materialize_structure`: local read, or one-shot fetch
+  of the pinned `cod_revision` to a plain local file,
+  decoupled from any cache; the producer is NOT
+  network-free and the strict COD-fetch error contract is
+  preserved); `kpoint_spec.density` = optional curator
+  override that pins/centres the grid.  Also: validation
+  rule 2 now enforces `system_type` presence + the
+  four-value domain; `system_type` recorded in the
+  produced entry's provenance (not a new 5.2 field); the
+  per-solid SCF cache, `is_cached_v2`, and `is_cached_loen`
+  are deleted (kaleidoscope run-reuse cache subsumes them);
+  Fortran-side fingerprints fold into the dispatched flight
+  as structure-only `-loen` units and are read from the
+  run dir's `fort.21` at harvest; the converged grid point
+  dual-harvests into `historicalGuidanceDB/staging/` via
+  C72 `harvest_flight`.  ARCH 9.8 open item marked
+  RESOLVED.  Code is C74.
 
 ### Phase K -- historical guidance dataspace (VISION 5, ARCH 10, DESIGN 7)
 

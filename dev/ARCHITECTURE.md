@@ -651,24 +651,64 @@ src/scripts/
                                  under share/atomicPDB/<elem>/
 ```
 
+**The producer is a kaleidoscope client.**  It does not
+run reference SCFs itself.  For each curated reference
+solid it builds a small *predict-then-verify* flight,
+hands that flight to kaleidoscope to dispatch and track,
+and then harvests the converged potential from the run
+directories.  This is the relationship set out in 9.7:
+the producer is a *what-to-compute* script, while
+kaleidoscope owns running, caching, and tracking the
+batch.
+
+This replaces the earlier shape in which the producer
+ran SCFs through its own driver and kept its own
+per-solid SCF cache.  That bespoke cache is gone:
+kaleidoscope's run-reuse cache (9.6, keyed on the
+structure file plus the makeinput options and build
+identity) subsumes it, so editing an entry's harvest
+declarations no longer re-triggers SCF -- only the cheap
+harvest step re-runs.
+
 Inputs:
 - A curation manifest in TOML, schema v2 (full spec in DESIGN
-  5.7), listing reference solids, atom sites to harvest from
-  each, the labels to assign, which entry per element carries
-  the `default` tag, and which `(method, sub_spec)` fingerprints
-  to harvest alongside each numerical potential.  Reference
-  structures are fetched from the Crystallography Open Database
-  at regeneration time using a pinned revision, with a
-  `structure_path` escape hatch for materials not in COD.
+  5.7), listing reference solids, each solid's `system_type`,
+  the atom sites to harvest from each, the labels to assign,
+  which entry per element carries the `default` tag, and which
+  `(method, sub_spec)` fingerprints to harvest alongside each
+  numerical potential.
+- The historical guidance dataspace (section 10), consulted
+  per reference solid to predict the converged k-point density
+  and the width of the verification grid around it.  When the
+  dataspace is too sparse to predict, the producer falls back
+  to a wide default grid.
 - The existing `pot1` / `coeff1` files (for `"isolated"`
   entries).
-- An Imago build (for running reference SCF calculations and,
-  for Fortran-side fingerprint matchers, follow-on
-  `imago.py -loen -scf no` runs per declared fingerprint).
+- An Imago build, used *through kaleidoscope* to run the
+  verification flights and, for Fortran-side fingerprint
+  matchers, the follow-on `imago.py -loen -scf no` runs per
+  declared fingerprint.
+
+**Structure materialization.**  A reference solid is named
+either by a local `structure_path` or by a `cod_id` pinned to
+a `cod_revision`.  A thin materialization step turns either
+form into one local structure file: a `structure_path` is read
+from disk; a `cod_id` is fetched once from the Crystallography
+Open Database at its pinned revision and written to a plain
+local location.  This is the producer's only network access,
+and it is deliberately decoupled from any cache -- its sole
+job is to hand kaleidoscope a local structure file for its
+run-reuse cache to key on.  Fetch failures are strict (named
+error, no silent fallback to another revision).
 
 Outputs:
 - Regenerated augmented database file in each affected
   `share/atomicPDB/<element>/` directory.
+- A guidance contribution.  The same converged grid point that
+  feeds a potential entry is also harvested into the historical
+  guidance dataspace's staging area (section 10), so every
+  reference solid the producer converges sharpens the predictor
+  for the next one.
 - A run log capturing SCF iteration counts and convergence
   metrics per reference run (input to 8.6).
 
@@ -686,9 +726,12 @@ Properties:
   to perturb the numbers.  Provenance metadata (e.g.,
   `generated_at` timestamps) refreshes on each run
   and is exempt from any reproducibility guarantee.
-- **Incremental.** Adding manifest entries updates only
-  the affected element files; existing entries are not
-  touched unless the manifest requests a rebuild.
+- **Incremental.** Reusing kaleidoscope's run-reuse
+  cache (9.6), an ordinary regeneration re-runs SCF
+  only for reference solids whose structure, options,
+  or build identity changed; adding harvest
+  declarations to an unchanged solid re-runs only the
+  harvest.
 - **Scriptable.** Invokable from CI or a developer
   workstation without manual intervention.
 
@@ -1282,11 +1325,17 @@ directory carrying `cache_key.toml`, `result.toml`, and
 
 What remains open:
 
-- **Producer-section revisions (9.7).**  DESIGN 5.7,
-  PSEUDOCODE 11.4, and ARCHITECTURE 8.5 still describe
-  the producer running SCFs itself; they must be revised
-  to delegate to kaleidoscope.  Tracked as follow-up
-  (TODO C69), not an architectural unknown.
+- **Producer-section revisions (9.7) -- RESOLVED (C69).**
+  DESIGN 5.7, PSEUDOCODE 11.4, and ARCHITECTURE 8.5 have
+  been rewritten so the producer delegates SCF to
+  kaleidoscope: it materializes each reference structure
+  (a thin local read, or a one-shot fetch of the pinned
+  COD revision), builds a predict-then-verify flight,
+  dispatches one flat batch, harvests each solid's
+  converged grid point, and contributes that point back to
+  the guidance dataspace (section 10).  The bespoke
+  per-solid SCF cache is gone; kaleidoscope's run-reuse
+  cache (9.6) subsumes it.  The matching code is TODO C74.
 
 ## 10. Historical Guidance Dataspace
 
