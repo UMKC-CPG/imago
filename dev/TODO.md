@@ -2084,17 +2084,25 @@ the C48.3 wiring (C74) is the first major consumer.
   (center) path.  Incr 2 = the harvest per-id read + no-record
   skip + crystalline-default retired + #8 (gap required via
   _require_field) + len==1 single-point skip + the rts/rt
-  rename.  **NEXT = incr 3 (producer pipeline, PSEUDOCODE
-  11.4):** the greenfield reference-solid predict/dispatch/
-  harvest path + ~12 unbuilt helpers (materialize_structure,
-  make_producer_options, build_loen_units, pick_converged_unit,
-  extract_potential, harvestFingerprints, curation_executor,
-  log/provenance helpers); load_manifest_v2 rule 2 ->
-  system_type (4-value domain) + basis/functional/
-  kpoint_integration on ReferenceSolid; CalcUnit.kind +
-  harvest kind=="convergence" filter (deferred from incr 2);
-  #5 (force thru dispatch) and the imago_commit-injection C71
-  deferral.  Needs a live Imago toolchain for end-to-end.
+  rename.  **Incr 3 DONE (3a manifest 55376bb, 3b CalcUnit.kind
+  349efc7, 3c producer pipeline 7016ff9):** load_manifest_v2
+  rule 2 now requires system_type (4-value domain) +
+  basis/functional/kpoint_integration on ReferenceSolid;
+  CalcUnit.kind + the harvest kind=="convergence" filter; and
+  the full three-phase producer (materialize_structure [Option
+  A], make_producer_options, pick_converged_unit,
+  extract_potential, the run-log/provenance helpers,
+  curation_executor, the CLI) wired predict->dispatch->harvest
+  with the guidance contribution.  The ipdb emitter gained
+  dict/array provenance support (first Imago-source entry) +
+  the system_type forensic extra.  imago_commit injection (C71
+  deferral) landed via _git_sha.  **C74 is CODE-COMPLETE,
+  full suite 630 passed** -- the toolchain seam (dispatch /
+  extract_potential per-site scfV / COD fetch / force cache
+  bypass) is injected + mocked in tests and needs a live Imago
+  run on the cluster to validate end-to-end.  STILL DEFERRED:
+  build_loen_units / harvest_fingerprints stub to [] pending the
+  C54 matcher registry + C60 fingerprint harvest.
 - [ ] C75. Seed `share/historicalGuidanceDB/entries/`
   via a deliberate stratified seed flight.  ~150-250
   calculations covering the chemistry surface
