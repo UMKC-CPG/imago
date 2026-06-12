@@ -214,11 +214,14 @@ def test_serialize_flight_sweep_and_metadata_round_trip(tmp_path):
     sweep = SweepRecord(
         varied_axes=("kpt-density",),
         fixed_axes={"basis": "fb", "functional": "ldau"})
-    # A flat prediction table standing in for the 6.2.8 helper's
-    #   PredictionRecord: scalars plus a string array.
+    # A flat stand-in payload (scalars plus a string array) that
+    #   the dispatch core stores and round-trips without ever
+    #   reading its contents.  This exercises that verbatim
+    #   write-then-read cycle, so the exact keys are just example
+    #   data, not the literal builder output.
     prediction = {
         "policy": "verify_around_prediction",
-        "predicted_value": 50.0,
+        "predicted_kpoint_density": 50.0,
         "confidence": 0.83,
         "is_under_trained": False,
         "neighbor_entry_ids": ["mp-1", "mp-2"],

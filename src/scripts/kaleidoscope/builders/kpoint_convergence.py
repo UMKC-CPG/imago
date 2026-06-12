@@ -1,5 +1,5 @@
-"""kaleidoscope.builders.predict_verify -- the predict-then-verify
-k-point-density flight builder (DESIGN 6.2.8 / 7.7;
+"""kaleidoscope.builders.kpoint_convergence -- the predict-then-
+verify k-point-density flight builder (DESIGN 6.2.8 / 7.7;
 PSEUDOCODE 15.6).
 
 This is the FIRST option-axis builder in the flight-builder split
@@ -26,7 +26,8 @@ knows the swept knob is a k-point density, and knows how to spell
 the per-grid-point directory tag.  To keep the dumb core's import
 graph free of the physics layer, a client imports it explicitly::
 
-    from kaleidoscope.builders.predict_verify import predict_settings
+    from kaleidoscope.builders.kpoint_convergence \
+        import build_kpoint_convergence
 
 Importing it pulls in ``guidance_db`` and ``structure_control``;
 the core never does.
@@ -76,8 +77,11 @@ class PredictionRecord:
     - ``policy``             : which grid path was taken
                                (``trust_no_verify`` /
                                ``wide_grid_no_prior`` /
-                               ``verify_around_prediction``).
-    - ``predicted_value``    : the predicted converged k-density.
+                               ``verify_around_prediction`` /
+                               ``curator_override``).
+    - ``predicted_kpoint_density`` : the predicted converged
+                               k-density (or the curator-pinned
+                               value in override mode).
     - ``confidence``         : the predictor's combined confidence
                                in [0, 1] that drove the grid width.
     - ``is_under_trained``   : True when the dataspace was too thin
@@ -91,11 +95,39 @@ class PredictionRecord:
                                (Bohr magnetons per atom); None for
                                non-crystalline systems.
     - ``system_type``        : the declared system type.
-    - ``feature_vector``     : the query Signature the prediction
-                               was made for.
+    - ``feature_vector``     : the query ``Signature`` the
+                               prediction was keyed on (recorded
+                               for forensics; the harvest recomputes
+                               its own from the .skl rather than
+                               reading this back).  A guidance_db
+                               ``Signature`` bundles four feature
+                               fields: ``system_type`` (the
+                               four-way label), the 13-long
+                               ``composition_vector`` (atom-fraction
+                               weight per element group, summing to
+                               1), ``lattice_family`` (the crystal
+                               family string -- empty when non-
+                               crystalline), and its 6-long
+                               ``lattice_onehot`` (all zeros when
+                               non-crystalline).  Typed ``object``
+                               (not ``Signature``) only to spare
+                               this builder importing that type;
+                               ``asdict`` serializes it to a
+                               sub-table either way.
+    - ``basis`` / ``functional`` / ``kpoint_integration`` : the
+                               sub-model the run uses.  Carried on
+                               the per-structure record (and ONLY
+                               here -- never duplicated into
+                               ``sweep.fixed_axes``) so a combined
+                               multi-structure flight whose
+                               structures differ in sub-model is
+                               still harvestable: each structure's
+                               harvest reads its own sub-model back
+                               from its own record (DESIGN 6.2.9 /
+                               7.8 step 3f).
     """
     policy: str
-    predicted_value: float | None
+    predicted_kpoint_density: float | None
     confidence: float
     is_under_trained: bool
     neighbor_entry_ids: tuple = ()
@@ -103,6 +135,9 @@ class PredictionRecord:
     predicted_magnetization: float | None = None
     system_type: str = ""
     feature_vector: object = None
+    basis: str = ""
+    functional: str = ""
+    kpoint_integration: str = ""
 
 
 # ------------------------------------------------------------------
@@ -257,8 +292,9 @@ def _slug_from_path(path):
     stable id can be derived from an in-memory object."""
     if not isinstance(path, str):
         raise KaleidoscopeError(
-            "predict_settings needs an explicit id when structure "
-            "is not a path (cannot derive a slug from an object)")
+            "build_kpoint_convergence needs an explicit id when "
+            "structure is not a path (cannot derive a slug from "
+            "an object)")
     stem = os.path.splitext(os.path.basename(path))[0]
     slug = re.sub(r"[^a-z0-9_-]+", "-", stem.lower()).strip("-")
     if not slug:
@@ -271,23 +307,31 @@ def _slug_from_path(path):
 #  Attaching the prediction without teaching the core about it
 # ------------------------------------------------------------------
 
-def attach_prediction_record(flight, record):
-    """Stash a PredictionRecord on the flight as a plain dict under
-    ``metadata["prediction"]`` (PSEUDOCODE 15.6).  The
-    domain-agnostic core only round-trips this opaque table
-    (serialize_flight emits it as ``[flight.prediction]``); the
-    harvest step reads it back.  ``asdict`` recurses through the
+def attach_prediction_record(flight, structure_id, record):
+    """Stash one structure's PredictionRecord on the flight as a
+    plain dict under ``metadata["predictions"][structure_id]``
+    (PSEUDOCODE 15.6; DESIGN 6.2.9).  Keying by structure id lets a
+    single combined flight carry many structures' predictions -- a
+    producer merges several one-entry mappings into one flight, and
+    the harvest looks each structure up by its id (DESIGN 7.8).
+
+    The domain-agnostic core only round-trips this opaque table
+    (serialize_flight emits it as ``[flight.predictions.<id>]``);
+    the harvest step reads it back.  ``asdict`` recurses through the
     nested ``feature_vector`` Signature so the whole record is
-    plain scalars, arrays, and a sub-table."""
-    flight.metadata["prediction"] = asdict(record)
+    plain scalars, arrays, and a sub-table (metadata must be
+    TOML-serializable)."""
+    flight.metadata.setdefault("predictions", {})
+    flight.metadata["predictions"][structure_id] = asdict(record)
 
 
 # ------------------------------------------------------------------
 #  The builder
 # ------------------------------------------------------------------
 
-def predict_settings(structure, options, dataspace, system_type,
-                     verify=True, id=None, root=""):
+def build_kpoint_convergence(structure, options, dataspace,
+                             system_type, verify=True, id=None,
+                             center=None, root=""):
     """Build a predict-then-verify ``Flight`` for one structure
     (DESIGN 6.2.8 / 7.7; PSEUDOCODE 15.6).
 
@@ -310,10 +354,17 @@ def predict_settings(structure, options, dataspace, system_type,
         declared by the caller.
     verify
         When False, *trust mode*: a length-1 grid at the
-        predicted value, no widening (DESIGN 6.2.1).
+        predicted (or pinned) value, no widening (DESIGN 6.2.1).
     id
         The flight-level unit id (a slug).  Derived from the
         structure path when omitted.
+    center
+        A curator-pinned k-density (the 5.7 ``kpoint_spec``
+        override).  When given, the predictor is BYPASSED and the
+        grid is built around this value instead -- a tight verify
+        grid (``verify=True``) or a single point (``verify=False``)
+        -- with policy ``curator_override`` (DESIGN 6.2.9).  When
+        None, the builder runs full predict-then-verify.
     root
         The workspace root for the returned flight.  PSEUDOCODE
         15.6 leaves this to the caller; it is exposed here as an
@@ -324,14 +375,14 @@ def predict_settings(structure, options, dataspace, system_type,
     -------
     (Flight, PredictionRecord)
         The flight is ready to dispatch (once ``root`` is set);
-        the record is also stashed in ``flight.metadata`` so the
-        harvest recovers it.
+        the record is also stashed in ``flight.metadata`` under
+        ``predictions[id]`` so the harvest recovers it (6.2.9).
     """
     # The three sub-model-selecting options are mandatory.
     for required in ("basis", "functional", "kpoint_integration"):
         if required not in options:
             raise KaleidoscopeError(
-                f"predict_settings options must carry "
+                f"build_kpoint_convergence options must carry "
                 f"{required!r} (it selects the predictor "
                 f"sub-model)")
 
@@ -340,27 +391,36 @@ def predict_settings(structure, options, dataspace, system_type,
     query_sig = compute_signature(
         resolved, system_type, dataspace.group_table)
 
-    # 2. Ask the predictor.  It always returns a PredictionResult
-    #    (never None), so no None-guards are needed below.
-    result = predict(
-        dataspace, query_sig, options["basis"],
-        options["functional"], options["kpoint_integration"])
-
-    # 3. Choose the grid of k-densities and record which path we
-    #    took (DESIGN 7.7 step 3).
-    if not verify:
-        # Trust mode: one point at the predicted value.
-        grid_values = [result.predicted_kpoint_density]
-        policy = "trust_no_verify"
-    elif result.is_under_trained:
-        # No usable prior: fall back to the wide-grid default.
-        grid_values = default_wide_kpoint_density_grid()
-        policy = "wide_grid_no_prior"
+    # 2-3. Choose the grid of k-densities and record which path we
+    #    took (DESIGN 7.7 step 3 / 6.2.9).  `result` stays None in
+    #    curator-override mode (the predictor is never consulted);
+    #    in predict mode predict() always returns a PredictionResult
+    #    (never None), so no None-guards are needed there.
+    if center is not None:
+        # Curator override (5.7 kpoint_spec.density): a tight verify
+        # grid centred on the pinned density, or a single point when
+        # not verifying.  No prediction is consulted.
+        result = None
+        grid_values = (build_verification_grid(center, 1.0)
+                       if verify else [center])
+        policy = "curator_override"
     else:
-        # Predict-then-verify with confidence-aware widening.
-        grid_values = build_verification_grid(
-            result.predicted_kpoint_density, result.confidence)
-        policy = "verify_around_prediction"
+        result = predict(
+            dataspace, query_sig, options["basis"],
+            options["functional"], options["kpoint_integration"])
+        if not verify:
+            # Trust mode: one point at the predicted value.
+            grid_values = [result.predicted_kpoint_density]
+            policy = "trust_no_verify"
+        elif result.is_under_trained:
+            # No usable prior: fall back to the wide-grid default.
+            grid_values = default_wide_kpoint_density_grid()
+            policy = "wide_grid_no_prior"
+        else:
+            # Predict-then-verify with confidence-aware widening.
+            grid_values = build_verification_grid(
+                result.predicted_kpoint_density, result.confidence)
+            policy = "verify_around_prediction"
 
     # 4. Round + dedupe to integer k-densities so the on-disk tag
     #    parses back to exactly the swept value (DESIGN 6.2.4); a
@@ -387,25 +447,48 @@ def predict_settings(structure, options, dataspace, system_type,
     # 5. Record the sweep shape so serialize_flight emits
     #    [flight.sweep] and the harvest recovers the varied axis
     #    without parsing run-directory paths (DESIGN 6.2.8 step 6).
-    sweep = SweepRecord(
-        varied_axes=("kpt-density",),
-        fixed_axes={
-            "basis": options["basis"],
-            "functional": options["functional"],
-            "kpoint_integration": options["kpoint_integration"]})
+    #    fixed_axes is EMPTY: the (basis, functional,
+    #    kpoint_integration) sub-model rides on the per-structure
+    #    record below, never duplicated here, so the same fact never
+    #    lives in two places (DESIGN 6.2.9).
+    sweep = SweepRecord(varied_axes=("kpt-density",), fixed_axes={})
 
     # 6. Assemble the full prediction record (DESIGN 7.7 step 5).
-    record = PredictionRecord(
-        policy=policy,
-        predicted_value=result.predicted_kpoint_density,
-        confidence=result.confidence,
-        is_under_trained=result.is_under_trained,
-        neighbor_entry_ids=result.neighbor_entry_ids,
-        predicted_gap=result.predicted_gap,
-        predicted_magnetization=result.predicted_magnetization,
-        system_type=system_type,
-        feature_vector=query_sig)
+    #    In curator-override mode there is no `result`: the record
+    #    documents the pinned value (full confidence, no neighbors,
+    #    no predicted character).  The three sub-model axes come
+    #    from `options` either way and are recorded ONLY here (not
+    #    in fixed_axes), so a combined mixed-sub-model flight stays
+    #    harvestable per structure (DESIGN 6.2.9 / 7.8 step 3f).
+    if result is None:
+        record = PredictionRecord(
+            policy=policy,
+            predicted_kpoint_density=float(center),
+            confidence=1.0,
+            is_under_trained=False,
+            neighbor_entry_ids=(),
+            predicted_gap=None,
+            predicted_magnetization=None,
+            system_type=system_type,
+            feature_vector=query_sig,
+            basis=options["basis"],
+            functional=options["functional"],
+            kpoint_integration=options["kpoint_integration"])
+    else:
+        record = PredictionRecord(
+            policy=policy,
+            predicted_kpoint_density=result.predicted_kpoint_density,
+            confidence=result.confidence,
+            is_under_trained=result.is_under_trained,
+            neighbor_entry_ids=result.neighbor_entry_ids,
+            predicted_gap=result.predicted_gap,
+            predicted_magnetization=result.predicted_magnetization,
+            system_type=system_type,
+            feature_vector=query_sig,
+            basis=options["basis"],
+            functional=options["functional"],
+            kpoint_integration=options["kpoint_integration"])
 
     flight = Flight(root=root, units=units, sweep=sweep)
-    attach_prediction_record(flight, record)
+    attach_prediction_record(flight, unit_id, record)
     return flight, record

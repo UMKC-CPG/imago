@@ -1,5 +1,5 @@
 """Tests for the predict-then-verify flight builder
-(kaleidoscope.builders.predict_verify; DESIGN 6.2.8 / 7.7;
+(kaleidoscope.builders.kpoint_convergence; DESIGN 6.2.8 / 7.7;
 PSEUDOCODE 15.6).
 
 The builder's job is purely to turn a prediction into a
@@ -20,7 +20,7 @@ import types
 import pytest
 
 from kaleidoscope import CalcUnit, Flight, KaleidoscopeError
-from kaleidoscope.builders import predict_verify as pv
+from kaleidoscope.builders import kpoint_convergence as kc
 from kaleidoscope.workspace import serialize_flight
 from guidance_db import PredictionResult, Signature
 
@@ -62,24 +62,41 @@ def _result(kpd=100.0, confidence=0.9, under_trained=False,
         predicted_gap=gap, predicted_magnetization=magnetization)
 
 
+def _no_predict(*args, **kwargs):
+    """A stand-in predictor that fails if called -- used by the
+    curator-override tests to prove the predictor is bypassed."""
+    raise AssertionError(
+        "predict() must not run in curator-override mode")
+
+
 @pytest.fixture
 def patched(monkeypatch):
     """Return a function that patches the physics layer to a fixed
     signature and a caller-supplied PredictionResult."""
     def _apply(result):
-        monkeypatch.setattr(pv, "compute_signature",
+        monkeypatch.setattr(kc, "compute_signature",
                             lambda *args, **kw: _signature())
-        monkeypatch.setattr(pv, "predict",
+        monkeypatch.setattr(kc, "predict",
                             lambda *args, **kw: result)
     return _apply
 
 
+@pytest.fixture
+def patched_no_predict(monkeypatch):
+    """Patch only compute_signature; install a predictor that
+    raises if consulted (for the override-bypass tests)."""
+    monkeypatch.setattr(kc, "compute_signature",
+                        lambda *args, **kw: _signature())
+    monkeypatch.setattr(kc, "predict", _no_predict)
+
+
 def _build(**kwargs):
-    """Run predict_settings with the standard stand-in inputs and
-    a caller-chosen id (a non-path structure cannot derive one).
-    The predictor itself is already installed by the ``patched``
-    fixture, so only the builder's own arguments are passed here."""
-    return pv.predict_settings(
+    """Run build_kpoint_convergence with the standard stand-in
+    inputs and a caller-chosen id (a non-path structure cannot
+    derive one).  The predictor itself is already installed by the
+    ``patched`` fixture, so only the builder's own arguments are
+    passed here."""
+    return kc.build_kpoint_convergence(
         _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline",
         id="si", **kwargs)
 
@@ -91,17 +108,17 @@ def _build(**kwargs):
 def test_logspace_endpoints_and_geometric_center():
     """logspace includes both endpoints and is geometrically
     spaced; a single-point request is the geometric midpoint."""
-    grid = pv.logspace(10.0, 40.0, 3)
+    grid = kc.logspace(10.0, 40.0, 3)
     assert grid[0] == pytest.approx(10.0)
     assert grid[-1] == pytest.approx(40.0)
     assert grid[1] == pytest.approx(20.0)        # sqrt(10*40)
-    assert pv.logspace(10.0, 40.0, 1) == \
+    assert kc.logspace(10.0, 40.0, 1) == \
         pytest.approx([math.sqrt(400.0)])
 
 
 def test_build_verification_grid_tight_when_confident():
     """confidence=1 -> a tight 3-point span [c/1.2, c*1.2]."""
-    grid = pv.build_verification_grid(100.0, 1.0)
+    grid = kc.build_verification_grid(100.0, 1.0)
     assert len(grid) == 3
     assert grid[0] == pytest.approx(100.0 / 1.2)
     assert grid[-1] == pytest.approx(100.0 * 1.2)
@@ -110,7 +127,7 @@ def test_build_verification_grid_tight_when_confident():
 def test_build_verification_grid_wide_when_unsure():
     """confidence=0.3 -> ~6 points over a wider [c/2.25, c*2.25]
     span (width = 1.2 + 1.5*0.7, n = round(3 + 4*0.7))."""
-    grid = pv.build_verification_grid(100.0, 0.3)
+    grid = kc.build_verification_grid(100.0, 0.3)
     assert len(grid) == 6
     assert grid[0] == pytest.approx(100.0 / 2.25)
     assert grid[-1] == pytest.approx(100.0 * 2.25)
@@ -120,18 +137,18 @@ def test_encode_axis_value_examples():
     """Integer-valued floats render as plain integers; a decimal
     uses 'p' for '.' and a leading 'm' for a negative
     (DESIGN 6.2.4 rule 3)."""
-    assert pv.encode_axis_value(50.0) == "50"
-    assert pv.encode_axis_value(1.5) == "1p5"
-    assert pv.encode_axis_value(-2.0) == "m2"
-    assert pv.encode_axis_value(0.1) == "0p1"
+    assert kc.encode_axis_value(50.0) == "50"
+    assert kc.encode_axis_value(1.5) == "1p5"
+    assert kc.encode_axis_value(-2.0) == "m2"
+    assert kc.encode_axis_value(0.1) == "0p1"
 
 
 def test_build_calc_tag_examples_and_order():
     """build_calc_tag returns one '<axis>-<value>' component per
     axis, in mapping order (DESIGN 6.2.4)."""
-    assert pv.build_calc_tag({"kpt-density": 50}) == \
+    assert kc.build_calc_tag({"kpt-density": 50}) == \
         ("kpt-density-50",)
-    assert pv.build_calc_tag(
+    assert kc.build_calc_tag(
         {"kpt-density": 50, "basis-size": 3}) == \
         ("kpt-density-50", "basis-size-3")
 
@@ -140,11 +157,11 @@ def test_build_calc_tag_rejects_non_slug_axis():
     """An axis name that is not a slug aborts -- it would be an
     unsafe directory level."""
     with pytest.raises(KaleidoscopeError):
-        pv.build_calc_tag({"Bad Axis": 5})
+        kc.build_calc_tag({"Bad Axis": 5})
 
 
 # --------------------------------------------------------------
-#  predict_settings: grid + policy selection
+#  build_kpoint_convergence: grid + policy selection
 # --------------------------------------------------------------
 
 def test_high_confidence_gives_tight_three_point_grid(patched):
@@ -189,7 +206,44 @@ def test_trust_mode_gives_single_point(patched):
 
 
 # --------------------------------------------------------------
-#  predict_settings: the built units and the prediction record
+#  build_kpoint_convergence: curator override (center given)
+# --------------------------------------------------------------
+
+def test_curator_override_pins_grid_and_bypasses_predictor(
+        patched_no_predict):
+    """A pinned ``center`` (the 5.7 kpoint_spec override) lays out a
+    tight verify grid around the curator value WITHOUT consulting
+    the predictor; policy is curator_override (DESIGN 6.2.9)."""
+    flight, record = kc.build_kpoint_convergence(
+        _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline",
+        id="si", center=120.0)
+    kpds = [unit.options["kpd"] for unit in flight.units]
+    assert record.policy == "curator_override"
+    assert record.predicted_kpoint_density == 120.0
+    assert record.confidence == 1.0
+    assert record.is_under_trained is False
+    assert record.neighbor_entry_ids == ()
+    assert record.predicted_gap is None
+    assert len(kpds) == 3                     # tight verify grid
+    assert 120 in kpds                        # centred on the pin
+    # The sub-model is still recorded on the override record.
+    assert record.basis == "fb"
+    assert record.kpoint_integration == "gaussian-0.1"
+
+
+def test_curator_override_single_point_when_not_verifying(
+        patched_no_predict):
+    """center with verify=False yields a single pinned point and
+    still bypasses the predictor."""
+    flight, record = kc.build_kpoint_convergence(
+        _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline",
+        id="si", center=120.0, verify=False)
+    assert [u.options["kpd"] for u in flight.units] == [120]
+    assert record.policy == "curator_override"
+
+
+# --------------------------------------------------------------
+#  build_kpoint_convergence: units and the prediction record
 # --------------------------------------------------------------
 
 def test_units_carry_kpd_tag_options_and_key_fields(patched):
@@ -211,36 +265,44 @@ def test_units_carry_kpd_tag_options_and_key_fields(patched):
             ["structure"]
 
 
-def test_sweep_record_names_varied_and_fixed_axes(patched):
-    """The flight's SweepRecord names the swept axis and the held-
-    constant sub-model axes so the harvest never path-parses."""
+def test_sweep_record_varied_axis_and_empty_fixed_axes(patched):
+    """The flight's SweepRecord names the swept axis; fixed_axes is
+    EMPTY because the (basis, functional, kpoint_integration)
+    sub-model rides on the per-structure record, never duplicated
+    here (DESIGN 6.2.9)."""
     patched(_result(kpd=100.0, confidence=1.0))
     flight, _ = _build(verify=True)
     assert flight.sweep.varied_axes == ("kpt-density",)
-    assert flight.sweep.fixed_axes == {
-        "basis": "fb", "functional": "gga-pbe",
-        "kpoint_integration": "gaussian-0.1"}
+    assert flight.sweep.fixed_axes == {}
 
 
 def test_prediction_record_shape_and_stash(patched):
-    """The returned record carries the full provenance, and the
-    same data is stashed (as a plain dict) in flight.metadata so
-    the harvest recovers it (PSEUDOCODE 15.6)."""
+    """The returned record carries the full provenance -- including
+    the sub-model (the sole home now that fixed_axes is empty) --
+    and the same data is stashed (as a plain dict) under
+    flight.metadata["predictions"][id] so the harvest recovers it
+    per structure (PSEUDOCODE 15.6 / DESIGN 6.2.9)."""
     patched(_result(kpd=100.0, confidence=0.83,
                     neighbor_ids=("mp-1", "mp-2"), gap=1.2,
                     magnetization=0.0))
     flight, record = _build(verify=True)
-    assert record.predicted_value == 100.0
+    assert record.predicted_kpoint_density == 100.0
     assert record.confidence == 0.83
     assert record.is_under_trained is False
     assert record.neighbor_entry_ids == ("mp-1", "mp-2")
     assert record.predicted_gap == 1.2
     assert record.system_type == "crystalline"
-    stashed = flight.metadata["prediction"]
+    # The sub-model rides on the record (DESIGN 6.2.9).
+    assert record.basis == "fb"
+    assert record.functional == "gga-pbe"
+    assert record.kpoint_integration == "gaussian-0.1"
+    # Keyed by structure id so one flight can carry many.
+    stashed = flight.metadata["predictions"]["si"]
     assert stashed["policy"] == "verify_around_prediction"
     # asdict keeps tuples in memory; they become TOML arrays only
     #   once serialize_flight writes them (see the round-trip test).
     assert stashed["neighbor_entry_ids"] == ("mp-1", "mp-2")
+    assert stashed["kpoint_integration"] == "gaussian-0.1"
     # feature_vector flattened to a nested dict (the Signature).
     assert stashed["feature_vector"]["lattice_family"] == "cubic"
 
@@ -255,8 +317,8 @@ def test_missing_required_option_raises(patched):
     bad = {"functional": "gga-pbe",
            "kpoint_integration": "gaussian-0.1"}   # no basis
     with pytest.raises(KaleidoscopeError):
-        pv.predict_settings(_STRUCTURE, bad, _DATASPACE,
-                            "crystalline", id="si")
+        kc.build_kpoint_convergence(
+            _STRUCTURE, bad, _DATASPACE, "crystalline", id="si")
 
 
 def test_non_path_structure_without_id_raises(patched):
@@ -264,21 +326,20 @@ def test_non_path_structure_without_id_raises(patched):
     stable slug, so the builder refuses rather than guess."""
     patched(_result())
     with pytest.raises(KaleidoscopeError):
-        pv.predict_settings(_STRUCTURE, _OPTIONS, _DATASPACE,
-                            "crystalline")
+        kc.build_kpoint_convergence(
+            _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline")
 
 
 def test_flight_serializes_prediction_and_sweep(patched, tmp_path):
     """End to end with Part A: a built flight serializes its
-    [flight.sweep] and [flight.prediction] blocks, and they read
-    back through tomllib unchanged."""
+    [flight.sweep] and per-id [flight.predictions.<id>] blocks, and
+    they read back through tomllib unchanged."""
     patched(_result(kpd=100.0, confidence=1.0))
     flight, _ = _build(verify=True, root=str(tmp_path))
     serialize_flight(flight)
     with open(tmp_path / "flight.toml", "rb") as flight_file:
         data = tomllib.load(flight_file)
     assert data["flight"]["sweep"]["varied_axes"] == ["kpt-density"]
-    assert data["flight"]["prediction"]["policy"] == \
-        "verify_around_prediction"
-    assert data["flight"]["prediction"]["feature_vector"][
-        "lattice_family"] == "cubic"
+    pred = data["flight"]["predictions"]["si"]
+    assert pred["policy"] == "verify_around_prediction"
+    assert pred["feature_vector"]["lattice_family"] == "cubic"

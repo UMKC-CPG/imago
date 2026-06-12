@@ -7,7 +7,8 @@ Role in the pipeline
 This is the *producer* half of the library / producer / consumer
 split (DESIGN 7 / ARCHITECTURE 10).  After kaleidoscope has
 dispatched a predict-then-verify flight (built by
-``kaleidoscope.builders.predict_verify``), each structure has been
+``kaleidoscope.builders.kpoint_convergence``), each structure has
+been
 run across a small grid of k-point densities.  This script reads
 that finished workspace back off disk, finds the converged grid
 point for each structure, and writes a rich ``GuidanceEntry`` to
@@ -104,7 +105,7 @@ _UNKNOWN_COMMIT = "unknown"
 # ==============================================================
 
 def decode_axis_value(token: str) -> float:
-    """Invert ``predict_verify.encode_axis_value``: turn the value
+    """Invert ``kpoint_convergence.encode_axis_value``: turn the value
     portion of a calc tag back into a number.  ``"p"`` was the
     stand-in for the decimal point and a leading ``"m"`` for a
     minus sign, so ``"100" -> 100``, ``"1p5" -> 1.5``,

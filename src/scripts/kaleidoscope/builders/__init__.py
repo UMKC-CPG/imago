@@ -11,8 +11,8 @@ builder turns a structure plus fixed options into a ``Flight`` of
 
 Anticipated members of this family (DESIGN 6.2):
 
-- ``predict_verify`` -- sweep k-point density as a predict-then-
-  verify verification grid, consulting the historical-guidance
+- ``kpoint_convergence`` -- sweep k-point density as a predict-
+  then-verify verification grid, consulting the historical-guidance
   database (the first builder, DESIGN 6.2.8 / 7.7).
 - (future) an XANES target-atom sweep.
 - (future) a basis-size sweep.
@@ -27,5 +27,6 @@ its builders, so importing the package costs nothing and pulling a
 builder's physics-layer dependencies (e.g. ``guidance_db``) is an
 explicit, opt-in act by the client::
 
-    from kaleidoscope.builders.predict_verify import predict_settings
+    from kaleidoscope.builders.kpoint_convergence \
+        import build_kpoint_convergence
 """
