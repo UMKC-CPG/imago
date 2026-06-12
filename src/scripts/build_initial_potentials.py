@@ -93,13 +93,23 @@ This file is being built incrementally (C48):
   their uniqueness (rule 8); only the harvest is deferred.
 """
 
+import argparse
 import os
+import subprocess
+import sys
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import initial_potential_db as ipdb
+import guidance_db
+import guidance_harvest
 from guidance_db import VALID_SYSTEM_TYPES
+from kaleidoscope import Flight, LocalExecutor, SweepRecord, dispatch
+from kaleidoscope.builders.kpoint_convergence import (
+    build_kpoint_convergence)
+from kaleidoscope.workspace import toml_line
 
 
 # ============================================================
@@ -725,3 +735,512 @@ def save_databases(databases: dict[str, ipdb.ElementDatabase],
 
     for elem, database in databases.items():
         ipdb.save(database, element_path(pdb_root, elem))
+
+
+# ============================================================
+#  Build identity, workspace, and structure materialization
+#  (DESIGN 5.7; PSEUDOCODE 11.4)
+# ============================================================
+
+def _git_sha() -> str:
+    """The current HEAD commit, or ``"unknown"`` when git is
+    unavailable.  Injected into the run options as ``imago_commit``
+    so kaleidoscope's run-reuse cache key (DESIGN 6.2.5) and every
+    produced entry's provenance both record which build the
+    *producer* believed it ran.  This records the producer's belief,
+    which can drift from the binary actually executed; C84 hardens
+    it by having Imago stamp its own build commit."""
+
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True)
+        return completed.stdout.strip() or "unknown"
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+
+
+def _now_iso8601_utc() -> str:
+    """The build timestamp in the schema's ISO-8601 UTC form."""
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def curation_workspace_root(pdb_root: str) -> str:
+    """The kaleidoscope workspace the producer dispatches its
+    combined flight into (PSEUDOCODE 11.4).  It sits beside the
+    databases under the shared data root so its run-reuse cache
+    (DESIGN 6.2.5) persists across producer runs and reference
+    solids dedupe against earlier builds."""
+
+    data_root = os.path.dirname(pdb_root.rstrip("/"))
+    return os.path.join(data_root, "curation", "workspace")
+
+
+def _cod_extension(ref: ReferenceSolid) -> str:
+    """The on-disk extension for a fetched COD structure.  COD
+    serves CIF, so v1 always writes ``.cif``; kept as a hook so a
+    future format negotiation has a single place to change."""
+
+    return ".cif"
+
+
+def _fetch_cod_structure(cod_id: int, cod_revision: str,
+                         dest: str) -> None:
+    """Fetch one pinned COD revision to ``dest`` (DESIGN 5.7,
+    Option A).  Strict on failure: a network outage, a COD outage,
+    or a missing pinned revision raises -- the fetch NEVER falls
+    back to a different revision, because a silent fallback would
+    desync the reproducible build from the pinned manifest.
+
+    NOTE (C74 end-to-end): the live COD fetch needs network access
+    and the COD per-revision API; it is exercised only on the
+    cluster.  A ``structure_path`` manifest avoids it entirely for
+    offline / unit-test runs."""
+
+    import urllib.error
+    import urllib.request
+
+    url = f"https://www.crystallography.net/cod/{cod_id}.cif"
+    try:
+        with urllib.request.urlopen(url) as response:
+            payload = response.read()
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"COD fetch failed for cod_id={cod_id} (pinned "
+            f"revision {cod_revision!r}): {exc}.  The build pins "
+            f"this revision and refuses to fall back.") from exc
+    with open(dest, "wb") as handle:
+        handle.write(payload)
+
+
+def materialize_structure(ref: ReferenceSolid, manifest_dir: str,
+                          pdb_root: str) -> str:
+    """Guarantee the reference solid's structure exists as a local
+    file and return its path (Option A; DESIGN 5.7 / PSEUDOCODE
+    11.4).  This is the producer's ONLY network access and is
+    deliberately decoupled from any run cache: it carries no SCF
+    state and makes no hit/miss decision.  Recompute avoidance
+    belongs to kaleidoscope's run-reuse cache (DESIGN 6.2.5), which
+    keys on this file's bytes.
+
+    A ``structure_path`` ref is a plain disk read, resolved under
+    the manifest directory (rule 4 already validated it exists).  A
+    ``cod_id`` ref fetches the pinned revision once into a plain
+    cache location (decoupled from the SCF cache), then reuses it."""
+
+    if ref.structure_path is not None:
+        return os.path.join(manifest_dir, ref.structure_path)
+
+    data_root = os.path.dirname(pdb_root.rstrip("/"))
+    local = os.path.join(
+        data_root, "atomicBDB", "cache", "structures",
+        ref.reference_id + _cod_extension(ref))
+    if not os.path.exists(local):
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        _fetch_cod_structure(ref.cod_id, ref.cod_revision, local)
+    return local
+
+
+# ============================================================
+#  Per-solid options + the (deferred) loen fingerprint units
+# ============================================================
+
+def make_producer_options(ref: ReferenceSolid,
+                          imago_commit: str) -> dict[str, Any]:
+    """The fixed (non-swept) makeinput options for a reference
+    solid's convergence flight (PSEUDOCODE 11.4).
+
+    Carries the sub-model triple the builder requires (``basis`` /
+    ``functional`` / ``kpoint_integration``), the ``scf_threshold``
+    and ``imago_commit`` that form kaleidoscope's run-reuse cache
+    key (DESIGN 6.2.5), and the fixed k-point shift.  The swept
+    k-density is deliberately absent: the builder adds it per grid
+    point (the ``kpd`` option), so a fixed value here would collide
+    with the sweep."""
+
+    options: dict[str, Any] = {
+        "basis": ref.basis,
+        "functional": ref.functional,
+        "kpoint_integration": ref.kpoint_integration,
+        "scf_threshold": ref.scf_threshold,
+        "imago_commit": imago_commit,
+    }
+    shift = ref.kpoint_spec.get("shift")
+    if shift is not None:
+        options["kpoint_shift"] = shift
+    return options
+
+
+def build_loen_units(ref: ReferenceSolid, struct_path: str) -> list:
+    """Structure-only ``imago -loen -scf no`` units, one per
+    Fortran-side fingerprint declaration (PSEUDOCODE 11.4).
+
+    DEFERRED (C54 matcher registry / C60 fingerprint harvest): the
+    Python-vs-Fortran split needs the MATCHERS registry to know
+    which declarations require a loen run, and the fingerprint
+    harvest itself is C60.  Until both land the producer dispatches
+    no loen units and harvests no fingerprints -- the convergence
+    path (the C74 deliverable) is unaffected.  Returns an empty
+    list, tagged here so the wiring point is obvious when C54/C60
+    fill it in."""
+
+    return []
+
+
+def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
+                         spec: ReferenceEntry,
+                         struct_path: str) -> list:
+    """Build one FingerprintRecord per declared fingerprint
+    (PSEUDOCODE 11.4 ``harvestFingerprints``).
+
+    DEFERRED (C60): the Python-side / Fortran-side matcher harvest
+    needs the C54 matcher registry and the C60 harvest itself.  For
+    C74 it returns an empty list so a produced entry carries no
+    fingerprints yet; the convergence potential -- C74's deliverable
+    -- is harvested fully."""
+
+    return []
+
+
+# ============================================================
+#  Harvest helpers: pick the converged run, read the potential
+#  (DESIGN 5.7 / 7.8; PSEUDOCODE 11.4)
+# ============================================================
+
+def _read_unit_result(workspace_root: str, unit) -> dict:
+    """Parse one dispatched unit's ``result.toml`` from its run
+    directory (the ``kaleidoscope.workspace.unit_run_dir`` layout:
+    ``<root>/wingbeats/<id>/<calc...>/result.toml``)."""
+
+    path = os.path.join(workspace_root, "wingbeats", unit.id,
+                        *unit.calc, "result.toml")
+    with open(path, "rb") as handle:
+        return tomllib.load(handle)
+
+
+def pick_converged_unit(flight: Flight, reference_id: str,
+                        workspace_root: str, scf_threshold: float):
+    """Return ``(unit, result_toml)`` for the converged grid point
+    of one solid's convergence sweep, or ``None`` when the energy is
+    still moving at the top of the grid (PSEUDOCODE 11.4).
+
+    Uses the same two-sided delta-below-threshold rule as the
+    guidance harvest (DESIGN 7.8 step 3c), reused via
+    ``guidance_harvest.pick_converged``: the smallest interior
+    k-density whose total energy is within ``scf_threshold`` of both
+    neighbours.  A single-point grid (a trust-mode run or a
+    single-point curator override) has no interior point to judge,
+    so its lone run IS the deliverable -- the producer trusts the
+    pinned/predicted point and harvests its potential directly."""
+
+    units = [unit for unit in flight.units
+             if unit.id == reference_id
+             and unit.kind == "convergence"]
+    units = sorted(
+        units,
+        key=lambda unit: guidance_harvest.swept_value_of(
+            unit, "kpt-density"))
+    results = [_read_unit_result(workspace_root, unit)
+               for unit in units]
+
+    if len(units) == 1:
+        return units[0], results[0]
+
+    energies = [result["total_energy"] for result in results]
+    index = guidance_harvest.pick_converged(energies, scf_threshold)
+    if index is None:
+        return None
+    return units[index], results[index]
+
+
+def extract_potential(result_toml: dict, atom_site: int
+                      ) -> tuple[list[float], list[float]]:
+    """Harvest the converged Gaussian potential for one atom site
+    from a dispatched run's result (DESIGN 5.7 / ARCHITECTURE 9.7;
+    PSEUDOCODE 11.4).
+
+    The converged ``scfV`` output (``result.outputs["scfV"]``, the
+    ``<edge>_initPot-<basis>.dat`` Imago writes from ``fort.8``)
+    holds the self-consistent potential as Gaussian terms.  Per the
+    5.7 harvest contract -- "converged ``scfV`` matches input
+    ``scfV``: coefficients from the output, alphas from the input,
+    taken together" -- the producer reads the coefficients out of
+    that file; the file shares the legacy ``coeff`` layout, so the
+    same parser yields both the coefficients and the alphas.
+
+    NOTE (C74 end-to-end): the per-atom-site selection within a
+    multi-site solid's ``scfV`` is validated only against a live
+    Imago run; ``atom_site`` is threaded through here for that
+    wiring (the single-site case reads the whole file)."""
+
+    scfv_path = result_toml["outputs"]["scfV"]
+    coefficients, alphas = _parse_coeff_file(scfv_path)
+    return coefficients, alphas
+
+
+def make_imago_provenance(commit: str, timestamp: str,
+                          ref: ReferenceSolid, atom_site: int,
+                          scf_iterations) -> dict[str, Any]:
+    """The ``[potential.provenance]`` block for a harvested
+    Imago-source entry (DESIGN 5.2 / 5.7).
+
+    Carries the ``source = "Imago"`` discriminant and every field
+    ``initial_potential_db.require_provenance`` demands of an Imago
+    entry (``reference_id``, ``atom_site``, ``kpoint_spec``,
+    ``scf_threshold``, ``scf_iterations``) so the 5.8 validation
+    harness can re-run the originating SCF, plus ``system_type``
+    recorded for forensics (5.7 rule 2)."""
+
+    return {
+        "source": "Imago",
+        "commit": commit,
+        "generated_at": timestamp,
+        "reference_id": ref.reference_id,
+        "system_type": ref.system_type,
+        "atom_site": atom_site,
+        "kpoint_spec": dict(ref.kpoint_spec),
+        "scf_threshold": ref.scf_threshold,
+        "scf_iterations": scf_iterations,
+    }
+
+
+# ============================================================
+#  Run log (DESIGN 5.7 / 5.8; PSEUDOCODE 11.4 write_run_log)
+# ============================================================
+
+def make_run_log_entry(ref: ReferenceSolid, unit,
+                       result_toml: dict) -> dict[str, Any]:
+    """One converged-solid row for the run log: the reference id,
+    the converged k-density (read off the chosen unit's calc tag),
+    and the SCF iteration count the 5.8 harness reads."""
+
+    return {
+        "reference_id": ref.reference_id,
+        "converged": True,
+        "converged_kpoint_density": guidance_harvest.swept_value_of(
+            unit, "kpt-density"),
+        "scf_iterations": result_toml.get("scf_iterations"),
+    }
+
+
+def make_nonconverged_log_entry(ref: ReferenceSolid
+                                ) -> dict[str, Any]:
+    """One non-converged-solid row for the run log: the sweep never
+    flattened, so no potential was harvested and the curator must
+    widen the grid (DESIGN 7.9)."""
+
+    return {"reference_id": ref.reference_id, "converged": False}
+
+
+def write_run_log(path: str, imago_commit: str, timestamp: str,
+                  per_run_log: list[dict[str, Any]]) -> None:
+    """Write the producer's run log (PSEUDOCODE 11.4): a manifest
+    snapshot header (the Imago commit + timestamp) followed by one
+    ``[[run]]`` block per reference solid.  The 5.8 validation
+    harness reads this to know which solids converged and in how
+    many SCF iterations.  Emitted with the kaleidoscope
+    ``toml_line`` helper so scalars/arrays format consistently."""
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as handle:
+        handle.write(toml_line("schema_version", 1))
+        handle.write(toml_line("imago_commit", imago_commit))
+        handle.write(toml_line("generated_at", timestamp))
+        for entry in per_run_log:
+            handle.write("\n[[run]]\n")
+            for key, value in entry.items():
+                if value is not None:
+                    handle.write(toml_line(key, value))
+
+
+def curation_executor(force: bool = False):
+    """Build the executor kaleidoscope dispatches the producer's
+    combined flight on (PSEUDOCODE 11.4).  v1 uses the in-process
+    ``LocalExecutor``; ``force`` is threaded for the planned
+    cache-bypass wiring (DESIGN 6.2.5) -- when set, cached runs
+    should re-run rather than dedupe.
+
+    NOTE (C74 end-to-end): a cluster producer swaps in a
+    ``ParslExecutor``; the force-driven cache bypass is wired
+    against the live run-reuse cache only on the cluster."""
+
+    return LocalExecutor()
+
+
+# ============================================================
+#  The producer pipeline (DESIGN 5.7; PSEUDOCODE 11.4)
+# ============================================================
+
+def build_initial_potentials(manifest_path: str, pdb_root: str,
+                             data_root: str, *, force: bool = False,
+                             single_element: str | None = None,
+                             dispatch_fn=dispatch,
+                             extract_fn=extract_potential
+                             ) -> list[dict[str, Any]]:
+    """The three-phase producer (DESIGN 5.7; PSEUDOCODE 11.4):
+    *build* a single combined flight, *dispatch* it through
+    kaleidoscope, then *harvest* each solid's converged potential
+    and contribute the same converged point back to the guidance
+    dataspace.  Returns the per-run log (also written to disk).
+
+    ``dispatch_fn`` and ``extract_fn`` are injected (defaulting to
+    the real kaleidoscope dispatch and the real scfV reader) so the
+    orchestration can be unit-tested with the toolchain seam mocked:
+    end-to-end dispatch and the per-site ``scfV`` read need a live
+    Imago run (C74)."""
+
+    manifest = load_manifest_v2(manifest_path)
+    manifest_dir = os.path.dirname(manifest.manifest_path)
+    guidance_root = os.path.join(data_root, "historicalGuidanceDB")
+    dataspace = guidance_db.load(guidance_root)
+    imago_commit = _git_sha()
+    timestamp = _now_iso8601_utc()
+    workspace = curation_workspace_root(pdb_root)
+
+    # ----- Phase 1: build.  Refresh the isolated baselines, then
+    # accumulate every solid's convergence units (and any loen
+    # units) into ONE combined flight so the whole producer run
+    # dispatches as a single flat parallel batch.
+    elements = None if single_element is None else [single_element]
+    databases = refresh_isolated_entries(
+        pdb_root, manifest, imago_commit, timestamp, elements)
+
+    all_units: list = []
+    predictions: dict[str, Any] = {}
+    struct_of: dict[str, str] = {}
+    for ref in manifest.reference_solids:
+        struct = materialize_structure(ref, manifest_dir, pdb_root)
+        struct_of[ref.reference_id] = struct
+        options = make_producer_options(ref, imago_commit)
+        # One builder call per solid (DESIGN 6.2.9): a pinned
+        # kpoint_spec.density is the curator override (predictor
+        # bypassed); otherwise full predict-then-verify.
+        flight_i, record_i = build_kpoint_convergence(
+            struct, options, dataspace, ref.system_type,
+            id=ref.reference_id,
+            center=ref.kpoint_spec.get("density"))
+        all_units.extend(flight_i.units)
+        all_units.extend(build_loen_units(ref, struct))
+        # Store the plain dict (metadata must be TOML-serializable).
+        predictions[ref.reference_id] = asdict(record_i)
+
+    flight = Flight(
+        root=workspace, units=all_units,
+        sweep=SweepRecord(varied_axes=("kpt-density",),
+                          fixed_axes={}),
+        metadata={"predictions": predictions})
+
+    # ----- Phase 2: dispatch.  Kaleidoscope runs and tracks every
+    # unit through the wingbeat seam and its run-reuse cache.
+    dispatch_fn(flight, executor=curation_executor(force))
+
+    # ----- Phase 3: harvest.  Per solid, pick the converged grid
+    # point, extract the potential at each named site, and record
+    # the run.  Non-converged solids are logged and skipped.
+    per_run_log: list[dict[str, Any]] = []
+    for ref in manifest.reference_solids:
+        converged = pick_converged_unit(
+            flight, ref.reference_id, workspace, ref.scf_threshold)
+        if converged is None:
+            per_run_log.append(make_nonconverged_log_entry(ref))
+            continue
+        unit, result_toml = converged
+        per_run_log.append(
+            make_run_log_entry(ref, unit, result_toml))
+        scf_iterations = result_toml.get("scf_iterations")
+
+        for spec in ref.entries:
+            elem_key = spec.element.lower()
+            if elem_key not in databases:
+                continue        # filtered out by --element
+            coefficients, alphas = extract_fn(
+                result_toml, spec.atom_site)
+            new_entry = ipdb.PotentialEntry(
+                label=spec.label,
+                default=spec.default,
+                description=spec.description,
+                num_gaussians=len(coefficients),
+                alpha_min=min(alphas),
+                alpha_max=max(alphas),
+                coefficients=coefficients,
+                alphas=alphas,
+                provenance=make_imago_provenance(
+                    imago_commit, timestamp, ref, spec.atom_site,
+                    scf_iterations),
+                fingerprints=harvest_fingerprints(
+                    flight, ref, spec, struct_of[ref.reference_id]))
+            database = databases[elem_key]
+            # Replace any prior entry with the same label (manifest
+            # rule 6 makes the only possible prior the same entry
+            # from a previous run).
+            database.potentials = [
+                entry for entry in database.potentials
+                if entry.label != spec.label]
+            database.potentials.append(new_entry)
+
+    # ----- Phase 3b: guidance contribution.  The same converged
+    # grid points feed the historical-guidance dataspace staging,
+    # so every solid the producer converges sharpens the predictor.
+    guidance_harvest.harvest_flight(
+        workspace, guidance_root, dataspace)
+
+    # ----- Write outputs: every affected element file, plus the
+    # run log the 5.8 validation harness reads.
+    save_databases(databases, pdb_root)
+    write_run_log(
+        os.path.join(data_root, "curation", "run_log.toml"),
+        imago_commit, timestamp, per_run_log)
+    return per_run_log
+
+
+# ============================================================
+#  Command-line interface
+# ============================================================
+
+def _default_pdb_root() -> str:
+    """``$IMAGO_DATA/atomicPDB`` (DESIGN 5.4 layout), or empty when
+    $IMAGO_DATA is unset so the parser can demand ``--pdb-root``."""
+
+    data_dir = os.environ.get("IMAGO_DATA", "")
+    return os.path.join(data_dir, "atomicPDB") if data_dir else ""
+
+
+def main(argv=None) -> int:
+    """CLI entry point: run the producer over a curation manifest
+    (DESIGN 5.7).  ``--element`` restricts the run to one element's
+    database; ``--force`` bypasses kaleidoscope's run-reuse cache so
+    every reference run re-executes."""
+
+    parser = argparse.ArgumentParser(
+        description="Build the augmented initial-potential database "
+                    "from a curation manifest (DESIGN 5.7).")
+    parser.add_argument(
+        "--manifest", required=True,
+        help="path to the curation manifest (schema v2)")
+    parser.add_argument(
+        "--pdb-root", default=_default_pdb_root(),
+        help="the atomicPDB root (default: $IMAGO_DATA/atomicPDB)")
+    parser.add_argument(
+        "--element", default=None,
+        help="restrict the build to this one element's database")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="bypass the run-reuse cache so every run re-executes")
+    args = parser.parse_args(argv)
+
+    if not args.pdb_root:
+        parser.error("--pdb-root not given and $IMAGO_DATA is unset")
+    data_root = os.path.dirname(args.pdb_root.rstrip("/"))
+
+    per_run_log = build_initial_potentials(
+        args.manifest, args.pdb_root, data_root,
+        force=args.force, single_element=args.element)
+    converged = sum(1 for row in per_run_log if row["converged"])
+    print(f"producer: {converged}/{len(per_run_log)} reference "
+          f"solids converged and harvested")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

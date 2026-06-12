@@ -16,6 +16,8 @@ import ``build_initial_potentials`` directly.
 """
 
 import os
+import tomllib
+import types
 
 import pytest
 
@@ -33,8 +35,23 @@ from build_initial_potentials import (
     save_databases,
     _parse_pot_file,
     _parse_coeff_file,
+    make_producer_options,
+    make_imago_provenance,
+    build_loen_units,
+    harvest_fingerprints,
+    curation_workspace_root,
+    materialize_structure,
+    extract_potential,
+    pick_converged_unit,
+    make_run_log_entry,
+    make_nonconverged_log_entry,
+    write_run_log,
+    build_initial_potentials,
 )
+import build_initial_potentials as bip
 import initial_potential_db as ipdb
+from kaleidoscope import CalcUnit, Flight
+from kaleidoscope.builders.kpoint_convergence import PredictionRecord
 
 
 pytestmark = pytest.mark.unit
@@ -758,3 +775,268 @@ class TestRefreshIsolatedEntries:
         assert iso.num_gaussians == 3
         assert iso.default is False
         assert iso.provenance["commit"] == "new"
+
+
+# ============================================================
+#  Producer pipeline -- incr 3c (the toolchain seam is mocked)
+# ============================================================
+
+def _ref(**overrides) -> ReferenceSolid:
+    """A ReferenceSolid with sensible defaults for the helper
+    tests; ``overrides`` replace individual fields."""
+
+    base = dict(
+        reference_id="au_fcc", system_type="crystalline",
+        basis="fb", functional="wigner",
+        kpoint_integration="linear-tetrahedral",
+        kpoint_spec={"density": 60.0, "shift": [0.0, 0.0, 0.0]},
+        scf_threshold=1.0e-6, cod_id=None, cod_revision=None,
+        structure_path="au.skel",
+        entries=[ReferenceEntry(
+            element="Au", atom_site=1, label="default_solid",
+            default=True, description="Au bulk.")])
+    base.update(overrides)
+    return ReferenceSolid(**base)
+
+
+def _write_result(workspace, unit_id, calc, *, energy,
+                  iterations=7, scfv="scfV.dat"):
+    """Write one dispatched unit's result.toml under the workspace
+    (the kaleidoscope run-dir layout)."""
+
+    run_dir = os.path.join(workspace, "wingbeats", unit_id, *calc)
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, "result.toml")
+    with open(path, "w") as handle:
+        handle.write(f"total_energy = {energy}\n")
+        handle.write(f"scf_iterations = {iterations}\n")
+        handle.write(f'outputs = {{ scfV = "{scfv}" }}\n')
+
+
+# ---- pure helpers --------------------------------------------
+
+def test_make_producer_options_carries_submodel_and_shift():
+    options = make_producer_options(_ref(), "abc123")
+    assert options["basis"] == "fb"
+    assert options["functional"] == "wigner"
+    assert options["kpoint_integration"] == "linear-tetrahedral"
+    assert options["scf_threshold"] == pytest.approx(1.0e-6)
+    assert options["imago_commit"] == "abc123"
+    assert options["kpoint_shift"] == [0.0, 0.0, 0.0]
+    # The swept k-density is added per grid point by the builder,
+    #   so it must not be pinned in the fixed options.
+    assert "kpd" not in options
+
+
+def test_make_imago_provenance_satisfies_schema():
+    prov = make_imago_provenance(
+        "abc123", "2026-06-12T00:00:00Z", _ref(), 1, 7)
+    assert prov["source"] == "Imago"
+    assert prov["system_type"] == "crystalline"
+    assert prov["scf_iterations"] == 7
+    # It must pass the ipdb Imago-provenance validator unchanged.
+    ipdb.require_provenance(prov, "x.toml", "default_solid")
+
+
+def test_loen_and_fingerprint_harvest_are_deferred_stubs():
+    # C54/C60: no loen units, no fingerprints yet.
+    assert build_loen_units(_ref(), "au.skel") == []
+    assert harvest_fingerprints(
+        None, _ref(), _ref().entries[0], "au.skel") == []
+
+
+def test_materialize_structure_resolves_local_path(tmp_path):
+    # The structure_path branch is a plain join under the manifest
+    #   dir -- no network.
+    path = materialize_structure(
+        _ref(structure_path="sub/au.skel"),
+        manifest_dir="/manifests", pdb_root="/data/atomicPDB")
+    assert path == os.path.join("/manifests", "sub", "au.skel")
+
+
+def test_curation_workspace_root_sits_beside_databases():
+    root = curation_workspace_root("/data/atomicPDB")
+    assert root == os.path.join("/data", "curation", "workspace")
+
+
+def test_extract_potential_reads_scfv_coefficients(tmp_path):
+    scfv = tmp_path / "scfV.dat"
+    scfv.write_text("2\n0.5 1.0 0 0 0\n0.3 2.0 0 0 0\n")
+    coeffs, alphas = extract_potential(
+        {"outputs": {"scfV": str(scfv)}}, atom_site=1)
+    assert coeffs == [0.5, 0.3]
+    assert alphas == [1.0, 2.0]
+
+
+# ---- pick_converged_unit -------------------------------------
+
+def _grid_flight(unit_id, kpds):
+    units = [CalcUnit(id=unit_id, structure="au.skel",
+                      calc=(f"kpt-density-{k}",)) for k in kpds]
+    return Flight(root="ws", units=units)
+
+
+def test_pick_converged_unit_returns_flat_interior_point(tmp_path):
+    workspace = str(tmp_path)
+    flight = _grid_flight("au_fcc", [50, 100, 200])
+    flight.root = workspace
+    # Flat across the interior point (both neighbour deltas below
+    #   threshold) so the two-sided rule converges at index 1.
+    for k, energy in zip((50, 100, 200), (0.5, 0.5, 0.5)):
+        _write_result(workspace, "au_fcc",
+                      (f"kpt-density-{k}",), energy=energy)
+    unit, result = pick_converged_unit(
+        flight, "au_fcc", workspace, scf_threshold=0.1)
+    assert unit.calc == ("kpt-density-100",)
+    assert result["scf_iterations"] == 7
+
+
+def test_pick_converged_unit_none_when_energy_still_moving(
+        tmp_path):
+    workspace = str(tmp_path)
+    flight = _grid_flight("au_fcc", [50, 100, 200])
+    flight.root = workspace
+    for k, energy in zip((50, 100, 200), (3.0, 2.0, 1.0)):
+        _write_result(workspace, "au_fcc",
+                      (f"kpt-density-{k}",), energy=energy)
+    assert pick_converged_unit(
+        flight, "au_fcc", workspace, scf_threshold=0.1) is None
+
+
+def test_pick_converged_unit_single_point_is_the_deliverable(
+        tmp_path):
+    # A single pinned point (curator override / trust mode) has no
+    #   interior to judge: its lone run IS the deliverable.
+    workspace = str(tmp_path)
+    flight = _grid_flight("au_fcc", [120])
+    flight.root = workspace
+    _write_result(workspace, "au_fcc", ("kpt-density-120",),
+                  energy=0.5)
+    unit, _ = pick_converged_unit(
+        flight, "au_fcc", workspace, scf_threshold=0.1)
+    assert unit.calc == ("kpt-density-120",)
+
+
+# ---- run log -------------------------------------------------
+
+def test_write_run_log_round_trips(tmp_path):
+    log_path = str(tmp_path / "curation" / "run_log.toml")
+    rows = [
+        make_run_log_entry(
+            _ref(), CalcUnit(id="au_fcc", structure="au.skel",
+                             calc=("kpt-density-100",)),
+            {"scf_iterations": 7}),
+        make_nonconverged_log_entry(_ref(reference_id="ag_fcc")),
+    ]
+    write_run_log(log_path, "abc123", "2026-06-12T00:00:00Z", rows)
+    with open(log_path, "rb") as handle:
+        data = tomllib.load(handle)
+    assert data["imago_commit"] == "abc123"
+    assert data["run"][0]["reference_id"] == "au_fcc"
+    assert data["run"][0]["converged"] is True
+    assert data["run"][0]["converged_kpoint_density"] == 100
+    assert data["run"][1]["converged"] is False
+
+
+# ---- the orchestrator (toolchain seam mocked) ----------------
+
+_AU_LOCAL_MANIFEST = """\
+schema_version = 2
+
+[[reference_solid]]
+reference_id = "au_fcc"
+system_type = "crystalline"
+basis = "fb"
+functional = "wigner"
+kpoint_integration = "linear-tetrahedral"
+structure_path = "au.skel"
+kpoint_spec = { density = 60.0, shift = [0.0, 0.0, 0.0] }
+scf_threshold = 1.0e-6
+
+  [[reference_solid.entry]]
+  element = "Au"
+  atom_site = 1
+  label = "default_solid"
+  default = true
+  description = "Au in fcc bulk."
+"""
+
+
+def test_build_initial_potentials_harvests_curated_entry(
+        tmp_path, monkeypatch):
+    """End-to-end producer wiring with the toolchain seam mocked:
+    the builder, dispatch, the scfV read, and the guidance harvest
+    are all stubbed, leaving the producer's own orchestration under
+    test -- build the combined flight, pick the converged point,
+    assemble + save the Imago-source entry, and write the run log."""
+
+    data_root = str(tmp_path)
+    pdb_root = os.path.join(data_root, "atomicPDB")
+    _make_element(pdb_root, "au", [1.0, 2.0, 3.0],
+                  [0.15, 1.5, 1.0e8])
+    (tmp_path / "au.skel").write_text("dummy structure\n")
+    manifest_path = _write(tmp_path, _AU_LOCAL_MANIFEST)
+
+    # Fake dataspace + builder: build_kpoint_convergence returns a
+    #   three-point grid flight + a real PredictionRecord (asdict
+    #   must serialize it).
+    monkeypatch.setattr(
+        bip.guidance_db, "load",
+        lambda root: types.SimpleNamespace(group_table={}))
+
+    def fake_builder(struct, options, dataspace, system_type, *,
+                     id, center):
+        units = [CalcUnit(id=id, structure=struct,
+                          calc=(f"kpt-density-{k}",),
+                          options={**options, "kpd": k})
+                 for k in (50, 100, 200)]
+        record = PredictionRecord(
+            policy="verify_around_prediction",
+            predicted_kpoint_density=100.0, confidence=0.9,
+            is_under_trained=False, system_type=system_type,
+            basis=options["basis"], functional=options["functional"],
+            kpoint_integration=options["kpoint_integration"])
+        # root is overridden on the combined flight the producer
+        #   builds, so a placeholder here is fine.
+        return Flight(root="", units=units), record
+
+    monkeypatch.setattr(bip, "build_kpoint_convergence",
+                        fake_builder)
+
+    # Mock dispatch: write a flat-energy result.toml per unit so
+    #   pick_converged_unit lands on kpt-density-100.
+    def fake_dispatch(flight, executor=None):
+        # Flat energies so the two-sided rule converges at the
+        #   interior point (kpt-density-100) under the 1e-6
+        #   manifest threshold.
+        for unit in flight.units:
+            _write_result(flight.root, unit.id, unit.calc,
+                          energy=0.5)
+
+    # Mock the scfV read and the guidance harvest (tested
+    #   elsewhere); record that the contribution fired.
+    harvested = {}
+    monkeypatch.setattr(
+        bip.guidance_harvest, "harvest_flight",
+        lambda ws, db, ds: harvested.setdefault("called", True))
+
+    build_initial_potentials(
+        manifest_path, pdb_root, data_root,
+        dispatch_fn=fake_dispatch,
+        extract_fn=lambda result, site: ([0.5, 0.3], [1.0, 2.0]))
+
+    # The Au database gained the curated default_solid entry.
+    database = ipdb.load(element_path(pdb_root, "au"),
+                         known_methods=None)
+    entry = ipdb.lookup(database, "default_solid")
+    assert entry.coefficients == [0.5, 0.3]
+    assert entry.num_gaussians == 2
+    assert entry.provenance["source"] == "Imago"
+    assert entry.provenance["reference_id"] == "au_fcc"
+    # The guidance contribution fired and the run log was written.
+    assert harvested.get("called") is True
+    with open(os.path.join(data_root, "curation", "run_log.toml"),
+              "rb") as handle:
+        run_log = tomllib.load(handle)
+    assert run_log["run"][0]["converged"] is True
+    assert run_log["run"][0]["converged_kpoint_density"] == 100

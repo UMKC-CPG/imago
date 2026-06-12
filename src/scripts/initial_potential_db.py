@@ -783,7 +783,18 @@ def _format_block(values: dict[str, Any],
     """
 
     width = max(len(k) for k in keys)
-    return [_format_kv(k, values[k], width) for k in keys]
+    lines = []
+    for key in keys:
+        value = values[key]
+        # A dict value (an Imago provenance ``kpoint_spec``) renders
+        #   as a single-line inline table, like a fingerprint
+        #   sub_spec; every other value is a plain aligned scalar.
+        if isinstance(value, dict):
+            lines.append(
+                f"{key.ljust(width)} = {_format_inline_table(value)}")
+        else:
+            lines.append(_format_kv(key, value, width))
+    return lines
 
 
 def _format_kv(key: str, value: Any, width: int) -> str:
@@ -879,6 +890,12 @@ def _format_inline_table(table: dict[str, Any]) -> str:
         value = table[key]
         if isinstance(value, dict):
             rhs = _format_inline_table(value)
+        elif isinstance(value, list):
+            # An inline array (e.g. an Imago provenance
+            #   kpoint_spec's ``shift`` triple).  Elements are
+            #   scalars; nested arrays are not expected here.
+            rhs = "[" + ", ".join(
+                _format_scalar(element) for element in value) + "]"
         else:
             rhs = _format_scalar(value)
         parts.append(f"{key} = {rhs}")
@@ -959,7 +976,13 @@ def _ordered_provenance_keys(
         "scf_threshold", "scf_iterations",
     ]
     if prov.get("source") == "Imago":
-        return base + extras
+        ordered = base + extras
+        # system_type is an optional forensic extra the producer
+        #   records (DESIGN 5.7 rule 2); emitted only when present
+        #   so a hand-written Imago entry without it still saves.
+        if "system_type" in prov:
+            ordered = ordered + ["system_type"]
+        return ordered
     return base
 
 

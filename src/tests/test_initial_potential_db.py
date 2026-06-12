@@ -784,6 +784,42 @@ class TestRoundTrip:
         assert isinstance(
             prov_def["scf_threshold"], float)
 
+    def test_round_trip_imago_provenance_dict_kpoint_spec(
+            self, tmp_path):
+        """An Imago entry whose provenance carries ``kpoint_spec``
+        as a nested table (density + a shift array) -- the shape
+        the C74 producer records straight from the manifest --
+        round-trips through save/load.  The emitter renders the
+        dict as an inline table and the shift as an inline array,
+        and the optional ``system_type`` forensic extra survives."""
+
+        provenance = {
+            "source": "Imago", "commit": "abc123",
+            "generated_at": "2026-06-12T00:00:00Z",
+            "reference_id": "au_fcc", "atom_site": 1,
+            "kpoint_spec": {"density": 60.0,
+                            "shift": [0.0, 0.0, 0.0]},
+            "scf_threshold": 1.0e-6, "scf_iterations": 7,
+            "system_type": "crystalline",
+        }
+        db = ElementDatabase(
+            schema_version=2, element_symbol="Au", nuclear_z=79.0,
+            nuclear_alpha=4.0e-1, covalent_radius=1.0)
+        db.potentials.append(_isolated_entry())     # default=False
+        db.potentials.append(PotentialEntry(
+            label="default_solid", default=True,
+            description="Au bulk.", num_gaussians=2,
+            alpha_min=1.0, alpha_max=2.0,
+            coefficients=[0.5, 0.3], alphas=[1.0, 2.0],
+            provenance=provenance))
+
+        path = _path_for(tmp_path, "Au")
+        save(db, path)
+        reloaded = lookup(load(path), "default_solid").provenance
+        assert reloaded["kpoint_spec"] == {
+            "density": 60.0, "shift": [0.0, 0.0, 0.0]}
+        assert reloaded["system_type"] == "crystalline"
+
     def test_round_trip_idempotent_save(self, tmp_path):
         """save(load(save(db)), path2) produces byte-identical
         output to the first save.  This is the strongest
