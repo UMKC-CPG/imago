@@ -2073,13 +2073,28 @@ the C48.3 wiring (C74) is the first major consumer.
   the potential deliverable (5.7) and skipped for guidance
   staging; guidance for a known density is seeded manually
   (DESIGN 7.8 intro / 7.9).
-  Also note the #7 docs-only renames still pending in CODE:
-  rename builders/predict_verify.py -> kpoint_convergence.py
-  + predict_settings -> build_kpoint_convergence +
-  predicted_value -> predicted_kpoint_density (+ the
-  test_predict_verify.py / guidance_harvest.py / builders
-  __init__ import sites).  Plus #5 (force thru dispatch),
-  #8 (throw on missing gap), and the three C71 deferrals.
+  **PROGRESS (2026-06-12): incr 1 (builder, 94ba551) + incr 2
+  (harvest, 838878d) DONE -- the fully unit-testable layers,
+  612 passed.**  Incr 1 = the #7 renames (predict_verify.py ->
+  kpoint_convergence.py, predict_settings ->
+  build_kpoint_convergence, predicted_value ->
+  predicted_kpoint_density, + import sites), the per-record
+  sub-model + empty fixed_axes, the per-id
+  metadata["predictions"] stash, and the curator-override
+  (center) path.  Incr 2 = the harvest per-id read + no-record
+  skip + crystalline-default retired + #8 (gap required via
+  _require_field) + len==1 single-point skip + the rts/rt
+  rename.  **NEXT = incr 3 (producer pipeline, PSEUDOCODE
+  11.4):** the greenfield reference-solid predict/dispatch/
+  harvest path + ~12 unbuilt helpers (materialize_structure,
+  make_producer_options, build_loen_units, pick_converged_unit,
+  extract_potential, harvestFingerprints, curation_executor,
+  log/provenance helpers); load_manifest_v2 rule 2 ->
+  system_type (4-value domain) + basis/functional/
+  kpoint_integration on ReferenceSolid; CalcUnit.kind +
+  harvest kind=="convergence" filter (deferred from incr 2);
+  #5 (force thru dispatch) and the imago_commit-injection C71
+  deferral.  Needs a live Imago toolchain for end-to-end.
 - [ ] C75. Seed `share/historicalGuidanceDB/entries/`
   via a deliberate stratified seed flight.  ~150-250
   calculations covering the chemistry surface
