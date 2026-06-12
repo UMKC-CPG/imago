@@ -377,11 +377,17 @@ def harvest_flight(workspace_root, db_root, dataspace):
             "with a varied axis -- nothing to harvest")
     axis = flight.sweep.varied_axes[0]
 
-    # Group the units by structure id: one verification sub-grid
-    #   per structure (insertion order preserved for a stable
-    #   summary).
+    # Keep only the convergence-sweep runs (DESIGN 6.2.9 / 7.8 step
+    #   2): a producer flight also carries structure-only
+    #   "fingerprint" loen units that share a structure id but
+    #   belong to a different harvester, and must not be mistaken
+    #   for grid points.  Then group by structure id: one
+    #   verification sub-grid per structure (insertion order
+    #   preserved for a stable summary).
     groups: dict[str, list] = {}
     for unit in flight.units:
+        if unit.kind != "convergence":
+            continue
         groups.setdefault(unit.id, []).append(unit)
 
     summaries = []

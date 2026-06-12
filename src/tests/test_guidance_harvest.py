@@ -45,7 +45,7 @@ _DATASPACE = types.SimpleNamespace(group_table={})
 def _make_workspace(tmp_path, kpds, energies, *,
                     gaps=None, kinds=None, mags=None,
                     scf_threshold=1.0, write_scf_threshold=True,
-                    write_gap=True,
+                    write_gap=True, add_loen=False,
                     policy="verify_around_prediction",
                     system_type="crystalline", confidence=0.9,
                     neighbor_ids=("mp-1", "mp-2"),
@@ -59,6 +59,13 @@ def _make_workspace(tmp_path, kpds, energies, *,
     root = str(tmp_path / "flight")
     units = [CalcUnit(id=unit_id, structure=structure,
                       calc=(f"kpt-density-{k}",)) for k in kpds]
+    if add_loen:
+        # A structure-only "fingerprint" loen unit sharing the
+        #   structure id (DESIGN 6.2.9): the convergence harvest must
+        #   filter it out.  It gets no result.toml below, so if the
+        #   harvest did NOT skip it the run would fail loudly.
+        units.append(CalcUnit(id=unit_id, structure=structure,
+                              calc=("loen",), kind="fingerprint"))
     # fixed_axes is empty: the sub-model rides on the per-structure
     #   prediction record (DESIGN 6.2.9), which the harvest reads.
     sweep = SweepRecord(varied_axes=("kpt-density",), fixed_axes={})
@@ -304,6 +311,23 @@ def test_missing_scf_threshold_raises(patched, tmp_path):
                            write_scf_threshold=False)
     with pytest.raises(ValueError):
         gh.harvest_flight(root, str(tmp_path / "db"), _DATASPACE)
+
+
+def test_fingerprint_loen_unit_is_ignored(patched, tmp_path):
+    """A structure-only 'fingerprint' loen unit sharing the
+    structure id is NOT a grid point: the convergence harvest filters
+    it out by kind (DESIGN 6.2.9 / 7.8 step 2) and still stages
+    exactly one entry from the convergence sweep.  (The loen unit has
+    no result.toml, so a failure to skip it would raise.)"""
+    root = _make_workspace(tmp_path, [50, 100, 200],
+                           [0.5, 0.5, 0.5], add_loen=True)
+    summaries = gh.harvest_flight(root, str(tmp_path / "db"),
+                                  _DATASPACE)
+    assert len(patched["entries"]) == 1
+    assert patched["entries"][0].measured.kpoint_density == 100
+    # one summary line for the single structure (the loen unit did
+    #   not create a second group).
+    assert len(summaries) == 1 and "staged" in summaries[0]
 
 
 def test_no_prediction_record_skips(patched, tmp_path):

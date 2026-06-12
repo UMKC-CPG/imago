@@ -237,6 +237,9 @@ def serialize_flight(flight):
             #   (``calc = []`` for a unit with no second level).
             flight_file.write(toml_line("calc", unit.calc))
             flight_file.write(toml_line("wingbeat", unit.wingbeat))
+            # kind is the run-role label (DESIGN 6.2.9); written
+            #   verbatim so each harvester can filter on it.
+            flight_file.write(toml_line("kind", unit.kind))
 
         # The optional sweep description (DESIGN 6.2.1/6.2.8): its
         #   fixed_axes dict nests as a [flight.sweep.fixed_axes]
@@ -261,9 +264,9 @@ def read_flight_toml(path):
     one that dispatched the flight, so it recovers the plan from
     disk rather than from an in-memory object.  Only the fields
     ``serialize_flight`` persists are restored: each unit's
-    identity (id, structure, calc tuple, wingbeat) -- but NOT its
-    makeinput ``options`` or ``key_fields``, which live with the
-    run, not the plan -- plus the optional ``[flight.sweep]``
+    identity (id, structure, calc tuple, wingbeat, kind) -- but NOT
+    its makeinput ``options`` or ``key_fields``, which live with
+    the run, not the plan -- plus the optional ``[flight.sweep]``
     block and every opaque ``[flight.<key>]`` metadata table
     (e.g. ``[flight.prediction]``).  The sweep's ordered
     ``varied_axes`` is what lets the harvest read each swept value
@@ -281,7 +284,10 @@ def read_flight_toml(path):
             #   shape so unit_run_dir can splat it (empty == no
             #   second directory level).
             calc=tuple(raw_unit.get("calc", [])),
-            wingbeat=raw_unit.get("wingbeat")))
+            wingbeat=raw_unit.get("wingbeat"),
+            # kind defaults to "convergence" for a pre-kind
+            #   flight.toml (DESIGN 6.2.9).
+            kind=raw_unit.get("kind", "convergence")))
 
     # Everything under the [flight] table: the optional sweep
     #   description plus the opaque metadata tables.  The sweep is

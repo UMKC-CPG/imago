@@ -285,6 +285,25 @@ def test_read_flight_toml_round_trips_units_sweep_metadata(tmp_path):
     assert flight.metadata["prediction"] == prediction
 
 
+def test_calc_unit_kind_round_trips_and_defaults(tmp_path):
+    """CalcUnit.kind (DESIGN 6.2.9) serializes and restores: a unit
+    that does not set it defaults to 'convergence', and an explicit
+    'fingerprint' loen unit round-trips as such -- this is what lets
+    the convergence harvest filter out the loen runs that share a
+    structure id."""
+    units = [
+        CalcUnit(id="si", structure="si.skl",
+                 calc=("kpt-density-50",), wingbeat="imago"),
+        CalcUnit(id="si", structure="si.skl", calc=("loen",),
+                 wingbeat="imago", kind="fingerprint"),
+    ]
+    serialize_flight(Flight(root=str(tmp_path), units=units))
+    flight = read_flight_toml(
+        os.path.join(str(tmp_path), "flight.toml"))
+    assert [u.kind for u in flight.units] == [
+        "convergence", "fingerprint"]
+
+
 def test_flight_id_of_is_the_workspace_basename():
     """The provenance flight_id is the workspace root's basename,
     trailing slash and all (DESIGN 7.8)."""

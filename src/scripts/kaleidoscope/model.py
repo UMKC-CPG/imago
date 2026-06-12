@@ -71,6 +71,14 @@ class CalcUnit:
                       fills it with one component per swept knob.
     - ``wingbeat``    : the wingbeat name, or None for the flight
                       default.
+    - ``kind``      : a short run-role label the dispatch core
+                      stores and round-trips but never interprets
+                      (DESIGN 6.2.9).  Each harvester consumes only
+                      the kinds it understands: the convergence
+                      harvest reads ``"convergence"`` (the default)
+                      and ignores e.g. ``"fingerprint"`` loen runs
+                      that share a structure id.  Keeping the core
+                      ignorant of its meaning honors Principle 9.
     - ``key_fields``: the cache identity (DESIGN 6.2.5).
     """
     id: str
@@ -78,6 +86,7 @@ class CalcUnit:
     options: dict = field(default_factory=dict)
     calc: tuple = ()
     wingbeat: Optional[str] = None
+    kind: str = "convergence"
     key_fields: KeyFields = field(default_factory=KeyFields)
 
 
