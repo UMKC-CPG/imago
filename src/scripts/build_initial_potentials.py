@@ -99,6 +99,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import initial_potential_db as ipdb
+from guidance_db import VALID_SYSTEM_TYPES
 
 
 # ============================================================
@@ -151,9 +152,25 @@ class ReferenceSolid:
     per-site harvest declarations.  Exactly one of ``cod_id`` (with
     ``cod_revision``) or ``structure_path`` is set (rule 4); the
     unused alternative is ``None``.
+
+    ``system_type`` is one of the four guidance system types
+    (``"crystalline"`` / ``"amorphous"`` / ``"nanostructure"`` /
+    ``"molecular"``); it drives which guidance sub-model the
+    predictor consults (DESIGN 7) and is recorded on the produced
+    entry for forensics.  ``basis`` / ``functional`` /
+    ``kpoint_integration`` are the (basis, functional, integration)
+    sub-model the reference run uses; together they select the
+    predictor sub-model (DESIGN 7.6) and are recorded on every
+    produced entry's context.  All four are *required* in the
+    manifest (rule 2): nothing the producer emits depends on an
+    implicit default (VISION Principle 5).
     """
 
     reference_id: str
+    system_type: str
+    basis: str
+    functional: str
+    kpoint_integration: str
     kpoint_spec: dict[str, Any]
     scf_threshold: float
     cod_id: int | None
@@ -221,7 +238,11 @@ def load_manifest_v2(path: str,
 
     1. ``schema_version`` must equal 2.
     2. Every ``[[reference_solid]]`` carries ``reference_id``,
-       ``kpoint_spec``, and ``scf_threshold``.
+       ``system_type``, ``basis``, ``functional``,
+       ``kpoint_integration``, ``kpoint_spec``, and
+       ``scf_threshold``; ``system_type`` must be one of the four
+       guidance system types (``crystalline`` / ``amorphous`` /
+       ``nanostructure`` / ``molecular``).
     3. Every ``[[reference_solid.entry]]`` carries ``element``,
        ``atom_site``, ``label``, ``default``, ``description``.
     4. Exactly one of ``cod_id`` / ``structure_path`` per solid;
@@ -262,14 +283,29 @@ def load_manifest_v2(path: str,
     reference_solids: list[ReferenceSolid] = []
 
     for ref in raw.get("reference_solid", []):
-        # ----- Rule 2: required per-solid fields.
-        for field_name in ("reference_id", "kpoint_spec",
-                            "scf_threshold"):
+        # ----- Rule 2: required per-solid fields.  The sub-model
+        # triple (basis, functional, kpoint_integration) and
+        # system_type are required alongside the run settings:
+        # they select the guidance sub-model and land on every
+        # produced entry, so nothing emitted rides on an implicit
+        # default (VISION Principle 5).
+        for field_name in ("reference_id", "system_type", "basis",
+                           "functional", "kpoint_integration",
+                           "kpoint_spec", "scf_threshold"):
             _require(field_name in ref, path,
                      f"manifest rule 2: [[reference_solid]] "
                      f"missing field: {field_name}")
 
         rid = ref["reference_id"]
+
+        # ----- Rule 2 (domain): system_type must be one of the four
+        # guidance system types -- the predictor switches its
+        # sub-model on it (DESIGN 7), so an unknown value is a hard
+        # error rather than a silently mis-signed entry.
+        _require(ref["system_type"] in VALID_SYSTEM_TYPES, path,
+                 f"manifest rule 2: [[reference_solid {rid}]] "
+                 f"system_type {ref['system_type']!r} is not one "
+                 f"of {VALID_SYSTEM_TYPES}")
 
         # ----- Rule 4: exactly one structure source.
         has_cod = "cod_id" in ref
@@ -378,6 +414,10 @@ def load_manifest_v2(path: str,
 
         reference_solids.append(ReferenceSolid(
             reference_id=rid,
+            system_type=ref["system_type"],
+            basis=ref["basis"],
+            functional=ref["functional"],
+            kpoint_integration=ref["kpoint_integration"],
             kpoint_spec=dict(ref["kpoint_spec"]),
             scf_threshold=ref["scf_threshold"],
             cod_id=ref.get("cod_id"),

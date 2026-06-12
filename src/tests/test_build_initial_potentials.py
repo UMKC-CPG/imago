@@ -50,6 +50,10 @@ schema_version = 2
 
 [[reference_solid]]
 reference_id = "au_fcc"
+system_type = "crystalline"
+basis = "fb"
+functional = "wigner"
+kpoint_integration = "linear-tetrahedral"
 cod_id = 9008463
 cod_revision = "2023-04-12"
 kpoint_spec = { density = 60.0, shift = [0.0, 0.0, 0.0] }
@@ -90,6 +94,10 @@ class TestLoadHappyPath:
         assert len(manifest.reference_solids) == 1
         solid = manifest.reference_solids[0]
         assert solid.reference_id == "au_fcc"
+        assert solid.system_type == "crystalline"
+        assert solid.basis == "fb"
+        assert solid.functional == "wigner"
+        assert solid.kpoint_integration == "linear-tetrahedral"
         assert solid.cod_id == 9008463
         assert solid.cod_revision == "2023-04-12"
         assert solid.structure_path is None
@@ -119,6 +127,10 @@ class TestLoadHappyPath:
             "schema_version = 2\n\n"
             "[[reference_solid]]\n"
             "reference_id = \"x_local\"\n"
+            "system_type = \"crystalline\"\n"
+            "basis = \"fb\"\n"
+            "functional = \"wigner\"\n"
+            "kpoint_integration = \"linear-tetrahedral\"\n"
             "structure_path = \"x.skel\"\n"
             "kpoint_spec = { density = 60.0 }\n"
             "scf_threshold = 1.0e-6\n\n"
@@ -201,6 +213,39 @@ class TestRule2RequiredSolidFields:
                 match="manifest rule 2.*scf_threshold"):
             load_manifest_v2(path)
 
+    def test_missing_system_type_raises(self, tmp_path):
+        path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
+            'system_type = "crystalline"\n', ""))
+        with pytest.raises(ValueError,
+                           match="manifest rule 2.*system_type"):
+            load_manifest_v2(path)
+
+    def test_missing_basis_raises(self, tmp_path):
+        path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
+            'basis = "fb"\n', ""))
+        with pytest.raises(ValueError,
+                           match="manifest rule 2.*basis"):
+            load_manifest_v2(path)
+
+    def test_missing_kpoint_integration_raises(self, tmp_path):
+        path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
+            'kpoint_integration = "linear-tetrahedral"\n', ""))
+        with pytest.raises(
+                ValueError,
+                match="manifest rule 2.*kpoint_integration"):
+            load_manifest_v2(path)
+
+    def test_invalid_system_type_raises(self, tmp_path):
+        # A system_type outside the four-value domain is a hard
+        # error -- the predictor switches its sub-model on it.
+        path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
+            'system_type = "crystalline"\n',
+            'system_type = "liquid"\n'))
+        with pytest.raises(
+                ValueError,
+                match="manifest rule 2.*system_type.*not one"):
+            load_manifest_v2(path)
+
 
 class TestRule3RequiredEntryFields:
     def test_missing_default_raises(self, tmp_path):
@@ -252,6 +297,10 @@ class TestRule4StructureSource:
             "schema_version = 2\n\n"
             "[[reference_solid]]\n"
             "reference_id = \"x_local\"\n"
+            "system_type = \"crystalline\"\n"
+            "basis = \"fb\"\n"
+            "functional = \"wigner\"\n"
+            "kpoint_integration = \"linear-tetrahedral\"\n"
             "structure_path = \"absent.skel\"\n"
             "kpoint_spec = { density = 60.0 }\n"
             "scf_threshold = 1.0e-6\n\n"
@@ -274,6 +323,10 @@ class TestRule5ReferenceIdUniqueness:
         text = _VALID_COD_MANIFEST + (
             "\n[[reference_solid]]\n"
             "reference_id = \"au_fcc\"\n"
+            "system_type = \"crystalline\"\n"
+            "basis = \"fb\"\n"
+            "functional = \"wigner\"\n"
+            "kpoint_integration = \"linear-tetrahedral\"\n"
             "cod_id = 1234567\n"
             "cod_revision = \"2023-01-01\"\n"
             "kpoint_spec = { density = 60.0 }\n"
@@ -295,6 +348,10 @@ class TestRule6ElementLabelUniqueness:
         text = _VALID_COD_MANIFEST + (
             "\n[[reference_solid]]\n"
             "reference_id = \"au_hcp\"\n"
+            "system_type = \"crystalline\"\n"
+            "basis = \"fb\"\n"
+            "functional = \"wigner\"\n"
+            "kpoint_integration = \"linear-tetrahedral\"\n"
             "cod_id = 1234567\n"
             "cod_revision = \"2023-01-01\"\n"
             "kpoint_spec = { density = 60.0 }\n"
@@ -489,6 +546,9 @@ def _manifest_curating_au() -> CurationManifest:
         schema_version=2, manifest_path="x.toml",
         reference_solids=[ReferenceSolid(
             reference_id="au_fcc",
+            system_type="crystalline", basis="fb",
+            functional="wigner",
+            kpoint_integration="linear-tetrahedral",
             kpoint_spec={"density": 60.0},
             scf_threshold=1e-6,
             cod_id=9008463, cod_revision="2023-04-12",
