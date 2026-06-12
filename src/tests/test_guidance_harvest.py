@@ -45,6 +45,7 @@ _DATASPACE = types.SimpleNamespace(group_table={})
 def _make_workspace(tmp_path, kpds, energies, *,
                     gaps=None, kinds=None, mags=None,
                     scf_threshold=1.0, write_scf_threshold=True,
+                    write_gap=True,
                     policy="verify_around_prediction",
                     system_type="crystalline", confidence=0.9,
                     neighbor_ids=("mp-1", "mp-2"),
@@ -54,21 +55,26 @@ def _make_workspace(tmp_path, kpds, energies, *,
     flight.toml (via the real serialize_flight) plus one
     result.toml per grid point.  Returns the workspace root.  The
     knobs let each test shape the grid, the energies, and the
-    [flight.prediction] block."""
+    per-structure [flight.predictions.<id>] block."""
     root = str(tmp_path / "flight")
     units = [CalcUnit(id=unit_id, structure=structure,
                       calc=(f"kpt-density-{k}",)) for k in kpds]
-    sweep = SweepRecord(
-        varied_axes=("kpt-density",),
-        fixed_axes={"basis": "fb", "functional": "gga-pbe",
-                    "kpoint_integration": "gaussian-0.1"})
+    # fixed_axes is empty: the sub-model rides on the per-structure
+    #   prediction record (DESIGN 6.2.9), which the harvest reads.
+    sweep = SweepRecord(varied_axes=("kpt-density",), fixed_axes={})
     metadata = {}
     if write_prediction:
-        metadata["prediction"] = {
+        # Per-id predictions mapping (DESIGN 6.2.9); this record is
+        #   the SOLE home of system_type AND the (basis, functional,
+        #   kpoint_integration) sub-model the harvest reads.
+        metadata["predictions"] = {unit_id: {
             "policy": policy, "system_type": system_type,
             "confidence": confidence,
             "neighbor_entry_ids": list(neighbor_ids),
-            "predicted_value": 100.0, "is_under_trained": False}
+            "predicted_kpoint_density": 100.0,
+            "is_under_trained": False,
+            "basis": "fb", "functional": "gga-pbe",
+            "kpoint_integration": "gaussian-0.1"}}
     serialize_flight(Flight(root=root, units=units, sweep=sweep,
                             metadata=metadata))
 
@@ -79,14 +85,19 @@ def _make_workspace(tmp_path, kpds, energies, *,
         gap = gaps[index] if gaps is not None else 1.5
         kind = kinds[index] if kinds is not None else "indirect"
         mag = mags[index] if mags is not None else 0.0
-        with open(os.path.join(run_dir, "result.toml"), "w") as rt:
-            rt.write(toml_line("total_energy", energies[index]))
-            rt.write(toml_line("gap_ev", gap))
-            rt.write(toml_line("gap_kind", kind))
-            rt.write(toml_line("total_magnetization", mag))
+        path = os.path.join(run_dir, "result.toml")
+        with open(path, "w") as result_file:
+            result_file.write(
+                toml_line("total_energy", energies[index]))
+            if write_gap:
+                result_file.write(toml_line("gap_ev", gap))
+                result_file.write(toml_line("gap_kind", kind))
+            result_file.write(
+                toml_line("total_magnetization", mag))
             if write_scf_threshold:
-                rt.write(toml_line("scf_threshold", scf_threshold))
-            rt.write(toml_line("imago_commit", "abc123"))
+                result_file.write(
+                    toml_line("scf_threshold", scf_threshold))
+            result_file.write(toml_line("imago_commit", "abc123"))
     return root
 
 
@@ -186,8 +197,9 @@ def test_converged_sweep_stages_one_entry(patched, tmp_path):
 
 def test_converged_entry_measured_and_context(patched, tmp_path):
     """The staged entry's measured + context fields come from the
-    chosen grid point's result.toml and the sweep's fixed axes;
-    cell info comes from the loaded structure (Bohr^3)."""
+    chosen grid point's result.toml and this structure's prediction
+    record (the sub-model's sole home, DESIGN 6.2.9); cell info
+    comes from the loaded structure (Bohr^3)."""
     root = _make_workspace(
         tmp_path, [50, 100, 200], [0.5, 0.5, 0.5],
         gaps=[5.0, 5.0, 5.0], kinds=["indirect"] * 3,
@@ -256,16 +268,17 @@ def test_imago_commit_falls_back_to_unknown(patched, tmp_path):
 #  The skip paths
 # --------------------------------------------------------------
 
-def test_trust_mode_stages_nothing(patched, tmp_path):
-    """A trust-mode flight (single point, policy trust_no_verify)
-    harvests no entry -- one calc is weaker evidence than a grid
-    (DESIGN 7.7)."""
+def test_single_point_grid_stages_nothing(patched, tmp_path):
+    """A single-point grid (trust mode OR a single-point curator
+    override) harvests no entry -- one calc is weaker evidence than
+    a grid, and the skip keys on len(grid)==1, not the policy
+    string (DESIGN 6.2.9 / 7.7)."""
     root = _make_workspace(tmp_path, [137], [0.5],
                            policy="trust_no_verify")
     summaries = gh.harvest_flight(root, str(tmp_path / "db"),
                                   _DATASPACE)
     assert patched["entries"] == []
-    assert "trusted" in summaries[0]
+    assert "single point" in summaries[0]
 
 
 def test_non_converged_sweep_skips_and_tags(patched, tmp_path):
@@ -293,14 +306,41 @@ def test_missing_scf_threshold_raises(patched, tmp_path):
         gh.harvest_flight(root, str(tmp_path / "db"), _DATASPACE)
 
 
+def test_no_prediction_record_skips(patched, tmp_path):
+    """A structure with no [flight.predictions.<id>] record is not
+    guidance-harvestable -- the record is the sole source of
+    system_type and the sub-model -- so it is skipped, not staged
+    (DESIGN 6.2.9 / 7.8 step 3)."""
+    root = _make_workspace(tmp_path, [50, 100, 200],
+                           [0.5, 0.5, 0.5],
+                           write_prediction=False)
+    summaries = gh.harvest_flight(root, str(tmp_path / "db"),
+                                  _DATASPACE)
+    assert patched["entries"] == []
+    assert "no prediction record" in summaries[0]
+
+
+def test_missing_gap_raises(patched, tmp_path):
+    """A converged run whose result.toml omits the (required)
+    electronic-character gap fails loudly rather than fabricating a
+    value (DESIGN 7.8 / group-A #8).  Unlike total_magnetization, an
+    absent gap means the run never surfaced what the entry exists to
+    record."""
+    root = _make_workspace(tmp_path, [50, 100, 200],
+                           [0.5, 0.5, 0.5], write_gap=False)
+    with pytest.raises(ValueError):
+        gh.harvest_flight(root, str(tmp_path / "db"), _DATASPACE)
+
+
 # --------------------------------------------------------------
 #  Non-crystalline path
 # --------------------------------------------------------------
 
 def test_non_crystalline_signature_uses_prediction_type(patched,
                                                         tmp_path):
-    """system_type rides on the [flight.prediction] block, so a
-    molecular flight signs (and stages) under 'molecular'."""
+    """system_type rides on this structure's
+    [flight.predictions.<id>] record, so a molecular flight signs
+    (and stages) under 'molecular'."""
     root = _make_workspace(tmp_path, [25, 50, 100],
                            [0.5, 0.5, 0.5],
                            system_type="molecular")

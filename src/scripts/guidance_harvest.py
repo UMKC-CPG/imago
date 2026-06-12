@@ -22,11 +22,15 @@ information flow stays simple and homogeneous -- three inputs,
 each with one clear job):
 
   * ``flight.toml``  -- the *plan*: the unit list (id, structure,
-    calc tags), the ``[flight.sweep]`` block (which axis varied and
-    which sub-model axes were held fixed), and the
-    ``[flight.prediction]`` block the builder stashed.  The swept
-    k-density of each grid point is read out of its calc tag (e.g.
-    ``kpt-density-100``) using the sweep's ordered ``varied_axes``.
+    calc tags), the ``[flight.sweep]`` block (which axis varied; in
+    v1 nothing is held fixed), and the per-structure
+    ``[flight.predictions.<id>]`` blocks the builder stashed.  Each
+    block carries that structure's prediction AND the (basis,
+    functional, kpoint_integration) sub-model it ran under -- the
+    sole home for the sub-model, never duplicated into
+    ``fixed_axes`` (DESIGN 6.2.9).  The swept k-density of each grid
+    point is read out of its calc tag (e.g. ``kpt-density-100``)
+    using the sweep's ordered ``varied_axes``.
   * each run's ``result.toml`` -- the *per-run facts*: the final
     SCF total energy (for the convergence test and the
     grid-energies array), the measured ``gap_ev`` / ``gap_kind`` /
@@ -214,49 +218,82 @@ def _now_iso8601_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def build_entry(workspace_root, grid, kpds, energies, rts, idx,
-                prediction, fixed_axes, dataspace):
+def _require_field(result_toml: dict, field: str, unit_id: str):
+    """Return ``result_toml[field]`` or raise a clear error naming
+    the missing field and the structure (DESIGN 7.8 / group-A #8).
+
+    Used for the electronic-character fields ``gap_ev`` / ``gap_kind``
+    that the predictor keys on: unlike ``total_magnetization`` (which
+    a closed-shell run legitimately omits, defaulting to 0.0), an
+    absent gap means the run did not surface the quantity the entry
+    exists to record, so the harvest fails loudly rather than
+    fabricating a value."""
+
+    if field not in result_toml:
+        raise ValueError(
+            unit_id + ": converged run's result.toml is missing "
+            "the required field " + repr(field) + " (the harvest "
+            "needs the measured electronic character; re-run with "
+            "an imago build that surfaces it -- TODO C76)")
+    return result_toml[field]
+
+
+def build_entry(workspace_root, grid, kpds, energies,
+                result_tomls, idx, prediction, dataspace):
     """Assemble the rich :class:`GuidanceEntry` for one converged
     structure sweep (DESIGN 7.8 step 3f; PSEUDOCODE 15.7 step g).
 
-    ``grid``/``kpds``/``energies``/``rts`` are the per-grid-point
-    units, swept k-densities, total energies, and parsed
-    result.toml dicts (all parallel, sorted by k-density); ``idx``
-    is the converged index chosen by :func:`pick_converged`.
-    ``prediction`` is the ``[flight.prediction]`` dict (or None for
-    a hand-built flight) and ``fixed_axes`` the sweep's held-
-    constant sub-model axes.  The ``entry_id`` is left empty here;
-    :func:`save_entry` fills it with the deterministic slug."""
+    ``grid``/``kpds``/``energies``/``result_tomls`` are the
+    per-grid-point units, swept k-densities, total energies, and
+    parsed ``result.toml`` dicts (all parallel, sorted by
+    k-density); ``idx`` is the converged index chosen by
+    :func:`pick_converged`.
+    ``prediction`` is this structure's ``[flight.predictions.<id>]``
+    dict -- the SOLE source of both ``system_type`` and the
+    (basis, functional, kpoint_integration) sub-model (DESIGN 6.2.9
+    / 7.8 step 3f).  ``harvest_flight`` has already guaranteed it is
+    present (a structure with no record is skipped before reaching
+    here), so no None-guards are needed.  The ``entry_id`` is left
+    empty here; :func:`save_entry` fills it with the deterministic
+    slug."""
 
-    chosen_rt = rts[idx]
+    chosen_result = result_tomls[idx]
     chosen_kpd = kpds[idx]
-    threshold = rts[0].get("scf_threshold")
+    threshold = result_tomls[0].get("scf_threshold")
 
-    # system_type rides on the prediction record (it carries it
-    #   from the builder, DESIGN 7.7); a hand-built flight with no
-    #   prediction defaults to crystalline.
-    system_type = (prediction["system_type"]
-                   if prediction is not None else "crystalline")
+    # system_type rides on this structure's prediction record (it
+    #   carries it from the builder, DESIGN 7.7).
+    system_type = prediction["system_type"]
 
     structure = _load_structure(grid[0].structure)
     signature = compute_signature(
         structure, system_type, dataspace.group_table)
 
     measured = Measured(
-        gap_ev=chosen_rt["gap_ev"],
-        gap_kind=chosen_rt["gap_kind"],
+        # gap_ev / gap_kind are REQUIRED measured quantities (the
+        #   electronic character the predictor keys on); a run that
+        #   did not surface them cannot earn an entry, so this is a
+        #   loud failure rather than a silent default.
+        gap_ev=_require_field(chosen_result, "gap_ev", grid[0].id),
+        gap_kind=_require_field(
+            chosen_result, "gap_kind", grid[0].id),
         # spin_polarization is not surfaced by imago (the iteration
         #   file carries the magnetic moment, not a polarization),
         #   so it is recorded as 0.0; the predictor's spin character
         #   keys on total_magnetization instead (the C72 decision).
         spin_polarization=0.0,
-        total_magnetization=chosen_rt.get("total_magnetization", 0.0),
+        total_magnetization=chosen_result.get(
+            "total_magnetization", 0.0),
         kpoint_density=chosen_kpd)
 
+    # The sub-model is read from THIS structure's record -- never
+    #   from sweep.fixed_axes (now empty), so a combined
+    #   mixed-sub-model flight harvests each structure correctly
+    #   (DESIGN 6.2.9 / 7.8 step 3f).
     context = Context(
-        basis=fixed_axes["basis"],
-        functional=fixed_axes["functional"],
-        kpoint_integration=fixed_axes["kpoint_integration"],
+        basis=prediction["basis"],
+        functional=prediction["functional"],
+        kpoint_integration=prediction["kpoint_integration"],
         scf_threshold=threshold,
         cell_atom_count=structure.num_atoms,
         cell_volume_per_formula_unit=(
@@ -268,14 +305,11 @@ def build_entry(workspace_root, grid, kpds, energies, rts, idx,
         converged_at=chosen_kpd,
         metric="total_energy",
         metric_threshold=threshold,
-        predictor_confidence=(
-            prediction["confidence"]
-            if prediction is not None else 0.0),
+        predictor_confidence=prediction["confidence"],
         predictor_neighbor_ids=tuple(
-            prediction["neighbor_entry_ids"]
-            if prediction is not None else ()))
+            prediction["neighbor_entry_ids"]))
 
-    commit = chosen_rt.get("imago_commit") or _UNKNOWN_COMMIT
+    commit = chosen_result.get("imago_commit") or _UNKNOWN_COMMIT
     provenance = Provenance(
         flight_id=flight_id_of(workspace_root),
         source_structure=grid[0].structure,
@@ -323,19 +357,25 @@ def harvest_flight(workspace_root, db_root, dataspace):
 
     flight = read_flight_toml(
         os.path.join(workspace_root, "flight.toml"))
-    prediction = flight.metadata.get("prediction")
+
+    # Per-structure predictions, keyed by structure id (DESIGN
+    #   6.2.9); a single-structure flight carries a one-entry map.
+    #   Each record is the SOLE source of its structure's
+    #   system_type and (basis, functional, kpoint_integration)
+    #   sub-model (7.8 step 3f), so a structure with no record is
+    #   skipped below.
+    predictions = flight.metadata.get("predictions", {})
 
     # The swept axis (v1: a single axis, "kpt-density") names which
-    #   calc-tag component carries each grid point's value, and the
-    #   fixed axes carry the sub-model context (basis/functional/
-    #   kpoint_integration).  A hand-built flight with no sweep
-    #   cannot be harvested into the k-density dataspace.
+    #   calc-tag component carries each grid point's value.  A
+    #   flight with no sweep cannot be harvested into the k-density
+    #   dataspace.  The sub-model is NOT read from sweep.fixed_axes
+    #   (now empty): it rides on the per-structure record (3f).
     if flight.sweep is None or not flight.sweep.varied_axes:
         raise ValueError(
             workspace_root + ": flight.toml has no [flight.sweep] "
             "with a varied axis -- nothing to harvest")
     axis = flight.sweep.varied_axes[0]
-    fixed_axes = flight.sweep.fixed_axes
 
     # Group the units by structure id: one verification sub-grid
     #   per structure (insertion order preserved for a stable
@@ -346,32 +386,44 @@ def harvest_flight(workspace_root, db_root, dataspace):
 
     summaries = []
     for unit_id, units in groups.items():
+        # The prediction this structure was launched under.  No
+        #   record -> not guidance-harvestable (the record is the
+        #   sole source of system_type + sub-model, 7.8 step 3f);
+        #   the builder always attaches one, so this only fires for
+        #   a hand-built flight outside the predict-then-verify
+        #   path (which seeds guidance by hand instead, 7.9).
+        prediction = predictions.get(unit_id)
+        if prediction is None:
+            summaries.append(
+                unit_id + ": no prediction record (not staged)")
+            continue
+
         # a. Sort the sub-grid by swept k-density.
         grid = sorted(units, key=lambda u: swept_value_of(u, axis))
 
         # b. Parse each run's result.toml for the energy and the
         #    measured quantities.
-        kpds, energies, rts = [], [], []
+        kpds, energies, result_tomls = [], [], []
         for unit in grid:
-            rt = _read_result_toml(workspace_root, unit)
+            result_toml = _read_result_toml(workspace_root, unit)
             kpds.append(swept_value_of(unit, axis))
-            energies.append(rt["total_energy"])
-            rts.append(rt)
+            energies.append(result_toml["total_energy"])
+            result_tomls.append(result_toml)
 
-        # c. Trust mode harvests deliverables but stages NO entry
-        #    (DESIGN 6.2.1 / 7.7): one converged calc is weaker
-        #    evidence than a grid.  This MUST precede pick_converged
-        #    -- a trust grid is a single point, so the two-sided
-        #    test below would report it as "still moving".
-        if prediction is not None \
-                and prediction.get("policy") == "trust_no_verify":
+        # c. A single-point grid harvests deliverables but stages NO
+        #    entry (DESIGN 6.2.1 / 7.7): one converged calc is weaker
+        #    evidence than a grid.  Covers both trust mode and a
+        #    single-point curator override, and MUST precede
+        #    pick_converged -- the two-sided test below needs >= 3
+        #    points and would report one point as "still moving".
+        if len(grid) == 1:
             summaries.append(
-                unit_id + ": trusted point (not staged)")
+                unit_id + ": single point (not staged)")
             continue
 
         # d. metric_threshold = the SCF criterion the runs used
         #    (the v1 convention); pick the converged grid point.
-        threshold = rts[0].get("scf_threshold")
+        threshold = result_tomls[0].get("scf_threshold")
         if threshold is None:
             raise ValueError(
                 unit_id + ": result.toml carries no scf_threshold "
@@ -389,8 +441,8 @@ def harvest_flight(workspace_root, db_root, dataspace):
 
         # f/g. Build the rich entry and stage it.
         entry = build_entry(
-            workspace_root, grid, kpds, energies, rts, idx,
-            prediction, fixed_axes, dataspace)
+            workspace_root, grid, kpds, energies, result_tomls,
+            idx, prediction, dataspace)
         path = save_entry(entry, db_root)
         summaries.append(unit_id + ": staged " + path)
 
