@@ -6112,6 +6112,16 @@ dataclass PredictionRecord:    # 7.7-derived; serialized as
     predicted_magnetization : float | None
     system_type             : str
     feature_vector          : Signature
+    basis                   : str   # the (basis, functional,
+    functional              : str   #   kpoint_integration)
+    kpoint_integration      : str   #   sub-model this run used;
+                                    #   per-record (not flight-
+                                    #   level fixed_axes) so a
+                                    #   combined multi-structure
+                                    #   flight whose structures
+                                    #   differ in sub-model is
+                                    #   still harvestable (DESIGN
+                                    #   6.2.9 / 7.8 step 3f)
 ```
 
 ```
@@ -6232,12 +6242,13 @@ function build_kpoint_convergence(structure, options, dataspace,
     # Record the sweep shape (DESIGN 6.2.8 step 6) so
     # serialize_flight emits [flight.sweep] and harvest
     # recovers the varied axis without path-parsing.
+    # fixed_axes is empty: the (basis/functional/
+    # kpoint_integration) sub-model is carried on the
+    # per-structure record below, not duplicated here, so the
+    # same fact never lives in two places (DESIGN 6.2.9).
     sweep = SweepRecord(
         varied_axes = ("kpt-density",),
-        fixed_axes  = {
-            "basis":              options["basis"],
-            "functional":         options["functional"],
-            "kpoint_integration": options["kpoint_integration"]})
+        fixed_axes  = {})
 
     # The prediction record.  In override mode it documents the
     # curator-pinned value (full confidence, no neighbors, no
@@ -6252,7 +6263,10 @@ function build_kpoint_convergence(structure, options, dataspace,
             predicted_gap            = None,
             predicted_magnetization  = None,
             system_type              = system_type,
-            feature_vector           = query_sig)
+            feature_vector           = query_sig,
+            basis                    = options["basis"],
+            functional               = options["functional"],
+            kpoint_integration       = options["kpoint_integration"])
     else:
         record = PredictionRecord(
             policy                   = policy,
@@ -6263,7 +6277,10 @@ function build_kpoint_convergence(structure, options, dataspace,
             predicted_gap            = result.predicted_gap,
             predicted_magnetization  = result.predicted_magnetization,
             system_type              = system_type,
-            feature_vector           = query_sig)
+            feature_vector           = query_sig,
+            basis                    = options["basis"],
+            functional               = options["functional"],
+            kpoint_integration       = options["kpoint_integration"])
 
     # One flight, one structure: stash the record in the
     # predictions mapping under this structure's id (DESIGN
@@ -6324,9 +6341,11 @@ entry field is filled from exactly ONE of three inputs, so the
 information flow stays simple:
 
 - **`flight.toml`** -- the *plan*: the unit list (id, structure,
-  calc tags), the `[flight.sweep]` block (which axis varied and
-  the sub-model axes held fixed), and the
-  `[flight.predictions.<id>]` tables (one per structure).  Each
+  calc tags), the `[flight.sweep]` block (which axis varied; in
+  v1 nothing is held fixed), and the
+  `[flight.predictions.<id>]` tables (one per structure, each
+  carrying that structure's prediction AND the (basis,
+  functional, kpoint_integration) sub-model it ran under).  Each
   grid point's swept k-density is read out of its
   calc tag (`kpt-density-<int>`) using the sweep's ordered
   `varied_axes` -- the makeinput `options` are deliberately NOT
@@ -6360,10 +6379,24 @@ function harvest_flight(workspace_root, db_root, dataspace):
     predictions = flight.metadata.get("predictions", {})  # 15.6
 
     # The swept axis names which calc-tag component carries each
-    #   grid point's value; the fixed axes carry the sub-model
-    #   context.  A flight with no sweep cannot be harvested.
-    axis       = flight.sweep.varied_axes[0]      # v1: single axis
-    fixed_axes = flight.sweep.fixed_axes
+    #   grid point's value.  A flight that declared no sweep
+    #   (sweep is None) cannot feed THIS harvester -- it is the
+    #   GUIDANCE harvester, and a guidance entry IS the claim
+    #   "this k-density is converged," which only a grid can
+    #   establish; with no varied axis there is nothing to read a
+    #   swept value along.  A single one-off calculation is not
+    #   blocked by this: it is a length-1 SWEEP (trust mode or a
+    #   pinned kpoint_spec), still harvested for the producer's
+    #   potential deliverable, and merely skipped for guidance
+    #   staging at step (c) below (one point is not convergence
+    #   evidence); a known-good k-density can instead be seeded by
+    #   hand as a source="manual" entry (DESIGN 7.9).
+    #   The sub-model (basis/functional/kpoint_integration) is NOT
+    #   read here from sweep.fixed_axes: it rides on each
+    #   structure's prediction record so a combined
+    #   mixed-sub-model flight is harvestable (DESIGN 6.2.9 / 7.8
+    #   step 3f); the per-structure read is in step (g) below.
+    axis = flight.sweep.varied_axes[0]            # v1: single axis
 
     # Only convergence-sweep runs are grid points; other kinds
     # (e.g. "fingerprint" loen runs) share a structure id but
@@ -6372,8 +6405,16 @@ function harvest_flight(workspace_root, db_root, dataspace):
                          if u.kind == "convergence"]
 
     for unit_id, units in group_by_id(convergence_units):
-        # The prediction this structure was launched under.
+        # The prediction this structure was launched under.  It is
+        #   the SOLE source of system_type (step f) and the
+        #   sub-model (step g), so a structure with no record cannot
+        #   be staged -- skip it.  The helper (15.6) always attaches
+        #   one; a record-less sweep is a hand-built flight outside
+        #   the predict-then-verify path (DESIGN 7.8 / 7.9).
         prediction = predictions.get(unit_id)
+        if prediction is None:
+            log(unit_id + ": no prediction record (not staged)")
+            continue
         # a. The verification sub-grid for this structure, sorted
         #    by swept k-density (read out of each unit's calc tag).
         grid = sort(units, key = lambda u: swept_value_of(u, axis))
@@ -6416,11 +6457,12 @@ function harvest_flight(workspace_root, db_root, dataspace):
             continue
 
         # f. Signature: system_type from the prediction record (it
-        #    carries it from 7.7); composition + lattice via
-        #    compute_signature.  The SAME loaded structure also
-        #    supplies the cell facts in (g).
-        st = (prediction["system_type"] if prediction is not None
-              else "crystalline")
+        #    carries it from 7.7; the record is guaranteed present
+        #    -- record-less structures were skipped at the loop
+        #    top); composition + lattice via compute_signature.
+        #    The SAME loaded structure also supplies the cell facts
+        #    in (g).
+        st  = prediction["system_type"]
         sc  = load_skl(grid[0].structure)        # read_input_file
         sig = compute_signature(sc, st, dataspace.group_table)
 
@@ -6441,10 +6483,13 @@ function harvest_flight(workspace_root, db_root, dataspace):
                                         "total_magnetization", 0.0),
                 kpoint_density      = chosen_kpd),
             context      = Context(
-                basis      = fixed_axes["basis"],
-                functional = fixed_axes["functional"],
-                kpoint_integration = fixed_axes[
-                    "kpoint_integration"],
+                # sub-model from THIS structure's record (the sole
+                #   home; DESIGN 7.8 step 3f / 6.2.9), never from
+                #   sweep.fixed_axes.
+                basis      = prediction["basis"],
+                functional = prediction["functional"],
+                kpoint_integration =
+                    prediction["kpoint_integration"],
                 scf_threshold = thr,          # result.toml
                 cell_atom_count = sc.num_atoms,
                 cell_volume_per_formula_unit =
@@ -6455,12 +6500,11 @@ function harvest_flight(workspace_root, db_root, dataspace):
                 converged_at  = chosen_kpd,
                 metric        = "total_energy",
                 metric_threshold = thr,
-                predictor_confidence = (
-                    prediction["confidence"]
-                    if prediction is not None else 0.0),
-                predictor_neighbor_ids = tuple(
-                    prediction["neighbor_entry_ids"]
-                    if prediction is not None else [])),
+                # prediction is guaranteed present (record-less
+                #   structures were skipped at the loop top).
+                predictor_confidence   = prediction["confidence"],
+                predictor_neighbor_ids =
+                    tuple(prediction["neighbor_entry_ids"])),
             provenance   = Provenance(
                 flight_id        = flight_id_of(workspace_root),
                 source_structure = grid[0].structure,

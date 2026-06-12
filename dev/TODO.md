@@ -2045,17 +2045,34 @@ the C48.3 wiring (C74) is the first major consumer.
   (for the C48.3 deliverable) and the rich measured
   quantities (for guidance contribution).  Bundled with
   C48.3 once C70+C71+C72+C76 are in place.
-  **BLOCKING OPEN DESIGN QUESTION (deferred 2026-06-11):**
-  the combined multi-solid flight sets sweep.fixed_axes={}
-  but the harvest reads basis/functional/kpoint_integration
-  from fixed_axes -- breaks for a mixed-sub-model run
-  (manifest now allows per-solid basis/functional/
-  kpoint_integration).  Resolve before coding C74:
-  (A) require a uniform sub-model per producer run;
-  (B) RECOMMENDED carry the 3 sub-model axes in each
-  per-structure PredictionRecord (expands DESIGN 7.7);
-  (C) per-structure fixed_axes mapping.  Full write-up in
-  [[historical-guidance-database-design]].
+  **BLOCKING OPEN DESIGN QUESTION -- RESOLVED 2026-06-12,
+  Option B (per-record sub-model), single-source variant.**
+  The (basis, functional, kpoint_integration) sub-model is
+  carried ONLY on each per-structure PredictionRecord and is
+  NOT duplicated into sweep.fixed_axes (which is now {} for
+  builder flights) -- one home, no drift, no reader
+  confusion.  The harvest reads the sub-model per-id from the
+  record; a structure with NO record is SKIPPED (the record
+  is the sole source of both system_type and the sub-model,
+  so the old fixed_axes read AND the "default crystalline"
+  fallback are both retired).  Propagated this session
+  (DESIGN 6.2.8 steps 5/6 / 6.2.9 / 7.7 steps 5/6 / 7.8
+  step 3 guard + 3f; PSEUDOCODE 15.6 dataclass + builder
+  SweepRecord={} + record, 15.7 harvest skip + per-id reads).
+  Matching CODE rides with C74 proper: add
+  basis/functional/kpoint_integration to
+  predict_verify.PredictionRecord; set them in the builder;
+  make the builder's SweepRecord fixed_axes empty; switch
+  guidance_harvest's context read onto the per-id record;
+  add the no-record skip; drop the crystalline default.
+  **Update the test fixtures regardless of size** (record-
+  less synthetic flights must now attach a record or be
+  recognized as skipped).
+  Also clarified (same session) that a sweep-less / one-off
+  calc is not blocked: it is a length-1 sweep, harvested for
+  the potential deliverable (5.7) and skipped for guidance
+  staging; guidance for a known density is seeded manually
+  (DESIGN 7.8 intro / 7.9).
   Also note the #7 docs-only renames still pending in CODE:
   rename builders/predict_verify.py -> kpoint_convergence.py
   + predict_settings -> build_kpoint_convergence +

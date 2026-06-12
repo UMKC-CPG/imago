@@ -5009,29 +5009,42 @@ build_kpoint_convergence(
               result.predicted_magnetization,
           system_type              = system_type,
           feature_vector           = query_sig,
+          basis                    = options["basis"],
+          functional               = options["functional"],
+          kpoint_integration       =
+              options["kpoint_integration"],
       )
+
+    The (basis, functional, kpoint_integration) sub-model
+    is recorded ON the per-structure record and ONLY there
+    -- it is not also copied into the flight-level
+    `fixed_axes` (6.2.9), so the same fact never lives in two
+    places.  This is what keeps a combined multi-structure
+    flight whose structures use different sub-models
+    harvestable: each structure's harvest reads its own
+    sub-model from its own record (6.2.9; DESIGN 7.8 step
+    3f).
 
     In curator-override mode (`center` given) there is no
     `result`: the record instead documents the pinned value
     -- `predicted_kpoint_density = center`, `confidence =
     1.0`, `is_under_trained = False`, empty
     `neighbor_entry_ids`, and `None` predicted character --
-    with `feature_vector = query_sig` still recorded.
+    with `feature_vector = query_sig` and the three sub-model
+    axes still recorded.
 
 6.  Record the sweep shape so serialize_flight emits
     the [flight.sweep] block (PSEUDOCODE 13.1) and the
     harvest hook can recover the varied axis without
     re-deriving it from run-dir paths (DESIGN 7.8 step
     3a).  In v1 the single varied axis is k-density;
-    basis and functional are the fixed context axes:
+    `fixed_axes` is empty -- the sub-model the run used is
+    carried on the per-structure record (step 5), not
+    duplicated here (6.2.9):
 
       sweep = SweepRecord(
           varied_axes = ("kpt-density",),
-          fixed_axes  = {
-              "basis":              options["basis"],
-              "functional":         options["functional"],
-              "kpoint_integration": options["kpoint_integration"],
-          },
+          fixed_axes  = {},
       )
 
     Return (Flight(units=units, sweep=sweep, ...),
@@ -5127,6 +5140,33 @@ groups runs by structure id (6.2.6), so when it processes a
 structure's group it looks that id up in the mapping; the
 flight-wide trust check of 6.2.6 becomes a per-structure
 check.
+
+**Per-structure sub-model.**  The (basis, functional,
+kpoint_integration) sub-model travels on the per-structure
+`PredictionRecord` for the same reason `system_type` does:
+in a combined multi-structure flight these axes can differ
+per structure (5.7 allows a manifest to set them per
+reference solid), so a single flight-level value is wrong.
+The sub-model is recorded on the per-structure record and
+*only* there -- it is deliberately not also written into
+`sweep.fixed_axes`, even for a single-structure flight where
+the three would be genuinely constant.  Storing the same
+fact in two places invites both drift (the two copies
+disagreeing after a later edit) and reader confusion (which
+copy is authoritative?), so the design keeps exactly one
+home.  The guidance harvest (7.8 step 3f) reads each
+structure's sub-model back from *its own* record; a flight
+with no record for a structure does not yield that
+structure's sub-model and so cannot be harvested into the
+dataspace (7.8).  (Three resolutions were weighed: require
+one uniform sub-model per producer run; carry the three axes
+per record; or a per-structure `fixed_axes` map.  The
+per-record form was chosen -- the record already travels per
+id and the prediction *was* made under that sub-model, so it
+is the record's natural home, and it keeps the per-solid
+override 5.7 grants.  `sweep.fixed_axes` remains a general
+SweepRecord field for any future axis a flight truly holds
+constant across every unit, but in v1 it has no occupant.)
 
 **The mode rides on the prediction.**  A `PredictionRecord`
 already names which grid path produced it in its `policy`
@@ -6270,14 +6310,19 @@ def compute_signature(
     """
 
 def predict(
-    dataspace:   Dataspace,
-    query:       Signature,
-    basis:       str,
-    functional:  str,
+    dataspace:           Dataspace,
+    query:               Signature,
+    basis:               str,
+    functional:          str,
+    kpoint_integration:  str,
 ) -> PredictionResult:
-    """Run the predictor (7.6) for a given query
-    signature within the (basis, functional) sub-model.
-    Always returns a PredictionResult; the
+    """Run the predictor (7.6) for a given query signature
+    within the (basis, functional, kpoint_integration)
+    sub-model.  The three settings select the sub-model
+    (7.6 step 2) so a prediction never interpolates across
+    incompatible settings -- in particular a tetrahedral-
+    integration density is never mixed with a Gaussian-
+    smeared one.  Always returns a PredictionResult; the
     `is_under_trained` flag plus the `confidence` score
     tell the caller how seriously to take the prediction.
     Never returns None: the caller (DESIGN 6.2.8) must
@@ -6609,9 +6654,12 @@ below is what it executes.
   *but* the swept knob).
 - `system_type`: one of the four valid values, declared by
   the caller.
-- `basis`, `functional`: the (basis, functional) under
-  which the flight will run; selects the predictor's
-  sub-model (7.6 step 2).
+- `basis`, `functional`, `kpoint_integration`: the
+  (basis, functional, kpoint_integration) sub-model under
+  which the flight will run; the triple selects the
+  predictor's sub-model (7.6 step 2) and is the same triple
+  the per-structure record carries (step 5) and the harvest
+  reads back (7.8 step 3f).
 - `dataspace`: the loaded `Dataspace` (7.4).
 - `verify`: optional bool, default True; False triggers
   trust mode (6.2.1) -- a length-1 grid at the predicted
@@ -6696,14 +6744,28 @@ below is what it executes.
                               if prediction is not None else None,
         system_type              = system_type,
         feature_vector           = query_sig,
+        basis                    = basis,
+        functional               = functional,
+        kpoint_integration       = kpoint_integration,
     )
+
+    The last three fields -- the (basis, functional,
+    kpoint_integration) sub-model the prediction was made
+    under -- are recorded ONLY here, on the per-structure
+    record; they are deliberately NOT also copied into the
+    flight-level `sweep.fixed_axes` (6.2.9).  This is the
+    single home for the sub-model, which both lets a producer
+    fold many structures into one combined flight even when
+    they do NOT share a sub-model -- each structure's harvest
+    reads its own sub-model back from its own record (7.8
+    step 3f) -- and avoids the confusion of the same fact
+    living in two places.
 
 6.  flight = Flight(
         units = units,
         sweep = SweepRecord(
             varied_axes = ("kpt-density",),
-            fixed_axes  = { "basis":      basis,
-                            "functional": functional },
+            fixed_axes  = {},
         ),
         ...
     )
@@ -6711,7 +6773,14 @@ below is what it executes.
     The `sweep` field (DESIGN 6.2.1) makes
     serialize_flight emit [flight.sweep], so harvest
     (7.8 step 3a) recovers the varied axis without parsing
-    run-dir paths.
+    run-dir paths.  `fixed_axes` is left empty: the sub-model
+    that used to live here now rides on the per-structure
+    record (above), so a single-structure and a combined
+    multi-structure flight share one shape and the sub-model
+    is never duplicated (6.2.9).  (`fixed_axes` remains a
+    general SweepRecord field for any future axis a flight
+    genuinely holds constant across every unit; it simply has
+    no v1 occupant.)
 
 7.  return flight, prediction_record
 ```
@@ -6773,6 +6842,32 @@ guidance entry rich enough to feed the predictor.  It
 runs after the verification grid has finished (or as a
 separate post-step the user invokes).
 
+This is the *guidance* harvest specifically, and it is
+distinct from the producer's own potential harvest (5.7).
+A guidance entry's whole content is the claim "for a
+structure like this, this k-density is converged," and the
+predictor's training target *is* that converged k-density.
+Convergence is a statement about a neighborhood -- the
+total energy has stopped moving as the mesh is refined --
+so it is only established by a grid (the two-sided rule of
+step 3c needs at least three points).  This is why the
+harvest needs a flight that declared a sweep with a varied
+k-density axis.
+
+A single one-off calculation -- a curator who does not want
+to sweep variants -- is *not* blocked by this.  Such a run
+is built as a length-1 sweep (trust mode, or a pinned
+`kpoint_spec` override; 6.2.1 / 5.7); the producer's own
+harvest (5.7) still extracts its converged potential for
+the initial-potential database, and the guidance harvest
+simply does not auto-stage a guidance entry from it (step
+3a) -- one point is weaker evidence than a grid.  When the
+curator already knows a good k-density and wants it in the
+guidance dataspace from a one-off, the manual seed path
+(7.9, `source = "manual"`) records it directly, with a
+human vouching for the convergence claim the automation
+could not establish.
+
 **Inputs:**
 
 - A finished flight's workspace directory.
@@ -6784,9 +6879,11 @@ filled from exactly one of three on-disk inputs, so the
 information flow stays simple and homogeneous:
 
 - **`flight.toml`** -- the *plan*: the unit list, the
-  `[flight.sweep]` block (the varied axis + the fixed
-  sub-model axes), and the `[flight.predictions.<id>]`
-  tables.
+  `[flight.sweep]` block (the varied axis the swept value is
+  read along), and the `[flight.predictions.<id>]` tables
+  (one per structure, each carrying that structure's
+  prediction *and* the (basis, functional,
+  kpoint_integration) sub-model it ran under; 6.2.9).
   Each grid point's swept k-density is read out of its calc
   tag (`kpt-density-<int>`) via the sweep's ordered
   `varied_axes`; the makeinput `options` are not persisted
@@ -6834,7 +6931,16 @@ still passes and the curator can spot it on review).
     CalcUnits by id (one group per structure).
 
 3.  For each structure group (let `prediction` be its
-    entry in the predictions mapping):
+    entry in the predictions mapping).  If the structure
+    has no `prediction` record, SKIP it: the record is now
+    the sole source of both `system_type` (step e) and the
+    (basis, functional, kpoint_integration) sub-model (step
+    f), so a record-less structure cannot be staged.  A
+    flight built by the helper (6.2.8) always carries a
+    record per structure; a record-less convergence sweep is
+    a hand-built flight outside the predict-then-verify path,
+    and guidance entries are earned only along that path
+    (7.9 covers the by-hand seed route instead).  Otherwise:
       a. Sort the grid by k-density ascending.  A
          single-point grid (trust mode, or a single-point
          curator override) harvests deliverables but is
@@ -6870,10 +6976,14 @@ still passes and the curator can spot it on review).
               run's result.toml; kpoint_density = the
               chosen calc tag's k-density
             - context: basis/functional/kpoint_integration
-              from the sweep's fixed_axes; scf_threshold
-              from result.toml; cell_atom_count and
-              cell_volume_per_formula_unit from the loaded
-              structure (step e)
+              from this structure's `prediction` record
+              (which carries the sub-model it ran under;
+              7.7 / 6.2.9), NOT from the flight-level
+              fixed_axes, so a combined mixed-sub-model
+              flight harvests each structure correctly;
+              scf_threshold from result.toml; cell_atom_count
+              and cell_volume_per_formula_unit from the
+              loaded structure (step e)
             - verification: grid_values,
               grid_energies (the parallel total-energy
               array gathered in step b, so the
