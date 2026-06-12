@@ -3120,6 +3120,9 @@ cod_revision          = "2023-04-12"
 # structure_path      = "au_fcc.skel"     # alternative form
 kpoint_spec           = { density = 60.0, shift = [0.0, 0.0, 0.0] }
 scf_threshold         = 1.0e-6
+basis                 = "fb"
+functional            = "wigner"
+kpoint_integration    = "linear-tetrahedral"
 
   [[reference_solid.entry]]
   element     = "Au"
@@ -3188,6 +3191,26 @@ scf_threshold         = 1.0e-6
       a, b, c reciprocal axes.
 - `scf_threshold` (real): SCF convergence threshold for
   the reference run.  Recorded in provenance.
+- `basis` (string): the basis set the reference SCF run uses --
+  one of `"mb"` (minimal), `"fb"` (full), `"eb"` (extended).
+  The initial-potential producer uses the full basis (`"fb"`)
+  for reference-quality potentials.  Together with `functional`
+  and `kpoint_integration` it selects the guidance predictor's
+  sub-model (DESIGN 7.6) and is recorded on the produced
+  guidance entry's context.
+- `functional` (string): the exchange-correlation functional
+  token.  `"wigner"` is the Imago default (the Wigner
+  interpolation method, makeinput `-xccode` 100).  A predictor
+  sub-model selector: a prediction never mixes data converged
+  under different functionals.
+- `kpoint_integration` (string): the Brillouin-zone integration
+  method, as a sub-model-selecting token.
+  `"linear-tetrahedral"` (the producer's default; makeinput
+  `-scfkpint` 1, the linear analytic tetrahedron) is
+  parameter-free, while a Gaussian-smeared method carries its
+  smearing factor in the token (e.g. `"gaussian-0.1"`, makeinput
+  `-scfkpint` 0).  The producer maps this token to makeinput's
+  integer integration code.
 
 **Per-entry fields (`[[reference_solid.entry]]`).**
 
@@ -3240,13 +3263,19 @@ file (5.2):
 
 1. `schema_version == 2`.
 2. Every `[[reference_solid]]` carries `reference_id`,
-   `system_type`, `kpoint_spec`, `scf_threshold`, and *exactly
-   one* of `{(cod_id, cod_revision), structure_path}` (see rule 4
-   for details).  `system_type` must be one of the four allowed
+   `system_type`, `basis`, `functional`, `kpoint_integration`,
+   `kpoint_spec`, `scf_threshold`, and *exactly one* of
+   `{(cod_id, cod_revision), structure_path}` (see rule 4 for
+   details).  `system_type` must be one of the four allowed
    values `{"crystalline", "amorphous", "nanostructure",
    "molecular"}`; any other value is a hard error, since the
    guidance predictor (DESIGN 7) switches its sub-model on it and
-   the produced entry records it for forensics.
+   the produced entry records it for forensics.  `basis`,
+   `functional`, and `kpoint_integration` are likewise required:
+   they select the predictor sub-model (DESIGN 7.6) and are
+   recorded on every produced entry's context, so nothing the
+   producer emits depends on an implicit default (VISION
+   Principle 5).
 3. Every `[[reference_solid.entry]]` carries `element`,
    `atom_site`, `label`, `default`, `description`.
 4. Exactly one of `cod_id` or `structure_path` is set on each
@@ -3354,14 +3383,15 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
    a. `materialize_structure(ref)` → a local structure file
       (read from disk for `structure_path`, or fetched once from
       COD at the pinned `cod_revision` for `cod_id`).
-   b. `predict_settings(structure, options, dataspace,
+   b. `build_kpoint_convergence(structure, options, dataspace,
       system_type, …)` (DESIGN 6.2.8 / 7) consults the guidance
       dataspace and returns the **verification grid**: a set of
       k-point densities bracketing the predicted converged
       density, widened by the prediction's uncertainty (a
       length-1 grid in trust mode; the wide default grid when the
       dataspace cannot predict).  A manifest `kpoint_spec.density`
-      acts as a curator override that pins or centres the grid;
+      is passed as the `center` argument -- a curator override
+      that pins or centres the grid and bypasses the predictor;
       `kpoint_spec.shift` is always passed through as a fixed
       option.
    c. Emit one `CalcUnit` per grid point — each carrying the
@@ -4250,10 +4280,11 @@ A practical corollary of Principle 12 is the
 sweeps (sweep k-density values, sweep target atoms for
 XANES, sweep basis sizes) live as helpers inside
 kaleidoscope -- 6.2.8 is the first such helper, the
-predict-then-verify constructor for DESIGN 7.  These
+k-point-density convergence constructor for DESIGN 7
+(predict-then-verify is its default strategy).  These
 builders live in a `kaleidoscope/builders/` subpackage (one
-module per builder: the first is
-`builders/predict_verify.py`), imported explicitly by a
+module per builder, each named for the axis it sweeps: the
+first is `builders/kpoint_convergence.py`), imported by a
 client so the dumb core's import graph never pulls the
 physics layer (`guidance_db`, `structure_control`) that a
 builder depends on.  Domain-aware
@@ -4287,6 +4318,11 @@ CalcUnit
   options       makeinput options for this unit
   wingbeat      which Wingbeat executes it (6.2.2);
                   defaults to the flight default
+  kind          run role (6.2.9): a short label the core
+                  stores and round-trips but never
+                  interprets.  Default "convergence"; each
+                  harvester reads only the kinds it knows
+                  (e.g. "fingerprint" for loen runs)
   key_fields    client-declared cache identity (6.2.5):
                   scalar fields + names of key files
 
@@ -4305,9 +4341,10 @@ Flight
                   dispatch core round-trips verbatim into
                   flight.toml as [flight.<key>] blocks but
                   never interprets (Principle 9).  Default
-                  empty; the predict-then-verify helper
-                  (6.2.8) stashes its PredictionRecord as
-                  metadata["prediction"]
+                  empty; the k-point convergence builder
+                  (6.2.8/6.2.9) stashes its per-structure
+                  PredictionRecords as
+                  metadata["predictions"][<id>]
 
 SweepRecord
   varied_axes   tuple[str, ...]: axis names in the
@@ -4825,11 +4862,12 @@ constructs `CalcUnit`s directly.
 **Inputs and outputs.**
 
 ```
-predict_settings(
+build_kpoint_convergence(
     structure,                 # StructureControl or skl path
     options,                   # dict of non-swept makeinput
-                               #   options; MUST carry "basis"
-                               #   and "functional" -- they
+                               #   options; MUST carry "basis",
+                               #   "functional", and
+                               #   "kpoint_integration" -- they
                                #   select the predictor sub-
                                #   model (DESIGN 7.6 step 2) --
                                #   plus the usual scf_threshold,
@@ -4846,6 +4884,10 @@ predict_settings(
     id           = None,       # flight-level unit id; if
                                #   None, derived from
                                #   structure path
+    center       = None,       # curator-pinned k-density
+                               #   (6.2.9): bypass the
+                               #   predictor and build the
+                               #   grid around this value
 )  ->  (Flight, PredictionRecord)
 ```
 
@@ -4861,9 +4903,10 @@ predict_settings(
     crystalline) the lattice-family one-hot; system_type
     is fixed by argument.
 
-2.  Query the predictor.  `predict` is the DESIGN 7.4
-    free function over the loaded Dataspace, not a method
-    on a `db` object; the
+2.  Query the predictor (skipped entirely when `center`
+    is given -- the curator override consults no history).
+    `predict` is the DESIGN 7.4 free function over the
+    loaded Dataspace, not a method on a `db` object; the
     (basis, functional, kpoint_integration) sub-model is
     selected from the options dict (DESIGN 7.6 step 2):
         result = predict(dataspace, query_sig,
@@ -4880,7 +4923,16 @@ predict_settings(
 
 3.  Decide the verification grid:
 
-      if not verify:
+      if center is not None:
+          # curator override (6.2.9): a tight verify grid
+          #   centred on the pinned density, or a single
+          #   point when not verifying.  No prediction.
+          result      = None
+          grid_values = (build_verification_grid(center, 1.0)
+                         if verify else [center])
+          policy      = "curator_override"
+
+      elif not verify:
           # trust mode: one CalcUnit at the predicted
           #   value, no widening.
           grid_values = [result.predicted_kpoint_density]
@@ -4926,6 +4978,7 @@ predict_settings(
               structure = structure,
               options   = unit_options,
               wingbeat  = "imago",
+              kind      = "convergence",       # default role
               key_fields = standard_key_fields(),
           ))
 
@@ -4938,24 +4991,32 @@ predict_settings(
 
 5.  Assemble the PredictionRecord -- the full field set,
     identical to DESIGN 7.7 step 5 and matching the
-    [flight.prediction] fields the harvest hook recovers
-    (DESIGN 7.8).  `predict()` always returns a
-    PredictionResult (never None, DESIGN 7.4), so no
-    None-guards are needed; the under-trained case is
-    carried by `is_under_trained`:
+    [flight.predictions.<id>] fields the harvest hook
+    recovers (DESIGN 7.8).  In predict mode `predict()`
+    always returns a PredictionResult (never None, DESIGN
+    7.4), so no None-guards are needed; the under-trained
+    case is carried by `is_under_trained`:
 
       prediction_record = PredictionRecord(
-          policy             = policy,
-          predicted_value    = result.predicted_kpoint_density,
-          confidence         = result.confidence,
-          is_under_trained   = result.is_under_trained,
-          neighbor_entry_ids = result.neighbor_entry_ids,
-          predicted_gap      = result.predicted_gap,
-          predicted_magnetization =
+          policy                   = policy,
+          predicted_kpoint_density =
+              result.predicted_kpoint_density,
+          confidence               = result.confidence,
+          is_under_trained         = result.is_under_trained,
+          neighbor_entry_ids       = result.neighbor_entry_ids,
+          predicted_gap            = result.predicted_gap,
+          predicted_magnetization  =
               result.predicted_magnetization,
-          system_type        = system_type,
-          feature_vector     = query_sig,
+          system_type              = system_type,
+          feature_vector           = query_sig,
       )
+
+    In curator-override mode (`center` given) there is no
+    `result`: the record instead documents the pinned value
+    -- `predicted_kpoint_density = center`, `confidence =
+    1.0`, `is_under_trained = False`, empty
+    `neighbor_entry_ids`, and `None` predicted character --
+    with `feature_vector = query_sig` still recorded.
 
 6.  Record the sweep shape so serialize_flight emits
     the [flight.sweep] block (PSEUDOCODE 13.1) and the
@@ -4974,10 +5035,13 @@ predict_settings(
       )
 
     Return (Flight(units=units, sweep=sweep, ...),
-    prediction_record).  The caller attaches
-    `prediction_record` to the Flight so the harvest
-    hook (DESIGN 7.8) recovers it from
-    [flight.prediction] in flight.toml.
+    prediction_record).  The helper attaches
+    `prediction_record` to the Flight under
+    `metadata["predictions"][id]` (a one-entry mapping for
+    a single structure; 6.2.9) so the harvest hook (DESIGN
+    7.8) recovers it from [flight.predictions.<id>] in
+    flight.toml.  A multi-structure producer merges these
+    one-entry mappings into a combined flight.
 ```
 
 **Trust mode and the harvest contract.**  When
@@ -5009,8 +5073,8 @@ can stage it manually per DESIGN 7.4 / 7.8.
 - 6.2.6 -- the harvest handoff that consumes the
   `PredictionRecord` to write back into the dataspace.
 
-**Single varied axis in v1.**  `predict_settings` sweeps
-exactly one axis -- k-density -- so `Flight.sweep`
+**Single varied axis in v1.**  `build_kpoint_convergence`
+sweeps exactly one axis -- k-density -- so `Flight.sweep`
 always has `varied_axes = ("kpt-density",)` and every
 `CalcUnit.calc` is a one-element tuple.  This matches
 DESIGN 7.2's "exactly one verified target" and DESIGN
@@ -5031,6 +5095,100 @@ convention.  None of those helpers belongs inside the
 dispatch core; all of them will share the path conventions
 and the `PredictionRecord` mechanism this first helper
 establishes.
+
+#### 6.2.9 Multi-structure flights: per-structure prediction and run kinds
+
+6.2.8 builds a flight for *one* structure.  A producer
+that runs a *set* of structures -- the initial-potential
+builder (5.7), and any later survey over many systems --
+wants all their runs dispatched as one flat batch (a
+single cluster submission, not one per structure).  Two
+small additions to the 6.2.1 model let a single flight
+carry many structures without losing per-structure
+meaning.
+
+**Per-structure prediction.**  A single structure has one
+`PredictionRecord`.  For a set of structures a lone
+record on the flight is wrong: each structure has its own
+predicted operating point, its own confidence, and --
+decisively -- its own `system_type`, which determines how
+that structure's feature signature is computed.  A
+multi-structure flight therefore carries a *mapping* from
+structure id to prediction:
+
+```
+metadata["predictions"][<structure_id>] = PredictionRecord
+```
+
+The single-structure builder (6.2.8) produces a one-entry
+mapping, so the single and multi cases share one shape and
+the old singleton key is retired.  The harvester already
+groups runs by structure id (6.2.6), so when it processes a
+structure's group it looks that id up in the mapping; the
+flight-wide trust check of 6.2.6 becomes a per-structure
+check.
+
+**The mode rides on the prediction.**  A `PredictionRecord`
+already names which grid path produced it in its `policy`
+field.  That field *is* the per-structure convergence mode,
+and a producer may choose it independently per structure:
+
+- `wide_grid_no_prior` -- a broad sweep, used when guidance
+  has no usable prior.
+- `verify_around_prediction` -- a narrow sweep centred on
+  the predicted value.
+- `trust_no_verify` -- a single calculation at the predicted
+  value; no sweep.
+- `curator_override` -- a single point, or a tight sweep,
+  centred on a value the curator pinned by hand (the 5.7
+  `kpoint_spec` override; this mode bypasses the predictor).
+
+This is the "broad / narrow / none / override" choice made
+once per structure -- the nested-loop shape: one outer list
+of structures, each with its own inner convergence strategy.
+
+**Run kind.**  A flight may hold runs that are *not*
+convergence-sweep points.  The initial-potential builder,
+for one, also dispatches a structure-only
+`imago -loen -scf no` run per declared fingerprint (5.7),
+which the convergence harvester must not mistake for a grid
+point.  So every `CalcUnit` carries a `kind` label -- a
+short string the dispatch core stores and round-trips but
+never interprets (Principle 9) -- and each harvester
+consumes only the kinds it understands:
+
+- `kind = "convergence"` -- a k-density grid point; read by
+  the historical-guidance harvester (k-density + gap) and by
+  the initial-potential harvester (converged potential).
+- `kind = "fingerprint"` -- a structure-only loen run; read
+  by the fingerprint harvester.
+
+The default kind is `"convergence"`, so an ordinary
+single-purpose sweep needs no annotation; only the extra
+runs are tagged.  The convergence harvester selects
+`kind == "convergence"` before grouping, which is why a
+fingerprint run that shares its structure's id no longer
+pollutes the grid.
+
+*Why a label rather than a tag convention.*  One could
+instead infer "is this a sweep point?" by parsing each
+run's `<calc>` tag against the flight's varied axis (6.2.4)
+-- a `kpt-density-200` tag is a sweep point, a
+`loen-bispec-...` tag is not.  That works for today's two
+kinds but is implicit string-matching; an explicit `kind`
+reads plainly to a student and extends to a third kind
+without new parsing rules.
+
+**Harvest is general (6.2.6 restated).**  "Harvest" is the
+general act of walking a finished flight and pulling out a
+*specific* result; the swept k-density is only one target.
+The same finished flight feeds several harvesters -- the
+historical-guidance harvester (k-density), the
+initial-potential harvester (potential), the fingerprint
+harvester (descriptor) -- each selecting its `kind` and,
+where it needs the prediction, indexing
+`metadata["predictions"]` by structure id.  The dispatch
+core stays domain-ignorant throughout.
 
 ### 6.3 makeinput callable build API
 
@@ -6472,15 +6630,15 @@ below is what it executes.
 1.  query_sig = compute_signature(target, system_type,
                                   dataspace.group_table)
 
-2.  pred = predict(dataspace, query_sig, basis,
-                   functional, kpoint_integration)
+2.  prediction = predict(dataspace, query_sig, basis,
+                         functional, kpoint_integration)
 
 3.  if not verify:
         # trust mode (DESIGN 6.2.1).
-        grid_values = [pred.predicted_kpoint_density]
+        grid_values = [prediction.predicted_kpoint_density]
         policy      = "trust_no_verify"
 
-    elif pred.is_under_trained:
+    elif prediction.is_under_trained:
         # the dataspace is too thin for the predictor to
         # trust its own answer -- fall back to the wide-
         # grid default (7.9).
@@ -6489,8 +6647,8 @@ below is what it executes.
 
     else:
         grid_values = build_verification_grid(
-                          pred.predicted_kpoint_density,
-                          pred.confidence,
+                          prediction.predicted_kpoint_density,
+                          prediction.confidence,
                       )
         policy = "verify_around_prediction"
 
@@ -6520,23 +6678,24 @@ below is what it executes.
     translation point between the two names.
 
 5.  prediction_record = PredictionRecord(
-        policy             = policy,
-        predicted_value    = pred.predicted_kpoint_density
-                              if pred is not None else None,
-        confidence         = pred.confidence
-                              if pred is not None else 0.0,
-        is_under_trained   = (pred.is_under_trained
-                              if pred is not None
+        policy                   = policy,
+        predicted_kpoint_density =
+            prediction.predicted_kpoint_density
+                              if prediction is not None else None,
+        confidence               = prediction.confidence
+                              if prediction is not None else 0.0,
+        is_under_trained         = (prediction.is_under_trained
+                              if prediction is not None
                               else True),
-        neighbor_entry_ids = pred.neighbor_entry_ids
-                              if pred is not None else [],
-        predicted_gap      = pred.predicted_gap
-                              if pred is not None else None,
-        predicted_magnetization =
-            pred.predicted_magnetization
-                              if pred is not None else None,
-        system_type        = system_type,
-        feature_vector     = query_sig,
+        neighbor_entry_ids       = prediction.neighbor_entry_ids
+                              if prediction is not None else [],
+        predicted_gap            = prediction.predicted_gap
+                              if prediction is not None else None,
+        predicted_magnetization  =
+            prediction.predicted_magnetization
+                              if prediction is not None else None,
+        system_type              = system_type,
+        feature_vector           = query_sig,
     )
 
 6.  flight = Flight(
@@ -6599,7 +6758,8 @@ adjust them.  They are tunable knobs in
 calibration is a one-file change.
 
 **The prediction record** is persisted alongside the
-flight (in `flight.toml` as `[flight.prediction]`)
+flight (in `flight.toml` as `[flight.predictions.<id>]`,
+keyed by structure id so one flight can carry many; 6.2.9)
 so the harvest hook (7.8) can recover the predicting
 neighbors and the confidence score that drove the grid
 choice.  Without it, the harvested
@@ -6616,8 +6776,8 @@ separate post-step the user invokes).
 **Inputs:**
 
 - A finished flight's workspace directory.
-- The flight's `[flight.prediction]` block recovered
-  from `flight.toml` (7.7).
+- The flight's `[flight.predictions.<id>]` tables recovered
+  from `flight.toml` (7.7), one per structure.
 
 **The three-source rule (Model 1).**  Every entry field is
 filled from exactly one of three on-disk inputs, so the
@@ -6625,7 +6785,8 @@ information flow stays simple and homogeneous:
 
 - **`flight.toml`** -- the *plan*: the unit list, the
   `[flight.sweep]` block (the varied axis + the fixed
-  sub-model axes), and the `[flight.prediction]` block.
+  sub-model axes), and the `[flight.predictions.<id>]`
+  tables.
   Each grid point's swept k-density is read out of its calc
   tag (`kpt-density-<int>`) via the sweep's ordered
   `varied_axes`; the makeinput `options` are not persisted
@@ -6663,14 +6824,23 @@ still passes and the curator can spot it on review).
 
 ```
 1.  Load the flight report (DESIGN 6.2.6) and the
-    [flight.prediction] block from flight.toml.
+    [flight.predictions.<id>] tables from flight.toml
+    (one per structure).
 
-2.  Group CalcUnits by id (one group per structure).
+2.  Keep only the convergence-sweep runs
+    (`kind == "convergence"`, 6.2.9) -- other kinds (e.g.
+    "fingerprint" loen runs) share a structure id but
+    belong to a different harvester -- then group those
+    CalcUnits by id (one group per structure).
 
-3.  For each structure group:
-      a. Filter to the verification grid (the CalcUnits
-         that swept k-density).  Sort by k-density
-         ascending.
+3.  For each structure group (let `prediction` be its
+    entry in the predictions mapping):
+      a. Sort the grid by k-density ascending.  A
+         single-point grid (trust mode, or a single-point
+         curator override) harvests deliverables but is
+         NOT staged as a guidance entry -- one converged
+         calc is weaker evidence than a grid (6.2.1) --
+         and is skipped here before the convergence test.
       b. For each CalcUnit's converged run, parse
          result.toml for total_energy, gap_ev, gap_kind,
          total_magnetization, and scf_threshold; read the
@@ -6691,7 +6861,7 @@ still passes and the curator can spot it on review).
          an entry.  The user must widen the grid and
          re-run.
       e. Compute the structure's signature: system_type
-         from the flight's [flight.prediction]
+         from this structure's `prediction` record
          (which carries it from 7.7); composition_vector
          and lattice_family via compute_signature().
       f. Build a GuidanceEntry (per the three-source rule):
@@ -6712,8 +6882,8 @@ still passes and the curator can spot it on review).
               converged_at = chosen k-density,
               metric/metric_threshold,
               predictor_confidence and
-              predictor_neighbor_ids from
-              [flight.prediction].
+              predictor_neighbor_ids from this
+              structure's `prediction` record.
             - provenance: flight_id, source_structure,
               imago_commit, curator = "guidance_harvest.py".
       g. Write the entry to

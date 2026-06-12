@@ -2039,12 +2039,30 @@ the C48.3 wiring (C74) is the first major consumer.
   (C71) into the C48.3 producer.  Replaces the current
   "user picks settings up front" pattern with predict-
   then-verify: for each reference solid in the curation
-  manifest, predict_settings(...) returns a verification
-  sub-grid Flight, kaleidoscope dispatches it, the
-  harvest hook reads back both the converged potential
+  manifest, build_kpoint_convergence(...) returns a
+  verification sub-grid Flight, kaleidoscope dispatches it,
+  the harvest hook reads back both the converged potential
   (for the C48.3 deliverable) and the rich measured
   quantities (for guidance contribution).  Bundled with
   C48.3 once C70+C71+C72+C76 are in place.
+  **BLOCKING OPEN DESIGN QUESTION (deferred 2026-06-11):**
+  the combined multi-solid flight sets sweep.fixed_axes={}
+  but the harvest reads basis/functional/kpoint_integration
+  from fixed_axes -- breaks for a mixed-sub-model run
+  (manifest now allows per-solid basis/functional/
+  kpoint_integration).  Resolve before coding C74:
+  (A) require a uniform sub-model per producer run;
+  (B) RECOMMENDED carry the 3 sub-model axes in each
+  per-structure PredictionRecord (expands DESIGN 7.7);
+  (C) per-structure fixed_axes mapping.  Full write-up in
+  [[historical-guidance-database-design]].
+  Also note the #7 docs-only renames still pending in CODE:
+  rename builders/predict_verify.py -> kpoint_convergence.py
+  + predict_settings -> build_kpoint_convergence +
+  predicted_value -> predicted_kpoint_density (+ the
+  test_predict_verify.py / guidance_harvest.py / builders
+  __init__ import sites).  Plus #5 (force thru dispatch),
+  #8 (throw on missing gap), and the three C71 deferrals.
 - [ ] C75. Seed `share/historicalGuidanceDB/entries/`
   via a deliberate stratified seed flight.  ~150-250
   calculations covering the chemistry surface
@@ -2155,6 +2173,19 @@ on the same data later with no schema change.  Built on P10.
 - [ ] C83. (future) src/scripts/resource_migrate.py: schema
   migration tool mirroring guidance_migrate.py.  Not day-1
   scope (ARCH 11.6).
+- [ ] C84. Have Imago stamp its own build commit into its
+  output so the guidance/resource harvests record a real
+  build identity instead of the `"unknown"` fallback.
+  Background: the C74 producer echoes `imago_commit` through
+  the run options into the wingbeat-written `result.toml`
+  (the near-term fix the harvests read), but that records
+  what the *producer* believed it ran, which can drift from
+  the binary actually executed.  The robust upgrade is for
+  the running binary to report its own build commit (e.g.
+  from the C78 `build_info.toml`, or a compiled-in version
+  string), which the wingbeat then copies into `result.toml`
+  in place of the echoed value.  Pairs with C78 (build
+  identity) and C79 (wingbeat/imago.py capture hooks).
 
 ---
 
@@ -2186,6 +2217,17 @@ on the same data later with no schema change.  Built on P10.
   source can read naturally.  See angle_utils.py and
   test_angle_utils.py for the prose patterns that
   initially tripped the script.
+- [ ] T2. Consolidate the two parallel fixture trees onto
+  `src/tests/fixtures/`, deleting the vestigial top-level
+  `tests/fixtures/`.  The whole source tree lives under
+  `src/` and the active conftest already reads the
+  `src/tests/` copy, so the top-level copy is a drift
+  footgun (the same fixture diverging in two places).
+  Before deleting, grep for any test or pytest config that
+  still points at the top-level `tests/` path and redirect
+  it.  Do this as its own small cleanup commit, separate
+  from the C74 producer work, so the dedupe is easy to
+  review and revert independently.
 
 ---
 

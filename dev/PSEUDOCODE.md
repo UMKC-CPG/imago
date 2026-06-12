@@ -3642,7 +3642,7 @@ the "isolated" entries from current `pot1`/`coeff1`
 files (so atomSCF changes propagate), then, per
 reference solid, materializes the structure, asks the
 guidance predictor for a verification grid
-(`predict_settings`, 15.6), and emits one `CalcUnit`
+(`build_kpoint_convergence`, 15.6), and emits one `CalcUnit`
 per k-density grid point plus one structure-only
 `imago.py -loen -scf no` unit per Fortran-side
 fingerprint.  The dispatch phase hands every collected
@@ -3727,26 +3727,18 @@ function buildInitialPotentials(manifest_path,
         # scf_threshold ride along unchanged.
         options = make_producer_options(ref)
 
-        if ref.kpoint_spec.density is not None:
-            # Curator override: pin/centre the grid on
-            # the supplied density (a length-1 trust
-            # grid, or a tight verify around it).  No
-            # prediction is consulted (DESIGN 5.7 /
-            # 6.2.8).
-            flight_i, record_i = pin_to_density(
-                struct, options, ref.system_type,
-                ref.kpoint_spec.density,
-                id   = ref.reference_id,
-                root = workspace)
-        else:
-            # Full predict-then-verify.  predict_settings
-            # falls back to the wide default grid inside
-            # itself when the dataspace cannot predict.
-            flight_i, record_i = predict_settings(
-                struct, options, dataspace,
-                ref.system_type,
-                id   = ref.reference_id,
-                root = workspace)
+        # One builder call for every mode (DESIGN 6.2.9).
+        # `center` carries the curator override when the
+        # manifest pins kpoint_spec.density (the builder then
+        # bypasses the predictor); otherwise it is None and the
+        # builder runs full predict-then-verify, falling back to
+        # the wide default grid inside itself when the dataspace
+        # cannot predict.  Only the units are kept here; the
+        # combined flight below supplies the shared root.
+        flight_i, record_i = build_kpoint_convergence(
+            struct, options, dataspace, ref.system_type,
+            id     = ref.reference_id,
+            center = ref.kpoint_spec.density)
 
         # Domain-specific loen units: the generic builder
         # knows nothing about fingerprints, so the
@@ -3754,13 +3746,18 @@ function buildInitialPotentials(manifest_path,
         # `-loen -scf no` unit per Fortran-side
         # declaration.  The bispectrum fingerprint
         # depends on geometry alone, so these need not
-        # wait for the converged grid point.
+        # wait for the converged grid point.  Each is
+        # tagged kind = "fingerprint" (DESIGN 6.2.9) so the
+        # convergence harvest skips it and only the
+        # fingerprint harvest reads its fort.21.
         loen_units = build_loen_units(ref, struct,
             workspace)
 
         all_units.extend(flight_i.units)
         all_units.extend(loen_units)
-        predictions[ref.reference_id] = record_i
+        # Store the plain dict (as attach_prediction_record
+        # does), since metadata must be TOML-serializable.
+        predictions[ref.reference_id] = as_dict(record_i)
 
     # The combined flight carries every solid's units and
     # stashes the per-solid prediction records in the
@@ -3889,8 +3886,14 @@ function load_manifest_v2(path):
     seen_elements        = set()
 
     for ref in solids:
-        # Rule 2: required per-solid fields.
-        for f in ("reference_id", "system_type",
+        # Rule 2: required per-solid fields.  basis,
+        # functional, and kpoint_integration are required
+        # so that nothing the producer emits depends on an
+        # implicit default (VISION Principle 5); together
+        # with system_type they select the guidance
+        # predictor's sub-model (DESIGN 7.6).
+        for f in ("reference_id", "system_type", "basis",
+                  "functional", "kpoint_integration",
                   "kpoint_spec", "scf_threshold"):
             require(f in ref, path,
                 "manifest rule 2: [[reference_solid"
@@ -4694,6 +4697,14 @@ dataclass CalcUnit:
     options     : dict         # makeinput options
     wingbeat    : str | None   # wingbeat name; None -> the
                                #   flight default
+    kind        : str          # run role (DESIGN 6.2.9): a
+                               #   short label the core stores
+                               #   and round-trips but never
+                               #   interprets.  Default
+                               #   "convergence"; each
+                               #   harvester reads only the
+                               #   kinds it understands (e.g.
+                               #   "fingerprint" for loen runs)
     key_fields  : KeyFields    # client-declared identity
 
 dataclass Flight:
@@ -4709,8 +4720,9 @@ dataclass Flight:
     metadata         : dict    # opaque per-key tables the
                                #   core round-trips verbatim
                                #   as [flight.<key>] and never
-                               #   reads (Principle 9); 6.2.8
-                               #   stashes the prediction here
+                               #   reads (Principle 9); 6.2.8/
+                               #   6.2.9 stash the per-structure
+                               #   predictions mapping here
 
 dataclass SweepRecord:
     varied_axes : tuple[str,...]  # axis names, in the order
@@ -4737,7 +4749,8 @@ function serialize_flight(flight):
         record["sweep"] = as_dict(flight.sweep)
     # Each metadata[key] becomes a verbatim [flight.<key>]
     # table; the core never reads the contents (Principle 9).
-    # The 6.2.8 helper stashes [flight.prediction] this way.
+    # The 6.2.8/6.2.9 builder stashes the predictions mapping
+    # this way, emitted as [flight.predictions.<id>] sub-tables.
     for key, table in flight.metadata.items():
         record[key] = table
     write_toml(join(flight.root, "flight.toml"), record)
@@ -6086,18 +6099,19 @@ Dataspace into a verification-grid `Flight` plus a
 
 ```
 dataclass PredictionRecord:    # 7.7-derived; serialized as
-                               # [flight.prediction]
-    policy             : str        # trust_no_verify |
+                               # [flight.predictions.<id>]
+    policy                  : str   # trust_no_verify |
                                     #   wide_grid_no_prior |
-                                    #   verify_around_prediction
-    predicted_value    : float | None
-    confidence         : float
-    is_under_trained   : bool
-    neighbor_entry_ids : tuple[str]
-    predicted_gap      : float | None
+                                    #   verify_around_prediction |
+                                    #   curator_override
+    predicted_kpoint_density : float | None
+    confidence              : float
+    is_under_trained        : bool
+    neighbor_entry_ids      : tuple[str]
+    predicted_gap           : float | None
     predicted_magnetization : float | None
-    system_type        : str
-    feature_vector     : Signature
+    system_type             : str
+    feature_vector          : Signature
 ```
 
 ```
@@ -6157,31 +6171,44 @@ function build_calc_tag(calc_axes):
 ```
 
 ```
-function predict_settings(structure, options, dataspace,
-                          system_type, verify = True,
-                          id = None):
-    # options MUST carry "basis" and "functional" (they
-    # select the predictor sub-model, DESIGN 7.6 step 2).
+function build_kpoint_convergence(structure, options, dataspace,
+                                  system_type, verify = True,
+                                  id = None, center = None):
+    # The k-point-density convergence flight builder (DESIGN
+    # 6.2.8/6.2.9).  options MUST carry "basis", "functional",
+    # and "kpoint_integration" -- they select the predictor
+    # sub-model (DESIGN 7.6 step 2).  When `center` is given it
+    # is a curator-pinned k-density (the 5.7 kpoint_spec
+    # override): the predictor is bypassed and the grid is
+    # built around that value instead.
     sc = (structure if is_structure_control(structure)
           else load_skl(structure))
     query_sig = compute_signature(
         sc, system_type, dataspace.group_table)
 
-    result = predict(dataspace, query_sig,
-                     options["basis"], options["functional"],
-                     options["kpoint_integration"])
-
-    # Decide the grid + policy (DESIGN 7.7 step 3).
-    if not verify:
-        grid_values = [result.predicted_kpoint_density]
-        policy = "trust_no_verify"
-    elif result.is_under_trained:
-        grid_values = default_wide_kpoint_density_grid()
-        policy = "wide_grid_no_prior"
+    # Decide the grid + policy (DESIGN 7.7 step 3 / 6.2.9).
+    if center is not None:
+        # Curator override: a tight verify grid centred on the
+        # pinned density, or a single point when not verifying.
+        # No prediction is consulted.
+        result = None
+        grid_values = (build_verification_grid(center, 1.0)
+                       if verify else [center])
+        policy = "curator_override"
     else:
-        grid_values = build_verification_grid(
-            result.predicted_kpoint_density, result.confidence)
-        policy = "verify_around_prediction"
+        result = predict(dataspace, query_sig,
+                         options["basis"], options["functional"],
+                         options["kpoint_integration"])
+        if not verify:
+            grid_values = [result.predicted_kpoint_density]
+            policy = "trust_no_verify"
+        elif result.is_under_trained:
+            grid_values = default_wide_kpoint_density_grid()
+            policy = "wide_grid_no_prior"
+        else:
+            grid_values = build_verification_grid(
+                result.predicted_kpoint_density, result.confidence)
+            policy = "verify_around_prediction"
 
     # Round + dedupe to integer k-densities so the on-disk
     # tag parses back to exactly the swept value (6.2.4).
@@ -6199,6 +6226,7 @@ function predict_settings(structure, options, dataspace,
             structure  = structure,
             options    = unit_options,
             wingbeat   = "imago",
+            kind       = "convergence",        # default role
             key_fields = standard_key_fields()))
 
     # Record the sweep shape (DESIGN 6.2.8 step 6) so
@@ -6211,19 +6239,38 @@ function predict_settings(structure, options, dataspace,
             "functional":         options["functional"],
             "kpoint_integration": options["kpoint_integration"]})
 
-    record = PredictionRecord(
-        policy             = policy,
-        predicted_value    = result.predicted_kpoint_density,
-        confidence         = result.confidence,
-        is_under_trained   = result.is_under_trained,
-        neighbor_entry_ids = result.neighbor_entry_ids,
-        predicted_gap      = result.predicted_gap,
-        predicted_magnetization = result.predicted_magnetization,
-        system_type        = system_type,
-        feature_vector     = query_sig)
+    # The prediction record.  In override mode it documents the
+    # curator-pinned value (full confidence, no neighbors, no
+    # predicted character); otherwise it mirrors the predictor.
+    if center is not None:
+        record = PredictionRecord(
+            policy                   = policy,
+            predicted_kpoint_density = float(center),
+            confidence               = 1.0,
+            is_under_trained         = False,
+            neighbor_entry_ids       = (),
+            predicted_gap            = None,
+            predicted_magnetization  = None,
+            system_type              = system_type,
+            feature_vector           = query_sig)
+    else:
+        record = PredictionRecord(
+            policy                   = policy,
+            predicted_kpoint_density = result.predicted_kpoint_density,
+            confidence               = result.confidence,
+            is_under_trained         = result.is_under_trained,
+            neighbor_entry_ids       = result.neighbor_entry_ids,
+            predicted_gap            = result.predicted_gap,
+            predicted_magnetization  = result.predicted_magnetization,
+            system_type              = system_type,
+            feature_vector           = query_sig)
 
+    # One flight, one structure: stash the record in the
+    # predictions mapping under this structure's id (DESIGN
+    # 6.2.9).  A multi-structure producer merges these one-entry
+    # mappings into a combined flight.
     flight = Flight(units = units, sweep = sweep, ...)
-    attach_prediction_record(flight, record)
+    attach_prediction_record(flight, unit_id, record)
     return flight, record
 ```
 
@@ -6238,10 +6285,10 @@ function standard_key_fields():
 ```
 
 **Attaching the PredictionRecord without teaching the core
-about it.**  DESIGN 6.2.8 step 6 / 7.7 step 6 say the record
-is attached to "the Flight's metadata" and serialized as
-`[flight.prediction]`, but the §13.1 `Flight` has no
-field for it, and the dispatch core must not interpret
+about it.**  DESIGN 6.2.8 step 6 / 6.2.9 / 7.7 step 6 say the
+record is attached to "the Flight's metadata" and serialized
+under `[flight.predictions.<id>]`, but the §13.1 `Flight` has
+no field for it, and the dispatch core must not interpret
 domain data (Principle 9).  The pseudocode pins this the way
 the opaque `WingbeatOutcome.detail` is handled: `Flight`
 carries a generic `metadata: dict[str, dict]` (default
@@ -6249,10 +6296,13 @@ empty) that `serialize_flight` (§13.1) emits VERBATIM as
 `[flight.<key>]` tables, never reading the contents.
 
 ```
-function attach_prediction_record(flight, record):
-    # Domain-aware helper stashes a plain dict; the core only
-    # round-trips it.  Harvest (15.7) reads it back.
-    flight.metadata["prediction"] = as_dict(record)
+function attach_prediction_record(flight, structure_id, record):
+    # Domain-aware helper stashes a plain dict keyed by the
+    # structure id (DESIGN 6.2.9), so one combined flight can
+    # carry many structures' predictions.  The core only
+    # round-trips it; harvest (15.7) reads it back by id.
+    flight.metadata.setdefault("predictions", {})
+    flight.metadata["predictions"][structure_id] = as_dict(record)
 ```
 
 This rests on the generic `metadata` field on `Flight` plus
@@ -6275,8 +6325,9 @@ information flow stays simple:
 
 - **`flight.toml`** -- the *plan*: the unit list (id, structure,
   calc tags), the `[flight.sweep]` block (which axis varied and
-  the sub-model axes held fixed), and the `[flight.prediction]`
-  block.  Each grid point's swept k-density is read out of its
+  the sub-model axes held fixed), and the
+  `[flight.predictions.<id>]` tables (one per structure).  Each
+  grid point's swept k-density is read out of its
   calc tag (`kpt-density-<int>`) using the sweep's ordered
   `varied_axes` -- the makeinput `options` are deliberately NOT
   persisted in `flight.toml`, so the calc tag is the on-disk
@@ -6304,7 +6355,9 @@ a polarization, so the predictor keys its spin character on
 function harvest_flight(workspace_root, db_root, dataspace):
     flight = read_flight_toml(
         join(workspace_root, "flight.toml"))
-    prediction = flight.metadata.get("prediction")  # 15.6
+    # Per-structure predictions, keyed by structure id (DESIGN
+    # 6.2.9); a single-structure flight carries a one-entry map.
+    predictions = flight.metadata.get("predictions", {})  # 15.6
 
     # The swept axis names which calc-tag component carries each
     #   grid point's value; the fixed axes carry the sub-model
@@ -6312,7 +6365,15 @@ function harvest_flight(workspace_root, db_root, dataspace):
     axis       = flight.sweep.varied_axes[0]      # v1: single axis
     fixed_axes = flight.sweep.fixed_axes
 
-    for unit_id, units in group_by_id(flight.units):
+    # Only convergence-sweep runs are grid points; other kinds
+    # (e.g. "fingerprint" loen runs) share a structure id but
+    # belong to a different harvester (DESIGN 6.2.9).
+    convergence_units = [u for u in flight.units
+                         if u.kind == "convergence"]
+
+    for unit_id, units in group_by_id(convergence_units):
+        # The prediction this structure was launched under.
+        prediction = predictions.get(unit_id)
         # a. The verification sub-grid for this structure, sorted
         #    by swept k-density (read out of each unit's calc tag).
         grid = sort(units, key = lambda u: swept_value_of(u, axis))
@@ -6327,15 +6388,16 @@ function harvest_flight(workspace_root, db_root, dataspace):
             energies.append(rt["total_energy"])
             rts.append(rt)
 
-        # c. Trust mode harvests deliverables but does NOT
-        #    auto-stage a guidance entry (DESIGN 6.2.1 / 7.7):
+        # c. A single-point grid harvests deliverables but does
+        #    NOT auto-stage a guidance entry (DESIGN 6.2.1 / 7.7):
         #    one converged calc is weaker evidence than a grid.
-        #    This MUST precede pick_converged: a trust grid is a
-        #    single point, so the convergence test below would
-        #    return None and misreport it as "energy moving."
-        if prediction is not None \
-           and prediction["policy"] == "trust_no_verify":
-            log(unit_id + ": trusted point (not staged)")
+        #    This covers both trust_no_verify and a single-point
+        #    curator_override, and MUST precede pick_converged:
+        #    the two-sided convergence test below needs >= 3
+        #    points and would otherwise misreport one as "energy
+        #    still moving."
+        if len(grid) == 1:
+            log(unit_id + ": single point (not staged)")
             continue
 
         # metric_threshold = the SCF criterion the runs used (the
