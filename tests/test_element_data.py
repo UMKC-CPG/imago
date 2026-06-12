@@ -200,15 +200,23 @@ class TestLJPairCoeffs:
     def test_index_zero_is_none(self, ed):
         assert ed.lj_pair_coeffs[0] is None
 
-    def test_entries_are_two_tuples(self, ed):
+    def test_entries_are_one_indexed_pairs(self, ed):
+        # Each entry is the 1-indexed list [None, epsilon, sigma]
+        # (slot 0 unused), matching the parser, condense.py's
+        # [z][1] / [z][2] access, and the Perl ElementData.pm
+        # convention -- not a bare (epsilon, sigma) tuple.
         for z in range(1, ed.num_elements + 1):
             entry = ed.lj_pair_coeffs[z]
-            assert len(entry) == 2, (
-                f'lj_pair_coeffs[{z}] should have 2 values, got {len(entry)}'
+            assert len(entry) == 3, (
+                f'lj_pair_coeffs[{z}] should be [None, epsilon, '
+                f'sigma], got {len(entry)} values'
             )
+            assert entry[0] is None
+            assert isinstance(entry[1], float)
+            assert isinstance(entry[2], float)
 
     def test_silicon_coeffs(self, ed):
-        eps, sig = ed.lj_pair_coeffs[14]
+        _, eps, sig = ed.lj_pair_coeffs[14]
         assert eps == pytest.approx(0.03, rel=1e-4)
         assert sig == pytest.approx(2.5, rel=1e-4)
 
