@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """build_initial_potentials.py -- the augmented potential
 database *producer* (DESIGN 5.7; PSEUDOCODE 11.4).
 
@@ -1329,19 +1330,22 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(
         description="Build the augmented initial-potential database "
-                    "from a curation manifest (DESIGN 5.7).")
+                    "from a curation manifest.")
     parser.add_argument(
-        "--manifest", required=True,
-        help="path to the curation manifest (schema v2)")
+        "--manifest", default="manifest.toml",
+        help="path to the curation manifest, schema v2 (default: "
+             "manifest.toml in the current working directory)")
     parser.add_argument(
         "--pdb-root", default=_default_pdb_root(),
         help="the atomicPDB root (default: $IMAGO_DATA/atomicPDB)")
     parser.add_argument(
         "--element", default=None,
-        help="restrict the build to this one element's database")
+        help="restrict the build to this one element's database "
+             "(default: build every element named in the manifest)")
     parser.add_argument(
         "--force", action="store_true",
-        help="bypass the run-reuse cache so every run re-executes")
+        help="bypass the run-reuse cache so every reference run "
+             "re-executes (default: reuse any cached runs)")
     args = parser.parse_args(argv)
 
     if not args.pdb_root:

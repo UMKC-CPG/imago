@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """guidance_harvest.py -- turn a finished kaleidoscope flight into
 staged historical-guidance entries (DESIGN 7.8 harvest half;
 PSEUDOCODE 15.7).
@@ -475,8 +476,7 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(
         description="Harvest a finished kaleidoscope flight into "
-                    "staged historical-guidance entries "
-                    "(DESIGN 7.8).")
+                    "staged historical-guidance entries.")
     parser.add_argument(
         "workspace_root",
         help="the flight workspace directory (holding flight.toml "

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """guidance_promote.py -- the curator's promotion helper for the
 historical-guidance dataspace (DESIGN 7.8 curator half;
 PSEUDOCODE 15.7).
@@ -330,8 +331,9 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(
         description="Review and promote staged historical-guidance "
-                    "entries from staging/ into entries/ "
-                    "(DESIGN 7.8).")
+                    "entries from staging/ into entries/.  With no "
+                    "mode flag the default is interactive review of "
+                    "each staged entry.")
     parser.add_argument(
         "--db-root", default=_default_db_root(),
         help="the historicalGuidanceDB root "
