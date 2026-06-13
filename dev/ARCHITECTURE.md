@@ -1301,6 +1301,26 @@ kaleidoscope once this section stabilizes; that
 revision is tracked as follow-up work, not performed
 here.
 
+The harvest contract reads one companion output beyond the
+converged `scfV`.  Because the producer-derived entry label
+encodes the OLCAO `(species, type)` of each harvested site
+(DESIGN 5.2.1), and those numbers are assigned by makeinput
+during input preparation rather than known at manifest
+time, the harvest stage needs them back at storage time.
+Rather than add a new output, the producer co-opts the
+`datSkl.map` file makeinput already writes (the sorted-dat
+to skeleton atom-number mapping): it gains three columns
+carrying each site's element, `atom_species_id`, and
+`atom_type_id`.  The harvester looks up the manifest
+entry's `atom_site` (a skeleton-numbering index) and reads
+its `(species, type)` straight off the map.  The assigner
+thus records its own verdict where the run lives, and the
+harvest stage reads it back to mint the storage label
+without re-parsing the run's Imago input.  This keeps the
+makeinput/harvest interface explicit: the run produces the
+numbers, the producer only consumes them.  The
+producer-side change is tracked as TODO C87.
+
 ### 9.8 Open architectural questions
 
 Most of the early questions are resolved and recorded

@@ -2490,6 +2490,115 @@ fingerprint.
    loudly rather than quietly omitting the fingerprint
    from the lookup.
 
+#### 5.2.1 Label naming
+
+The `label` of every producer-harvested `[[potential]]`
+entry is assembled mechanically from the OLCAO identity
+coordinate of the harvested atom site, prefixed by the
+reference solid it came from.  The canonical form is:
+
+    <reference_id>-<element><species>-t<type>-a<site>
+
+all lowercase.  Example: a single Si site in a diamond-Si
+reference run yields `si_diamond-si1-t1-a1`.
+
+The five components and their sources:
+
+  Component     Source
+  --------------------------------------------------------
+  reference_id  The manifest `reference_id` of the
+                reference solid (5.7).  The only
+                human-minted part of the label.
+  element       Periodic-table symbol of the site,
+                lowercased (makeinput's element/species/
+                type model: "elements are defined by the
+                periodic table").
+  species       OLCAO species number of the site
+                (`atom_species_id`).  Species are defined
+                by the structure of the system (the si1,
+                si2 tags carried in the skeleton file).
+  type          OLCAO potential-type number of the site
+                (`atom_type_id`).  Types are defined by
+                the needs of the calculation and assigned
+                by the grouping pass (crystallographic
+                equivalency, reduce, target, or block).
+  site          The 1-based `atom_site` index of the
+                harvested atom in the reference structure;
+                equals `provenance.atom_site`.  The `a`
+                prefix keeps it from colliding with the
+                species token.
+
+`element` and `species` fuse into the single OLCAO token
+the CLI already speaks (`si1`), so a label reads straight
+into a `-pot LABEL scope=si1` override (5.6.1) with no
+translation step.
+
+**Why these five and not fewer.**  The label is not the
+environment encoder (the fingerprint is, 5.6.5) and not
+the prose (the `description` is).  It is a typeable handle
+plus an exact back-pointer: from the label alone a reader
+reconstructs which run, which species, which potential
+type, and which atom produced the entry.  Every component
+but `reference_id` is a value the run already holds, so
+the scheme invents no names and cannot drift -- the type
+integer is the realized grouping verdict, not a separate
+interpretation of the environment that could disagree
+with the fingerprint.
+
+**Type integers are per-run.**  The grouping pass relabels
+and compresses type numbers on each run (the species/type
+relax-and-renumber step in makeinput), so `t3` is
+meaningful only within its `reference_id`.  The prefix
+scopes it, so this is not a defect: `si_vac-si1-t2-a17`
+reads as "type 2 as the si_vac run assigned it."
+
+**Uniqueness is automatic.**  Two entries in one element
+file share an element by construction; they differ in the
+`-a<site>` component when they come from the same
+reference solid (atom_site is unique per structure) and
+in the `<reference_id>` prefix otherwise.  So rule 6
+((element, label) unique) holds by construction provided
+`reference_id` is manifest-unique (rule 5) and label-safe
+(lowercase letters, digits, `-`, `_`; no spaces, since
+the whole label is typed into `-pot`).
+
+**Assembled at harvest, not authored in the manifest.**
+The `type` number is not known until the grouping pass
+runs, so the label cannot be written into the manifest
+ahead of time.  The ordering of the producer pipeline
+makes this a non-issue: every reference run passes through
+makeinput, which assigns species (from the skeleton tags)
+and type (from the grouping pass) while building the run's
+Imago input, so by the time any run has finished executing
+the `(species, type)` of every site is a settled fact.
+The harvest stage runs strictly after all executions and
+mints the storage label only then.
+
+To hand the harvester those numbers without re-parsing the
+input, the producer co-opts a file makeinput already
+writes: `datSkl.map`.  Today that file records the mapping
+between the sorted `imago.dat` atom numbering and the
+original skeleton numbering (two columns, DAT# and
+SKELETON#).  It is emitted at the exact point in the
+output path where the sorted per-atom element, species,
+and type arrays are in hand, so it gains three further
+columns -- the site's element, `atom_species_id`, and
+`atom_type_id`.  The `atom_site` of a manifest entry is a
+skeleton-numbering index, so the harvester looks up the
+SKELETON# row and reads that site's `(species, type)`
+straight off the map.  The assigner records its own
+verdict where the run lives; the harvester reads it back
+and assembles the label.  Consequently the manifest entry's
+`label` field (rule 3) becomes an optional curator override
+of the derived default rather than a required field.  See
+TODO C87 for the producer and makeinput changes.
+
+**Reserved labels are unaffected.**  `"isolated"` (the
+atomSCF baseline, rule 6) and `"default_solid"` (the
+Phase-1 single-bulk improved entry) keep their fixed
+names; the mechanical scheme governs only the
+producer-harvested solid entries that Phase 2 adds.
+
 ### 5.3 Sketch (gold, two entries with fingerprints)
 
 The sketch below uses simplified float notation for
@@ -2750,11 +2859,21 @@ electronic-state flags (XANES today).
 #### 5.6.1 CLI surface
 
 ```
--pot LABEL              Manual override.  Apply LABEL
-                        uniformly across the structure
-                        (where no other scheme picks
-                        an entry).  Optional.  See
-                        precedence in 5.6.3.
+-pot LABEL   scope=SPEC (optional)
+             scope=~SPEC (optional)
+                        Manual override for the augmented
+                        potential database.  Apply the
+                        entry named LABEL to the atoms
+                        selected by SPEC.  Without scope=,
+                        LABEL applies across the whole
+                        structure (the global form).  SPEC
+                        is an element (scope=si -> all
+                        silicon) or a species (scope=si1
+                        -> species si1 only); scope=~SPEC
+                        excludes that element or species.
+                        Repeatable: different scopes may
+                        carry different labels.  Optional.
+                        See precedence in 5.6.3.
 
 -target name=NAME ...   Position-based species/type
 -block  name=NAME ...   grouping.  Existing flag
@@ -2794,6 +2913,40 @@ electronic-state flags (XANES today).
                         behavior; layered on top of
                         the species pass.
 ```
+
+A note on `scope=`: the keyword is deliberately reused
+across two option families, but its argument differs by
+the pipeline stage the option acts in.  For the *grouping*
+ops (`-reduce`, `-bispec`) `scope=` names a spatial region
+declared by a `-target`/`-block name=NAME` (5.6.4) -- it
+selects *which atoms to group*.  For the *assignment* op
+(`-pot`) `scope=` names an already-resolved element or
+species -- it selects *which assigned atoms receive the
+label*.  Grouping precedes assignment, so by the time
+`-pot` runs every atom already has an `(element, species)`,
+which is exactly what its `scope=` refers to.  A future
+relaxation may let `-pot scope=` also accept a named
+spatial region for symmetry with the grouping ops; until a
+concrete need appears it is element/species only (TODO).
+
+**Retirement of legacy potential/basis substitution.**
+The historical `-subpot` / `-subbasis` options substituted
+an alternate *numbered* legacy file (`pot<N>` / `coeff<N>`,
+`contract<N>.dat`) for a targeted element or species.  The
+potential half is being removed: an audit of the installed
+database (all 103 element directories) found only `pot1` /
+`coeff1` present -- no element ever shipped a `pot2` or
+higher, so `-subpot` had nothing to substitute and was
+never exercised in practice.  Its capability is fully
+subsumed by the augmented database plus the now-scoped
+`-pot`: an alternate potential is a *labeled entry* the
+curator harvests (5.7), selected per element or species by
+`-pot LABEL scope=SPEC` rather than by a magic file index.
+The basis half (`-subbasis`) follows the same trajectory
+once the basis-set database gains an augmented, labeled
+form analogous to the potential database; the two
+deprecate together, preserving their long-standing
+symmetry.
 
 #### 5.6.2 Mutual exclusion
 
@@ -2874,11 +3027,18 @@ final assignment, pick exactly one `PotentialEntry`
 from that element's database.  Precedence, top to
 bottom:
 
-1. **`-pot LABEL` (manual override).**  If given, every
-   species in every element uses the entry with
-   `label == LABEL`.  `KeyError` for any element that
-   lacks the label is fatal — `-pot` is a deliberate
-   override and silent fallback would mask user intent.
+1. **`-pot` (manual override).**  Each `-pot LABEL`
+   applies its label to the species in its `scope=`
+   (an unscoped `-pot LABEL` applies to every species in
+   every element; a `scope=SPEC` form applies only to the
+   named element or species).  When several `-pot` flags
+   are given, a more specific scope wins over a broader one
+   for the species they share (species beats element beats
+   global); two equally-specific scopes naming the same
+   species are a hard error at parse time.  `KeyError` for
+   any in-scope element that lacks the label is fatal --
+   `-pot` is a deliberate override and a silent fallback
+   would mask user intent.
 2. **Fingerprint match** (only for atoms assigned by an
    environment-based scheme).  For each species' atoms,
    ask the matcher to summarize them into one

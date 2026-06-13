@@ -1637,6 +1637,90 @@ shipped.
   both (a) Phase-2 base chain (C53-C61) landing
   first and (b) D10 design landing.
 
+#### CLI override cleanup (DESIGN 5.6.1)
+
+- [ ] C85. Make `-pot` scoped and repeatable in
+  `makeinput.py` per DESIGN 5.6.1 / 5.6.5.  Change the
+  argparse definition from a single `type=str` to a
+  repeatable `action="append"` accepting `LABEL` plus an
+  optional `scope=SPEC` / `scope=~SPEC` keyword, where
+  `SPEC` is an element (`si`) or species (`si1`) tag.
+  Thread the scoped overrides into
+  `_select_augmented_pot_entry` / `_obtain_pot_info` so the
+  per-element pick becomes a per-(element, species) pick:
+  an unscoped `-pot` is the global default, a scoped `-pot`
+  applies only to its element/species, and more-specific
+  scopes win over broader ones (species > element >
+  global), with two equally-specific scopes on the same
+  species a parse-time error.  Keep the existing
+  hard-error-on-missing-label and legacy-fallback-with-
+  warning semantics.  Update the OPTIONS EXPLANATIONS and
+  DEFAULTS help text and the selection tests.  Closes the
+  gap that today `-pot` can only target the augmented
+  database globally while only the legacy `-subpot` could
+  target a single species.
+- [ ] C86. Remove the `-subpot` option from `makeinput.py`
+  (DESIGN 5.6.1 retirement note).  An audit of all 103
+  installed element directories found only `pot1`/`coeff1`
+  -- no `pot2`-or-higher ever shipped, so `-subpot` had
+  nothing to substitute and was never exercised.  Its
+  capability is subsumed by the augmented database plus the
+  scoped `-pot` from C85.  Delete the argparse definition,
+  the `pot_sub_*` parsing, and the path-1 substitution
+  branch in `_obtain_pot_info`, collapsing its three-path
+  precedence (subpot > augmented > legacy) to two
+  (augmented > legacy).  Leave `-subbasis` in place: it
+  deprecates together with `-subpot` only once the basis-
+  set database gains an augmented, labeled form (a future
+  task), preserving the long-standing subbasis/subpot
+  symmetry.  Do C86 after C85 so the replacement capability
+  lands before the legacy option is withdrawn.
+
+#### Producer-derived entry labels (DESIGN 5.2.1)
+
+- [ ] C87. Assemble the augmented-database entry `label` at
+  harvest instead of authoring it in the manifest, per the
+  DESIGN 5.2.1 scheme
+  `<reference_id>-<element><species>-t<type>-a<site>`.  The
+  `type` (and `species`) numbers are not known until the
+  grouping pass runs, so the label cannot be a manifest
+  field; the harvest stage mints it after all executions
+  finish.  Three coordinated changes:
+  (a) co-opt the existing `datSkl.map` output of makeinput
+      (`print_imago` / its sorting helper, makeinput.py:4627)
+      rather than adding a new file.  It currently writes two
+      columns (DAT# = sorted imago.dat atom number, SKELETON#
+      = original imago.skl atom number); add three columns for
+      each site's element, `atom_species_id`, and
+      `atom_type_id`.  The sorting helper already returns
+      `sorted_elem_id` / `sorted_spec_id` / `sorted_type_id`
+      at the write point (line 4634), so the data is in hand;
+      this just records the verdict so the harvester need not
+      re-parse the run's input.  Update the `datSkl.map`
+      docstring (makeinput.py:3373) and any reader of the
+      file's column layout.
+  (b) `build_initial_potentials.py` harvest path
+      (`extract_potential` / its caller near line 1158) reads
+      `datSkl.map`, finds the SKELETON# row equal to the
+      harvested `atom_site`, takes that row's
+      `(species, type)`, and builds the label as
+      `f"{reference_id}-{element}{species}-t{type}-a{site}"`,
+      lowercased, then stores the entry under it (the
+      replace-by-label upsert keys on this assembled label).
+  (c) `load_manifest_v2` relaxes manifest rule 3 so the entry
+      `label` field is OPTIONAL -- when present it overrides
+      the derived default (curator escape hatch); when absent
+      the producer derives it per (b).  Add a label-safe
+      charset check on `reference_id` (rule 5): lowercase
+      letters, digits, `-`, `_`; no spaces, since the whole
+      assembled label is typed into `-pot`.
+  Until C87 lands the manifest must still supply an explicit
+  `label` (current rule 3); the C74 smoke-test manifest
+  carries the derived value `si_diamond-si1-t1-a1` as that
+  explicit placeholder.  Update the manifest schema docs and
+  the producer tests (siteMap round-trip + derived-label
+  assembly + optional-override path).
+
 ### Phase J -- kaleidoscope flight infrastructure (VISION 4, ARCH 9)
 
 The shared submit / track / harvest infrastructure.
