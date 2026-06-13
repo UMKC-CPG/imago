@@ -3175,8 +3175,9 @@ below): per-solid fields the SCF run needs
 (`structure_path`, `kpoint_spec`,
 `scf_threshold`) plus a stable
 `reference_id`; per-entry harvest declarations
-(`atom_site`, expected `element`, `label`,
-`description`).
+(`atom_site`, expected `element`, `description`,
+and an optional `label` override -- absent labels
+are derived at harvest per 5.2.1).
 
 **What it deliberately omits**: the numerical
 potentials themselves (those are SCF outputs);
@@ -3380,9 +3381,14 @@ kpoint_integration    = "linear-tetrahedral"
 - `atom_site` (positive integer): 1-based site index into the
   structure, matching Imago's site-indexing convention everywhere
   else in the codebase.
-- `label` (string): the label this entry is written under in the
-  element's `s_gaussian_pot.toml`.  `(element, label)` must be
-  unique across the entire manifest (rule 6).
+- `label` (string, *optional*): the label this entry is written
+  under in the element's `s_gaussian_pot.toml`.  When omitted, the
+  producer derives it at harvest per 5.2.1
+  (`<reference_id>-<element><species>-t<type>-a<site>`); when
+  present it overrides that derived default.  An explicit
+  `(element, label)` must be unique across the entire manifest;
+  a derived label's `(reference_id, element, atom_site)` must be
+  unique (rule 6).
 - `default` (bool): whether this entry should be tagged
   `default = true` in the element's `s_gaussian_pot.toml`.
   Exactly one entry per element across the entire manifest is
@@ -3437,17 +3443,29 @@ file (5.2):
    producer emits depends on an implicit default (VISION
    Principle 5).
 3. Every `[[reference_solid.entry]]` carries `element`,
-   `atom_site`, `label`, `default`, `description`.
+   `atom_site`, `default`, `description`.  `label` is *optional*
+   (5.2.1): when present it is an explicit curator override; when
+   absent the producer derives it at harvest from the run's site
+   identity, so the species and type numbers (unknown until the
+   grouping pass runs) need not be authored ahead of time.
 4. Exactly one of `cod_id` or `structure_path` is set on each
    `[[reference_solid]]`.  If `structure_path`, it resolves to
    an existing file under the manifest's directory.  If `cod_id`,
    it parses as a positive integer *and* `cod_revision` is
    present as a non-empty string.
-5. `reference_id` is unique across the manifest.
-6. `(element, label)` is unique across the manifest.  Two solids
-   cannot both produce, e.g., `("Au", "default_solid")` — the
-   database holds one entry per `(element, label)`, so silent
-   overwrite would mask a curation mistake.
+5. `reference_id` is unique across the manifest *and* label-safe
+   (lowercase letters, digits, `-`, `_`): it is embedded verbatim
+   in every derived entry label and typed into `-pot`, so a
+   non-conforming id is a hard error (5.2.1).
+6. No two entries may produce the same database entry.  For an
+   entry with an explicit `label`, `(element, label)` is unique
+   across the manifest — two solids cannot both produce, e.g.,
+   `("Au", "default_solid")`.  For an entry with a derived label,
+   `(reference_id, element, atom_site)` is unique, since the
+   derived label is built from exactly those three; two such
+   entries would collide on the identical label.  Either way a
+   silent overwrite that would mask a curation mistake is
+   refused.
 7. For every element appearing on any
    `[[reference_solid.entry]]`, exactly one such entry across
    the entire manifest carries `default = true`.  Zero or

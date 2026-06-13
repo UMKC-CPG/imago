@@ -31,6 +31,7 @@ conftest.py's ``SCRIPTS_DIR`` insertion lets us import
 """
 
 import os
+import types
 
 import pytest
 
@@ -196,3 +197,48 @@ def test_from_options_builds_reconciled_settings(imago_data_dir):
     # The rc defaults were loaded by the constructor: a
     #   representative rc-backed attribute exists.
     assert hasattr(settings, "makekpoints_exec")
+
+
+# ==============================================================
+#  _sort_atoms: the datSkl.map writer (DESIGN 5.2.1 / C87)
+# ==============================================================
+
+def test_sort_atoms_writes_datskl_map_with_identity_columns(
+        tmp_path, monkeypatch):
+    """``_sort_atoms`` writes ``inputs/datSkl.map`` with the five
+    columns the C87 label-derivation reads: DAT#, SKELETON#, and
+    each site's element symbol, species number, and type number.
+
+    Two atoms (Si then O), already in element order, drive the
+    writer directly with a synthetic settings/sc so the species and
+    type columns are exercised without a full makeinput build."""
+
+    settings = types.SimpleNamespace(
+        num_atoms=2,
+        atom_element_id=[0, 1, 2],          # 1-indexed
+        atom_species_id=[0, 1, 1],
+        atom_type_id=[[0, 1, 1]],           # [file_set][atom]
+        atom_element_name=[None, "Si", "O"],
+        xanes_atoms=[])
+    sc = types.SimpleNamespace(
+        fract_abc=[[None, 0, 0, 0], [None, 0.0, 0.0, 0.0],
+                   [None, 0.5, 0.5, 0.5]],
+        direct_abc=[[None, 0, 0, 0], [None, 0.0, 0.0, 0.0],
+                    [None, 0.5, 0.5, 0.5]],
+        direct_xyz=[[None, 0, 0, 0], [None, 0.0, 0.0, 0.0],
+                    [None, 0.5, 0.5, 0.5]])
+
+    monkeypatch.chdir(tmp_path)
+    os.makedirs("inputs")
+    makeinput._sort_atoms(settings, sc, file_set=0,
+                          cumulative_num_types=None)
+
+    rows = [line.split() for line in
+            (tmp_path / "inputs" / "datSkl.map").read_text()
+            .splitlines() if line.strip()]
+    # Header carries the new column names; data rows carry element,
+    #   species, and type alongside the dat<->skl numbering.
+    assert rows[0] == ["DAT#", "SKELETON#", "ELEMENT",
+                       "SPECIES", "TYPE"]
+    assert rows[1] == ["1", "1", "si", "1", "1"]
+    assert rows[2] == ["2", "2", "o", "1", "1"]

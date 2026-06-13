@@ -95,6 +95,7 @@ This file is being built incrementally (C48):
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tomllib
@@ -142,13 +143,22 @@ class ReferenceEntry:
     whether this entry should carry the database file's single
     ``default = true`` tag (per-element-database rule 7); the
     manifest is the single source of truth for that choice.
+
+    ``label`` is optional (DESIGN 5.2.1).  When the curator omits
+    it, the producer derives the label at harvest from the run's
+    site identity --
+    ``<reference_id>-<element><species>-t<type>-a<site>`` -- so the
+    species and type numbers (unknown until the grouping pass runs)
+    land in the label without being authored ahead of time.  A
+    present ``label`` is an explicit override of that derived
+    default.
     """
 
     element: str
     atom_site: int
-    label: str
     default: bool
     description: str
+    label: str | None = None
     fingerprints: list[ManifestFingerprint] = field(
         default_factory=list)
 
@@ -254,13 +264,23 @@ def load_manifest_v2(path: str,
        guidance system types (``crystalline`` / ``amorphous`` /
        ``nanostructure`` / ``molecular``).
     3. Every ``[[reference_solid.entry]]`` carries ``element``,
-       ``atom_site``, ``label``, ``default``, ``description``.
+       ``atom_site``, ``default``, ``description``.  ``label`` is
+       optional (DESIGN 5.2.1): when present it overrides the
+       derived default; when absent the producer assembles it at
+       harvest from the run's site identity.
     4. Exactly one of ``cod_id`` / ``structure_path`` per solid;
        ``cod_id`` must be a positive integer with a non-empty
        ``cod_revision``; ``structure_path`` must resolve to an
        existing file under the manifest's directory.
-    5. ``reference_id`` is unique across the manifest.
-    6. ``(element, label)`` is unique across the manifest.
+    5. ``reference_id`` is unique across the manifest and is
+       label-safe (lowercase letters, digits, ``-``, ``_``),
+       because it is embedded verbatim in every derived entry
+       label and typed into ``-pot`` (DESIGN 5.2.1).
+    6. For entries with an explicit ``label``, ``(element, label)``
+       is unique across the manifest.  For entries with a derived
+       label, ``(reference_id, element, atom_site)`` is unique --
+       two such entries would derive the identical label (the
+       per-construction uniqueness of DESIGN 5.2.1).
     7. Exactly one ``default = true`` entry per element that
        appears anywhere in the manifest.
     8. Within one entry's fingerprint declarations,
@@ -286,6 +306,9 @@ def load_manifest_v2(path: str,
 
     seen_ref_ids: set[str] = set()
     seen_element_label: set[tuple[str, str]] = set()
+    # (reference_id, element, atom_site) for derived-label entries:
+    # two with the same triple would derive the identical label.
+    seen_derived_key: set[tuple[str, str, int]] = set()
     # elem -> count of default=true entries (rule 7, post-loop).
     default_per_element: dict[str, int] = {}
     seen_elements: set[str] = set()
@@ -307,6 +330,16 @@ def load_manifest_v2(path: str,
                      f"missing field: {field_name}")
 
         rid = ref["reference_id"]
+
+        # ----- Rule 5 (charset): reference_id is embedded verbatim
+        # in every derived entry label and typed into -pot, so it
+        # must be label-safe -- lowercase letters, digits, hyphen,
+        # underscore (DESIGN 5.2.1).  Checked before the uniqueness
+        # tally so a malformed id fails with the clearer message.
+        _require(re.fullmatch(r"[a-z0-9_-]+", rid) is not None, path,
+                 f"manifest rule 5: reference_id {rid!r} is not "
+                 f"label-safe (use lowercase letters, digits, '-', "
+                 f"'_'); it is embedded verbatim in derived labels")
 
         # ----- Rule 2 (domain): system_type must be one of the four
         # guidance system types -- the predictor switches its
@@ -353,8 +386,10 @@ def load_manifest_v2(path: str,
 
         entries: list[ReferenceEntry] = []
         for entry in ref.get("entry", []):
-            # ----- Rule 3: required entry fields.
-            for field_name in ("element", "atom_site", "label",
+            # ----- Rule 3: required entry fields.  ``label`` is
+            # NOT required (DESIGN 5.2.1): absent => derived at
+            # harvest, present => explicit override.
+            for field_name in ("element", "atom_site",
                                "default", "description"):
                 _require(field_name in entry, path,
                          f"manifest rule 3: "
@@ -362,17 +397,28 @@ def load_manifest_v2(path: str,
                          f"missing field: {field_name}")
 
             elem = entry["element"]
-            label = entry["label"]
+            label = entry.get("label")
             seen_elements.add(elem)
 
-            # ----- Rule 6: (element, label) uniqueness across
-            # the entire manifest -- two solids cannot both
-            # produce the same database entry.
-            key = (elem, label)
-            _require(key not in seen_element_label, path,
-                     f"manifest rule 6: duplicate "
-                     f"(element, label): {key}")
-            seen_element_label.add(key)
+            # ----- Rule 6: no two entries may produce the same
+            # database entry.  With an explicit label that means
+            # (element, label) is unique across the manifest; with
+            # a derived label it means (reference_id, element,
+            # atom_site) is unique, since those three are exactly
+            # what the derived label is built from (DESIGN 5.2.1).
+            if label is not None:
+                key = (elem, label)
+                _require(key not in seen_element_label, path,
+                         f"manifest rule 6: duplicate "
+                         f"(element, label): {key}")
+                seen_element_label.add(key)
+            else:
+                dkey = (rid, elem, entry["atom_site"])
+                _require(dkey not in seen_derived_key, path,
+                         f"manifest rule 6: two entries derive the "
+                         f"same label (same reference_id, element, "
+                         f"atom_site): {dkey}")
+                seen_derived_key.add(dkey)
 
             # ----- Rule 7 tally: count default=true per element;
             # the "exactly one" check runs after the full walk.
@@ -979,6 +1025,54 @@ def extract_potential(result_toml: dict, atom_site: int
     return coefficients, alphas
 
 
+def read_site_identity_map(result_toml: dict
+                           ) -> dict[int, tuple[str, int, int]]:
+    """Read the run's ``datSkl.map`` into ``{skeleton_atom:
+    (element, species, type)}`` (DESIGN 5.2.1 / 5.7; ARCHITECTURE
+    9.7).
+
+    makeinput writes this file during input preparation, recording
+    -- per atom -- the sorted-dat number, the original skeleton
+    number, and the site's element symbol, OLCAO species number,
+    and potential-type number (C87).  The producer keys harvest by
+    ``atom_site``, which is a *skeleton* numbering index, so this
+    returns the map keyed by the skeleton column (``values[1]``).
+
+    The columns are ``DAT#  SKELETON#  ELEMENT  SPECIES  TYPE``; the
+    header line is skipped.  Reading the whole file once per
+    converged solid lets every site's label be assembled without a
+    second pass."""
+
+    path = result_toml["outputs"]["datSkl_map"]
+    identity: dict[int, tuple[str, int, int]] = {}
+    with open(path) as handle:
+        rows = [line for line in handle if line.strip()]
+    for row in rows[1:]:                       # skip the header line
+        columns = row.split()
+        skeleton_atom = int(columns[1])
+        element = columns[2]
+        species = int(columns[3])
+        type_number = int(columns[4])
+        identity[skeleton_atom] = (element, species, type_number)
+    return identity
+
+
+def assemble_entry_label(reference_id: str, element: str,
+                         species: int, type_number: int,
+                         atom_site: int) -> str:
+    """Assemble the DESIGN 5.2.1 entry label
+    ``<reference_id>-<element><species>-t<type>-a<site>``.
+
+    The element symbol is lowercased so it fuses with the species
+    number into the OLCAO species token the CLI speaks (``si1``),
+    and the whole label is lowercase.  ``reference_id`` is already
+    label-safe (manifest rule 5), so no further escaping is
+    needed."""
+
+    return (f"{reference_id}-{element.lower()}{species}"
+            f"-t{type_number}-a{atom_site}")
+
+
 def make_imago_provenance(commit: str, timestamp: str,
                           ref: ReferenceSolid, atom_site: int,
                           scf_iterations) -> dict[str, Any]:
@@ -1076,7 +1170,8 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                              data_root: str, *, force: bool = False,
                              single_element: str | None = None,
                              dispatch_fn=dispatch,
-                             extract_fn=extract_potential
+                             extract_fn=extract_potential,
+                             identity_fn=read_site_identity_map
                              ) -> list[dict[str, Any]]:
     """The three-phase producer (DESIGN 5.7; PSEUDOCODE 11.4):
     *build* a single combined flight, *dispatch* it through
@@ -1084,11 +1179,12 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     and contribute the same converged point back to the guidance
     dataspace.  Returns the per-run log (also written to disk).
 
-    ``dispatch_fn`` and ``extract_fn`` are injected (defaulting to
-    the real kaleidoscope dispatch and the real scfV reader) so the
+    ``dispatch_fn``, ``extract_fn``, and ``identity_fn`` are
+    injected (defaulting to the real kaleidoscope dispatch, the real
+    scfV reader, and the real ``datSkl.map`` reader) so the
     orchestration can be unit-tested with the toolchain seam mocked:
-    end-to-end dispatch and the per-site ``scfV`` read need a live
-    Imago run (C74)."""
+    end-to-end dispatch, the per-site ``scfV`` read, and the
+    site-identity read all need a live Imago run (C74)."""
 
     manifest = load_manifest_v2(manifest_path)
     manifest_dir = os.path.dirname(manifest.manifest_path)
@@ -1150,14 +1246,33 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             make_run_log_entry(ref, unit, result_toml))
         scf_iterations = result_toml.get("scf_iterations")
 
+        # The site-identity map (datSkl.map) is read at most once per
+        # converged solid, and only if some entry needs a derived
+        # label -- entries that pin an explicit label never touch it.
+        site_identity: dict[int, tuple[str, int, int]] | None = None
+
         for spec in ref.entries:
             elem_key = spec.element.lower()
             if elem_key not in databases:
                 continue        # filtered out by --element
             coefficients, alphas = extract_fn(
                 result_toml, spec.atom_site)
+
+            # The label is the curator's explicit override when given,
+            # else derived from the run's site identity (DESIGN 5.2.1).
+            if spec.label is not None:
+                label = spec.label
+            else:
+                if site_identity is None:
+                    site_identity = identity_fn(result_toml)
+                _elem, species, type_number = (
+                    site_identity[spec.atom_site])
+                label = assemble_entry_label(
+                    ref.reference_id, spec.element, species,
+                    type_number, spec.atom_site)
+
             new_entry = ipdb.PotentialEntry(
-                label=spec.label,
+                label=label,
                 default=spec.default,
                 description=spec.description,
                 num_gaussians=len(coefficients),
@@ -1176,7 +1291,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             # from a previous run).
             database.potentials = [
                 entry for entry in database.potentials
-                if entry.label != spec.label]
+                if entry.label != label]
             database.potentials.append(new_entry)
 
     # ----- Phase 3b: guidance contribution.  The same converged

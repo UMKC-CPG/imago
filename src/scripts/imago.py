@@ -83,6 +83,11 @@ class FileNames:
         self.imago = "imago"
         self.atom_pos = "atomPos"
         self.lattice = "lattice"
+        # The sorted-dat <-> skeleton atom-number map makeinput
+        #   writes into the run's inputs/ directory; the initial-
+        #   potential producer harvests it to recover each site's
+        #   species/type and assemble the DESIGN 5.2.1 label (C87).
+        self.dat_skl_map = "datSkl.map"
 
         # Replacements (SCF vs post-SCF tags).
         self.scf = "scf"
@@ -2481,6 +2486,16 @@ def project_home_outputs(settings):
 
     # All-tasks block: the main combined output ("imago.out").
     outputs["out"] = f"{edge}_{job_name}{basis}{fn.out}"
+
+    # The sorted-dat <-> skeleton atom map makeinput writes into the
+    #   run's inputs/ directory (carrying each site's element/species/
+    #   type).  The initial-potential producer reads it at harvest to
+    #   assemble the DESIGN 5.2.1 entry label, so it is exposed
+    #   through the same logical-key outputs contract.  It lives under
+    #   inputs/, not the project home; _harvest_result only records it
+    #   when the file exists, so a prepared-directory run that bypassed
+    #   makeinput simply omits the key (C87).
+    outputs["datSkl_map"] = os.path.join("inputs", fn.dat_skl_map)
 
     # Property-specific block: the primary "total" file each
     #   property helper writes to the project home, keyed by

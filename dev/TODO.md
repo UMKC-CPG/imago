@@ -1678,9 +1678,9 @@ shipped.
 
 #### Producer-derived entry labels (DESIGN 5.2.1)
 
-- [ ] C87. Assemble the augmented-database entry `label` at
-  harvest instead of authoring it in the manifest, per the
-  DESIGN 5.2.1 scheme
+- [x] C87 (DONE 2026-06-13). Assemble the augmented-database entry
+  `label` at harvest instead of authoring it in the manifest, per
+  the DESIGN 5.2.1 scheme
   `<reference_id>-<element><species>-t<type>-a<site>`.  The
   `type` (and `species`) numbers are not known until the
   grouping pass runs, so the label cannot be a manifest
@@ -1714,12 +1714,23 @@ shipped.
       charset check on `reference_id` (rule 5): lowercase
       letters, digits, `-`, `_`; no spaces, since the whole
       assembled label is typed into `-pot`.
-  Until C87 lands the manifest must still supply an explicit
-  `label` (current rule 3); the C74 smoke-test manifest
-  carries the derived value `si_diamond-si1-t1-a1` as that
-  explicit placeholder.  Update the manifest schema docs and
-  the producer tests (siteMap round-trip + derived-label
-  assembly + optional-override path).
+  Update the manifest schema docs and the producer tests
+  (datSkl.map round-trip + derived-label assembly + optional-
+  override path).
+  IMPLEMENTED: (a) makeinput `_sort_atoms` writes the five-column
+  `datSkl.map` (DAT# SKELETON# ELEMENT SPECIES TYPE); imago.py
+  `project_home_outputs` registers it as `outputs["datSkl_map"]`
+  (FileNames.dat_skl_map token).  (b) producer
+  `read_site_identity_map` + `assemble_entry_label`; the harvest
+  loop derives the label when the entry pins none (new injectable
+  `identity_fn`).  (c) `load_manifest_v2`: rule 3 no longer
+  requires `label`; rule 5 adds the label-safe `reference_id`
+  charset check; rule 6 guards derived-label collisions on
+  `(reference_id, element, atom_site)`.  Docs: DESIGN 5.7 rules
+  3/5/6 + per-entry field list; structure_control reader docstring.
+  Tests: 637 pass.  The C74 smoke-test manifest still carries the
+  explicit `si_diamond-si1-t1-a1`; it can now be dropped to exercise
+  the derive path (label is optional).
 
 ### Phase J -- kaleidoscope flight infrastructure (VISION 4, ARCH 9)
 

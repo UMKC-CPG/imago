@@ -1580,8 +1580,16 @@ class StructureControl:
         File format (``inputs/datSkl.map`` by default)::
 
             <header line — skipped>
-            <dat_atom_num>  <skl_atom_num>
+            <dat_atom_num>  <skl_atom_num>  [element  species  type]
             ...  (one line per atom, 1-indexed)
+
+        Newer makeinput output (DESIGN 5.2.1 / C87) appends three
+        further columns -- the site's element symbol, species
+        number, and potential-type number -- which the initial-
+        potential producer reads to assemble entry labels.  This
+        reader ignores them: it splits on whitespace and consumes
+        only ``values[1]`` (the skeleton number), so both the two-
+        column and the five-column layouts parse identically here.
 
         Parameters
         ----------

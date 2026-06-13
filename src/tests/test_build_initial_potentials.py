@@ -42,6 +42,8 @@ from build_initial_potentials import (
     curation_workspace_root,
     materialize_structure,
     extract_potential,
+    read_site_identity_map,
+    assemble_entry_label,
     pick_converged_unit,
     make_run_log_entry,
     make_nonconverged_log_entry,
@@ -358,6 +360,16 @@ class TestRule5ReferenceIdUniqueness:
         with pytest.raises(ValueError, match="manifest rule 5"):
             load_manifest_v2(path)
 
+    def test_non_label_safe_reference_id_raises(self, tmp_path):
+        # An uppercase reference_id is rejected: it is embedded
+        # verbatim in derived labels and typed into -pot (5.2.1).
+        text = _VALID_COD_MANIFEST.replace(
+            'reference_id = "au_fcc"', 'reference_id = "Au_FCC"')
+        path = _write(tmp_path, text)
+        with pytest.raises(ValueError,
+                           match="manifest rule 5.*label-safe"):
+            load_manifest_v2(path)
+
 
 class TestRule6ElementLabelUniqueness:
     def test_duplicate_element_label_raises(self, tmp_path):
@@ -381,6 +393,32 @@ class TestRule6ElementLabelUniqueness:
             "  description = \"Au hcp.\"\n")
         path = _write(tmp_path, text)
         with pytest.raises(ValueError, match="manifest rule 6"):
+            load_manifest_v2(path)
+
+    def test_optional_label_parses_as_none(self, tmp_path):
+        # An entry that omits label is valid (5.2.1): the producer
+        # derives the label at harvest, so the parsed entry holds
+        # label is None.
+        text = _VALID_COD_MANIFEST.replace(
+            '  label = "default_solid"\n', "")
+        path = _write(tmp_path, text)
+        manifest = load_manifest_v2(path)
+        entry = manifest.reference_solids[0].entries[0]
+        assert entry.label is None
+
+    def test_two_derived_labels_same_site_raise(self, tmp_path):
+        # Two label-less entries with the same (reference_id,
+        # element, atom_site) would derive the identical label.
+        text = _VALID_COD_MANIFEST.replace(
+            '  label = "default_solid"\n', "") + (
+            "\n  [[reference_solid.entry]]\n"
+            "  element = \"Au\"\n"
+            "  atom_site = 1\n"
+            "  default = false\n"
+            "  description = \"Au bulk again.\"\n")
+        path = _write(tmp_path, text)
+        with pytest.raises(ValueError,
+                           match="manifest rule 6.*derive the same"):
             load_manifest_v2(path)
 
 
@@ -868,6 +906,31 @@ def test_extract_potential_reads_scfv_coefficients(tmp_path):
     assert alphas == [1.0, 2.0]
 
 
+# ---- site identity (datSkl.map) + label assembly (C87) -------
+
+def test_read_site_identity_map_keys_by_skeleton_number(tmp_path):
+    # The five-column datSkl.map makeinput now writes: a header
+    # line plus DAT#  SKELETON#  ELEMENT  SPECIES  TYPE.  The
+    # reader keys by the skeleton number (column 2), since the
+    # producer harvests by atom_site (skeleton numbering).
+    dat_skl = tmp_path / "datSkl.map"
+    dat_skl.write_text(
+        "      DAT#  SKELETON#    ELEMENT    SPECIES       TYPE\n"
+        "         1          2         si          1          1\n"
+        "         2          1          o          1          2\n")
+    identity = read_site_identity_map(
+        {"outputs": {"datSkl_map": str(dat_skl)}})
+    assert identity == {2: ("si", 1, 1), 1: ("o", 1, 2)}
+
+
+def test_assemble_entry_label_builds_the_5_2_1_form():
+    # <reference_id>-<element><species>-t<type>-a<site>, lowercased.
+    assert assemble_entry_label(
+        "si_diamond", "Si", 1, 1, 1) == "si_diamond-si1-t1-a1"
+    assert assemble_entry_label(
+        "forsterite", "Mg", 1, 2, 2) == "forsterite-mg1-t2-a2"
+
+
 # ---- pick_converged_unit -------------------------------------
 
 def _grid_flight(unit_id, kpds):
@@ -1040,3 +1103,69 @@ def test_build_initial_potentials_harvests_curated_entry(
         run_log = tomllib.load(handle)
     assert run_log["run"][0]["converged"] is True
     assert run_log["run"][0]["converged_kpoint_density"] == 100
+
+
+# A label-less variant of the local manifest: the entry omits
+#   ``label`` so the producer must derive it at harvest (5.2.1).
+_AU_LOCAL_MANIFEST_NO_LABEL = _AU_LOCAL_MANIFEST.replace(
+    '  label = "default_solid"\n', "")
+
+
+def test_build_initial_potentials_derives_label_at_harvest(
+        tmp_path, monkeypatch):
+    """When the manifest entry omits ``label``, the producer reads
+    the run's site identity (datSkl.map, via ``identity_fn``) and
+    assembles the DESIGN 5.2.1 label
+    ``<reference_id>-<element><species>-t<type>-a<site>``."""
+
+    data_root = str(tmp_path)
+    pdb_root = os.path.join(data_root, "atomicPDB")
+    _make_element(pdb_root, "au", [1.0, 2.0, 3.0],
+                  [0.15, 1.5, 1.0e8])
+    (tmp_path / "au.skel").write_text("dummy structure\n")
+    manifest_path = _write(tmp_path, _AU_LOCAL_MANIFEST_NO_LABEL)
+
+    monkeypatch.setattr(
+        bip.guidance_db, "load",
+        lambda root: types.SimpleNamespace(group_table={}))
+
+    def fake_builder(struct, options, dataspace, system_type, *,
+                     id, center):
+        units = [CalcUnit(id=id, structure=struct,
+                          calc=(f"kpt-density-{k}",),
+                          options={**options, "kpd": k})
+                 for k in (50, 100, 200)]
+        record = PredictionRecord(
+            policy="verify_around_prediction",
+            predicted_kpoint_density=100.0, confidence=0.9,
+            is_under_trained=False, system_type=system_type,
+            basis=options["basis"], functional=options["functional"],
+            kpoint_integration=options["kpoint_integration"])
+        return Flight(root="", units=units), record
+
+    monkeypatch.setattr(bip, "build_kpoint_convergence",
+                        fake_builder)
+
+    def fake_dispatch(flight, executor=None):
+        for unit in flight.units:
+            _write_result(flight.root, unit.id, unit.calc,
+                          energy=0.5)
+
+    monkeypatch.setattr(
+        bip.guidance_harvest, "harvest_flight",
+        lambda ws, db, ds: None)
+
+    # Inject the site-identity reader: site 1 is Au species 1,
+    #   type 1, so the derived label is au_fcc-au1-t1-a1.
+    build_initial_potentials(
+        manifest_path, pdb_root, data_root,
+        dispatch_fn=fake_dispatch,
+        extract_fn=lambda result, site: ([0.5, 0.3], [1.0, 2.0]),
+        identity_fn=lambda result: {1: ("au", 1, 1)})
+
+    database = ipdb.load(element_path(pdb_root, "au"),
+                         known_methods=None)
+    entry = ipdb.lookup(database, "au_fcc-au1-t1-a1")
+    assert entry.default is True
+    assert entry.coefficients == [0.5, 0.3]
+    assert entry.provenance["reference_id"] == "au_fcc"

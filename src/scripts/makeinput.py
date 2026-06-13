@@ -3371,7 +3371,10 @@ def print_imago(settings, sc):
     * ``kp-scf.dat`` and ``kp-pscf.dat`` — k-point meshes
     * ``memory``        — estimated peak memory for each Imago phase
     * ``datSkl.map``    — mapping between sorted (imago.dat) atom numbers and
-      the original (imago.skl) atom numbers
+      the original (imago.skl) atom numbers, plus each site's element
+      symbol, species number, and potential-type number (the initial-
+      potential producer reads these to assemble the DESIGN 5.2.1
+      entry label; TODO C87)
     * ``imago.fract-mi`` and ``imago.cart-mi`` — re-written skeleton files
       with explicit species assignments (non-XANES only)
     * Job submission scripts (PBS / LSF / Slurm / bash)
@@ -4624,12 +4627,30 @@ def _sort_atoms(settings, sc, file_set, cumulative_num_types):
                 sorted_xanes_atoms[file_set] = new_pos
                 break
 
-    # Write the datSkl.map file.
+    # Write the datSkl.map file.  Beyond the DAT# <-> SKELETON#
+    #   atom-number mapping, each row records the site's element
+    #   symbol, OLCAO species number, and potential-type number.
+    #   The initial-potential database producer reads these back at
+    #   harvest to assemble the DESIGN 5.2.1 entry label
+    #   <reference_id>-<element><species>-t<type>-a<site> without
+    #   re-deriving the species/type assignment, which is settled
+    #   here during input preparation (TODO C87).  Older readers
+    #   that only consume the first two columns (the dat<->skl
+    #   numbering) are unaffected: they split on whitespace and the
+    #   extra columns trail to the right.
     map_path = os.path.join(INPUTS_DIR, DAT_SKL_MAP)
     with open(map_path, "w") as f:
-        f.write("       DAT#     SKELETON#\n")
+        f.write(f"{'DAT#':>10s} {'SKELETON#':>10s} "
+                f"{'ELEMENT':>10s} {'SPECIES':>10s} "
+                f"{'TYPE':>10s}\n")
         for new_pos in range(1, num_atoms + 1):
-            f.write(f"{new_pos:10d} {index_map[new_pos]:10d}\n")
+            old_atom = index_map[new_pos]
+            element_symbol = (
+                settings.atom_element_name[old_atom].lower())
+            f.write(f"{new_pos:10d} {old_atom:10d} "
+                    f"{element_symbol:>10s} "
+                    f"{sorted_spec_id[new_pos]:10d} "
+                    f"{sorted_type_id[new_pos]:10d}\n")
 
     return (sorted_elem_id, sorted_spec_id, sorted_type_id,
             sorted_fract_abc, sorted_direct_abc, sorted_direct_xyz,
