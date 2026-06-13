@@ -643,6 +643,7 @@ DEFAULTS
   -subbasis:     No substitutions are done by default.
   -subpot:       No substitutions are done by default.
   -modpot:       No potentials are modified by default.
+  -pot:          The default-tagged entry for each element.
   -basisdb:      $IMAGO_DATA/atomicBDB
   -potdb:        $IMAGO_DATA/atomicPDB
   -scfkp:        One general kpoint is used for all SCF calculations.
