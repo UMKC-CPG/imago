@@ -3613,10 +3613,12 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
       metrics in the run log.
    c. For each `[[reference_solid.entry]]`:
       i.   `extract_potential` for the named `atom_site` from the
-           converged run.  The harvest format is settled (ARCH
-           9.7): the converged `scfV` matches the input `scfV`,
-           the alphas come from the input min/max/number, and the
-           coefficients and alphas are taken together.
+           converged run.  The converged `scfV` output lists every
+           potential type (a `NUM_TYPES` header + per-type Gaussian
+           blocks under a `TOTAL__OR__SPIN_UP` channel); the harvest
+           selects the site's type block -- its type number read
+           from `datSkl.map` (ARCH 9.7) -- and takes each term's
+           coefficient and alpha (columns 1 and 2) together.
       ii.  For each `[[reference_solid.entry.fingerprint]]`
            declaration, compute the fingerprint at `atom_site`
            for the requested `(method, sub_spec)`.  Python-side
@@ -4060,14 +4062,22 @@ API to tell it:
    the whole batch.
 2. **Where is the converged potential?**  An absolute
    path to the converged `scfV` output file (the
-   `<edge>_initPot-<basis>.dat` that today's
-   `manage_output` writes from `fort.8`).  The producer
-   reads the Gaussian coefficients out of that file
-   directly; the alphas it already knows, because they
-   are an *input* (the min/max/number it fed into
-   makeinput).  "Converged `scfV` matches input `scfV`"
-   (5.7) is exactly this: coefficients come from the
-   output, alphas from the input, taken together.
+   `<edge>_scfV-<basis>.dat` that today's `manage_output`
+   writes from `fort.8`).  That file carries the potential
+   for *every* OLCAO potential type in the material, not one
+   bare coefficient block: a `NUM_TYPES` header, then a
+   `TOTAL__OR__SPIN_UP` channel listing each type as a count
+   line plus that many Gaussian-term lines (a redundant
+   `SPIN_DN` channel follows -- the producer runs non-spin,
+   so the `TOTAL__OR__SPIN_UP` channel *is* the total
+   potential and the `SPIN_DN` copy is ignored; spin handling
+   is deferred).  The harvest selects the named site's type
+   block -- its type number read from `datSkl.map` (9.7) --
+   and takes columns 1 and 2 of each term as the coefficient
+   and its alpha.  Those alphas equal the basis input the
+   producer fed makeinput -- the consistency "converged
+   `scfV` matches input `scfV`" (5.7) names -- so coefficients
+   and alphas are read together from the one converged block.
 3. **Under what conditions did it run?**  The SCF
    settings actually used -- basis, k-point spec,
    convergence threshold, Imago build commit -- so the
@@ -4986,11 +4996,12 @@ client walks the report and, for each unit it deems
 acceptable, opens `wingbeat_dir` and reads what it needs.  For
 the producer that means: keep units whose `detail ==
 "converged"`, reload the 6.1.2 `ImagoResult` from
-`result.toml`, read the converged `scfV` from
-`result.outputs["scfV"]`, and pair its coefficients with
-the input alphas (5.7 / ARCHITECTURE 9.7).  Non-converged
-or failed units are simply skipped -- recorded in the
-report, never harvested.
+`result.toml`, read the named site's type block from the
+converged `scfV` at `result.outputs["scfV"]` (a multi-type
+file; the site's type number comes from `datSkl.map`),
+taking that block's coefficients and alphas together (5.7 /
+ARCHITECTURE 9.7).  Non-converged or failed units are simply
+skipped -- recorded in the report, never harvested.
 
 This is the precise shape of the C48.3 producer-as-client
 relationship: kaleidoscope runs and tracks the batch and

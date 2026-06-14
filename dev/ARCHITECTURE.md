@@ -1293,9 +1293,16 @@ Under this section the producer instead becomes a
 kaleidoscope *client*: it hands kaleidoscope the curated
 structures and the makeinput options, lets kaleidoscope
 run and track the batch, and then harvests the converged
-potentials from the run directories (the harvest format
-is settled -- the converged `scfV` matches the input
-`scfV`; see DESIGN 5.7 / PSEUDOCODE 11.4).  Those three
+potentials from the run directories.  The converged `scfV`
+output carries every potential type in the material (a
+`NUM_TYPES` header + per-type Gaussian blocks under a
+`TOTAL__OR__SPIN_UP` channel); the harvest selects each named
+site's type block and takes its coefficients and alphas
+together (the site's type number comes from the `datSkl.map`
+described below; the producer runs non-spin, so the
+`TOTAL__OR__SPIN_UP` channel is the total potential -- spin
+handling is deferred; see DESIGN 5.7 / PSEUDOCODE 11.4).
+Those three
 producer sections will be revised to delegate to
 kaleidoscope once this section stabilizes; that
 revision is tracked as follow-up work, not performed

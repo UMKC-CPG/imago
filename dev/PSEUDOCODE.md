@@ -3815,6 +3815,9 @@ function buildInitialPotentials(manifest_path,
             elem = spec.element
             if elem not in databases:
                 continue   # filtered out by --element
+            # extract_potential reads the site's TYPE block
+            # from the converged scfV (NUM_TYPES + per-type;
+            # the type number comes from datSkl.map, 9.7).
             coeffs, alphas = extract_potential(
                 converged, spec.atom_site)
             # One FingerprintRecord per declared
@@ -5085,12 +5088,15 @@ function harvest_converged_potentials(report, manifest):
         result = read_toml(
             join(entry.wingbeat_dir, "result.toml"))   # §12.1
         scfV_path = result["outputs"]["scfV"]
-        # Coefficients come from the converged scfV output;
-        # alphas come from the run's INPUT (min/max/number).
-        # Taken together they are the harvested potential
+        # The converged scfV output lists every potential
+        # type (NUM_TYPES + per-type blocks under a
+        # TOTAL__OR__SPIN_UP channel; the producer runs
+        # non-spin, so that channel is the total potential).
+        # Select the harvested site's type block and take each
+        # term's coefficient and alpha (columns 1-2) together
         # (DESIGN 5.7 / ARCHITECTURE 9.7).
-        coeffs = read_scfV_coefficients(scfV_path)
-        alphas = input_alphas_for(entry, manifest)
+        coeffs, alphas = read_scfV_type_block(
+            scfV_path, site_type(entry))
         store_potential_entry(entry, coeffs, alphas)
 ```
 
