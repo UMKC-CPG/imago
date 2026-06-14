@@ -584,15 +584,21 @@ def _parse_pot_file(path: str) -> _PotFileData:
 
 def _parse_coeff_file(path: str) -> tuple[list[float],
                                           list[float]]:
-    """Parse a legacy ``coeff`` file into (coefficients, alphas).
+    """Parse a HEADERLESS ``coeff1`` file into (coefficients,
+    alphas) -- one element's potential, the atomicPDB layout.
 
-    The file is a count line followed by one line per Gaussian
+    The file is a bare count line followed by one line per Gaussian
     term; the term lines carry five whitespace-separated columns
     of which only column 1 (the coefficient) and column 2 (the
     alpha) are meaningful here -- columns 3-5 are the placeholder
     fields Imago ignores (see C47).  The count line is
     cross-checked against the number of term lines so a truncated
     or padded file is caught at parse time.
+
+    This is NOT the converged ``scfV`` output layout: that file
+    carries every potential type behind a ``NUM_TYPES`` header and
+    per-channel tags (``TOTAL__OR__SPIN_UP`` / ``SPIN_DN``), parsed
+    by ``_parse_scfv_type_block`` instead (DESIGN 5.7).
     """
 
     with open(path) as handle:
@@ -1108,6 +1114,79 @@ def pick_converged_unit(flight: Flight, reference_id: str,
     return completed[index], results[index]
 
 
+def _parse_scfv_type_block(path: str, type_number: int
+                           ) -> tuple[list[float], list[float]]:
+    """Parse the converged ``scfV`` output and return one potential
+    type's ``(coefficients, alphas)`` (DESIGN 5.7 / ARCH 9.7).
+
+    The file holds every OLCAO potential type, not one bare block::
+
+        NUM_TYPES   <n>
+        TOTAL__OR__SPIN_UP          <- total / spin-up channel
+          <count_1>                 <- type 1: a count line ...
+          <count_1 term lines>      <-   ... then that many terms
+          <count_2> / <terms> ...   <- types 2..n follow in order
+        SPIN_DN                     <- a redundant copy (non-spin)
+          ...
+
+    Each term line carries five columns; only column 1 (the
+    coefficient) and column 2 (the alpha) are meaningful -- columns
+    3-5 are the placeholder fields Imago ignores (as in ``coeff1``).
+    The producer runs non-spin, so the ``TOTAL__OR__SPIN_UP``
+    channel IS the total potential; the ``SPIN_DN`` channel and the
+    trailing +UJ section are not read (spin handling is deferred).
+
+    ``type_number`` is 1-based (the OLCAO potential-type number from
+    ``datSkl.map``).  The block is found by walking the
+    count-delimited blocks in order, so the per-type term counts
+    need not be known ahead of time; each block's count line is
+    cross-checked against the term lines that follow."""
+
+    with open(path) as handle:
+        lines = [line for line in handle if line.strip() != ""]
+
+    header = lines[0].split()
+    if not header or header[0] != "NUM_TYPES":
+        raise ValueError(
+            f"{path}: expected a 'NUM_TYPES' header, found "
+            f"{lines[0].strip()!r}")
+    num_types = int(header[1])
+    if not 1 <= type_number <= num_types:
+        raise ValueError(
+            f"{path}: requested type {type_number} but the file "
+            f"declares NUM_TYPES = {num_types}")
+
+    channel_tag = lines[1].strip()
+    if channel_tag != "TOTAL__OR__SPIN_UP":
+        raise ValueError(
+            f"{path}: expected the 'TOTAL__OR__SPIN_UP' channel "
+            f"tag on line 2, found {channel_tag!r}")
+
+    # Walk the count-delimited type blocks in order and keep the
+    #   one for `type_number`.  Each block is a count line followed
+    #   by that many five-column term lines.
+    cursor = 2
+    for current_type in range(1, num_types + 1):
+        declared_count = int(lines[cursor].split()[0])
+        cursor += 1
+        term_lines = lines[cursor:cursor + declared_count]
+        cursor += declared_count
+        if len(term_lines) != declared_count:
+            raise ValueError(
+                f"{path}: type {current_type} count line says "
+                f"{declared_count} terms but only "
+                f"{len(term_lines)} follow")
+        if current_type == type_number:
+            coefficients = [float(line.split()[0])
+                            for line in term_lines]
+            alphas = [float(line.split()[1]) for line in term_lines]
+            return coefficients, alphas
+
+    # Unreachable: the range guard guarantees `type_number` lies in
+    #   1..num_types, so the loop always returns first.
+    raise AssertionError("scfV type block not found")
+
+
 def extract_potential(result_toml: dict, atom_site: int
                       ) -> tuple[list[float], list[float]]:
     """Harvest the converged Gaussian potential for one atom site
@@ -1115,22 +1194,35 @@ def extract_potential(result_toml: dict, atom_site: int
     PSEUDOCODE 11.4).
 
     The converged ``scfV`` output (``result.outputs["scfV"]``, the
-    ``<edge>_initPot-<basis>.dat`` Imago writes from ``fort.8``)
-    holds the self-consistent potential as Gaussian terms.  Per the
-    5.7 harvest contract -- "converged ``scfV`` matches input
-    ``scfV``: coefficients from the output, alphas from the input,
-    taken together" -- the producer reads the coefficients out of
-    that file; the file shares the legacy ``coeff`` layout, so the
-    same parser yields both the coefficients and the alphas.
+    ``<edge>_scfV-<basis>.dat`` Imago writes from ``fort.8``) holds
+    the self-consistent potential for EVERY OLCAO potential type in
+    the material -- not one bare coefficient block.  Its layout is a
+    ``NUM_TYPES`` header, then a ``TOTAL__OR__SPIN_UP`` channel that
+    lists each type as a count line plus that many Gaussian-term
+    lines, followed by a redundant ``SPIN_DN`` channel.  The
+    producer runs non-spin, so the ``TOTAL__OR__SPIN_UP`` channel is
+    the total potential and the ``SPIN_DN`` copy is ignored (spin
+    handling is deferred).
 
-    NOTE (C74 end-to-end): the per-atom-site selection within a
-    multi-site solid's ``scfV`` is validated only against a live
-    Imago run; ``atom_site`` is threaded through here for that
-    wiring (the single-site case reads the whole file)."""
+    This selects the type block for ``atom_site``: the site's type
+    number comes from the run's ``datSkl.map`` (DESIGN 5.2.1 / ARCH
+    9.7, the same map the storage label is built from), and the
+    block's columns 1 and 2 are taken together as the coefficient
+    and its alpha.  Those alphas equal the basis input the producer
+    fed makeinput -- the consistency "converged ``scfV`` matches
+    input ``scfV``" (5.7) names.
+
+    (Contrast ``_parse_coeff_file``, which parses a single
+    headerless ``coeff1`` block -- one element's potential -- and is
+    NOT interchangeable with this multi-type output.)"""
 
     scfv_path = result_toml["outputs"]["scfV"]
-    coefficients, alphas = _parse_coeff_file(scfv_path)
-    return coefficients, alphas
+    # The site's potential-type number (1-based) is read from the
+    #   run's datSkl.map -- the same map the storage label is built
+    #   from (DESIGN 5.2.1 / ARCH 9.7) -- and selects the type block
+    #   within the multi-type scfV output.
+    type_number = read_site_identity_map(result_toml)[atom_site][2]
+    return _parse_scfv_type_block(scfv_path, type_number)
 
 
 def read_site_identity_map(result_toml: dict

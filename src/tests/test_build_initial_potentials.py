@@ -919,13 +919,67 @@ def test_curation_workspace_root_sits_beside_databases():
     assert root == os.path.join("/data", "curation", "workspace")
 
 
-def test_extract_potential_reads_scfv_coefficients(tmp_path):
+def _write_scfv(path, body):
+    """Write a multi-type scfV output file (the NUM_TYPES /
+    TOTAL__OR__SPIN_UP / SPIN_DN layout Imago writes from fort.8)."""
+    path.write_text(body)
+
+
+def test_extract_potential_reads_scfv_type_block(tmp_path):
+    """extract_potential selects the named site's type block from
+    the multi-type scfV output (NUM_TYPES header + the
+    TOTAL__OR__SPIN_UP channel), resolving the site's type via
+    datSkl.map and taking cols 1-2 (coeff, alpha).  The redundant
+    SPIN_DN channel is ignored."""
     scfv = tmp_path / "scfV.dat"
-    scfv.write_text("2\n0.5 1.0 0 0 0\n0.3 2.0 0 0 0\n")
-    coeffs, alphas = extract_potential(
-        {"outputs": {"scfV": str(scfv)}}, atom_site=1)
+    _write_scfv(scfv,
+                "NUM_TYPES    1\n"
+                "TOTAL__OR__SPIN_UP\n"
+                "   2\n"
+                " 0.5 1.0 0 0 0\n"
+                " 0.3 2.0 0 0 0\n"
+                "SPIN_DN\n"
+                "   2\n"
+                " 9.9 1.0 0 0 0\n"        # must NOT be read
+                " 9.9 2.0 0 0 0\n")
+    datskl = tmp_path / "datSkl.map"
+    datskl.write_text("DAT SKEL ELEM SPECIES TYPE\n"
+                      "  1    1   Si       1    1\n")
+    result_toml = {"outputs": {"scfV": str(scfv),
+                               "datSkl_map": str(datskl)}}
+    coeffs, alphas = extract_potential(result_toml, atom_site=1)
     assert coeffs == [0.5, 0.3]
     assert alphas == [1.0, 2.0]
+
+
+def test_extract_potential_selects_the_right_type_block(tmp_path):
+    """With several types in one scfV file, the site's type number
+    (from datSkl.map) picks the correct block -- not just the
+    first."""
+    scfv = tmp_path / "scfV.dat"
+    _write_scfv(scfv,
+                "NUM_TYPES    2\n"
+                "TOTAL__OR__SPIN_UP\n"
+                "   1\n"
+                " 1.1 0.5 0 0 0\n"        # type 1
+                "   2\n"
+                " 2.1 0.5 0 0 0\n"        # type 2
+                " 2.2 1.5 0 0 0\n"
+                "SPIN_DN\n"
+                "   1\n"
+                " 9.9 0.5 0 0 0\n"
+                "   2\n"
+                " 9.9 0.5 0 0 0\n"
+                " 9.9 1.5 0 0 0\n")
+    datskl = tmp_path / "datSkl.map"
+    datskl.write_text("DAT SKEL ELEM SPECIES TYPE\n"
+                      "  1    1   Si       1    1\n"
+                      "  2    2   Si       2    2\n")
+    result_toml = {"outputs": {"scfV": str(scfv),
+                               "datSkl_map": str(datskl)}}
+    coeffs, alphas = extract_potential(result_toml, atom_site=2)
+    assert coeffs == [2.1, 2.2]
+    assert alphas == [0.5, 1.5]
 
 
 # ---- site identity (datSkl.map) + label assembly (C87) -------
