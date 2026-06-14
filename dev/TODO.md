@@ -2218,7 +2218,8 @@ the C48.3 wiring (C74) is the first major consumer.
   rewrite `make_producer_options` to the dest-keyed vocabulary
   (functional->xccode, kpoint_integration->scfkpint, basis->
   scf_basis, scf_threshold->converg, shift->kpshift); (c) export
-  `imago.OPTION_KEYS` + a `CACHE_ONLY_KEYS` set; (d) move the
+  `imago.OPTION_KEYS` + a `CACHE_ONLY_KEYS` set from
+  `kaleidoscope.wingbeats`; (d) move the
   partition into `ImagoWingbeat.run`, retire the shared-options
   `run_structure` call; (e) `_KEY_SCALAR_NAMES` ->
   `("converg", "imago_commit")`; (f) harden `pick_converged_unit`

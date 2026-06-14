@@ -3731,7 +3731,7 @@ function buildInitialPotentials(manifest_path,
         # basis/functional/kpoint_integration also pick the
         # predictor sub-model.  The wingbeat (§13.2) routes
         # each key to the tool that recognises it.
-        options = make_producer_options(ref)
+        options = make_producer_options(ref, imago_commit)
 
         # One builder call for every mode (DESIGN 6.2.9).
         # `center` carries the curator override when the

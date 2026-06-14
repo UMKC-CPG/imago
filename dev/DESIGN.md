@@ -5493,10 +5493,13 @@ unit's options into:
   `{job, edge, scf_basis, pscf_basis, serialxyz, valgrind}`
   (6.1), exported as `imago.OPTION_KEYS` so the wingbeat does not
   hard-code it -> handed to `from_options`.
-- **bookkeeping / cache-only** -- `imago_commit`, the build
-  identity that busts the run-reuse cache across imago versions
-  (6.2.5).  It is *dropped before forwarding* and reaches neither
-  tool.  This is safe because the cache identity is captured
+- **bookkeeping / cache-only** -- the keys in `CACHE_ONLY_KEYS`
+  (today just `imago_commit`, the build identity that busts the
+  run-reuse cache across imago versions, 6.2.5), exported from
+  `kaleidoscope.wingbeats` because this is kaleidoscope's own
+  bookkeeping, not an imago tool input.  Such a key is *dropped
+  before forwarding* and reaches neither tool.  This is safe
+  because the cache identity is captured
   separately in `unit.key_fields` at build time
   (`standard_key_fields` copies the scalars out of `options`), so
   removing the key from the forwarded options does not change the
@@ -5556,11 +5559,11 @@ that unit's `result.toml`.
 
 *Follow-on code (for TODO).*  (a) add makeinput `-converg`;
 (b) rewrite `make_producer_options` to emit the dest-keyed, coded
-vocabulary above; (c) export `imago.OPTION_KEYS`; (d) move the
+vocabulary above; (c) export `imago.OPTION_KEYS` plus a
+`CACHE_ONLY_KEYS` set from `kaleidoscope.wingbeats`; (d) move the
 partition into `ImagoWingbeat.run` and retire the single-shared-
 options call to `run_structure`; (e) update `_KEY_SCALAR_NAMES`;
-(f)
-harden `pick_converged_unit` against a missing `result.toml`.
+(f) harden `pick_converged_unit` against a missing `result.toml`.
 
 ### 6.3 makeinput callable build API
 
