@@ -2503,6 +2503,23 @@ class Matcher:
         raise NotImplementedError(
             "representative is implemented by concrete Matcher subclasses")
 
+    def build_payload(self, fingerprint):
+        """Serialize one fingerprint into the dict stored as a
+        ``FingerprintRecord`` payload (DESIGN 5.2 / 5.4).  The producer's
+        fingerprint harvest calls this; the consumer reads it back with
+        ``extract_query_vector``.  Each matcher owns its payload field name
+        (``values`` for bispectrum, ``shell_code`` for reduce)."""
+        raise NotImplementedError(
+            "build_payload is implemented by concrete Matcher subclasses")
+
+    def extract_query_vector(self, payload):
+        """Read a stored ``FingerprintRecord`` payload back into the form
+        this matcher's ``distance`` expects -- the inverse of
+        ``build_payload`` -- so the producer and consumer agree on the
+        payload field name (DESIGN 5.4)."""
+        raise NotImplementedError(
+            "extract_query_vector is implemented by concrete subclasses")
+
     def to_loen_input(self, sub_spec):
         """Translate ``sub_spec`` into the Imago LOEN input block.
 
@@ -2569,6 +2586,14 @@ class ReduceShellCode:
     element_id : int
         The central atom's element index.  Two atoms of different elements
         can never be the same species, so a mismatch is an infinite distance.
+        This is a structure-local index, not a global atomic number, so it
+        is used only for the within-structure ``distance`` test and never
+        stored; the transferable form keeps the symbol instead.
+    element_name : str
+        The central atom's element symbol.  Carried for the stored,
+        cross-structure payload (``build_payload``), where a global symbol is
+        needed because the integer ``element_id`` does not transfer across
+        structures.
     tolerance : float
         The fractional level-distance tolerance (e.g. 0.05 for 5%).
     levels : list[ReduceShellLevel]
@@ -2577,6 +2602,7 @@ class ReduceShellCode:
     """
 
     element_id: int
+    element_name: str
     tolerance: float
     levels: list
 
@@ -2716,7 +2742,8 @@ class ReduceMatcher(Matcher):
                     level_distance[level], members, member_names)
 
             fingerprints[atom] = ReduceShellCode(
-                element_id[atom], tolerance, levels)
+                element_id[atom], element_name[atom],
+                tolerance, levels)
 
         return fingerprints
 
@@ -2765,6 +2792,37 @@ class ReduceMatcher(Matcher):
         5.6.5)."""
 
         return members[0]
+
+    def build_payload(self, shell_code):
+        """Serialize one ``ReduceShellCode`` into the element-only,
+        cross-structure payload stored on disk (DESIGN 5.2): the central
+        atom's element symbol plus, per level, the shell distance and the
+        list of neighbor element symbols.
+
+        The structure-local integer ids and the neighbor species are
+        dropped here -- species numbering does not transfer across
+        structures, so only the transferable element symbols are kept.  All
+        symbols are lowercased to match the CLI element/species token
+        convention.  ``levels`` is sliced from index 1 to skip the unused
+        1-indexing placeholder."""
+
+        levels = []
+        for shell in shell_code.levels[1:]:
+            levels.append({
+                "distance": shell.distance,
+                "neighbors": [name.lower()
+                              for name in shell.member_names],
+            })
+        return {"shell_code": {
+            "element": shell_code.element_name.lower(),
+            "levels": levels,
+        }}
+
+    def extract_query_vector(self, payload):
+        """Read the stored shell code back out of a record payload (DESIGN
+        5.4).  Reduce records keep it under the ``shell_code`` key."""
+
+        return payload["shell_code"]
 
 
 class BispecMatcher(Matcher):

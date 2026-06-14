@@ -254,11 +254,13 @@ def test_compute_query_emits_shell_codes():
 
     atom_one = fingerprints[1]
     assert atom_one.element_id == 1
+    assert atom_one.element_name == "Si"
     assert atom_one.tolerance == 0.05
     # One level, holding the single O neighbor (element 2, species 1)
     # at 2.0 Angstrom.
     assert atom_one.levels[1].distance == pytest.approx(2.0)
     assert atom_one.levels[1].members == [(2, 1)]
+    assert atom_one.levels[1].member_names == ["O"]
 
 
 def test_distance_zero_for_equivalent_and_inf_otherwise():
@@ -295,3 +297,55 @@ def test_representative_returns_first_member():
     sentinel_first = object()
     members = [sentinel_first, object(), object()]
     assert ReduceMatcher().representative(members) is sentinel_first
+
+
+# ==============================================================
+#  Payload serialization (DESIGN 5.2 element-only shell_code)
+# ==============================================================
+
+def test_build_payload_is_element_only_shell_code():
+    """``build_payload`` serializes a shell code into the stored,
+    cross-structure form: the central element symbol plus per-level
+    distance and neighbor element symbols, all lowercased, with NO
+    species component (which would not transfer across structures)."""
+
+    min_dist = [
+        [None, None, None, None, None],
+        [None, 0.0,  3.0,  2.0,  2.6],
+        [None, 3.0,  0.0,  2.6,  2.0],
+        [None, 2.0,  2.6,  0.0,  3.0],
+        [None, 2.6,  2.0,  3.0,  0.0],
+    ]
+    structure = _structure_view(
+        min_dist,
+        element_id=[None, 1, 1, 2, 2],
+        element_name=[None, "Si", "Si", "O", "O"],
+        species_id=[None, 1, 1, 1, 1],
+    )
+    matcher = ReduceMatcher()
+    fps = matcher.compute_query(structure, _ONE_SHELL)
+
+    payload = matcher.build_payload(fps[1])
+    assert payload == {
+        "shell_code": {
+            "element": "si",
+            "levels": [
+                {"distance": pytest.approx(2.0), "neighbors": ["o"]},
+            ],
+        }
+    }
+    # No species leaked into the transferable descriptor.
+    neighbors = payload["shell_code"]["levels"][0]["neighbors"]
+    assert all(isinstance(name, str) for name in neighbors)
+
+
+def test_extract_query_vector_unwraps_build_payload():
+    """``extract_query_vector`` is the inverse of ``build_payload`` --
+    it hands back the stored ``shell_code`` dict unchanged."""
+
+    matcher = ReduceMatcher()
+    shell_code = {"element": "o",
+                  "levels": [{"distance": 1.98,
+                              "neighbors": ["si", "si"]}]}
+    payload = {"shell_code": shell_code}
+    assert matcher.extract_query_vector(payload) is shell_code
