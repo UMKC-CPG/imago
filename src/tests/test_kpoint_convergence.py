@@ -33,9 +33,15 @@ from guidance_db import PredictionResult, Signature
 #   no StructureControl (hence no elements.dat) is ever touched.
 _STRUCTURE = object()
 
-_OPTIONS = {"basis": "fb", "functional": "gga-pbe",
-            "kpoint_integration": "gaussian-0.1",
-            "scf_threshold": 1.0e-6}
+# Tool-facing run settings (dest-keyed, coded): copied verbatim
+#   into every unit and never inspected by the builder.
+_OPTIONS = {"scf_basis": "fb", "xccode": 200,
+            "scfkpint": 0, "converg": 1.0e-6}
+
+# The human sub-model the predictor + record read, in its own dict
+#   (DESIGN 6.2.8): kept separate from the tool-facing _OPTIONS.
+_SUBMODEL = {"basis": "fb", "functional": "gga-pbe",
+             "kpoint_integration": "gaussian-0.1"}
 
 _DATASPACE = types.SimpleNamespace(group_table={})
 
@@ -97,7 +103,7 @@ def _build(**kwargs):
     ``patched`` fixture, so only the builder's own arguments are
     passed here."""
     return kc.build_kpoint_convergence(
-        _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline",
+        _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline", _SUBMODEL,
         id="si", **kwargs)
 
 
@@ -215,7 +221,7 @@ def test_curator_override_pins_grid_and_bypasses_predictor(
     tight verify grid around the curator value WITHOUT consulting
     the predictor; policy is curator_override (DESIGN 6.2.9)."""
     flight, record = kc.build_kpoint_convergence(
-        _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline",
+        _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline", _SUBMODEL,
         id="si", center=120.0)
     kpds = [unit.options["kpd"] for unit in flight.units]
     assert record.policy == "curator_override"
@@ -236,7 +242,7 @@ def test_curator_override_single_point_when_not_verifying(
     """center with verify=False yields a single pinned point and
     still bypasses the predictor."""
     flight, record = kc.build_kpoint_convergence(
-        _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline",
+        _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline", _SUBMODEL,
         id="si", center=120.0, verify=False)
     assert [u.options["kpd"] for u in flight.units] == [120]
     assert record.policy == "curator_override"
@@ -258,9 +264,9 @@ def test_units_carry_kpd_tag_options_and_key_fields(patched):
         assert unit.structure is _STRUCTURE
         assert unit.wingbeat == "imago"
         assert unit.id == "si"
-        # scf_threshold flows into the cache scalars; the
-        #   structure is the single byte-compared key file.
-        assert unit.key_fields.scalars["scf_threshold"] == 1.0e-6
+        # converg (the SCF limit) flows into the cache scalars;
+        #   the structure is the single byte-compared key file.
+        assert unit.key_fields.scalars["converg"] == 1.0e-6
         assert [f.name for f in unit.key_fields.files] == \
             ["structure"]
 
@@ -311,14 +317,15 @@ def test_prediction_record_shape_and_stash(patched):
 #  Error paths and the Part-A serialization round-trip
 # --------------------------------------------------------------
 
-def test_missing_required_option_raises(patched):
-    """An options dict missing a sub-model-selecting key aborts."""
+def test_missing_required_submodel_key_raises(patched):
+    """A submodel dict missing a sub-model-selecting key aborts."""
     patched(_result())
     bad = {"functional": "gga-pbe",
            "kpoint_integration": "gaussian-0.1"}   # no basis
     with pytest.raises(KaleidoscopeError):
         kc.build_kpoint_convergence(
-            _STRUCTURE, bad, _DATASPACE, "crystalline", id="si")
+            _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline", bad,
+            id="si")
 
 
 def test_non_path_structure_without_id_raises(patched):
@@ -327,7 +334,8 @@ def test_non_path_structure_without_id_raises(patched):
     patched(_result())
     with pytest.raises(KaleidoscopeError):
         kc.build_kpoint_convergence(
-            _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline")
+            _STRUCTURE, _OPTIONS, _DATASPACE, "crystalline",
+            _SUBMODEL)
 
 
 def test_flight_serializes_prediction_and_sweep(patched, tmp_path):

@@ -111,7 +111,7 @@ from guidance_db import VALID_SYSTEM_TYPES
 from kaleidoscope import Flight, LocalExecutor, SweepRecord, dispatch
 from kaleidoscope.builders.kpoint_convergence import (
     build_kpoint_convergence)
-from kaleidoscope.workspace import toml_line
+from kaleidoscope.workspace import read_status, toml_line
 
 
 # ============================================================
@@ -893,29 +893,102 @@ def materialize_structure(ref: ReferenceSolid, manifest_dir: str,
 #  Per-solid options + the (deferred) loen fingerprint units
 # ============================================================
 
+# Translation from the manifest's human-readable physics names to
+#   the coded option values each tool's argparse dest expects
+#   (DESIGN 6.2.10, decision 2).  The producer owns this translation
+#   because it is where the physics intent is known; the wingbeat
+#   downstream only routes keys by namespace and never value-codes.
+
+# Exchange-correlation functional name -> makeinput ``xccode``
+#   integer (the codes in ``share/xc_code.dat``).  v1 covers the
+#   non-relativistic, spin-restricted functionals a reference-solid
+#   manifest selects; extend this map as that vocabulary grows.
+_FUNCTIONAL_TO_XCCODE = {
+    "wigner": 100,
+    "ceperley-alder": 101,
+    "hedin-lundqvist": 102,
+    "pbe": 200,
+}
+
+# k-point integration method name -> makeinput ``scfkpint`` integer
+#   (0 = Gaussian broadening / histogram, 1 = the linear analytic
+#   tetrahedron).
+_KPOINT_INTEGRATION_TO_SCFKPINT = {
+    "gaussian": 0,
+    "linear-tetrahedral": 1,
+}
+
+
+def _scfkpint_for(token: str) -> int:
+    """Map a k-point integration token to makeinput's ``scfkpint``
+    code.  ``linear-tetrahedral`` -> 1; ``gaussian`` -> 0.  A
+    smeared Gaussian may name its smearing factor in the token
+    (e.g. ``gaussian-0.1``); the integration *code* is still 0.
+    That factor is not separately threaded in v1 -- makeinput's
+    default smearing applies and only the integration code is set
+    here.  An unknown token raises at the manifest boundary rather
+    than reaching makeinput as a mystery value."""
+    if token in _KPOINT_INTEGRATION_TO_SCFKPINT:
+        return _KPOINT_INTEGRATION_TO_SCFKPINT[token]
+    if token.startswith("gaussian-"):
+        return 0
+    raise ValueError(
+        f"unknown kpoint_integration {token!r}; the producer "
+        f"understands {sorted(_KPOINT_INTEGRATION_TO_SCFKPINT)} "
+        f"(or 'gaussian-<smearing>')")
+
+
 def make_producer_options(ref: ReferenceSolid,
                           imago_commit: str) -> dict[str, Any]:
-    """The fixed (non-swept) makeinput options for a reference
-    solid's convergence flight (PSEUDOCODE 11.4).
+    """The fixed (non-swept) run settings for a reference solid's
+    convergence flight, in each tool's own coded vocabulary
+    (DESIGN 6.2.10 / PSEUDOCODE 11.4).
 
-    Carries the sub-model triple the builder requires (``basis`` /
-    ``functional`` / ``kpoint_integration``), the ``scf_threshold``
-    and ``imago_commit`` that form kaleidoscope's run-reuse cache
-    key (DESIGN 6.2.5), and the fixed k-point shift.  The swept
-    k-density is deliberately absent: the builder adds it per grid
-    point (the ``kpd`` option), so a fixed value here would collide
-    with the sweep."""
+    The manifest records physics in human-readable form
+    (``functional = "wigner"``, ``kpoint_integration =
+    "linear-tetrahedral"``, ``basis = "fb"``); this function
+    translates that into the dest-keyed, coded options the tools'
+    ``from_options`` APIs require, so the wingbeat (DESIGN 6.2.2 /
+    13.2) can route each key purely by namespace without
+    value-coding:
+
+      - ``functional``         -> ``xccode``   (wigner = 100, ...)
+      - ``kpoint_integration`` -> ``scfkpint`` (LAT = 1, ...)
+      - ``basis``              -> ``scf_basis`` (an imago run-time
+                                  selection; imago codes ``fb -> 2``)
+      - ``scf_threshold``      -> ``converg``  (the makeinput SCF
+                                  convergence limit)
+      - ``kpoint_spec.shift``  -> ``kpshift``
+
+    Also carried: ``imago_commit``, the build identity that (with
+    ``converg``) forms kaleidoscope's run-reuse cache key (DESIGN
+    6.2.5); the wingbeat drops it before forwarding.
+
+    This dict carries NO physics-name keys.  The human sub-model
+    (basis / functional / kpoint_integration) travels to the
+    builder in its own ``submodel`` dict (DESIGN 6.2.8 / 6.2.10),
+    never mixed in here, so makeinput never sees a name it would
+    reject.  The swept k-density is also absent: the builder adds
+    it per grid point (the ``kpd`` option), so a fixed value here
+    would collide with the sweep."""
+
+    try:
+        xccode = _FUNCTIONAL_TO_XCCODE[ref.functional]
+    except KeyError:
+        raise ValueError(
+            f"unknown functional {ref.functional!r}; the producer "
+            f"understands {sorted(_FUNCTIONAL_TO_XCCODE)}")
 
     options: dict[str, Any] = {
-        "basis": ref.basis,
-        "functional": ref.functional,
-        "kpoint_integration": ref.kpoint_integration,
-        "scf_threshold": ref.scf_threshold,
+        "scf_basis": ref.basis,
+        "xccode": xccode,
+        "scfkpint": _scfkpint_for(ref.kpoint_integration),
+        "converg": ref.scf_threshold,
         "imago_commit": imago_commit,
     }
     shift = ref.kpoint_spec.get("shift")
     if shift is not None:
-        options["kpoint_shift"] = shift
+        options["kpshift"] = shift
     return options
 
 
@@ -966,11 +1039,30 @@ def _read_unit_result(workspace_root: str, unit) -> dict:
         return tomllib.load(handle)
 
 
+def _unit_completed(workspace_root: str, unit) -> bool:
+    """True iff a dispatched unit ran to completion -- its
+    ``status.toml`` records status ``"done"`` (the DESIGN 6.2.4
+    lifecycle: queued / running / done / failed / lost).
+
+    A failed / lost / still-queued unit, or one with no
+    ``status.toml`` at all, did not complete and has written no
+    ``result.toml`` to harvest.  Checking this BEFORE reaching for
+    ``result.toml`` is the DESIGN 6.2.10 robustness fix: when every
+    unit fails at the makeinput/imago seam, the old harvest opened a
+    missing ``result.toml`` and crashed with ``FileNotFoundError``
+    instead of recording a non-converged solid."""
+    wingbeat_dir = os.path.join(
+        workspace_root, "wingbeats", unit.id, *unit.calc)
+    status = read_status(wingbeat_dir)
+    return bool(status) and status.get("status") == "done"
+
+
 def pick_converged_unit(flight: Flight, reference_id: str,
                         workspace_root: str, scf_threshold: float):
     """Return ``(unit, result_toml)`` for the converged grid point
     of one solid's convergence sweep, or ``None`` when the energy is
-    still moving at the top of the grid (PSEUDOCODE 11.4).
+    still moving at the top of the grid -- or when nothing ran to
+    completion (PSEUDOCODE 11.4).
 
     Uses the same two-sided delta-below-threshold rule as the
     guidance harvest (DESIGN 7.8 step 3c), reused via
@@ -979,7 +1071,14 @@ def pick_converged_unit(flight: Flight, reference_id: str,
     neighbours.  A single-point grid (a trust-mode run or a
     single-point curator override) has no interior point to judge,
     so its lone run IS the deliverable -- the producer trusts the
-    pinned/predicted point and harvests its potential directly."""
+    pinned/predicted point and harvests its potential directly.
+
+    Only units that ran to completion are considered: a failed or
+    result-less unit is treated as non-converged and dropped before
+    its ``result.toml`` is opened (DESIGN 6.2.10).  When no unit
+    completed -- e.g. every unit failed at the makeinput/imago seam
+    -- the solid did not converge and the function returns ``None``,
+    which the caller logs and skips (5.7)."""
 
     units = [unit for unit in flight.units
              if unit.id == reference_id
@@ -988,17 +1087,25 @@ def pick_converged_unit(flight: Flight, reference_id: str,
         units,
         key=lambda unit: guidance_harvest.swept_value_of(
             unit, "kpt-density"))
-    results = [_read_unit_result(workspace_root, unit)
-               for unit in units]
 
-    if len(units) == 1:
-        return units[0], results[0]
+    # Keep only the units that completed; a failed/result-less unit
+    # is not a convergence data point and has no result.toml to read.
+    completed = [unit for unit in units
+                 if _unit_completed(workspace_root, unit)]
+    if not completed:
+        return None
+
+    results = [_read_unit_result(workspace_root, unit)
+               for unit in completed]
+
+    if len(completed) == 1:
+        return completed[0], results[0]
 
     energies = [result["total_energy"] for result in results]
     index = guidance_harvest.pick_converged(energies, scf_threshold)
     if index is None:
         return None
-    return units[index], results[index]
+    return completed[index], results[index]
 
 
 def extract_potential(result_toml: dict, atom_site: int
@@ -1210,11 +1317,22 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         struct = materialize_structure(ref, manifest_dir, pdb_root)
         struct_of[ref.reference_id] = struct
         options = make_producer_options(ref, imago_commit)
+        # The predictor and the PredictionRecord speak the human
+        # physics names, not the codes, so the sub-model travels to
+        # the builder in its OWN dict -- never mixed into the
+        # tool-facing options (DESIGN 6.2.8 / 6.2.10), which would
+        # both duplicate the basis and make makeinput reject
+        # "functional" / "kpoint_integration".
+        submodel = {
+            "basis": ref.basis,
+            "functional": ref.functional,
+            "kpoint_integration": ref.kpoint_integration,
+        }
         # One builder call per solid (DESIGN 6.2.9): a pinned
         # kpoint_spec.density is the curator override (predictor
         # bypassed); otherwise full predict-then-verify.
         flight_i, record_i = build_kpoint_convergence(
-            struct, options, dataspace, ref.system_type,
+            struct, options, dataspace, ref.system_type, submodel,
             id=ref.reference_id,
             center=ref.kpoint_spec.get("density"))
         all_units.extend(flight_i.units)

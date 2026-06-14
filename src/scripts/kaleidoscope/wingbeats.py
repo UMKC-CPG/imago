@@ -21,6 +21,45 @@ from .model import WingbeatOutcome, KaleidoscopeError
 from .workspace import emit_scalar, toml_line
 
 
+# Option keys that are neither a makeinput build setting nor an imago
+#   run-time selection, but kaleidoscope's own run-reuse bookkeeping
+#   (DESIGN 6.2.10).  ``imago_commit`` is the build identity that busts
+#   the run-reuse cache across imago versions (DESIGN 6.2.5).  The
+#   default wingbeat drops these before forwarding, so neither tool
+#   ever sees them; this is safe because the cache identity is captured
+#   separately in ``unit.key_fields`` at build time, not from the
+#   forwarded options.
+CACHE_ONLY_KEYS = frozenset({"imago_commit"})
+
+
+def _partition_options(options):
+    """Split a unit's options into the makeinput build set and the
+    imago run set, dropping kaleidoscope's cache-only bookkeeping
+    (DESIGN 6.2.10).  Routing is by each tool's recognised-key set:
+
+    - a key in ``imago.OPTION_KEYS`` (job, edge, scf_basis, ...) is
+      an imago run-time selection -> the imago set;
+    - a key in ``CACHE_ONLY_KEYS`` (imago_commit) is kaleidoscope's
+      own bookkeeping -> dropped before forwarding, reaching neither
+      tool (its cache identity is captured separately in the unit's
+      key_fields at build time, DESIGN 6.2.5);
+    - every other key -> the makeinput build set, where makeinput's
+      strict unknown-key check stays the typo backstop.
+
+    Returns ``(makeinput_options, imago_options)``."""
+    import imago
+    makeinput_options = {}
+    imago_options = {}
+    for key, value in options.items():
+        if key in imago.OPTION_KEYS:
+            imago_options[key] = value
+        elif key in CACHE_ONLY_KEYS:
+            continue
+        else:
+            makeinput_options[key] = value
+    return makeinput_options, imago_options
+
+
 # ------------------------------------------------------------------
 #  Wingbeat protocol and registry
 # ------------------------------------------------------------------
@@ -82,9 +121,24 @@ class ImagoWingbeat(Wingbeat):
         if self._is_prepared(wingbeat_dir):
             result = imago.run_prepared(wingbeat_dir)
         else:
-            result = imago.run_structure(
-                unit.structure, unit.options, wingbeat_dir
-            )
+            # The wingbeat owns the makeinput/imago option split
+            #   (DESIGN 6.2.10): a unit carries ONE options dict, but
+            #   makeinput (strict) and imago (lenient) have disjoint
+            #   key vocabularies, so the wingbeat -- the one component
+            #   that drives both tools -- routes each key to the tool
+            #   that recognises it and drops the cache-only build
+            #   identity.  It does NOT defer to imago.run_structure,
+            #   which forwards a SINGLE options dict to both tools and
+            #   so cannot serve their disjoint keys.
+            import makeinput
+            makeinput_options, imago_options = _partition_options(
+                unit.options)
+            makeinput.build_run_dir(
+                unit.structure, makeinput_options, wingbeat_dir)
+            settings = imago.ScriptSettings.from_options(
+                imago_options)
+            result = imago.run_prepared(
+                wingbeat_dir, settings=settings)
 
         self._persist_result(wingbeat_dir, result)
 

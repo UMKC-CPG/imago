@@ -531,6 +531,9 @@ OPTIONS EXPLANATIONS
             identifying which Brillouin zone to print and a scale factor
             that causes the size of the Brillouin zone to be scaled.
 
+-converg    Set the SCF convergence limit for this run, overriding the
+            value otherwise sourced from the rc file (converg_main).
+
 -xccode     Set the exchange correlation code (see $IMAGO_DIR/share/
             xc_code.dat for the list of codes).
 
@@ -668,6 +671,8 @@ DEFAULTS
                    The area is undefined.
   -xanes:        Off by default (one set of input files).
                    Default radius=3.50 A.  Atoms chosen 1 from each species.
+  -converg:      SCF convergence limit taken from the rc file
+                   (converg_main) unless overridden.
   -xccode:       100 (Wigner interpolation method).
   -xcmesh:       numvect=100, weights=0.5/0.5, in_samp=0.1, out_samp=3.5,
                    spacing=0.8.
@@ -887,6 +892,21 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
                             metavar=("IN", "OUT", "SPACING"), default=None,
                             help="XC mesh sampling: in-rate, out-rate, "
                                  "spacing.  Default: 0.1 3.5 0.8.")
+
+        # ---- SCF execution ----
+        # The -converg option pins the SCF convergence limit for
+        # this build.  makeinput normally sources the limit from the
+        # rc file's converg_main; supplying -converg overrides that
+        # for a single run, letting a caller (the initial-potential
+        # database builder) fix a per-solid threshold.  It threads
+        # structurally just like -xccode above: a float whose default
+        # is None, taken to mean "fall back to the rc value", and
+        # whose supplied value is written into imago.dat as the SCF
+        # convergence criterion.
+        parser.add_argument(
+            "-converg", dest="converg", type=float, default=None,
+            help="SCF convergence limit for this run.  Overrides the "
+                 "rc converg_main default when supplied.")
 
         # ---- Target / Block / Reduce (repeatable) ----
         # These three options implement the atom-grouping schemes described
@@ -1174,6 +1194,13 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             self.xc_in_samp = args.samp[0]
             self.xc_out_samp = args.samp[1]
             self.xc_spacing_samp = args.samp[2]
+
+        # SCF execution.  A supplied -converg pins the SCF
+        # convergence limit for this run, overriding the rc-sourced
+        # converg_main default; an absent option leaves the rc value
+        # in place (DESIGN 6.2.10, decision 3).
+        if args.converg is not None:
+            self.converg_main = args.converg
 
         # Grouping methods: reduce.
         if args.reduce is not None:

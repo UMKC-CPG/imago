@@ -216,6 +216,18 @@ EDGE_MAP = {
 # Map basis string to numeric code.
 BASIS_CODE_MAP = {"mb": 1, "fb": 2, "eb": 3}
 
+# The option keys the imago callable API recognises (the run-time
+#   selections of DESIGN 6.1.3).  A kaleidoscope wingbeat routes
+#   exactly these keys to ``ScriptSettings.from_options`` and lets
+#   every other key fall through to makeinput, so the makeinput/imago
+#   split lives in one place and a setting migrates between the tools
+#   by editing this set rather than reworking the router (DESIGN
+#   6.2.10).  Kept in sync with ``_args_from_options`` below, the sole
+#   reader of these keys.
+OPTION_KEYS = frozenset(
+    {"job", "edge", "scf_basis", "pscf_basis",
+     "serialxyz", "valgrind"})
+
 
 # ------------------------------------------------------------------ #
 #                  Callable API: Result and Errors                    #

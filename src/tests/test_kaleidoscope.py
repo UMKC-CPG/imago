@@ -569,14 +569,18 @@ def test_imago_runner_maps_converged(tmp_path, monkeypatch):
 
 def test_imago_runner_maps_not_converged(tmp_path, monkeypatch):
     """A directory with no staged imago.dat goes through the
-    structure-and-options build path; NOT_CONVERGED still
-    *completed*, so it is ok=True with detail="not_converged"."""
+    structure-and-options build path (the wingbeat builds the deck
+    with makeinput, then runs it); NOT_CONVERGED still *completed*,
+    so it is ok=True with detail="not_converged"."""
     import imago
+    import makeinput
 
-    def fake_run_structure(structure, options, wingbeat_dir):
-        return _imago_result(imago.RunStatus.NOT_CONVERGED)
-
-    monkeypatch.setattr(imago, "run_structure", fake_run_structure)
+    monkeypatch.setattr(makeinput, "build_run_dir",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(
+        imago, "run_prepared",
+        lambda wingbeat_dir, **kwargs: _imago_result(
+            imago.RunStatus.NOT_CONVERGED))
     unit = CalcUnit(id="x", structure="s.skl")
     outcome = ImagoWingbeat().run(unit, str(tmp_path))
     assert outcome.ok is True
@@ -587,12 +591,14 @@ def test_imago_runner_maps_failed_to_not_ok(tmp_path, monkeypatch):
     """A hard FAILED is the only status that maps to ok=False --
     the unit did not complete."""
     import imago
+    import makeinput
 
-    def fake_run_structure(structure, options, wingbeat_dir):
-        return _imago_result(imago.RunStatus.FAILED,
-                             message="fortran abort")
-
-    monkeypatch.setattr(imago, "run_structure", fake_run_structure)
+    monkeypatch.setattr(makeinput, "build_run_dir",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(
+        imago, "run_prepared",
+        lambda wingbeat_dir, **kwargs: _imago_result(
+            imago.RunStatus.FAILED, message="fortran abort"))
     outcome = ImagoWingbeat().run(CalcUnit(id="x", structure="s"),
                                 str(tmp_path))
     assert outcome.ok is False
@@ -613,15 +619,41 @@ def test_imago_runner_prepared_detection_under_inputs(tmp_path,
         used["prepared"] = True
         return _imago_result(imago.RunStatus.CONVERGED)
 
-    def fake_run_structure(structure, options, wingbeat_dir):
+    def fake_build_run_dir(structure, options, wingbeat_dir):
+        # The structure-build path would call this; in prepared
+        #   mode it must be skipped entirely.
         used["structure"] = True
-        return _imago_result(imago.RunStatus.CONVERGED)
 
+    import makeinput
     monkeypatch.setattr(imago, "run_prepared", fake_run_prepared)
-    monkeypatch.setattr(imago, "run_structure", fake_run_structure)
+    monkeypatch.setattr(makeinput, "build_run_dir",
+                        fake_build_run_dir)
     ImagoWingbeat().run(CalcUnit(id="x", structure="s"),
                       str(tmp_path))
     assert used == {"prepared": True}
+
+
+def test_partition_options_routes_by_recognised_key_set():
+    """The wingbeat splits a unit's options three ways (DESIGN
+    6.2.10): imago run-time selections go to imago, the cache-only
+    build identity is dropped, and everything else goes to the
+    strict makeinput build."""
+    from kaleidoscope.wingbeats import _partition_options
+    options = {
+        "scf_basis": "fb",         # imago run-time selection
+        "job": "scf",              # imago
+        "xccode": 100,             # makeinput
+        "scfkpint": 1,             # makeinput
+        "converg": 1.0e-6,         # makeinput
+        "imago_commit": "abc123",  # cache-only -> dropped
+    }
+    makeinput_options, imago_options = _partition_options(options)
+    assert imago_options == {"scf_basis": "fb", "job": "scf"}
+    assert makeinput_options == {
+        "xccode": 100, "scfkpint": 1, "converg": 1.0e-6}
+    # The build identity reaches neither tool.
+    assert "imago_commit" not in imago_options
+    assert "imago_commit" not in makeinput_options
 
 
 # ==============================================================

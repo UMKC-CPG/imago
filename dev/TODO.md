@@ -2251,6 +2251,23 @@ the C48.3 wiring (C74) is the first major consumer.
   pinned `kpoint_spec.density` builds a 3-point tight grid, not a
   single point; re-run needs `--force` or a cleared
   `$IMAGO_DATA/curation/workspace/`.
+  **Follow-on code (a)-(f) DONE + tested (2026-06-13, full suite 640
+  passed).**  Includes the two-dictionary `submodel` refinement
+  (DESIGN 6.2.8/6.2.10).  makeinput grew `-converg`;
+  `make_producer_options` now emits dest-keyed coded tool settings
+  only (functional->xccode, kpoint_integration->scfkpint via a
+  smearing-aware mapper, basis->scf_basis, scf_threshold->converg,
+  shift->kpshift) while the builder takes the human sub-model in its
+  own `submodel` dict; `imago.OPTION_KEYS` +
+  `wingbeats.CACHE_ONLY_KEYS` exported; `ImagoWingbeat.run`
+  partitions options across makeinput/imago and drops the cache-only
+  build identity (retiring the shared-options `run_structure` call);
+  `_KEY_SCALAR_NAMES` keys on `converg`; `pick_converged_unit` reads
+  `status.toml` first and skips failed/result-less units.  **What
+  remains for C74: the live cluster smoke run** to validate the seam
+  end to end (the `jobs/c74_si_test/` manifest, re-run with `--force`
+  per the reminder above), plus the still-stubbed C54/C60 fingerprint
+  harvest.
 - [ ] C75. Seed `share/historicalGuidanceDB/entries/`
   via a deliberate stratified seed flight.  ~150-250
   calculations covering the chemistry surface

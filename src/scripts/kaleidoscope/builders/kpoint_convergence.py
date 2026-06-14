@@ -239,7 +239,7 @@ def build_calc_tag(calc_axes):
 # The producer's cache identity for a converged-potential run
 #   (DESIGN 6.2.1): the scalar settings that define "the same
 #   calculation" plus the structure file, byte-compared.
-_KEY_SCALAR_NAMES = ("scf_threshold", "imago_commit")
+_KEY_SCALAR_NAMES = ("converg", "imago_commit")
 
 
 def standard_key_fields(structure, options):
@@ -248,9 +248,10 @@ def standard_key_fields(structure, options):
     the scalar settings that define run identity.
 
     The scalar names are taken from ``options`` when present
-    (DESIGN-6.2.1 lists ``scf_threshold`` and ``imago_commit``).
-    ``scf_threshold`` is naturally in the makeinput options; the
-    build-identity ``imago_commit`` is producer-injected -- it is
+    (DESIGN 6.2.1/6.2.10 list ``converg`` and ``imago_commit``).
+    ``converg`` (the SCF convergence limit) is naturally in the
+    makeinput options; the build-identity ``imago_commit`` is
+    producer-injected -- it is
     carried in ``options`` when the producer (C74) supplies it and
     silently omitted otherwise, so this helper never has to learn
     how the build stamps its own commit (a C78 concern).
@@ -330,8 +331,8 @@ def attach_prediction_record(flight, structure_id, record):
 # ------------------------------------------------------------------
 
 def build_kpoint_convergence(structure, options, dataspace,
-                             system_type, verify=True, id=None,
-                             center=None, root=""):
+                             system_type, submodel, verify=True,
+                             id=None, center=None, root=""):
     """Build a predict-then-verify ``Flight`` for one structure
     (DESIGN 6.2.8 / 7.7; PSEUDOCODE 15.6).
 
@@ -341,17 +342,25 @@ def build_kpoint_convergence(structure, options, dataspace,
         An ``imago.skl`` path, or an already-loaded
         StructureControl.
     options
-        The fixed (non-swept) makeinput options, held constant
-        across every grid point.  MUST carry ``basis``,
-        ``functional``, and ``kpoint_integration`` -- together
-        they select the predictor sub-model (DESIGN 7.6 step 2),
-        so a prediction never mixes incompatible settings.
+        The fixed (non-swept) run settings in each tool's own
+        coded vocabulary (``scf_basis`` / ``xccode`` / ``scfkpint``
+        / ``converg`` / ``kpshift`` / ``imago_commit``), held
+        constant across every grid point and copied verbatim into
+        every unit.  Carries NO physics-name keys -- the wingbeat
+        forwards it to the tools as-is (DESIGN 6.2.10).
     dataspace
         The historical-guidance ``Dataspace`` loaded by
         ``guidance_db.load`` (DESIGN 7.4).
     system_type
         One of the four valid system types (DESIGN 7.2),
         declared by the caller.
+    submodel
+        The three human physics names the predictor and the
+        ``PredictionRecord`` speak: ``basis``, ``functional``,
+        ``kpoint_integration`` (DESIGN 7.6 step 2).  Kept OUT of
+        ``options`` because makeinput would reject these names --
+        they are a prediction input, not a tool setting (DESIGN
+        6.2.8 / 6.2.10).
     verify
         When False, *trust mode*: a length-1 grid at the
         predicted (or pinned) value, no widening (DESIGN 6.2.1).
@@ -378,11 +387,11 @@ def build_kpoint_convergence(structure, options, dataspace,
         the record is also stashed in ``flight.metadata`` under
         ``predictions[id]`` so the harvest recovers it (6.2.9).
     """
-    # The three sub-model-selecting options are mandatory.
+    # The three sub-model-selecting names are mandatory.
     for required in ("basis", "functional", "kpoint_integration"):
-        if required not in options:
+        if required not in submodel:
             raise KaleidoscopeError(
-                f"build_kpoint_convergence options must carry "
+                f"build_kpoint_convergence submodel must carry "
                 f"{required!r} (it selects the predictor "
                 f"sub-model)")
 
@@ -406,8 +415,8 @@ def build_kpoint_convergence(structure, options, dataspace,
         policy = "curator_override"
     else:
         result = predict(
-            dataspace, query_sig, options["basis"],
-            options["functional"], options["kpoint_integration"])
+            dataspace, query_sig, submodel["basis"],
+            submodel["functional"], submodel["kpoint_integration"])
         if not verify:
             # Trust mode: one point at the predicted value.
             grid_values = [result.predicted_kpoint_density]
@@ -471,9 +480,9 @@ def build_kpoint_convergence(structure, options, dataspace,
             predicted_magnetization=None,
             system_type=system_type,
             feature_vector=query_sig,
-            basis=options["basis"],
-            functional=options["functional"],
-            kpoint_integration=options["kpoint_integration"])
+            basis=submodel["basis"],
+            functional=submodel["functional"],
+            kpoint_integration=submodel["kpoint_integration"])
     else:
         record = PredictionRecord(
             policy=policy,
@@ -485,9 +494,9 @@ def build_kpoint_convergence(structure, options, dataspace,
             predicted_magnetization=result.predicted_magnetization,
             system_type=system_type,
             feature_vector=query_sig,
-            basis=options["basis"],
-            functional=options["functional"],
-            kpoint_integration=options["kpoint_integration"])
+            basis=submodel["basis"],
+            functional=submodel["functional"],
+            kpoint_integration=submodel["kpoint_integration"])
 
     flight = Flight(root=root, units=units, sweep=sweep)
     attach_prediction_record(flight, unit_id, record)

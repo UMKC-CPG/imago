@@ -839,11 +839,16 @@ def _ref(**overrides) -> ReferenceSolid:
 
 def _write_result(workspace, unit_id, calc, *, energy,
                   iterations=7, scfv="scfV.dat"):
-    """Write one dispatched unit's result.toml under the workspace
-    (the kaleidoscope run-dir layout)."""
+    """Write one COMPLETED unit's status.toml and result.toml under
+    the workspace (the kaleidoscope run-dir layout).  A completed
+    run carries both: the harvest's completion gate
+    (pick_converged_unit) reads status.toml first (DESIGN 6.2.10),
+    then result.toml."""
 
     run_dir = os.path.join(workspace, "wingbeats", unit_id, *calc)
     os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, "status.toml"), "w") as handle:
+        handle.write('status = "done"\n')
     path = os.path.join(run_dir, "result.toml")
     with open(path, "w") as handle:
         handle.write(f"total_energy = {energy}\n")
@@ -851,19 +856,36 @@ def _write_result(workspace, unit_id, calc, *, energy,
         handle.write(f'outputs = {{ scfV = "{scfv}" }}\n')
 
 
+def _write_failed(workspace, unit_id, calc):
+    """Write one FAILED unit: a status.toml='failed' and NO
+    result.toml, the shape left when a unit aborts at the
+    makeinput/imago seam (DESIGN 6.2.10)."""
+
+    run_dir = os.path.join(workspace, "wingbeats", unit_id, *calc)
+    os.makedirs(run_dir, exist_ok=True)
+    with open(os.path.join(run_dir, "status.toml"), "w") as handle:
+        handle.write('status = "failed"\n')
+
+
 # ---- pure helpers --------------------------------------------
 
-def test_make_producer_options_carries_submodel_and_shift():
+def test_make_producer_options_emits_coded_tool_settings():
     options = make_producer_options(_ref(), "abc123")
-    assert options["basis"] == "fb"
-    assert options["functional"] == "wigner"
-    assert options["kpoint_integration"] == "linear-tetrahedral"
-    assert options["scf_threshold"] == pytest.approx(1.0e-6)
+    # Dest-keyed, coded -- each tool's own vocabulary (DESIGN
+    #   6.2.10): functional->xccode, kpoint_integration->scfkpint,
+    #   basis->scf_basis, scf_threshold->converg, shift->kpshift.
+    assert options["scf_basis"] == "fb"
+    assert options["xccode"] == 100              # wigner
+    assert options["scfkpint"] == 1              # linear-tetrahedral
+    assert options["converg"] == pytest.approx(1.0e-6)
     assert options["imago_commit"] == "abc123"
-    assert options["kpoint_shift"] == [0.0, 0.0, 0.0]
-    # The swept k-density is added per grid point by the builder,
-    #   so it must not be pinned in the fixed options.
-    assert "kpd" not in options
+    assert options["kpshift"] == [0.0, 0.0, 0.0]
+    # No physics-name keys leak in: the sub-model travels separately
+    #   (DESIGN 6.2.8), and the swept k-density is added per grid
+    #   point by the builder, not pinned in the fixed options.
+    for absent in ("basis", "functional", "kpoint_integration",
+                   "scf_threshold", "kpoint_shift", "kpd"):
+        assert absent not in options
 
 
 def test_make_imago_provenance_satisfies_schema():
@@ -966,6 +988,39 @@ def test_pick_converged_unit_none_when_energy_still_moving(
         flight, "au_fcc", workspace, scf_threshold=0.1) is None
 
 
+def test_pick_converged_unit_none_when_all_units_failed(tmp_path):
+    """Every unit failed at the makeinput/imago seam: each wrote a
+    status.toml='failed' and NO result.toml.  pick_converged_unit
+    must treat the solid as non-converged (return None), never crash
+    opening a missing result.toml (DESIGN 6.2.10)."""
+    workspace = str(tmp_path)
+    flight = _grid_flight("au_fcc", [50, 100, 200])
+    flight.root = workspace
+    for k in (50, 100, 200):
+        _write_failed(workspace, "au_fcc", (f"kpt-density-{k}",))
+    assert pick_converged_unit(
+        flight, "au_fcc", workspace, scf_threshold=0.1) is None
+
+
+def test_pick_converged_unit_drops_failed_keeps_completed(tmp_path):
+    """A failed unit is dropped from the grid before its (absent)
+    result.toml is read; the convergence rule runs on the survivors
+    (DESIGN 6.2.10)."""
+    workspace = str(tmp_path)
+    flight = _grid_flight("au_fcc", [50, 100, 200])
+    flight.root = workspace
+    # 50 failed; 100 and 200 completed flat -> a single survivor pair
+    #   has no interior point, so the rule cannot confirm convergence.
+    _write_failed(workspace, "au_fcc", ("kpt-density-50",))
+    _write_result(workspace, "au_fcc", ("kpt-density-100",),
+                  energy=0.5)
+    _write_result(workspace, "au_fcc", ("kpt-density-200",),
+                  energy=0.5)
+    # Two survivors, no interior point -> None (not a crash).
+    assert pick_converged_unit(
+        flight, "au_fcc", workspace, scf_threshold=0.1) is None
+
+
 def test_pick_converged_unit_single_point_is_the_deliverable(
         tmp_path):
     # A single pinned point (curator override / trust mode) has no
@@ -1047,8 +1102,8 @@ def test_build_initial_potentials_harvests_curated_entry(
         bip.guidance_db, "load",
         lambda root: types.SimpleNamespace(group_table={}))
 
-    def fake_builder(struct, options, dataspace, system_type, *,
-                     id, center):
+    def fake_builder(struct, options, dataspace, system_type,
+                     submodel, *, id, center):
         units = [CalcUnit(id=id, structure=struct,
                           calc=(f"kpt-density-{k}",),
                           options={**options, "kpd": k})
@@ -1057,8 +1112,9 @@ def test_build_initial_potentials_harvests_curated_entry(
             policy="verify_around_prediction",
             predicted_kpoint_density=100.0, confidence=0.9,
             is_under_trained=False, system_type=system_type,
-            basis=options["basis"], functional=options["functional"],
-            kpoint_integration=options["kpoint_integration"])
+            basis=submodel["basis"],
+            functional=submodel["functional"],
+            kpoint_integration=submodel["kpoint_integration"])
         # root is overridden on the combined flight the producer
         #   builds, so a placeholder here is fine.
         return Flight(root="", units=units), record
@@ -1129,8 +1185,8 @@ def test_build_initial_potentials_derives_label_at_harvest(
         bip.guidance_db, "load",
         lambda root: types.SimpleNamespace(group_table={}))
 
-    def fake_builder(struct, options, dataspace, system_type, *,
-                     id, center):
+    def fake_builder(struct, options, dataspace, system_type,
+                     submodel, *, id, center):
         units = [CalcUnit(id=id, structure=struct,
                           calc=(f"kpt-density-{k}",),
                           options={**options, "kpd": k})
@@ -1139,8 +1195,9 @@ def test_build_initial_potentials_derives_label_at_harvest(
             policy="verify_around_prediction",
             predicted_kpoint_density=100.0, confidence=0.9,
             is_under_trained=False, system_type=system_type,
-            basis=options["basis"], functional=options["functional"],
-            kpoint_integration=options["kpoint_integration"])
+            basis=submodel["basis"],
+            functional=submodel["functional"],
+            kpoint_integration=submodel["kpoint_integration"])
         return Flight(root="", units=units), record
 
     monkeypatch.setattr(bip, "build_kpoint_convergence",
