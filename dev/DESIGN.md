@@ -2403,9 +2403,22 @@ matchers Phase 2 ships with:
 
 - `"bispectrum"` records carry `values` (array of reals,
   length `2 * twoj2 + 1`).
-- `"reduce"` records carry a `shell_code` inline table
-  encoding per-level distance, neighbor count, and
-  neighbor element/species multiset.
+- `"reduce"` records carry a `shell_code` inline table:
+  the central atom's `element` symbol plus a `levels`
+  array, one entry per reduction level holding that
+  shell's `distance` and a `neighbors` list of neighbor
+  element symbols (the neighbor count is implicit in the
+  list length).  The neighbor multiset is element-only --
+  *not* element/species.  Species numbering is local to a
+  single structure (one structure's "species 2" has no
+  relation to another's), so it would not transfer to the
+  query structures this stored fingerprint is later
+  matched against (5.6.5); element symbols are global and
+  transferable, so the cross-structure descriptor keeps
+  only them.  Within `group_reduce` the species component
+  still distinguishes atoms, but that comparison never
+  leaves one structure.  All symbols are lowercased to
+  match the CLI element/species token convention.
 
 Fingerprint records inherit provenance from their parent
 `[potential.provenance]` block: the same reference run
@@ -2673,7 +2686,21 @@ sub_spec = { twoj1 = 6, twoj2 = 4 }
 values   = [
    ...  (5 entries)  ...
 ]
+
+[[potential.fingerprint]]
+method   = "reduce"
+sub_spec = { level = 2, thick = 5.0e-01, cutoff = 5.0e+00 }
+shell_code.element = "au"
+shell_code.levels  = [
+   { distance = 2.88e+00, neighbors = ["au", "au", "au"] },
+   { distance = 4.07e+00, neighbors = ["au", "au"] },
+]
 ```
+
+Reduce `shell_code` records the central atom's element
+and, per reduction level, the shell distance and the
+neighbor element symbols -- element-only, so the
+descriptor transfers across structures (5.2).
 
 ### 5.4 In-Memory Representation
 
@@ -3623,10 +3650,19 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
            declaration, compute the fingerprint at `atom_site`
            for the requested `(method, sub_spec)`.  Python-side
            matchers (e.g., `reduce`) compute in-process from the
-           reference structure; Fortran-side matchers (e.g.,
-           `bispectrum`) read the matching `-loen` unit that
-           kaleidoscope already dispatched in step 3c and parse
-           the row for `atom_site` from `fort.21`.  Build a
+           run's *expanded* structure -- `outputs["structure"]`,
+           makeinput's `imago.fract-mi` full cell -- not the
+           materialized source file, which for a space-grouped
+           reference is only the asymmetric unit and carries
+           neither the full-cell geometry the shells need nor the
+           run's numbering.  Because that expanded skeleton is
+           ordered by the run's sorted (dat) numbering while
+           `atom_site` is a skeleton index, the harvest maps
+           `atom_site` to the structure row through the same
+           `datSkl.map` used in step i.  Fortran-side matchers
+           (e.g., `bispectrum`) read the matching `-loen` unit
+           that kaleidoscope already dispatched in step 3c and
+           parse the row for `atom_site` from `fort.21`.  Build a
            `FingerprintRecord` (5.4) and attach it to the
            entry-in-progress.
       iii. Construct a `PotentialEntry` (5.2) with the
@@ -4138,7 +4174,20 @@ ImagoResult
                       produced (e.g. "scfV", "energy",
                       "iteration", plus property-specific
                       keys like "tdos", "bond"); the
-                      producer reads outputs["scfV"]
+                      producer reads outputs["scfV"].  Also
+                      "structure" -> the run's expanded
+                      full-cell skeleton (makeinput's
+                      imago.fract-mi: every atom explicit,
+                      space group 1, at the run's sorted
+                      numbering), and "datSkl_map" -> the
+                      sorted<->skeleton atom map.  The
+                      reduce fingerprint harvest (5.7) reads
+                      this pair: the expanded skeleton gives
+                      the geometry its shells need, and the
+                      map turns a manifest atom_site
+                      (skeleton numbering) into the row of
+                      that structure.  Both are present only
+                      when the run went through makeinput
   job               echo of identity: edge, job_name,
                       basis_scf, basis_pscf
   runtime_seconds   float: wall-clock time of the run,

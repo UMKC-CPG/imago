@@ -2853,8 +2853,24 @@ class ReduceMatcher extends Matcher:
         # `shell_code` field (DESIGN 5.2 / 5.4).
         return payload["shell_code"]
 
-    function build_payload(query_vector):
-        return {"shell_code": query_vector}
+    function build_payload(shell_code):
+        # Serialize the in-memory shell code into the
+        # element-only, cross-structure form stored on
+        # disk (DESIGN 5.2): the central atom's element
+        # symbol plus one entry per level holding the
+        # shell distance and the list of neighbor element
+        # symbols.  The structure-local integer ids and
+        # the neighbor species are dropped here -- species
+        # numbering does not transfer across structures,
+        # so only the transferable element symbols are
+        # kept.  All symbols are lowercased.
+        return {"shell_code": {
+            "element": lower(shell_code.element_symbol),
+            "levels": [
+                {"distance":  level.distance,
+                 "neighbors": lower_each(
+                     level.neighbor_symbols)}
+                for level in shell_code.levels]}}
 
     function to_loen_input(sub_spec):
         error("ReduceMatcher is Python-side; no LOEN"
@@ -4073,13 +4089,17 @@ function materialize_structure(ref):
 
 
 function harvestFingerprints(flight, ref, spec,
-        struct_path):
+        result_toml):
     # Build one FingerprintRecord per declared
-    # [[reference_solid.entry.fingerprint]].  The
-    # Python-side / Fortran-side split mirrors the
+    # [[reference_solid.entry.fingerprint]].  An entry
+    # with no declarations harvests nothing and never
+    # touches the structure -- the common case so far.
+    # The Python-side / Fortran-side split mirrors the
     # consumer's matcher dispatch (11.3.a): the matcher
     # knows whether it computes in process or was
     # dispatched as a -loen unit.
+    if spec.fingerprints is empty:
+        return []
     fingerprints = []
     for fp_decl in spec.fingerprints:
         method   = fp_decl["method"]
@@ -4090,7 +4110,7 @@ function harvestFingerprints(flight, ref, spec,
                 ref, spec.atom_site, matcher, sub_spec)
         else:
             payload = harvestPythonFingerprint(
-                struct_path, spec.atom_site, matcher,
+                result_toml, spec.atom_site, matcher,
                 sub_spec)
         fingerprints.append(FingerprintRecord(
             method   = method,
@@ -4132,20 +4152,34 @@ function harvestLoenFingerprint(flight, ref,
         rows[atom_site - 1])
 
 
-function harvestPythonFingerprint(struct_path,
+function harvestPythonFingerprint(result_toml,
         atom_site, matcher, sub_spec):
-    # In-process matcher call against the materialized
-    # structure file.  No subprocess, no on-disk cache
-    # file -- recomputing in-process is cheaper than the
-    # cache bookkeeping would be.  Wraps the result via
-    # matcher.build_payload so the per-matcher payload
-    # field name (DESIGN 5.2) flows through the same
-    # accessor the loen-side branch uses.
-    structure = read_structure(struct_path)
-    vectors = matcher.compute_query(structure,
-        sub_spec)
-    return matcher.build_payload(
-        vectors[atom_site - 1])
+    # In-process matcher call against the run's EXPANDED
+    # full-cell structure (outputs["structure"], makeinput's
+    # imago.fract-mi).  Reading the run's own expansion --
+    # not re-expanding the materialized source -- reuses the
+    # exact geometry and numbering the run computed and
+    # avoids duplicating applySpaceGroup.  No subprocess and
+    # no on-disk cache file: recomputing the shells in
+    # process is cheaper than the cache bookkeeping would be.
+    structure = read_structure(
+        result_toml.outputs["structure"])
+    # The reduce shells need neighbor distances out to the
+    # sub_spec cutoff; build the minimum-image matrix to at
+    # least that radius (periodic boundary conditions enter
+    # only here, exactly as in makeinput's grouping pass).
+    build_min_dist_matrix(structure, sub_spec["cutoff"])
+    vectors = matcher.compute_query(structure, sub_spec)
+    # That expanded skeleton is ordered by the run's sorted
+    # (dat) numbering, but atom_site is a skeleton index, so
+    # map it to the structure row through datSkl.map -- the
+    # same map step i reads.  Wrap the chosen vector via
+    # matcher.build_payload so the per-matcher payload field
+    # name (DESIGN 5.2) flows through the same accessor the
+    # loen-side branch uses.
+    dat_index = skeleton_to_dat(
+        result_toml.outputs["datSkl_map"])[atom_site]
+    return matcher.build_payload(vectors[dat_index])
 
 
 function sub_spec_slug(sub_spec):

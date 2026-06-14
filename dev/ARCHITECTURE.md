@@ -931,6 +931,28 @@ from `makeinput.py`.
                                   shape (members in,
                                   one fingerprint
                                   out).
+  build_payload(vector)           Wraps one fingerprint
+                                  into the dict stored
+                                  as a
+                                  `FingerprintRecord`
+                                  payload (DESIGN 5.2,
+                                  5.4): `BispecMatcher`
+                                  emits `{values: ...}`,
+                                  `ReduceMatcher` emits
+                                  `{shell_code: ...}`
+                                  (element-only, so the
+                                  descriptor transfers
+                                  across structures).
+                                  The producer (the
+                                  fingerprint harvest)
+                                  calls it.
+  extract_query_vector(payload)   The inverse: reads a
+                                  stored payload back
+                                  into the form this
+                                  matcher's `distance`
+                                  expects, so producer
+                                  and consumer agree on
+                                  field naming.
 
 **Registry.**  `makeinput.py` maintains a module-level
 dict mapping matcher names to matcher classes:
