@@ -3721,10 +3721,16 @@ function buildInitialPotentials(manifest_path,
         struct = materialize_structure(ref)
         struct_of[ref.reference_id] = struct
 
-        # Fixed (non-swept) makeinput options.  basis,
-        # functional, and kpoint_integration select the
-        # predictor sub-model; kpoint_spec.shift and
-        # scf_threshold ride along unchanged.
+        # Fixed (non-swept) options, already translated into
+        # the tools' own settings (DESIGN 6.2.10):
+        # make_producer_options maps the manifest's
+        # human-readable physics -- functional -> xccode,
+        # kpoint_integration -> scfkpint, basis -> the imago
+        # scf_basis, scf_threshold -> converg, shift ->
+        # kpshift -- and adds the imago_commit cache identity.
+        # basis/functional/kpoint_integration also pick the
+        # predictor sub-model.  The wingbeat (§13.2) routes
+        # each key to the tool that recognises it.
         options = make_producer_options(ref)
 
         # One builder call for every mode (DESIGN 6.2.9).
@@ -4780,10 +4786,25 @@ protocol Wingbeat:
 ```
 class ImagoWingbeat implements Wingbeat:
     function run(unit, wingbeat_dir):
-        # Default wingbeat: drive the §12 API.  Structure-
-        # and-options mode builds the run dir then runs.
-        result = imago.run_structure(
-                     unit.structure, unit.options, wingbeat_dir)
+        # Default wingbeat: drive the §12 API.  The wingbeat
+        # owns the makeinput/imago option split (DESIGN
+        # 6.2.10): route each option to the tool that
+        # recognises it, drop the cache-only build identity,
+        # then build the run dir and run it.
+        mk_opts    = {}
+        imago_opts = {}
+        for key, value in unit.options.items():
+            if key in imago.OPTION_KEYS:      # job, edge,
+                imago_opts[key] = value       #   scf_basis...
+            else if key in CACHE_ONLY_KEYS:   # imago_commit:
+                continue                      #   dropped, 6.2.5
+            else:
+                mk_opts[key] = value          # strict makeinput
+        makeinput.build_run_dir(
+            unit.structure, mk_opts, wingbeat_dir)
+        settings = ScriptSettings.from_options(imago_opts)
+        result = imago.run_prepared(
+                     wingbeat_dir, settings = settings)
 
         # Persist the §12.1 ImagoResult for the client to
         # reload (13.6).  kaleidoscope never reads it; it is
@@ -5264,10 +5285,13 @@ function run_structure(structure, options, run_dir,
     return run_prepared(run_dir, settings = settings)
 ```
 
-This is what lets a kaleidoscope flight hand a bare
-`imago.skl` plus options to the default wingbeat (§13.2) and
-have the run directory built and run in one worker call --
-the dependency the C48.3 producer is waiting on.
+The default wingbeat (§13.2) no longer calls this combined
+form: it partitions a unit's options and calls `build_run_dir`
+and `run_prepared` itself (DESIGN 6.2.10), so the `options`
+reaching `build_run_dir` here are makeinput-only.
+`run_structure` remains the one-call convenience path for a
+*direct* caller that already holds makeinput-only options --
+still the shape the C48.3 producer's seam is built on.
 
 ## 15. Historical Guidance Dataspace (DESIGN 7)
 

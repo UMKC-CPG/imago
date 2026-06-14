@@ -3358,7 +3358,17 @@ kpoint_integration    = "linear-tetrahedral"
   for reference-quality potentials.  Together with `functional`
   and `kpoint_integration` it selects the guidance predictor's
   sub-model (DESIGN 7.6) and is recorded on the produced
-  guidance entry's context.
+  guidance entry's context.  At present the basis differs from
+  `functional` and `kpoint_integration` in *where* it takes
+  effect: it is not currently a makeinput setting -- makeinput
+  writes all three basis sets into `imago.dat` and the basis is
+  chosen at the imago run itself (`scf_basis`, coded `fb -> 2`).
+  This may change: a future makeinput could own the basis
+  selection directly.  The seam does not depend on the present
+  arrangement -- the producer translates each manifest field
+  into the tools' own settings and the wingbeat routes each to
+  whichever tool recognises it (6.2.10), so the basis can move
+  to makeinput later without reworking the seam.
 - `functional` (string): the exchange-correlation functional
   token.  `"wigner"` is the Imago default (the Wigner
   interpolation method, makeinput `-xccode` 100).  A predictor
@@ -4649,12 +4659,14 @@ while converged / non-converged are wingbeat-supplied
 surface convergence in `status.toml` *and* stay ignorant
 of what convergence means.
 
-- The **default wingbeat** (`ImagoWingbeat`) calls the 6.1
-  API: `run_structure(unit.structure, unit.options,
-  wingbeat_dir)` (or `run_prepared` when inputs are already
-  staged).  It maps the returned `ImagoResult` into a
-  `WingbeatOutcome`: `ok = status in {CONVERGED,
-  NOT_CONVERGED, SKIPPED}` (the binary *ran*),
+- The **default wingbeat** (`ImagoWingbeat`) drives the 6.1
+  API.  It first **partitions the unit's options** into the
+  makeinput-side and imago-side settings (6.2.10), then builds
+  the run directory with `makeinput.build_run_dir` and runs it
+  with `imago.run_prepared` (or `run_prepared` alone when the
+  inputs are already staged).  It maps the returned
+  `ImagoResult` into a `WingbeatOutcome`: `ok = status in
+  {CONVERGED, NOT_CONVERGED, SKIPPED}` (the binary *ran*),
   `detail = status.name.lower()`.  It also **persists
   the full `ImagoResult` into the run directory** as
   `result.toml` (6.2.6), so the Imago-native detail
@@ -5408,6 +5420,148 @@ where it needs the prediction, indexing
 `metadata["predictions"]` by structure id.  The dispatch
 core stays domain-ignorant throughout.
 
+#### 6.2.10 The makeinput/imago option-contract seam
+
+*The collision this resolves.*  A unit carries a single
+`options` dict (6.2.1), and the default wingbeat forwarded it
+**whole** to both tools: `makeinput.build_run_dir(structure,
+options, ...)` to build the input deck, and
+`imago.ScriptSettings.from_options(options)` to drive the run.
+That only works if every key is meaningful to both readers, and
+it is not.  makeinput validates **strictly** -- an unrecognised
+dest is a contract fault and raises (`unknown makeinput option:
+'basis'`) -- while imago reads **leniently**, taking only the
+keys it knows.  The two tools also use **disjoint vocabularies**
+for the same physics: the basis choice is an imago run-time
+selection (`scf_basis`, coded `fb -> 2` via `BASIS_CODE_MAP`)
+and is never a makeinput dest at all, because makeinput writes
+*all three* basis sets into `imago.dat` as an overlapping set
+and the Fortran run selects one.  So the first imago-only key
+the producer emitted (`basis`) aborted every unit before
+makeinput could build anything.
+
+*Two root causes, kept separate.*
+
+1. **One options dictionary, two tools.**  The single `options`
+   dictionary must serve a strict consumer (makeinput) and a
+   lenient one (imago) whose recognised keys do not overlap.
+2. **Wrong vocabulary.**  The producer emitted physics names
+   (`functional`, `kpoint_integration`, `kpoint_shift`,
+   `scf_threshold`) where the tools expect their own dest names
+   and coded values (`xccode = 100`, `scfkpint = 1`, ...), and it
+   emitted build-identity bookkeeping (`imago_commit`) that is
+   not a tool input at all.
+
+*Freedom to refactor the tools.*  `makeinput.py` and `imago.py`
+are **ours to change** -- they are not fixed external programs.
+Where a change to either makes the split cleaner (a new dest such
+as the `-converg` option below, an exported `OPTION_KEYS` set, a
+helper that reports which keys a tool recognises, or a tidier
+`from_options` contract), prefer changing the tool over
+contorting the wingbeat around its present shape.  The decisions
+below assume that latitude.
+
+*Decision 1 -- the wingbeat owns the split.*  Partitioning the
+options dictionary is the **wingbeat's** responsibility, not
+`run_structure`'s.  The wingbeat is the one component that
+already runs *both* tools
+and is, by construction, the imago-specific adapter (6.2.2);
+letting it route options keeps the dispatch core domain-ignorant
+(Principle 8) while placing the makeinput/imago knowledge exactly
+where the rest of that knowledge already lives.  `run_structure`
+is therefore no longer a splitter (this amends 6.1.3 / 6.3.6):
+the wingbeat calls `makeinput.build_run_dir` and
+`imago.run_prepared` itself, handing each its own separated set
+of options.
+
+*Decision 2 -- the producer speaks the tools' vocabulary; the
+wingbeat is a pure router.*  `make_producer_options` (5.7)
+translates the manifest's human-readable physics
+(`functional = "wigner"`, `kpoint_integration =
+"linear-tetrahedral"`, `basis = "fb"`) into the **dest-keyed,
+coded** options the `from_options` APIs already require
+(`xccode = 100`, `scfkpint = 1`, `scf_basis = "fb"`, ...).  The
+wingbeat then routes purely by namespace and never value-codes:
+the translation lives in the producer, where the physics intent
+is known, mirroring how `-xccode` already takes the integer code
+defined in `xc_code.dat`.
+
+*The routing rule (three buckets).*  The wingbeat splits a
+unit's options into:
+
+- **imago run options** -- the fixed, known imago key set
+  `{job, edge, scf_basis, pscf_basis, serialxyz, valgrind}`
+  (6.1), exported as `imago.OPTION_KEYS` so the wingbeat does not
+  hard-code it -> handed to `from_options`.
+- **bookkeeping / cache-only** -- `imago_commit`, the build
+  identity that busts the run-reuse cache across imago versions
+  (6.2.5).  It is *dropped before forwarding* and reaches neither
+  tool.  This is safe because the cache identity is captured
+  separately in `unit.key_fields` at build time
+  (`standard_key_fields` copies the scalars out of `options`), so
+  removing the key from the forwarded options does not change the
+  cache key.
+- **makeinput build options** -- everything else, handed to
+  `build_run_dir`.  makeinput **keeps its strict unknown-key
+  check**, which now serves as the typo backstop: a key that is
+  neither an imago key nor bookkeeping nor a real makeinput dest
+  still raises, so the safety that strictness buys is preserved.
+
+| Producer emits | Bucket | Tool dest / note |
+| --- | --- | --- |
+| `scf_basis` | imago | basis selection, `fb -> 2` |
+| `kpd` | makeinput | k-point density (already correct) |
+| `xccode` | makeinput | XC functional code (wigner = 100) |
+| `scfkpint` | makeinput | k-point integration (LAT = 1) |
+| `kpshift` | makeinput | gamma-centred mesh offset |
+| `converg` | makeinput | SCF threshold (new dest; below) |
+| `imago_commit` | dropped | cache identity only (6.2.5) |
+
+*Designed for setting migration -- not rigid about today's
+split.*  The routing is by each tool's recognised-key set, not a
+hard-wired ownership map, so a setting can move between the tools
+without reworking the seam.  Concretely, the basis lives on the
+imago side **today** only because `scf_basis` is in
+`imago.OPTION_KEYS` and no makeinput basis dest exists; if a
+future makeinput grows a real basis option, dropping `scf_basis`
+from `imago.OPTION_KEYS` lets the basis key fall through to
+makeinput on its own.  The one case the present "imago set, else
+makeinput" rule does not yet cover is a setting that must reach
+**both** tools at once; that would be handled by routing on each
+tool's explicit recognised-set and forwarding a shared key to
+both -- the natural extension point, deferred until a real
+both-tools setting exists.
+
+*Decision 3 -- SCF convergence threads like `xccode`.*  makeinput
+currently has **no** dest for the SCF convergence limit: it
+sources `converg_main` from the rc file and writes it into
+`imago.dat`.  To let the producer pin it per reference solid, add
+a makeinput option `-converg` (dest `converg`, `type=float`) that
+**overrides** the rc `converg_main` when supplied and falls back
+to it when absent -- structurally identical to `-xccode`
+defaulting to 100.  `make_producer_options` maps the manifest
+`scf_threshold` onto `converg`.  The value stays a cache-key
+scalar (6.2.5), so `standard_key_fields`' `_KEY_SCALAR_NAMES`
+becomes `("converg", "imago_commit")` -- the cache keys on the
+dest the run actually used.
+
+*Related robustness fix (surfaced by the failed smoke run).*
+When every unit fails this way, no `result.toml` is written, and
+the harvest's `pick_converged_unit` raised `FileNotFoundError`
+trying to open it.  A failed or result-less unit must be treated
+as **non-converged** (logged and skipped, 5.7), never an
+uncaught crash: the harvest reads `status.toml` and skips any
+unit whose status is not a completed run before it reaches for
+that unit's `result.toml`.
+
+*Follow-on code (for TODO).*  (a) add makeinput `-converg`;
+(b) rewrite `make_producer_options` to emit the dest-keyed, coded
+vocabulary above; (c) export `imago.OPTION_KEYS`; (d) move the
+partition into `ImagoWingbeat.run` and retire the single-shared-
+options call to `run_structure`; (e) update `_KEY_SCALAR_NAMES`;
+(f)
+harden `pick_converged_unit` against a missing `result.toml`.
+
 ### 6.3 makeinput callable build API
 
 This subsection designs the makeinput counterpart of the
@@ -5642,6 +5796,14 @@ bare `imago.skl` plus options to the default wingbeat and
 have the run directory built and run in one worker call,
 which is exactly the dependency the C48.3 potential-DB
 producer is waiting on.
+
+Note (6.2.10): the `options` reaching `build_run_dir` here are
+**makeinput-only**.  The default wingbeat partitions a unit's
+options upstream and forwards the imago-side keys to
+`run_prepared` separately, so `run_structure`'s combined-options
+form above is the convenience path for a *direct* caller that
+already holds makeinput-only options -- the wingbeat does not
+use it to split.
 
 #### 6.3.7 Open details (for PSEUDOCODE / implementation)
 

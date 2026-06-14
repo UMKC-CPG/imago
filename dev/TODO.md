@@ -2198,6 +2198,35 @@ the C48.3 wiring (C74) is the first major consumer.
   run on the cluster to validate end-to-end.  STILL DEFERRED:
   build_loen_units / harvest_fingerprints stub to [] pending the
   C54 matcher registry + C60 fingerprint harvest.
+  **LIVE SMOKE RUN 2026-06-13 surfaced the makeinput/imago
+  option-contract gap** (the validation C74 was waiting on).  The
+  first live producer run aborted every unit with `unknown
+  makeinput option: 'basis'`: the producer emits one options
+  dictionary forwarded to both a strict makeinput and a lenient
+  imago, but 6 of its 7 keys do not match makeinput's real argparse
+  dests, and `basis` is an imago run-time selection (makeinput
+  writes all bases into imago.dat), not a makeinput setting at all.
+  **Resolved in DESIGN 6.2.10** ("option-contract seam") + a 6.3.6
+  pointer; propagated to DESIGN 6.2.2 / 5.7 and PSEUDOCODE 11.4 /
+  13.2 / 14.4.  Decisions: the **wingbeat** owns the split; the
+  **producer** emits dest-keyed, coded options; SCF convergence
+  threads like xccode via a new makeinput `-converg` dest; routing
+  is by each tool's recognised-key set, so `basis` can migrate to
+  makeinput later without reworking the seam.  **Follow-on CODE
+  (rides with the live-validation step of C74):** (a) add makeinput
+  `-converg` (dest `converg`, overrides rc `converg_main`); (b)
+  rewrite `make_producer_options` to the dest-keyed vocabulary
+  (functional->xccode, kpoint_integration->scfkpint, basis->
+  scf_basis, scf_threshold->converg, shift->kpshift); (c) export
+  `imago.OPTION_KEYS` + a `CACHE_ONLY_KEYS` set; (d) move the
+  partition into `ImagoWingbeat.run`, retire the shared-options
+  `run_structure` call; (e) `_KEY_SCALAR_NAMES` ->
+  `("converg", "imago_commit")`; (f) harden `pick_converged_unit`
+  against a missing `result.toml` (treat a failed / result-less
+  unit as non-converged, reading `status.toml`).  Reminder: the
+  pinned `kpoint_spec.density` builds a 3-point tight grid, not a
+  single point; re-run needs `--force` or a cleared
+  `$IMAGO_DATA/curation/workspace/`.
 - [ ] C75. Seed `share/historicalGuidanceDB/entries/`
   via a deliberate stratified seed flight.  ~150-250
   calculations covering the chemistry surface
