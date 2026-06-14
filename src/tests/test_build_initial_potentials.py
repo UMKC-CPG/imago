@@ -898,11 +898,122 @@ def test_make_imago_provenance_satisfies_schema():
     ipdb.require_provenance(prov, "x.toml", "default_solid")
 
 
-def test_loen_and_fingerprint_harvest_are_deferred_stubs():
-    # C54/C60: no loen units, no fingerprints yet.
+def test_build_loen_units_still_deferred():
+    # The loen-side (bispectrum) descriptor needs the C55 matcher
+    #   body and the C58 bootstrap, so no loen units are dispatched.
     assert build_loen_units(_ref(), "au.skel") == []
-    assert harvest_fingerprints(
-        None, _ref(), _ref().entries[0], "au.skel") == []
+
+
+def test_harvest_fingerprints_no_declarations_is_empty():
+    # An entry that declares no fingerprints harvests nothing and
+    #   never touches the structure (the common case so far), so the
+    #   result_toml is not even read.
+    entry = _ref().entries[0]
+    assert entry.fingerprints == []
+    assert harvest_fingerprints(None, _ref(), entry, {}) == []
+
+
+def _fake_two_atom_structure():
+    """A duck-typed structure (Si at row 1, O at row 2) exposing just
+    what ReduceMatcher.compute_query reads: the 1-indexed identity
+    arrays and the minimum-image distance matrix.  Stands in for the
+    StructureControl the harvest would read from the run's expanded
+    imago.fract-mi, so the matcher path is tested without a real
+    structure read (which needs the space-group database)."""
+
+    return types.SimpleNamespace(
+        num_atoms=2, num_elements=2,
+        atom_element_id=[None, 1, 2],
+        atom_species_id=[None, 1, 1],
+        atom_element_name=[None, "Si", "O"],
+        min_dist=[[None, None, None],
+                  [None, 0.0, 2.0],
+                  [None, 2.0, 0.0]])
+
+
+_REDUCE_DECL = ManifestFingerprint(
+    method="reduce",
+    sub_spec={"level": 1, "thick": 0.1, "cutoff": 5.0,
+              "tolerance": 0.05})
+
+
+def test_read_skeleton_to_dat_map_keys_by_skeleton(tmp_path):
+    """datSkl.map (DAT# SKELETON# ELEMENT SPECIES TYPE) reads into
+    {skeleton: (dat, element)}, skipping the header line."""
+    dat_skl = tmp_path / "datSkl.map"
+    dat_skl.write_text("DAT SKEL ELEM SPECIES TYPE\n"
+                       "  2    1   Si       1    1\n"
+                       "  1    2   O        1    1\n")
+    result_toml = {"outputs": {"datSkl_map": str(dat_skl)}}
+    assert bip.read_skeleton_to_dat_map(result_toml) == {
+        1: (2, "Si"), 2: (1, "O")}
+
+
+def test_harvest_fingerprints_reduce(tmp_path, monkeypatch):
+    """A reduce declaration harvests one element-only shell_code
+    FingerprintRecord for the named site, mapping atom_site (skeleton)
+    to the structure row via datSkl.map and computing in-process via
+    ReduceMatcher (DESIGN 5.7 / 5.2)."""
+    dat_skl = tmp_path / "datSkl.map"
+    dat_skl.write_text("DAT SKEL ELEM SPECIES TYPE\n"
+                       "  1    1   Si       1    1\n"
+                       "  2    2   O        1    1\n")
+    result_toml = {"outputs": {"structure": "imago.fract-mi",
+                               "datSkl_map": str(dat_skl)}}
+    monkeypatch.setattr(
+        bip, "_read_structure_with_distances",
+        lambda path, cutoff: _fake_two_atom_structure())
+
+    spec = ReferenceEntry(
+        element="Si", atom_site=1, label="t", default=True,
+        description="d", fingerprints=[_REDUCE_DECL])
+    records = harvest_fingerprints(None, _ref(), spec, result_toml)
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.method == "reduce"
+    assert record.sub_spec == _REDUCE_DECL.sub_spec
+    # Si at site 1 sees a single O neighbor at 2.0 Angstrom; the
+    #   stored shell_code is element-only and lowercased.
+    assert record.payload == {
+        "shell_code": {
+            "element": "si",
+            "levels": [{"distance": pytest.approx(2.0),
+                        "neighbors": ["o"]}],
+        }}
+
+
+def test_harvest_fingerprints_refuses_loen_side(monkeypatch):
+    """A Fortran-side (bispectrum) declaration raises rather than
+    silently dropping a fingerprint: the loen harvest is C55/C58."""
+    spec = ReferenceEntry(
+        element="Si", atom_site=1, label="t", default=True,
+        description="d",
+        fingerprints=[ManifestFingerprint(
+            method="bispectrum", sub_spec={"twoj1": 8, "twoj2": 8})])
+    with pytest.raises(NotImplementedError):
+        harvest_fingerprints(None, _ref(), spec, {})
+
+
+def test_harvest_fingerprints_guards_numbering_desync(
+        tmp_path, monkeypatch):
+    """When the expanded structure row and datSkl.map name different
+    elements for a site, the numbering has desynced and the harvest
+    refuses rather than describing the wrong atom."""
+    dat_skl = tmp_path / "datSkl.map"
+    dat_skl.write_text("DAT SKEL ELEM SPECIES TYPE\n"
+                       "  1    1   Au       1    1\n"   # map says Au
+                       "  2    2   O        1    1\n")
+    result_toml = {"outputs": {"structure": "imago.fract-mi",
+                               "datSkl_map": str(dat_skl)}}
+    monkeypatch.setattr(                            # structure says Si
+        bip, "_read_structure_with_distances",
+        lambda path, cutoff: _fake_two_atom_structure())
+    spec = ReferenceEntry(
+        element="Au", atom_site=1, label="t", default=True,
+        description="d", fingerprints=[_REDUCE_DECL])
+    with pytest.raises(ValueError):
+        harvest_fingerprints(None, _ref(), spec, result_toml)
 
 
 def test_materialize_structure_resolves_local_path(tmp_path):

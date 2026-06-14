@@ -89,9 +89,13 @@ This file is being built incrementally (C48):
   the run log, and the CLI flags** (next; needs a live Imago
   toolchain to exercise).
 * **C60 -- fingerprint harvest** (Phase 2): compute and attach the
-  ``[[reference_solid.entry.fingerprint]]`` records.  The manifest
-  reader here already *parses* those declarations and enforces
-  their uniqueness (rule 8); only the harvest is deferred.
+  ``[[reference_solid.entry.fingerprint]]`` records.  The Python-side
+  (reduce) harvest is implemented (the light half): it computes the
+  shell code in process from the run's expanded structure and stores
+  an element-only ``shell_code`` (DESIGN 5.2 / 5.7).  The Fortran-side
+  (bispectrum) harvest -- which needs a dispatched ``-loen`` unit --
+  is deferred to C55/C58, and a Fortran-side declaration is refused
+  rather than silently dropped.
 """
 
 import argparse
@@ -112,6 +116,11 @@ from kaleidoscope import Flight, LocalExecutor, SweepRecord, dispatch
 from kaleidoscope.builders.kpoint_convergence import (
     build_kpoint_convergence)
 from kaleidoscope.workspace import read_status, toml_line
+# The Phase-2 matcher registry (ARCHITECTURE 8.9) lives in makeinput;
+#   the fingerprint harvest dispatches reduce fingerprints through it.
+#   StructureControl reads the run's expanded structure for those shells.
+from makeinput import MATCHERS
+from structure_control import StructureControl
 
 
 # ============================================================
@@ -1002,31 +1011,135 @@ def build_loen_units(ref: ReferenceSolid, struct_path: str) -> list:
     """Structure-only ``imago -loen -scf no`` units, one per
     Fortran-side fingerprint declaration (PSEUDOCODE 11.4).
 
-    DEFERRED (C54 matcher registry / C60 fingerprint harvest): the
-    Python-vs-Fortran split needs the MATCHERS registry to know
-    which declarations require a loen run, and the fingerprint
-    harvest itself is C60.  Until both land the producer dispatches
-    no loen units and harvests no fingerprints -- the convergence
-    path (the C74 deliverable) is unaffected.  Returns an empty
-    list, tagged here so the wiring point is obvious when C54/C60
-    fill it in."""
+    DEFERRED (C55/C58): the loen-side (bispectrum) descriptor is
+    computed by the Imago Fortran engine, so each Fortran-side
+    declaration needs a dispatched ``-loen -scf no`` unit.  The
+    matcher registry (C54) now exists, but the bispectrum matcher
+    body (C55) and the nested-makeinput loen bootstrap (C58) do not,
+    so the producer dispatches no loen units yet.  Python-side
+    (reduce) fingerprints need no unit -- they are computed in the
+    harvest from the run's expanded structure (see
+    :func:`harvest_fingerprints`).  Returns an empty list, tagged
+    here so the wiring point is obvious when C55/C58 fill it in."""
 
     return []
+
+
+def _read_structure_with_distances(structure_path: str,
+                                   cutoff: float) -> StructureControl:
+    """Read the run's expanded full-cell structure and build its
+    minimum-image distance matrix out to ``cutoff`` (DESIGN 5.7).
+
+    ``structure_path`` is the run's ``outputs["structure"]`` -- the
+    ``imago.fract-mi`` makeinput wrote, every atom explicit in space
+    group 1 at the run's sorted (dat) numbering.  ``read_input_file``
+    dispatches on the filename to the skeleton reader; the file is
+    already a full P1 cell, so no further space-group expansion
+    happens.  ``set_limit_dist`` sizes the periodic search to the
+    reduce cutoff before ``create_min_dist_matrix`` populates
+    ``sc.min_dist`` -- the same minimum-image geometry makeinput's
+    grouping pass uses, so periodic boundary conditions enter exactly
+    once and exactly here."""
+
+    structure = StructureControl()
+    structure.read_input_file(structure_path)
+    structure.set_limit_dist(cutoff)
+    structure.create_min_dist_matrix()
+    return structure
+
+
+def read_skeleton_to_dat_map(result_toml: dict
+                             ) -> dict[int, tuple[int, str]]:
+    """Read the run's ``datSkl.map`` into ``{skeleton_atom:
+    (dat_atom, element)}`` (DESIGN 5.7 / ARCH 9.7).
+
+    The reduce harvest indexes the expanded structure by the run's
+    sorted (dat) numbering, while a manifest ``atom_site`` is a
+    *skeleton* index, so this returns the skeleton-to-dat mapping
+    (plus each site's element symbol, used to guard that the
+    structure row and the map agree).  Columns are ``DAT#
+    SKELETON#  ELEMENT  SPECIES  TYPE``; the header line is
+    skipped."""
+
+    path = result_toml["outputs"]["datSkl_map"]
+    mapping: dict[int, tuple[int, str]] = {}
+    with open(path) as handle:
+        rows = [line for line in handle if line.strip()]
+    for row in rows[1:]:                       # skip the header line
+        columns = row.split()
+        dat_atom = int(columns[0])
+        skeleton_atom = int(columns[1])
+        element = columns[2]
+        mapping[skeleton_atom] = (dat_atom, element)
+    return mapping
 
 
 def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
                          spec: ReferenceEntry,
-                         struct_path: str) -> list:
-    """Build one FingerprintRecord per declared fingerprint
+                         result_toml: dict) -> list:
+    """Build one ``FingerprintRecord`` per declared fingerprint
     (PSEUDOCODE 11.4 ``harvestFingerprints``).
 
-    DEFERRED (C60): the Python-side / Fortran-side matcher harvest
-    needs the C54 matcher registry and the C60 harvest itself.  For
-    C74 it returns an empty list so a produced entry carries no
-    fingerprints yet; the convergence potential -- C74's deliverable
-    -- is harvested fully."""
+    An entry that declares no fingerprints harvests nothing and
+    never reads the structure -- the common case so far.  Otherwise,
+    Python-side matchers (currently only ``reduce``) compute in
+    process from the run's *expanded* full-cell structure
+    (``outputs["structure"]``), which carries the geometry the shells
+    need and the run's numbering; ``atom_site`` (a skeleton index) is
+    mapped to a structure row through ``datSkl.map`` (the same map
+    :func:`extract_potential` reads).  The neighbor multiset is
+    element-only, so the stored fingerprint transfers across
+    structures (DESIGN 5.2).
 
-    return []
+    ``flight`` and ``ref`` are accepted for the loen-side (bispectrum)
+    harvest the protocol shares; that path is C55/C58, so a
+    Fortran-side declaration here raises rather than silently
+    dropping a fingerprint the curator asked for."""
+
+    if not spec.fingerprints:
+        return []
+
+    # Refuse loen-side declarations: the bispectrum matcher body
+    #   (C55) and the loen bootstrap (C58) are not built, so the
+    #   producer cannot satisfy a Fortran-side fingerprint yet.
+    #   Strict refusal beats silently omitting a declared record.
+    for declaration in spec.fingerprints:
+        if MATCHERS[declaration.method]().needs_loen_run:
+            raise NotImplementedError(
+                f"fingerprint method {declaration.method!r} needs a "
+                f"loen run; the Fortran-side harvest is C55/C58 and "
+                f"is not implemented yet")
+
+    # Every remaining declaration is Python-side (reduce).  Build the
+    #   expanded structure once, sized to the largest cutoff the
+    #   declarations request, and resolve atom_site to its dat row.
+    cutoff = max(declaration.sub_spec["cutoff"]
+                 for declaration in spec.fingerprints)
+    structure = _read_structure_with_distances(
+        result_toml["outputs"]["structure"], cutoff)
+    skeleton_to_dat = read_skeleton_to_dat_map(result_toml)
+
+    dat_atom, element = skeleton_to_dat[spec.atom_site]
+    # Guard the numbering assumption: the structure row and the map
+    #   must name the same element, or the expansion and the map have
+    #   desynced and the fingerprint would describe the wrong atom.
+    structure_element = structure.atom_element_name[dat_atom]
+    if structure_element.lower() != element.lower():
+        raise ValueError(
+            f"site {spec.atom_site}: datSkl.map names element "
+            f"{element!r} but the expanded structure row {dat_atom} "
+            f"is {structure_element!r}; numbering desync")
+
+    records = []
+    for declaration in spec.fingerprints:
+        matcher = MATCHERS[declaration.method]()
+        vectors = matcher.compute_query(structure, declaration.sub_spec)
+        payload = matcher.build_payload(vectors[dat_atom])
+        records.append(ipdb.FingerprintRecord(
+            method=declaration.method,
+            sub_spec=declaration.sub_spec,
+            payload=payload))
+    return records
 
 
 # ============================================================
@@ -1386,7 +1499,10 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     end-to-end dispatch, the per-site ``scfV`` read, and the
     site-identity read all need a live Imago run (C74)."""
 
-    manifest = load_manifest_v2(manifest_path)
+    # Pass the matcher registry so the loader enforces rule 9: every
+    #   declared fingerprint method must be a registered matcher (C54).
+    manifest = load_manifest_v2(
+        manifest_path, known_methods=set(MATCHERS))
     manifest_dir = os.path.dirname(manifest.manifest_path)
     guidance_root = os.path.join(data_root, "historicalGuidanceDB")
     dataspace = guidance_db.load(guidance_root)
@@ -1404,10 +1520,8 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
 
     all_units: list = []
     predictions: dict[str, Any] = {}
-    struct_of: dict[str, str] = {}
     for ref in manifest.reference_solids:
         struct = materialize_structure(ref, manifest_dir, pdb_root)
-        struct_of[ref.reference_id] = struct
         options = make_producer_options(ref, imago_commit)
         # The predictor and the PredictionRecord speak the human
         # physics names, not the codes, so the sub-model travels to
@@ -1495,7 +1609,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                     imago_commit, timestamp, ref, spec.atom_site,
                     scf_iterations),
                 fingerprints=harvest_fingerprints(
-                    flight, ref, spec, struct_of[ref.reference_id]))
+                    flight, ref, spec, result_toml))
             database = databases[elem_key]
             # Replace any prior entry with the same label (manifest
             # rule 6 makes the only possible prior the same entry
