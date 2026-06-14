@@ -460,8 +460,8 @@ subroutine mainSCF
 
    ! Note the columns that record statistics for each iteration.  The first is
    !   the iteration
-   write (7,*) "Iter. Occ._Energy   El._Error   ", &
-         & "Convergence   Total_Energy(au)      Mag._Mom.          ", &
+   write (7,*) "Iter.  Occ._Energy     El._Error   ", &
+         & "Convergence    Total_Energy(au)      Mag._Mom.          ", &
          & "Gap(au)  Gap_Kind"
    call flush (7)
 
