@@ -81,6 +81,8 @@ import math
 import os
 import shutil
 import sys
+from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 
 
@@ -2417,6 +2419,385 @@ def group_target(settings, sc, target_idx):
     update_from_track_flag(settings, relation, op, track_flag)
 
 
+# ===========================================================================
+# Phase-2 matcher protocol (ARCHITECTURE 8.9, DESIGN 5.6.4)
+# ===========================================================================
+#
+# A *matcher* is a uniform interface over one local-environment descriptor
+# family.  Each matcher knows exactly one way to summarize "what an atom sees
+# around it" into a comparable fingerprint, and exposes a small, fixed set of
+# operations so the species pass (here in makeinput) and the initial-potential
+# database producer (build_initial_potentials.py) can drive it without caring
+# which descriptor family it is.
+#
+# The two families Phase 2 ships with differ enormously in cost:
+#
+#   * ``reduce`` (ReduceMatcher) computes its fingerprint entirely in Python
+#     from the structure geometry -- the concentric-shell description that the
+#     long-standing reduce scheme has always used.  It needs no quantum run.
+#   * ``bispectrum`` (BispecMatcher) computes its fingerprint inside the Imago
+#     Fortran engine and is therefore far heavier; its body lands in C55/C58.
+#
+# Adding a future family (e.g. SOAP) is a new Matcher subclass plus a new
+# MATCHERS entry; no other code needs to change.
+
+
+class Matcher:
+    """Uniform interface over one local-environment descriptor family.
+
+    Concrete subclasses (``ReduceMatcher``, ``BispecMatcher``) implement the
+    operations below; this base class documents the protocol and supplies
+    "not implemented" defaults so a partially-built matcher fails loudly
+    rather than silently.
+
+    Class attributes every matcher advertises:
+
+    - ``name`` : the string written into a database entry's fingerprint
+      ``method`` field and used as the ``MATCHERS`` registry key.
+    - ``needs_loen_run`` : True when the descriptor is computed by the Imago
+      Fortran engine (the loen path), False when it is computed in Python.
+      This drives the nested-makeinput bootstrap of DESIGN 5.10.
+    - ``default_similarity_floor`` : the per-matcher default distance
+      threshold used when matching a query atom against stored database
+      fingerprints (DESIGN 5.6.5).  A query whose nearest stored fingerprint
+      is farther than this falls back to the default tag.  Users may override
+      it per scheme on the command line.
+
+    Instance operations:
+
+    - ``compute_query(structure, sub_spec)`` : compute the per-atom
+      fingerprints for ``structure`` under the parameters in ``sub_spec``.
+    - ``distance(vec_a, vec_b)`` : a symmetric scalar distance between two
+      fingerprints in this matcher's descriptor space.
+    - ``representative(members)`` : reduce a list of member-atom fingerprints
+      (the atoms of one species) into a single representative fingerprint.
+    - ``to_loen_input(sub_spec)`` / ``parse_loen_output(path, sub_spec)`` :
+      meaningful only when ``needs_loen_run`` is True; they translate a
+      ``sub_spec`` into the Imago LOEN input block and parse the resulting
+      ``fort.21`` descriptor file.
+    """
+
+    name = None
+    needs_loen_run = False
+    default_similarity_floor = None
+
+    def compute_query(self, structure, sub_spec):
+        """Compute one fingerprint per atom of ``structure``.
+
+        ``structure`` exposes the atom-identity arrays and the
+        minimum-distance matrix the matcher needs (``num_atoms``,
+        ``atom_element_id``, ``atom_species_id``, ``atom_element_name``,
+        ``min_dist``); ``StructureControl`` satisfies this directly and
+        makeinput's internal ``ReduceStructureView`` mirrors it.
+        """
+        raise NotImplementedError(
+            "compute_query is implemented by concrete Matcher subclasses")
+
+    def distance(self, vec_a, vec_b):
+        """Scalar distance between two fingerprints of this family."""
+        raise NotImplementedError(
+            "distance is implemented by concrete Matcher subclasses")
+
+    def representative(self, members):
+        """Reduce a species' member fingerprints to one representative."""
+        raise NotImplementedError(
+            "representative is implemented by concrete Matcher subclasses")
+
+    def to_loen_input(self, sub_spec):
+        """Translate ``sub_spec`` into the Imago LOEN input block.
+
+        Only loen-side matchers (``needs_loen_run`` True) implement this.
+        """
+        raise NotImplementedError(
+            "to_loen_input is only meaningful for loen-side matchers")
+
+    def parse_loen_output(self, path, sub_spec):
+        """Parse a loen run's ``fort.21`` into per-site fingerprint vectors.
+
+        Only loen-side matchers (``needs_loen_run`` True) implement this.
+        """
+        raise NotImplementedError(
+            "parse_loen_output is only meaningful for loen-side matchers")
+
+
+# ---------------------------------------------------------------------------
+# The reduce descriptor: a per-atom shell code.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ReduceShellLevel:
+    """One concentric shell of the reduce descriptor for a single atom.
+
+    Attributes
+    ----------
+    distance : float
+        The level distance -- the distance (Angstrom) to the nearest atom
+        that starts this shell.  This is the radial coordinate the reduce
+        distance test compares within tolerance.
+    members : list[tuple[int, int]]
+        The ``(element_id, species_id)`` pair of every neighbor that falls in
+        this shell, in ascending atom-index order.  Their multiset is what
+        the reduce composition test compares; their count is the reduce count
+        test.
+    member_names : list[str]
+        The element name of each member, parallel to ``members``.  Carried
+        only so the ``reduceSummary`` diagnostic can list shell neighbors by
+        name exactly as the historical algorithm did; it plays no part in the
+        distance comparison.
+    """
+
+    distance: float
+    members: list
+    member_names: list
+
+
+@dataclass
+class ReduceShellCode:
+    """The reduce fingerprint for one atom: its central element plus the
+    per-level shell description (DESIGN 5.6.5, "shell_code").
+
+    The comparison tolerance is embedded here so that ``distance`` is fully
+    self-contained -- it needs no ``sub_spec`` argument, matching the matcher
+    protocol's ``distance(vec_a, vec_b)`` signature (ARCHITECTURE 8.9).  All
+    fingerprints in one reduce pass are computed under the same ``sub_spec``
+    and therefore share the same tolerance, so reading it from the reference
+    (first) operand reproduces the historical, directional reduce test where
+    the tolerance band is scaled by the reduction atom's level distance.
+
+    Attributes
+    ----------
+    element_id : int
+        The central atom's element index.  Two atoms of different elements
+        can never be the same species, so a mismatch is an infinite distance.
+    tolerance : float
+        The fractional level-distance tolerance (e.g. 0.05 for 5%).
+    levels : list[ReduceShellLevel]
+        1-indexed list of shells (index 0 is an unused ``None`` placeholder),
+        one entry per requested reduction level.
+    """
+
+    element_id: int
+    tolerance: float
+    levels: list
+
+
+@dataclass
+class ReduceStructureView:
+    """The slice of structure state ``ReduceMatcher.compute_query`` reads.
+
+    During the makeinput species pass the authoritative per-atom species
+    assignment lives on ``settings`` (it is mutated as earlier grouping flags
+    run), while the minimum-distance geometry lives on the
+    ``StructureControl``.  This view bundles the two so the matcher can read a
+    single object whose attribute names match ``StructureControl`` -- which
+    lets the producer (build_initial_potentials.py) hand a real
+    ``StructureControl`` to the same ``compute_query`` unchanged.
+    """
+
+    num_atoms: int
+    num_elements: int
+    atom_element_id: list
+    atom_species_id: list
+    atom_element_name: list
+    min_dist: list
+
+
+class ReduceMatcher(Matcher):
+    """Python-side matcher wrapping the established reduce scheme.
+
+    The reduce fingerprint describes an atom by concentric spherical shells:
+    for each requested level it records the distance to the shell and the
+    element/species multiset of the neighbors in it (see ``compute_query``).
+    Two atoms are "the same species" when, at every level, their shell
+    distances agree within tolerance, they hold the same number of neighbors,
+    and those neighbors form the same ``(element, species)`` multiset (see
+    ``distance``).  This is exactly the test the historical ``group_reduce``
+    applied in place; C54 simply moved it behind this class so the producer
+    and the species pass reach it through one surface.
+    """
+
+    name = "reduce"
+    needs_loen_run = False
+    # Reduce distances are 0 (equivalent) or infinite (not), so any small
+    # positive floor admits only exact matches.  0.05 is the DESIGN 5.6.5
+    # starting value, tunable during the Phase-2 validation pass (C61).
+    default_similarity_floor = 0.05
+
+    def compute_query(self, structure, sub_spec):
+        """Build the per-atom shell codes for ``structure``.
+
+        Reproduces the historical reduce Phase 1 verbatim.  For each atom we
+        sweep outward building concentric shells: at each level we find the
+        closest still-unassigned atom (its distance defines the shell), then
+        gather every still-unassigned atom whose distance falls in the band
+        ``[shell_distance, shell_distance + thick]`` and within ``cutoff``.
+
+        Parameters
+        ----------
+        structure : ReduceStructureView or StructureControl
+            Supplies ``num_atoms``, the 1-indexed ``min_dist`` matrix, and the
+            per-atom ``atom_element_id`` / ``atom_species_id`` /
+            ``atom_element_name`` arrays.
+        sub_spec : dict
+            The reduce parameters: ``level`` (number of shells), ``thick``
+            (shell acceptance band, Angstrom), ``cutoff`` (maximum neighbor
+            distance, Angstrom), and ``tolerance`` (fractional level-distance
+            tolerance, embedded into each returned fingerprint).
+
+        Returns
+        -------
+        list[ReduceShellCode]
+            1-indexed list (index 0 is ``None``) of per-atom fingerprints.
+        """
+
+        num_levels = sub_spec["level"]
+        thick      = sub_spec["thick"]
+        cutoff     = sub_spec["cutoff"]
+        tolerance  = sub_spec["tolerance"]
+
+        num_atoms    = structure.num_atoms
+        min_dist     = structure.min_dist
+        element_id   = structure.atom_element_id
+        species_id   = structure.atom_species_id
+        element_name = structure.atom_element_name
+
+        fingerprints = [None] * (num_atoms + 1)
+
+        for atom in range(1, num_atoms + 1):
+
+            # atom_level[other] records which shell each other atom is
+            # assigned to for the current atom: 0 = unassigned, -1 = the
+            # atom itself (excluded from its own shells), >=1 = shell index.
+            atom_level = [0] * (num_atoms + 1)
+            atom_level[atom] = -1
+
+            level_distance = [None] * (num_levels + 1)
+
+            # Build each shell outward from the current atom.
+            for level in range(1, num_levels + 1):
+
+                # The closest still-unassigned atom starts this shell.  Ties
+                # keep the earlier atom index (strict ``<``), matching the
+                # historical scan order.
+                closest_atom = 0
+                for other in range(1, num_atoms + 1):
+                    if atom_level[other] == 0:
+                        if closest_atom == 0:
+                            closest_atom = other
+                        elif (min_dist[atom][other] <
+                              min_dist[atom][closest_atom]):
+                            closest_atom = other
+
+                closest_dist = min_dist[atom][closest_atom]
+                level_distance[level] = closest_dist
+
+                # Sweep every atom whose distance falls in the shell band and
+                # within the overall cutoff into this level.
+                for other in range(1, num_atoms + 1):
+                    d = min_dist[atom][other]
+                    if (d >= closest_dist and
+                            d <= closest_dist + thick and
+                            d <= cutoff):
+                        atom_level[other] = level
+
+            # Collect each shell's members in ascending atom-index order,
+            # recording their (element, species) pair for the comparison and
+            # their element name for the diagnostic.
+            levels = [None] * (num_levels + 1)
+            for level in range(1, num_levels + 1):
+                members = []
+                member_names = []
+                for other in range(1, num_atoms + 1):
+                    if atom_level[other] == level:
+                        members.append(
+                            (element_id[other], species_id[other]))
+                        member_names.append(element_name[other])
+                levels[level] = ReduceShellLevel(
+                    level_distance[level], members, member_names)
+
+            fingerprints[atom] = ReduceShellCode(
+                element_id[atom], tolerance, levels)
+
+        return fingerprints
+
+    def distance(self, vec_a, vec_b):
+        """Reduce distance: 0.0 when ``vec_b`` is equivalent to the reference
+        ``vec_a``, ``math.inf`` the moment any equivalence test fails.
+
+        The three historical tests are applied at every level; because the
+        verdict is a conjunction over all levels and tests, the order in which
+        they are checked does not change the result, only which test
+        short-circuits.  ``vec_a`` is the reference (the species' reduction
+        atom or representative): its tolerance and level distances set the
+        acceptance bands, reproducing the directional historical comparison.
+        """
+
+        # Test 0: atoms of different elements can never be one species.
+        if vec_a.element_id != vec_b.element_id:
+            return math.inf
+
+        num_levels = len(vec_a.levels) - 1
+        for level in range(1, num_levels + 1):
+            shell_a = vec_a.levels[level]
+            shell_b = vec_b.levels[level]
+
+            # Test 1: level distances within the reference's tolerance band.
+            if (abs(shell_a.distance - shell_b.distance) >
+                    vec_a.tolerance * shell_a.distance):
+                return math.inf
+
+            # Test 2: same number of neighbors in the shell.
+            if len(shell_a.members) != len(shell_b.members):
+                return math.inf
+
+            # Test 3: identical (element, species) neighbor multiset.  With
+            # the counts already equal (test 2), multiset equality is exactly
+            # the historical greedy permutation match.
+            if Counter(shell_a.members) != Counter(shell_b.members):
+                return math.inf
+
+        return 0.0
+
+    def representative(self, members):
+        """Return the first member's fingerprint as the species
+        representative.  Intra-species reduce fingerprints agree within
+        tolerance by construction, so any member is equally good (DESIGN
+        5.6.5)."""
+
+        return members[0]
+
+
+class BispecMatcher(Matcher):
+    """Loen-side matcher for the bispectrum descriptor (registered here;
+    body implemented in C55/C58).
+
+    The bispectrum captures angular detail about an atom's neighborhood and
+    is computed by the Imago Fortran engine rather than in Python, so
+    ``needs_loen_run`` is True.  C55 fills in ``to_loen_input`` (mapping a
+    ``sub_spec = {twoj1, twoj2}`` to the LOEN input block),
+    ``parse_loen_output`` (reading ``fort.21`` rows into vectors of length
+    ``2 * twoj2 + 1``), ``distance``, and ``representative`` (the
+    element-wise mean); C58 supplies the nested-makeinput bootstrap that
+    actually runs the engine.  Until then
+    the inherited methods raise ``NotImplementedError`` so any premature use
+    fails loudly.
+    """
+
+    name = "bispectrum"
+    needs_loen_run = True
+    # DESIGN 5.6.5 starting value for the bispectrum similarity floor.
+    default_similarity_floor = 0.10
+
+
+# The registry the species pass and the producer consult by manifest
+# ``method`` name; ``initial_potential_db.load`` validates fingerprint
+# methods against ``MATCHERS.keys()`` (ARCHITECTURE 8.9, rule 9).
+MATCHERS = {
+    "reduce":     ReduceMatcher,
+    "bispectrum": BispecMatcher,
+}
+
+
 def group_reduce(settings, sc, reduce_idx):
     """Group atoms by local-environment similarity (reduce scheme).
 
@@ -2425,6 +2806,19 @@ def group_reduce(settings, sc, reduce_idx):
     environments are.  The idea is that two atoms which "see" the same
     arrangement of neighbors out to some distance should be treated as
     equivalent (same species) for the purposes of the calculation.
+
+    Implementation note (C54)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~
+    The shell-building and the equivalence comparison described below now
+    live in ``ReduceMatcher`` (the Phase-2 matcher protocol, ARCHITECTURE
+    8.9): ``compute_query`` builds the per-atom shell codes and ``distance``
+    applies the three tests, returning zero for an equivalent pair.  This
+    function keeps only the species-assignment workflow -- walking the atoms,
+    starting a new species for each unassigned atom, joining later atoms at
+    zero distance, writing the ``reduceSummary`` diagnostic, and finalizing
+    the per-element species and type counts.  The behavior is unchanged; the
+    algorithm is just no longer duplicated in place.  The narrative below
+    still describes that algorithm in full for readers.
 
     Overview of the algorithm
     ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2527,9 +2921,6 @@ def group_reduce(settings, sc, reduce_idx):
 
     r = settings.reduces[reduce_idx]
     num_levels = r["level"]
-    thick      = r["thick"]
-    cutoff     = r["cutoff"]
-    tolerance  = r["tolerance"]
     op         = r["op"]
 
     # The reduce method currently only supports species grouping.  An
@@ -2541,96 +2932,39 @@ def group_reduce(settings, sc, reduce_idx):
             "the reduce method currently supports only species "
             "grouping (got op=%r)" % op)
 
-    # Open the diagnostic summary file.
-    reduce_fh = open("reduceSummary", "w")
-
     num_atoms    = settings.num_atoms
     num_elements = settings.num_elements
 
+    # Build the shell-code fingerprint for every atom through the reduce
+    #   matcher (ARCHITECTURE 8.9), which now owns the shell-build and
+    #   comparison the two inline phases used to do.  The matcher reads
+    #   the current per-atom identity from settings -- which an earlier
+    #   grouping flag in this pass may already have changed -- and the
+    #   periodic minimum-distance geometry from the StructureControl, so
+    #   the shells honor periodic boundary conditions exactly as before.
+    matcher = ReduceMatcher()
+    structure = ReduceStructureView(
+        num_atoms=num_atoms,
+        num_elements=num_elements,
+        atom_element_id=settings.atom_element_id,
+        atom_species_id=settings.atom_species_id,
+        atom_element_name=settings.atom_element_name,
+        min_dist=sc.min_dist,
+    )
+    fingerprints = matcher.compute_query(structure, r)
+
+    # Open the diagnostic summary file.
+    reduce_fh = open("reduceSummary", "w")
+
     # ==================================================================
-    # Phase 1: Build the shell configuration for every atom.
+    # Assign species from the shell-code fingerprints.
     #
-    # For each atom we determine which other atoms fall in each
-    # concentric spherical shell ("level").  The shells are built
-    # outward: at each level we find the closest still-unassigned atom,
-    # then sweep up everything within [that distance, that distance +
-    # thick] that is also within the overall cutoff.
-    # ==================================================================
-
-    # reduced_atoms[atom][level] = list of atom indices in that shell.
-    # level_distance[atom][level] = distance to the nearest atom that
-    #   starts that shell.
-    # Both are 1-indexed on atom and level.
-    reduced_atoms  = [None] * (num_atoms + 1)
-    level_distance = [None] * (num_atoms + 1)
-
-    for atom in range(1, num_atoms + 1):
-
-        # Initialize an array recording which level each other atom is
-        # assigned to for the current atom's shells.  0 = unassigned,
-        # -1 = the atom itself (excluded from its own shells).
-        atom_level = [0] * (num_atoms + 1)  # index 0 unused
-        atom_level[atom] = -1  # The current atom is excluded.
-
-        # Allocate storage for this atom's level distances and shell
-        # member lists.  Index 0 is a placeholder.
-        level_distance[atom] = [None] * (num_levels + 1)
-        reduced_atoms[atom]  = [None] * (num_levels + 1)
-
-        # Determine the configuration for each level separately.
-        for level in range(1, num_levels + 1):
-
-            # Find the closest unassigned atom (atom_level == 0) to the
-            # current atom.  This atom's distance defines the start of
-            # the shell for this level.
-            closest_atom = 0
-            for atom2 in range(1, num_atoms + 1):
-                if atom_level[atom2] == 0:
-                    if closest_atom == 0:
-                        closest_atom = atom2
-                    elif (sc.min_dist[atom][atom2] <
-                          sc.min_dist[atom][closest_atom]):
-                        closest_atom = atom2
-
-            # Record the distance to this level for the current atom.
-            level_distance[atom][level] = sc.min_dist[atom][closest_atom]
-
-            # Mark all atoms whose distance from the current atom falls
-            # in the range [closest_distance, closest_distance + thick]
-            # AND is within the overall cutoff.  These atoms belong to
-            # this level's shell.
-            closest_dist = sc.min_dist[atom][closest_atom]
-            for atom2 in range(1, num_atoms + 1):
-                d = sc.min_dist[atom][atom2]
-                if (d >= closest_dist and
-                        d <= closest_dist + thick and
-                        d <= cutoff):
-                    atom_level[atom2] = level
-
-        # ---------------------------------------------------------------
-        # Save the level assignments for this atom by collecting the
-        # atoms assigned to each level into per-level lists.
-        # ---------------------------------------------------------------
-
-        # num_reduced[level] counts atoms in each shell.
-        num_reduced = [0] * (num_levels + 1)
-
-        for level in range(1, num_levels + 1):
-            reduced_atoms[atom][level] = [None]  # 1-indexed list
-
-        for atom2 in range(1, num_atoms + 1):
-            for level in range(1, num_levels + 1):
-                if atom_level[atom2] == level:
-                    num_reduced[level] += 1
-                    reduced_atoms[atom][level].append(atom2)
-
-    # ==================================================================
-    # Phase 2: Compare shell configurations and assign species.
-    #
-    # At this point the 3D structure reduced_atoms[atom][level] is
-    # complete for each requested level of reduction.  Now we compare
-    # the data to determine which atoms are sufficiently similar to be
-    # grouped together as the same species.
+    # Walk the atoms in order.  Each atom that is not yet assigned starts
+    # a new species ("reduction atom", RA); every later atom whose reduce
+    # distance to it is zero -- i.e. it passes every equivalence test --
+    # joins that species.  This single-pass assignment is makeinput's own
+    # workflow; the shell-build and the equivalence tests it relies on now
+    # live solely in ReduceMatcher (compute_query and distance).
     # ==================================================================
 
     # Initialize a temporary atom species ID array (0 = not yet assigned).
@@ -2663,142 +2997,33 @@ def group_reduce(settings, sc, reduce_idx):
             f"{temp_atom_species_id[atom]}\n"
         )
 
-        # Build lists of the nearest-neighbor element and species IDs
-        # for the RA at each level (used for the composition test).
-        # ra_elements[level][i] and ra_species[level][i] are 1-indexed
-        # on i (matching the reduced_atoms indexing).
-        ra_elements = [None] * (num_levels + 1)
-        ra_species  = [None] * (num_levels + 1)
-
+        # Write this reduction atom's per-level distances and shell
+        # neighbor element names to the summary file, reading them
+        # straight from its precomputed shell-code fingerprint.
+        ra_code = fingerprints[atom]
         for level in range(1, num_levels + 1):
-
-            # Record the distance to this level in the summary file.
+            shell = ra_code.levels[level]
             reduce_fh.write(
-                f"Distance to level {level} = "
-                f"{level_distance[atom][level]}\n"
+                f"Distance to level {level} = {shell.distance}\n"
             )
 
-            # Build an element-name string for the summary file, and
-            # record element/species IDs for the composition test.
+            # The shell's neighbor element names, space-prefixed, exactly
+            # as the historical summary listed them (atom-index order).
             level_atoms_str = ""
-            ra_elements[level] = [None]  # 1-indexed
-            ra_species[level]  = [None]  # 1-indexed
-
-            # Walk the list of atoms in this level's shell (1-indexed).
-            for ri in range(1, len(reduced_atoms[atom][level])):
-                ra_atom = reduced_atoms[atom][level][ri]
-                ra_elements[level].append(settings.atom_element_id[ra_atom])
-                ra_species[level].append(settings.atom_species_id[ra_atom])
-                level_atoms_str += (
-                    f" {settings.atom_element_name[ra_atom]}"
-                )
-
-            # Print the list of atoms in this level.
+            for member_name in shell.member_names:
+                level_atoms_str += f" {member_name}"
             reduce_fh.write(f"Atoms in level {level} :  {level_atoms_str}\n")
 
         # ---------------------------------------------------------------
-        # Check each subsequent atom to see if it is sufficiently
-        # similar to the current RA according to the requested criteria.
+        # Check each subsequent atom against this RA.  A zero reduce
+        # distance means the comparison atom passes every equivalence
+        # test (same central element, per-level distances within
+        # tolerance, matching neighbor counts, and identical neighbor
+        # (element, species) composition), so it joins this species.
         # ---------------------------------------------------------------
-
         for atom2 in range(atom + 1, num_atoms + 1):
-
-            # --- Test 0: Same element? ---
-            # If the comparison atom (CA) is not the same element as the
-            # RA, it cannot possibly be the same species.
-            if settings.atom_element_id[atom] != settings.atom_element_id[atom2]:
-                continue
-
-            # --- Test 1: Level distances within tolerance? ---
-            # Check that the CA has distances to each level that are
-            # within (tolerance * RA_level_distance) of the RA distances.
-            failed = False
-            for level in range(1, num_levels + 1):
-                level_dist_diff = abs(
-                    level_distance[atom][level] -
-                    level_distance[atom2][level]
-                )
-                if level_dist_diff > tolerance * level_distance[atom][level]:
-                    failed = True
-                    break
-            if failed:
-                continue
-
-            # --- Test 2: Same number of neighbors at each level? ---
-            # The number of reduced atoms in each shell must match.
-            failed = False
-            for level in range(1, num_levels + 1):
-                # len - 1 because the lists are 1-indexed (index 0 = None).
-                ra_count = len(reduced_atoms[atom][level]) - 1
-                ca_count = len(reduced_atoms[atom2][level]) - 1
-                if ra_count != ca_count:
-                    failed = True
-                    break
-            if failed:
-                continue
-
-            # --- Test 3: Identical element/species composition? ---
-            # Check for identical element/species combinations at each
-            # level.  The order of atoms within a level is not required
-            # to match — only the multiset of (element, species) pairs
-            # needs to be the same.
-            #
-            # This is tested by a greedy matching algorithm: for each RA
-            # neighbor, search the CA neighbor list for a matching
-            # (element, species) pair.  If found, remove it from the CA
-            # list (by swapping it to the front and popping).  If every
-            # RA neighbor finds a match, the compositions are equivalent.
-            # If any RA neighbor fails to find a match, the atoms are
-            # not equivalent and we skip to the next CA.
-            failed = False
-            for level in range(1, num_levels + 1):
-
-                # Build the CA element and species lists for this level.
-                # These are consumed (shrunk) during matching, so we
-                # build fresh copies each time.
-                ca_elements = []
-                ca_species  = []
-                for ri in range(1, len(reduced_atoms[atom2][level])):
-                    ca_atom = reduced_atoms[atom2][level][ri]
-                    ca_elements.append(settings.atom_element_id[ca_atom])
-                    ca_species.append(settings.atom_species_id[ca_atom])
-
-                # Try to match each RA neighbor against the CA list.
-                level_failed = False
-                for ri in range(1, len(ra_species[level])):
-                    ra_sp = ra_species[level][ri]
-                    ra_el = ra_elements[level][ri]
-
-                    # Search the CA list for a matching pair.
-                    match_found = False
-                    for ci in range(len(ca_species)):
-                        if ca_species[ci] == ra_sp and ca_elements[ci] == ra_el:
-                            # Match found.  Remove from CA list by
-                            # swapping with the first element and
-                            # popping the front (matching the Perl
-                            # swap-and-shift idiom).
-                            ca_species[ci]  = ca_species[0]
-                            ca_elements[ci] = ca_elements[0]
-                            ca_species.pop(0)
-                            ca_elements.pop(0)
-                            match_found = True
-                            break
-
-                    if not match_found:
-                        level_failed = True
-                        break
-
-                if level_failed:
-                    failed = True
-                    break
-
-            if failed:
-                continue
-
-            # By this point all tests have been passed and this
-            # comparison atom (CA) is to be considered the same
-            # element/species as the reduction atom (RA).
-            temp_atom_species_id[atom2] = temp_atom_species_id[atom]
+            if matcher.distance(ra_code, fingerprints[atom2]) == 0.0:
+                temp_atom_species_id[atom2] = temp_atom_species_id[atom]
 
     # ==================================================================
     # Finalize: copy temporary results into the permanent arrays.
