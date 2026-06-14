@@ -1529,14 +1529,21 @@ shipped.
   stale memory claim that "v1 files still load" was
   corrected against DESIGN 5.2's no-v1-compatibility
   rule.
-- [ ] C54. makeinput.py: introduce the Matcher
+- [x] C54. makeinput.py: introduce the Matcher
   protocol (ARCHITECTURE 8.9) and the `MATCHERS`
   registry.  Refactor the existing `group_reduce`
   algorithm into `ReduceMatcher` (with
   `needs_loen_run = false`); preserve current
   behavior of `-reduce` as the regression target.
   This lands before the new schemes so the existing
-  test surface validates the refactor.
+  test surface validates the refactor.  DONE
+  (f772484): Matcher base + ReduceShellCode/
+  ReduceShellLevel + ReduceStructureView +
+  ReduceMatcher + BispecMatcher placeholder + MATCHERS;
+  group_reduce reduced to the species-assignment
+  workflow.  New test_makeinput_reduce.py adds two
+  hand-traced regression fixtures plus matcher-surface
+  unit tests; full suite 648 passed.
 - [ ] C55. makeinput.py: add `BispecMatcher` class
   with `needs_loen_run = true`.  Implement
   `to_loen_input(sub_spec)` returning the full LOEN
