@@ -60,12 +60,17 @@ def _settings(edge="gs", job_name="scf", job_id=0,
 
 def test_outputs_scf_only():
     """A plain SCF emits the three SCF-always keys plus out,
-    using the SCF basis tag, and no property key."""
+    using the SCF basis tag, and no property key.  It also
+    advertises the makeinput-written inputs/ artifacts -- the
+    site-identity map and the expanded full-cell structure the
+    reduce-fingerprint harvest reads (DESIGN 5.7 / C60)."""
     out = imago.project_home_outputs(_settings())
     assert out["scfV"] == "gs_scfV-fb.dat"
     assert out["energy"] == "gs_enrg-fb.dat"
     assert out["iteration"] == "gs_iter-fb.dat"
     assert out["out"] == "gs_scf-fb.out"
+    assert out["datSkl_map"] == "inputs/datSkl.map"
+    assert out["structure"] == "inputs/imago.fract-mi"
     assert "property" not in out
     assert "loen" not in out
 

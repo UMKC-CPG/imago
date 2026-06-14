@@ -88,6 +88,11 @@ class FileNames:
         #   potential producer harvests it to recover each site's
         #   species/type and assemble the DESIGN 5.2.1 label (C87).
         self.dat_skl_map = "datSkl.map"
+        # The expanded full-cell skeleton makeinput writes into the
+        #   run's inputs/ directory (every atom explicit, space group
+        #   1, sorted/dat numbering).  The reduce-fingerprint harvest
+        #   reads it as the run's actual geometry (DESIGN 5.7 / C60).
+        self.fract_mi = "imago.fract-mi"
 
         # Replacements (SCF vs post-SCF tags).
         self.scf = "scf"
@@ -2508,6 +2513,17 @@ def project_home_outputs(settings):
     #   when the file exists, so a prepared-directory run that bypassed
     #   makeinput simply omits the key (C87).
     outputs["datSkl_map"] = os.path.join("inputs", fn.dat_skl_map)
+
+    # The expanded full-cell skeleton makeinput writes alongside it
+    #   (imago.fract-mi: every atom explicit, space group 1, at the
+    #   run's sorted numbering).  The reduce-fingerprint harvest reads
+    #   it as the run's actual geometry -- the materialized source may
+    #   be only an asymmetric unit -- and maps a manifest atom_site to
+    #   a structure row through datSkl_map (DESIGN 5.7 / C60).  Like
+    #   datSkl_map it lives under inputs/ and is recorded only when the
+    #   file exists, so a prepared-directory or XANES run that does not
+    #   write it simply omits the key.
+    outputs["structure"] = os.path.join("inputs", fn.fract_mi)
 
     # Property-specific block: the primary "total" file each
     #   property helper writes to the project home, keyed by
