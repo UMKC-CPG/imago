@@ -3721,17 +3721,26 @@ function buildInitialPotentials(manifest_path,
         struct = materialize_structure(ref)
         struct_of[ref.reference_id] = struct
 
-        # Fixed (non-swept) options, already translated into
-        # the tools' own settings (DESIGN 6.2.10):
+        # Fixed (non-swept) RUN SETTINGS, already translated
+        # into the tools' own coded vocabulary (DESIGN 6.2.10):
         # make_producer_options maps the manifest's
         # human-readable physics -- functional -> xccode,
         # kpoint_integration -> scfkpint, basis -> the imago
         # scf_basis, scf_threshold -> converg, shift ->
         # kpshift -- and adds the imago_commit cache identity.
-        # basis/functional/kpoint_integration also pick the
-        # predictor sub-model.  The wingbeat (§13.2) routes
-        # each key to the tool that recognises it.
+        # These are tool-facing only; the wingbeat (§13.2)
+        # routes each key to the tool that recognises it.
         options = make_producer_options(ref, imago_commit)
+
+        # The predictor and the PredictionRecord speak the human
+        # physics names, not the codes, so the sub-model travels
+        # to the builder in its OWN dict -- never mixed into the
+        # tool-facing options (DESIGN 6.2.8 / 6.2.10), which would
+        # both duplicate the basis and make makeinput reject
+        # "functional" / "kpoint_integration".
+        submodel = {"basis":              ref.basis,
+                    "functional":         ref.functional,
+                    "kpoint_integration": ref.kpoint_integration}
 
         # One builder call for every mode (DESIGN 6.2.9).
         # `center` carries the curator override when the
@@ -3742,7 +3751,7 @@ function buildInitialPotentials(manifest_path,
         # cannot predict.  Only the units are kept here; the
         # combined flight below supplies the shared root.
         flight_i, record_i = build_kpoint_convergence(
-            struct, options, dataspace, ref.system_type,
+            struct, options, dataspace, ref.system_type, submodel,
             id     = ref.reference_id,
             center = ref.kpoint_spec.density)
 
@@ -6117,9 +6126,10 @@ function stage2(pgap, pmag, entries):
 
 Lives in `src/scripts/kaleidoscope/` (a domain-aware
 optional convenience; the dispatch core stays dumb,
-Principle 12).  It turns a structure + options + loaded
-Dataspace into a verification-grid `Flight` plus a
-`PredictionRecord` the harvest hook later recovers.
+Principle 12).  It turns a structure + tool-facing options
++ a separate `submodel` dict (the physics names the predictor
+reads) + a loaded Dataspace into a verification-grid `Flight`
+plus a `PredictionRecord` the harvest hook later recovers.
 
 ```
 dataclass PredictionRecord:    # 7.7-derived; serialized as
@@ -6206,15 +6216,24 @@ function build_calc_tag(calc_axes):
 
 ```
 function build_kpoint_convergence(structure, options, dataspace,
-                                  system_type, verify = True,
-                                  id = None, center = None):
+                                  system_type, submodel,
+                                  verify = True,
+                                  id = None, center = None,
+                                  root = ""):
     # The k-point-density convergence flight builder (DESIGN
-    # 6.2.8/6.2.9).  options MUST carry "basis", "functional",
-    # and "kpoint_integration" -- they select the predictor
-    # sub-model (DESIGN 7.6 step 2).  When `center` is given it
-    # is a curator-pinned k-density (the 5.7 kpoint_spec
-    # override): the predictor is bypassed and the grid is
-    # built around that value instead.
+    # 6.2.8/6.2.9).  `options` holds the dest-keyed coded run
+    # settings forwarded verbatim to the tools and carries NO
+    # physics-name keys.  `submodel` MUST carry "basis",
+    # "functional", and "kpoint_integration" -- the human names
+    # that select the predictor sub-model (DESIGN 7.6 step 2) and
+    # are stamped on the record; they are kept out of `options`
+    # because makeinput would reject them (DESIGN 6.2.10).  When
+    # `center` is given it is a curator-pinned k-density (the 5.7
+    # kpoint_spec override): the predictor is bypassed and the
+    # grid is built around that value instead.  `root` is the
+    # workspace root for the returned flight; "" lets a
+    # multi-structure producer supply the shared root when it
+    # merges the per-structure flights.
     sc = (structure if is_structure_control(structure)
           else load_skl(structure))
     query_sig = compute_signature(
@@ -6231,8 +6250,8 @@ function build_kpoint_convergence(structure, options, dataspace,
         policy = "curator_override"
     else:
         result = predict(dataspace, query_sig,
-                         options["basis"], options["functional"],
-                         options["kpoint_integration"])
+                         submodel["basis"], submodel["functional"],
+                         submodel["kpoint_integration"])
         if not verify:
             grid_values = [result.predicted_kpoint_density]
             policy = "trust_no_verify"
@@ -6251,7 +6270,7 @@ function build_kpoint_convergence(structure, options, dataspace,
     unit_id = id if id is not None else slug_from_path(structure)
     units = []
     for kpd_int in kpd_grid:
-        unit_options = dict(options)
+        unit_options = dict(options)           # tool-only copy
         unit_options["kpd"] = kpd_int          # makeinput key
         calc_axes = ordered_map({"kpt-density": kpd_int})
         units.append(CalcUnit(
@@ -6288,9 +6307,9 @@ function build_kpoint_convergence(structure, options, dataspace,
             predicted_magnetization  = None,
             system_type              = system_type,
             feature_vector           = query_sig,
-            basis                    = options["basis"],
-            functional               = options["functional"],
-            kpoint_integration       = options["kpoint_integration"])
+            basis                    = submodel["basis"],
+            functional               = submodel["functional"],
+            kpoint_integration       = submodel["kpoint_integration"])
     else:
         record = PredictionRecord(
             policy                   = policy,
@@ -6302,9 +6321,9 @@ function build_kpoint_convergence(structure, options, dataspace,
             predicted_magnetization  = result.predicted_magnetization,
             system_type              = system_type,
             feature_vector           = query_sig,
-            basis                    = options["basis"],
-            functional               = options["functional"],
-            kpoint_integration       = options["kpoint_integration"])
+            basis                    = submodel["basis"],
+            functional               = submodel["functional"],
+            kpoint_integration       = submodel["kpoint_integration"])
 
     # One flight, one structure: stash the record in the
     # predictions mapping under this structure's id (DESIGN

@@ -3571,19 +3571,26 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
    a. `materialize_structure(ref)` → a local structure file
       (read from disk for `structure_path`, or fetched once from
       COD at the pinned `cod_revision` for `cod_id`).
-   b. `build_kpoint_convergence(structure, options, dataspace,
-      system_type, …)` (DESIGN 6.2.8 / 7) consults the guidance
-      dataspace and returns the **verification grid**: a set of
-      k-point densities bracketing the predicted converged
-      density, widened by the prediction's uncertainty (a
-      length-1 grid in trust mode; the wide default grid when the
-      dataspace cannot predict).  A manifest `kpoint_spec.density`
-      is passed as the `center` argument -- a curator override
-      that pins or centres the grid and bypasses the predictor;
-      `kpoint_spec.shift` is always passed through as a fixed
-      option.
+   b. Build the two inputs the next step needs.  `options =
+      make_producer_options(ref)` translates the manifest physics
+      into each tool's coded settings (`functional` → `xccode`,
+      `kpoint_integration` → `scfkpint`, `basis` → `scf_basis`,
+      `scf_threshold` → `converg`, `kpoint_spec.shift` →
+      `kpshift`; 6.2.10), while `submodel = {basis, functional,
+      kpoint_integration}` keeps the human names the predictor and
+      record speak.  Then `build_kpoint_convergence(structure,
+      options, dataspace, system_type, submodel, …)` (DESIGN
+      6.2.8 / 7) consults the guidance dataspace and returns the
+      **verification grid**: a set of k-point densities bracketing
+      the predicted converged density, widened by the prediction's
+      uncertainty (a length-1 grid in trust mode; the wide default
+      grid when the dataspace cannot predict).  A manifest
+      `kpoint_spec.density` is passed as the `center` argument -- a
+      curator override that pins or centres the grid and bypasses
+      the predictor.
    c. Emit one `CalcUnit` per grid point — each carrying the
-      materialized structure, `scf_threshold`, and the k-density
+      materialized structure, the coded run settings (the SCF
+      convergence limit `converg` among them), and the k-density
       for that point — plus one structure-only
       `imago.py -loen -scf no` unit per declared Fortran-side
       fingerprint (the bispectrum fingerprint depends on geometry
@@ -5054,14 +5061,15 @@ constructs `CalcUnit`s directly.
 ```
 build_kpoint_convergence(
     structure,                 # StructureControl or skl path
-    options,                   # dict of non-swept makeinput
-                               #   options; MUST carry "basis",
-                               #   "functional", and
-                               #   "kpoint_integration" -- they
-                               #   select the predictor sub-
-                               #   model (DESIGN 7.6 step 2) --
-                               #   plus the usual scf_threshold,
-                               #   ... held fixed across the grid
+    options,                   # dict of non-swept RUN SETTINGS in
+                               #   each tool's own coded vocabulary:
+                               #   scf_basis, xccode, scfkpint,
+                               #   converg, kpshift, imago_commit,
+                               #   ... held fixed across the grid and
+                               #   copied verbatim into every
+                               #   CalcUnit.  Carries NO physics-name
+                               #   keys -- the wingbeat forwards it
+                               #   to the tools as-is (DESIGN 6.2.10).
     dataspace,                 # Dataspace loaded by
                                #   guidance_db.load() from
                                #   share/historicalGuidanceDB/
@@ -5069,6 +5077,15 @@ build_kpoint_convergence(
     system_type,               # "crystalline" / "amorphous"
                                #   / "nanostructure" /
                                #   "molecular" (DESIGN 7.2)
+    submodel,                  # dict of the three physics-name
+                               #   choices the predictor and the
+                               #   PredictionRecord speak: "basis",
+                               #   "functional", "kpoint_integration"
+                               #   (DESIGN 7.6 step 2).  Kept OUT of
+                               #   `options` because makeinput would
+                               #   reject these names -- they are a
+                               #   prediction input, not a tool
+                               #   setting (DESIGN 6.2.10).
     verify       = True,       # False -> trust mode (see
                                #   6.2.1 trust-mode note)
     id           = None,       # flight-level unit id; if
@@ -5078,6 +5095,12 @@ build_kpoint_convergence(
                                #   (6.2.9): bypass the
                                #   predictor and build the
                                #   grid around this value
+    root         = "",         # workspace root for the
+                               #   returned flight; "" lets a
+                               #   multi-structure producer
+                               #   supply the shared root when
+                               #   merging the per-structure
+                               #   flights
 )  ->  (Flight, PredictionRecord)
 ```
 
@@ -5098,11 +5121,13 @@ build_kpoint_convergence(
     `predict` is the DESIGN 7.4 free function over the
     loaded Dataspace, not a method on a `db` object; the
     (basis, functional, kpoint_integration) sub-model is
-    selected from the options dict (DESIGN 7.6 step 2):
+    read from the `submodel` dict (DESIGN 7.6 step 2), NOT
+    from `options` -- those physics names never enter the
+    tool-facing options (DESIGN 6.2.10):
         result = predict(dataspace, query_sig,
-                         options["basis"],
-                         options["functional"],
-                         options["kpoint_integration"])
+                         submodel["basis"],
+                         submodel["functional"],
+                         submodel["kpoint_integration"])
 
     `result` is a PredictionResult (DESIGN 7.4) carrying
     the predicted converged k-density, a combined
@@ -5157,7 +5182,8 @@ build_kpoint_convergence(
       kpd_grid = sorted(set(round(v) for v in grid_values))
       units = []
       for kpd_int in kpd_grid:
-          unit_options = dict(options)
+          unit_options = dict(options)         # tool-only:
+                                               #   forwarded as-is
           unit_options["kpd"] = kpd_int        # makeinput
                                                #   options key
           calc_axes = {"kpt-density": kpd_int} # tag-tree
@@ -5199,21 +5225,23 @@ build_kpoint_convergence(
               result.predicted_magnetization,
           system_type              = system_type,
           feature_vector           = query_sig,
-          basis                    = options["basis"],
-          functional               = options["functional"],
+          basis                    = submodel["basis"],
+          functional               = submodel["functional"],
           kpoint_integration       =
-              options["kpoint_integration"],
+              submodel["kpoint_integration"],
       )
 
     The (basis, functional, kpoint_integration) sub-model
-    is recorded ON the per-structure record and ONLY there
-    -- it is not also copied into the flight-level
-    `fixed_axes` (6.2.9), so the same fact never lives in two
-    places.  This is what keeps a combined multi-structure
-    flight whose structures use different sub-models
-    harvestable: each structure's harvest reads its own
-    sub-model from its own record (6.2.9; DESIGN 7.8 step
-    3f).
+    enters the helper as the separate `submodel` dict and is
+    recorded ON the per-structure record and ONLY there -- it
+    is neither copied into the flight-level `fixed_axes`
+    (6.2.9) nor mixed into the tool-facing `options`, so the
+    same fact never lives in two places and makeinput never
+    sees a physics name it would reject (DESIGN 6.2.10).  This
+    is what keeps a combined multi-structure flight whose
+    structures use different sub-models harvestable: each
+    structure's harvest reads its own sub-model from its own
+    record (6.2.9; DESIGN 7.8 step 3f).
 
     In curator-override mode (`center` given) there is no
     `result`: the record instead documents the pinned value
@@ -5344,7 +5372,11 @@ the three would be genuinely constant.  Storing the same
 fact in two places invites both drift (the two copies
 disagreeing after a later edit) and reader confusion (which
 copy is authoritative?), so the design keeps exactly one
-home.  The guidance harvest (7.8 step 3f) reads each
+home.  The builder receives that sub-model as a dedicated
+`submodel` dict, deliberately separate from the tool-facing
+`options` it forwards to makeinput and imago (6.2.8 /
+6.2.10): the three physics names are a prediction input, not
+a tool setting.  The guidance harvest (7.8 step 3f) reads each
 structure's sub-model back from *its own* record; a flight
 with no record for a structure does not yield that
 structure's sub-model and so cannot be harvested into the
@@ -5485,6 +5517,18 @@ wingbeat then routes purely by namespace and never value-codes:
 the translation lives in the producer, where the physics intent
 is known, mirroring how `-xccode` already takes the integer code
 defined in `xc_code.dat`.
+
+*The physics names still feed the builder -- through their own
+channel.*  Those same three names also drive the flight builder's
+predictor and its `PredictionRecord` (6.2.8), which need the human
+words (`wigner`), not the codes (`100`).  They reach the builder as
+a separate `submodel` dict, never through `options`: the coded
+`options` stay strictly tool-facing, and the human sub-model keeps
+its own home (6.2.8 / 6.2.9).  Only the basis appears in both
+channels -- as `submodel["basis"]` and the run-time `scf_basis` --
+because it is genuinely both a prediction input and an imago
+setting; `functional` and `kpoint_integration` carry a different
+value in each channel (`wigner` vs `100`) and so never collide.
 
 *The routing rule (three buckets).*  The wingbeat splits a
 unit's options into:

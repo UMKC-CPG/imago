@@ -2212,12 +2212,35 @@ the C48.3 wiring (C74) is the first major consumer.
   **producer** emits dest-keyed, coded options; SCF convergence
   threads like xccode via a new makeinput `-converg` dest; routing
   is by each tool's recognised-key set, so `basis` can migrate to
-  makeinput later without reworking the seam.  **Follow-on CODE
+  makeinput later without reworking the seam.
+  **Refinement (during the code work): the two-dictionary split.**
+  Wiring (b) surfaced a conflict between 6.2.10 (producer emits
+  dest-keyed options) and 6.2.8 (the builder reads the human
+  basis/functional/kpoint_integration FROM options for the
+  predictor + record): one shared dict cannot be both coded (for
+  the tools) and human (for the builder).  Resolved with the
+  programmer as a **two-dictionary** design -- `options` carries
+  tool-facing coded keys only, and a separate `submodel` dict
+  ({basis, functional, kpoint_integration}, the established name)
+  carries the human physics names into `build_kpoint_convergence`.
+  Only the basis appears in both channels (as `submodel["basis"]`
+  and `scf_basis`), which is intrinsic and benign; `functional` /
+  `kpoint_integration` carry different values in each and never
+  collide.  Propagated to DESIGN 6.2.8 (signature + predict +
+  record reads) / 6.2.9 (input-channel note) / 6.2.10 (decision-2
+  "physics names feed the builder through their own channel") / 5.7
+  (step 3b) and PSEUDOCODE 11.4 + 15.6.  **Follow-on CODE
   (rides with the live-validation step of C74):** (a) add makeinput
   `-converg` (dest `converg`, overrides rc `converg_main`); (b)
-  rewrite `make_producer_options` to the dest-keyed vocabulary
+  rewrite `make_producer_options` to emit the dest-keyed vocabulary
   (functional->xccode, kpoint_integration->scfkpint, basis->
-  scf_basis, scf_threshold->converg, shift->kpshift); (c) export
+  scf_basis, scf_threshold->converg, shift->kpshift) as TOOL-FACING
+  keys only, AND give `build_kpoint_convergence` a separate
+  `submodel` dict arg ({basis, functional, kpoint_integration}) for
+  the predictor + PredictionRecord, so the physics names never enter
+  `options` (the two-dictionary split, DESIGN 6.2.8/6.2.9/6.2.10);
+  the producer builds `submodel` from the ref and passes it; (c)
+  export
   `imago.OPTION_KEYS` + a `CACHE_ONLY_KEYS` set from
   `kaleidoscope.wingbeats`; (d) move the
   partition into `ImagoWingbeat.run`, retire the shared-options
