@@ -1600,7 +1600,7 @@ shipped.
   through the type pass (XANES integration intact);
   emit per-type potentials into the Imago input
   file in today's on-the-wire format.
-- [ ] C60. build_initial_potentials.py: bump the
+- [~] C60. build_initial_potentials.py: bump the
   manifest reader to v2 (new `default` per entry,
   new `[[reference_solid.entry.fingerprint]]`
   declarations; new validation rules 7/8/9 per
@@ -1610,6 +1610,19 @@ shipped.
   via cached `imago.py -loen -scf no` runs.
   Attach `FingerprintRecord`s and the `default`
   flag to each produced `PotentialEntry`.
+  LIGHT HALF DONE (b88ba01 docs; a9be84f matcher
+  build_payload; 9ba7f31 outputs["structure"];
+  d761cec producer harvest): the manifest reader
+  (already v2 with rules 7/8/9; rule 9 now wired to
+  MATCHERS) plus the Python-side (reduce) harvest --
+  it reads the run's expanded imago.fract-mi, maps
+  atom_site->dat via datSkl.map, computes the shell
+  code with ReduceMatcher, and stores an element-only
+  `shell_code` (DESIGN 5.2, species dropped as
+  non-transferable).  REMAINING: the Fortran-side
+  (bispectrum) harvest -- currently refused with
+  NotImplementedError -- needs C55 (BispecMatcher
+  body) + C58 (loen bootstrap) + build_loen_units.
 - [ ] C61. Add end-to-end Phase-2 tests: a small
   reference structure runs through the bootstrap +
   loen + bucketing + entry-pick + emit chain
