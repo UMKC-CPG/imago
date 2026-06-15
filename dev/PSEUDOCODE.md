@@ -2633,8 +2633,8 @@ one:
                              species)
   11.3.e       5.6.6        (type pass and electronic-
                              state perturbation)
-  11.3.f       5.10         (nested-makeinput
-                             bootstrap)
+  11.3.f       5.10         (makegroups.py bispectrum
+                             grouping)
   11.3.g       5.6.7        (driver and on-the-wire
                              emit)
 
@@ -2653,9 +2653,9 @@ machinery that C54 and onward layer in.
 
 When `first_environment_matcher` (11.3.g) returns None:
 
-  - The nested-makeinput bootstrap (11.3.f) never fires;
-    it is gated on a matcher whose `needs_loen_run` is
-    true, and here there is no matcher at all.
+  - No bispectrum grouping is involved; that happens
+    earlier, in makegroups (11.3.f), and never inside this
+    makeinput driver.
   - The preflight (11.3.b) still loads each element's
     database and still marks missing ones for the legacy
     path, but skips `require_coverage` -- that check is
@@ -2721,9 +2721,9 @@ Each matcher knows one descriptor family.  The species
 pass calls `compute_query` and `distance` to bucket
 atoms (11.3.c); the entry pick calls `representative`
 and `distance` against per-entry fingerprints (11.3.d);
-the producer (11.4) and the consumer bootstrap (11.3.f)
-both call `to_loen_input` and `parse_loen_output` on
-matchers whose `needs_loen_run` is true.  The protocol
+the producer (11.4) and the `makegroups` bispectrum flow
+(11.3.f) both call `to_loen_input` and `parse_loen_output`
+on matchers whose `needs_loen_run` is true.  The protocol
 isolates Imago's Fortran side from manifest-schema
 growth: a new descriptor family is a new class plus a
 new `MATCHERS` registry entry.
@@ -2746,11 +2746,13 @@ class Matcher:
         # atom count; element filtering happens at
         # the call site (11.3.c) where atoms_in_scope
         # already encodes element and spatial scope.
-        # Python-side matchers compute in-process;
-        # loen-side matchers fire the bootstrap
-        # (11.3.f) and parse its fort.21, which
-        # naturally produces one row per potential
-        # site of the whole structure.
+        # Python-side matchers (reduce) compute
+        # in-process.  Loen-side matchers (bispectrum) do
+        # NOT implement this: their vectors come from the
+        # makegroups sequential loen flow (11.3.f), read
+        # off fort.21 by parse_loen_output, which produces
+        # one row per potential site of the whole
+        # structure.
         abstract
 
     function distance(vec_a, vec_b):
@@ -2891,21 +2893,13 @@ class BispecMatcher extends Matcher:
                                          # per scheme
                                          # on the CLI
 
-    function compute_query(structure, sub_spec):
-        # Outer entry point.  Triggers the bootstrap
-        # of 11.3.f on `structure` with this matcher's
-        # loen-side parameters, then parses fort.21
-        # via parse_loen_output.  Element-aware mode
-        # is deferred to TODO C62 / D10.
-        if sub_spec.get("by_element", False):
-            error("element-aware bispectrum"
-                + " (sub_spec by_element=true) is"
-                + " not yet implemented; see TODO"
-                + " D10 / C62")
-        fort21 = runLoenBootstrap(structure, this,
-            sub_spec)
-        return this.parse_loen_output(fort21,
-            sub_spec)
+    # No compute_query: bispectrum vectors are not
+    # produced in-process.  The makegroups sequential
+    # loen flow (11.3.f) runs Imago and reads the
+    # resulting fort.21 through parse_loen_output below;
+    # the orchestrator, not this matcher, drives that
+    # sequence.  (Element-aware mode is deferred to TODO
+    # C62 / D10, where to_loen_input gains by_element.)
 
     function distance(a, b):
         # Euclidean distance between bispectrum
@@ -2918,9 +2912,9 @@ class BispecMatcher extends Matcher:
     function representative(members):
         # Element-wise arithmetic mean of the member
         # vectors.  All members share the same length
-        # (2*twoj2 + 1) because they come from one
-        # bootstrap run with one sub_spec, so the
-        # mean is well-defined slot by slot.
+        # (2*twoj2 + 1) because they come from one loen
+        # run under one sub_spec, so the mean is
+        # well-defined slot by slot.
         n = len(members)
         return [sum(m[i] for m in members) / n
                 for i in range(len(members[0]))]
@@ -2947,16 +2941,21 @@ class BispecMatcher extends Matcher:
                 "angle_squeeze", 0.85)}
 
     function parse_loen_output(path, sub_spec):
-        # fort.21: one row per potential site of the
-        # whole structure; 2*twoj2 + 1 real values
-        # per row, followed by a sum column the
-        # matcher ignores.  Returns a list of
-        # vectors in site-index order, length =
-        # structure atom count.
-        n_slots = 2 * sub_spec["twoj2"] + 1
-        rows = read_text_rows(path)
-        return [row_first_n_floats(r, n_slots)
-                for r in rows]
+        # fort.21 (DESIGN 5.10.3): a HEADER line, then one
+        # row per potential site of the whole structure in
+        # site-index order.  Each row leads with identity
+        # columns -- site#, element, species,
+        # type_in_species, type_flat -- then 2*twoj2 + 1
+        # real bispectrum values, then a trailing sum the
+        # matcher ignores.  Skip the header; from each data
+        # row return the identity fields plus the
+        # 2*twoj2 + 1 components.  (The orchestrator,
+        # 11.3.f, uses the identity fields to map a row to
+        # its atom/type without a separate datSkl.map.)
+        n_slots   = 2 * sub_spec["twoj2"] + 1
+        data_rows = drop_header(read_text_rows(path))
+        return [parse_identity_and_components(r, n_slots)
+                for r in data_rows]
 
     function extract_query_vector(payload):
         # Bispectrum records carry the vector in the
@@ -2992,8 +2991,10 @@ marks elements without a database for the legacy
 fallback path, and confirms (when an environment-based
 scheme is active) that every element's database covers
 the requested `(method, sub_spec)`.  Failing fast here
-keeps the expensive bootstrap (11.3.f) out of the
-"nothing to harvest" case.
+keeps a doomed run out of the "nothing to harvest" case.
+(For bispectrum the equivalent coverage check lives in
+makegroups, 11.3.f, since its grouping runs before
+makeinput.)
 
 ```
 function perElementPreflight(structure,
@@ -3416,113 +3417,75 @@ function next_type_id(species_to_next_type, s):
 
 ---
 
-#### 11.3.f Nested-makeinput Bootstrap (DESIGN 5.10)
+#### 11.3.f makegroups.py: bispectrum grouping (DESIGN 5.10)
 
-Triggered only when the active matcher's
-`needs_loen_run` is true AND the preflight (11.3.b) has
-already confirmed coverage.  Spawns a stripped-down
-nested `makeinput.py` to build a throwaway `imago.dat`,
-runs `imago.py -loen -scf no` against it, and parses
-the resulting `fort.21`.  The recursion guard --
-explicit `--no-loen-bootstrap` flag plus an argument
-list that contains no environment-based grouping flag
--- is the sole mechanism preventing the nested call
-from triggering its own bootstrap.
+A Fortran-side descriptor can only come from a completed
+Imago run, so bispectrum grouping is a *sequence* run from
+*outside* makeinput by `makegroups.py` -- never by
+makeinput re-invoking itself.  `makegroups` is dual-mode:
+an importable `group_by_bispectrum` the producer
+(`build_initial_potentials.py`) calls, plus a `__main__`
+CLI for manual use.  It runs the loen flow and rewrites the
+skeleton with explicit per-element species tags; makeinput
+then reads those tags like any other explicit assignment.
 
 ```
-function runLoenBootstrap(structure, matcher,
-        sub_spec):
-    # Recursion guard: the running invocation must
-    # not itself be a nested bootstrap call.  If it
-    # is, the trigger logic in 11.3.g misfired; abort
-    # with a clear message rather than silently
-    # recursing.
-    require(not settings.no_loen_bootstrap,
-        "runLoenBootstrap called inside a"
-        + " --no-loen-bootstrap invocation; the"
-        + " trigger condition in 11.3.g (only fires"
-        + " when matcher.needs_loen_run AND no"
-        + " --no-loen-bootstrap is set) misfired")
+function group_by_bispectrum(skeleton_path, sub_spec,
+        similarity_floor):
+    matcher = MATCHERS["bispectrum"]()
 
-    # 1. Scratch directory.  Re-create from scratch
-    #    every run so stale fort.21 contents cannot
-    #    be silently reused.
-    scratch = ".inputTemp/loen_bootstrap/"
-    fresh_directory(scratch)
+    # 1. First makeinput: a provisional imago.dat with no
+    #    grouping.  The LOEN_INPUT_DATA block carries the
+    #    sub_spec via matcher.to_loen_input; the potential
+    #    is irrelevant (bispectrum is geometric), so the
+    #    default-tagged entry is used and no -pot is given.
+    run_makeinput(skeleton_path,
+        loen_params = matcher.to_loen_input(sub_spec))
 
-    # 2. Build a minimal imago.dat via a stripped-
-    #    down nested makeinput.py.  The argument list
-    #    deliberately omits:
-    #      * -pot LABEL  (per-element preflight in
-    #        the nested call falls through to the
-    #        default-tagged entry on the no-scheme
-    #        branch -- exactly the path needed; no
-    #        per-element -pot machinery on the CLI).
-    #      * any grouping flag (-target, -block,
-    #        -reduce, -bispec, -xanes).  Every atom
-    #        in the nested call becomes its own
-    #        species and type, which is fine for
-    #        loen because loen iterates over
-    #        potential sites regardless of grouping.
-    #      * a non-trivial k-point mesh.  Γ-only is
-    #        sufficient; loen reads the k-point
-    #        block but does not use it for
-    #        fingerprint output.
-    nested_argv = [
-        "makeinput.py",
-        structure.skeleton_path,
-        "-kpd",    "1",            # Γ-only
-        "-scfkpd", "1",
-        "--no-loen-bootstrap",     # recursion guard
-        "--scratch",     scratch,
-        "--loen-params",
-            serialize_loen_params(
-                matcher.to_loen_input(sub_spec))]
-    run_subprocess(nested_argv,
-        cwd   = current_working_directory(),
-        check = True)
+    # 2. Run loen.  -scf no skips the SCF; loen needs only
+    #    the structure and the LOEN block.  Produces a
+    #    self-describing fort.21 (DESIGN 5.10.3).
+    run_imago(flags = ["-loen", "-scf", "no"])
 
-    # 3. Run loen against the freshly produced
-    #    imago.dat.  -scf no skips the SCF run; loen
-    #    only needs the structure and the LOEN_INPUT_
-    #    DATA block the nested call just wrote.
-    imago_dat = path_join(scratch, "imago.dat")
-    fort21    = path_join(scratch, "fort.21")
-    run_subprocess(
-        ["imago.py", "-loen", "-scf", "no",
-         "--input",   imago_dat,
-         "--workdir", scratch],
-        check = True)
+    # 3. Read fort.21.  Each row carries its own identity
+    #    (site#, element, species, type_in_species,
+    #    type_flat) and the bispectrum vector, so the
+    #    row -> atom mapping is read off the file -- no
+    #    separate datSkl.map lookup (DESIGN 5.10.3).
+    rows = matcher.parse_loen_output("fort.21", sub_spec)
 
-    # 4. Hand the fort.21 path back to the caller.
-    #    The matcher's parse_loen_output (11.3.a)
-    #    knows the row width and column semantics;
-    #    the bootstrap is descriptor-agnostic.
-    return fort21
+    # 4. Bucket atoms by fingerprint distance within the
+    #    floor, per element, refreshing each bucket's
+    #    representative as it grows (the same bucketing as
+    #    11.3.c, but run here in the orchestrator rather
+    #    than inside makeinput).
+    species_of = bucketByFingerprint(rows, matcher,
+        similarity_floor)
 
-
-function serialize_loen_params(param_dict):
-    # The nested makeinput call writes the
-    # LOEN_INPUT_DATA block from whatever parameter
-    # dict it receives via --loen-params.  Today the
-    # block is emitted at lines 4659-4665 of
-    # makeinput.py with hardcoded defaults; TODO C58
-    # wires the dict produced by
-    # matcher.to_loen_input(sub_spec) through that
-    # emission instead.  JSON is sufficient as the
-    # wire format.
-    return json_dumps(param_dict)
+    # 5. Rewrite the skeleton with explicit per-element
+    #    species tags -- Si1,Si2,...,O1,O2,... restarting
+    #    at 1 for each element (DESIGN 5.10.4).  A
+    #    round-trip test guards the numbering.
+    write_skeleton_with_species(skeleton_path, species_of)
+    return species_of
 ```
+
+The producer then runs makeinput on the rewritten skeleton
+(now explicitly typed) and proceeds to SCF and harvest.
+There is no recursion to guard against: each step is an
+ordinary process the orchestrator runs in order.
 
 ---
 
 #### 11.3.g Driver (DESIGN 5.6.7)
 
-Top-level orchestrator.  Chains preflight, optional
-bootstrap, species pass, manifest-entry pick, type
-pass, and emit.  The driver is matcher-agnostic; all
-descriptor-family knowledge lives in the matcher
-classes (11.3.a) and the `MATCHERS` registry.
+Top-level orchestrator.  Chains preflight, species
+pass, manifest-entry pick, type pass, and emit (no
+bootstrap step -- bispectrum atoms arrive pre-grouped
+from makegroups, 11.3.f).  The driver is
+matcher-agnostic; all descriptor-family knowledge lives
+in the matcher classes (11.3.a) and the `MATCHERS`
+registry.
 
 ```
 function emitInitialPotentials(structure, settings,
@@ -3545,11 +3508,12 @@ function emitInitialPotentials(structure, settings,
     # 3. Compute per-atom fingerprints once (if
     #    needed) so both the species-pass bucketing
     #    and the entry-pick representative comparison
-    #    see the same vectors.  For loen-side
-    #    matchers, compute_query fires the bootstrap
-    #    of 11.3.f and parses its fort.21.  For
-    #    Python-side matchers, the call stays in
-    #    process.
+    #    see the same vectors.  Only Python-side
+    #    matchers (reduce) reach this driver:
+    #    compute_query stays in process.  Loen-side
+    #    (bispectrum) grouping never runs here -- it is
+    #    done ahead of makeinput by makegroups (11.3.f),
+    #    so those atoms arrive already typed.
     atom_fingerprints = None
     if active_matcher is not None:
         atom_fingerprints = \

@@ -180,8 +180,10 @@
   Phase-2 open questions resolved (DESIGN 5.9, with
   interpolation parked for Phase 3 and element-aware
   bispec carried as a Phase-2 follow-up D10);
-  nested-makeinput bootstrap for Fortran-side matchers
-  (DESIGN 5.10); matcher protocol architectural section
+  sequential loen for Fortran-side matchers (DESIGN
+  5.10; later revised from a nested bootstrap to the
+  makegroups sequence); matcher protocol architectural
+  section
   inside `makeinput.py` (ARCHITECTURE 8.9).  Done
   2026-05-19, refined the same day to shrink
   ARCHITECTURE 8.2 to a pointer at DESIGN 5.2/5.3,
@@ -380,8 +382,9 @@
   run_structure becomes build_run_dir -> run_prepared,
   closing 6.1.3; 6.3.7 open details for PSEUDOCODE §14
   (options-dict normalization of multi-valued flags,
-  StructureControl structure type per C64, nested-makeinput
-  bootstrap left as a subprocess).  Key judgment: cwd
+  StructureControl structure type per C64; the loen flow
+  is now the makegroups sequence, not a makeinput
+  subprocess).  Key judgment: cwd
   discipline over path-rewriting -- safe because
   kaleidoscope parallelism is across separate workers, each
   with its own cwd.  PSEUDOCODE follows as P8.
@@ -429,8 +432,9 @@
   manifest-entry pick per species via fingerprint
   match, similarity floor, default-tag fallback
   (DESIGN 5.6.5); type-pass inheritance from parent
-  species (DESIGN 5.6.6); nested-makeinput bootstrap
-  orchestration with recursion guard (DESIGN 5.10).
+  species (DESIGN 5.6.6); the Fortran-side loen flow
+  (DESIGN 5.10; since revised to the makegroups
+  sequence -- no nested bootstrap or recursion guard).
   Update existing PSEUDOCODE 11.3 to reflect the
   Phase-2 selection flow rather than the Phase-1
   literal-label flow.  Done 2026-05-19: PSEUDOCODE
@@ -438,8 +442,9 @@
   matcher protocol; 11.3.b preflight + coverage
   check; 11.3.c species pass with scope resolution;
   11.3.d entry pick with three-step precedence;
-  11.3.e type pass with XANES split; 11.3.f bootstrap
-  with recursion guard; 11.3.g driver) and 11.4 was
+  11.3.e type pass with XANES split; 11.3.f the loen
+  flow -- since revised to makegroups; 11.3.g driver)
+  and 11.4 was
   refreshed to schema v2 in the same pass (manifest
   rules 1-9, is_cached_v2 with field-by-field +
   byte-compare, fingerprint harvest split between
@@ -1484,9 +1489,9 @@ keeps the common case branch-free.
 Builds on Phase 1 (C47-C51).  Phase 1 must be at
 least functionally complete (literal-label selection
 working end-to-end) before this chain lands, because
-the matcher protocol and the bootstrap subprocess
-both invoke makeinput's Phase-1 emission path
-internally.  The chain may be developed in parallel
+the matcher protocol and the makegroups sequential
+loen flow both invoke makeinput's Phase-1 emission
+path.  The chain may be developed in parallel
 with Phase 1 but cannot ship until Phase 1 has
 shipped.
 
@@ -1561,56 +1566,58 @@ shipped.
   "not yet implemented" error (placeholder for C62).
   DONE: `to_loen_input` rejects `by_element` (the
   guard C62 will replace), requires `twoj1`/`twoj2`,
-  defaults the other three; `parse_loen_output` reads
-  the leading `2*twoj2+1` floats per row and refuses a
-  short row; `distance` is L2 (rejects unequal length);
-  `representative` is the element-wise mean (rejects
-  empty); also added `build_payload`/
+  defaults the other three; `distance` is L2 (rejects
+  unequal length); `representative` is the element-wise
+  mean (rejects empty); also added `build_payload`/
   `extract_query_vector` (the `values` field) to
   complete the protocol surface.  14 unit tests in
-  `test_makeinput_bispec.py`.  The bootstrap entry
-  point `compute_query` stays inherited (it is C58).
+  `test_makeinput_bispec.py`.  `compute_query` is NOT
+  implemented for bispectrum -- the makegroups flow
+  (C58) reads `fort.21` via `parse_loen_output` instead.
+  KNOWN BUG: `parse_loen_output` was written against an
+  incomplete `fort.21` spec (no header, no `site#`
+  column); C89 revises it to the real enriched format.
 - [ ] C56. makeinput.py: add `name=NAME` keyword to
   the `-target` and `-block` argparse handlers.
   Validate uniqueness across the run; store the name
   in the existing spatial-flag records so subsequent
   scope references can resolve it.
-- [ ] C57. makeinput.py: add `scope=NAME` and
-  `scope=~NAME` keyword to the `-reduce` handler;
-  introduce the new `-bispec` argparse handler with
-  the same scope keyword plus `twoj1=` / `twoj2=`
-  sub_spec fields.  Enforce the
-  environment-scheme mutual exclusion (DESIGN 5.6.2):
-  at most one `-reduce` *or* one `-bispec` per run.
-- [ ] C58. makeinput.py: implement the nested-makeinput
-  bootstrap of DESIGN 5.10.  Spawn a subprocess into
-  `.inputTemp/loen_bootstrap/` with a stripped-down
-  argument list (no `-pot` flag -- default tag flows
-  through via the per-element preflight; Γ-only
-  k-points; no grouping flags), invoke
-  `imago.py -loen -scf no` against the produced
-  `imago.dat`, and parse `fort.21` for the active
-  matcher's per-atom fingerprint vectors.  Thread the
-  matcher's `to_loen_input(sub_spec)` parameter dict
-  (per DESIGN 5.10.5) into the existing
-  `LOEN_INPUT_DATA` block emission in makeinput.py
-  (currently hardcoded at lines 4659-4665), so the
-  bootstrap's loen call uses the active matcher's
-  parameters rather than the hardcoded defaults.  Add
-  the `--no-loen-bootstrap` belt-and-suspenders flag
-  to the nested call.
-- [ ] C59. makeinput.py: implement the Phase-2
-  species pass (DESIGN 5.6.4-5.6.7).  Walk
-  `settings.methods` in order; dispatch each
-  environment-based flag through its matcher with
-  the resolved spatial scope; bucket atoms by
-  fingerprint distance with the matcher's default
-  similarity floor; pick one manifest entry per
-  species via fingerprint match + similarity floor
-  + default-tag fallback; propagate species choices
-  through the type pass (XANES integration intact);
-  emit per-type potentials into the Imago input
-  file in today's on-the-wire format.
+- [ ] C57. makeinput.py: add `scope=NAME` /
+  `scope=~NAME` to the `-reduce` handler.  Add a
+  LOEN-block flag (e.g. `-loeninput`) that fills the
+  `LOEN_INPUT_DATA` block (makeinput.py:5477-5484) from
+  a `to_loen_input(sub_spec)` parameter dict instead of
+  the hardcoded `4 4` -- this is a plain input-writer
+  flag, NOT a grouping flag, used by makegroups' first
+  makeinput call (DESIGN 5.10.2).  The `-bispec`
+  *grouping* handler does NOT live in makeinput; it
+  belongs to makegroups (C58).
+- [ ] C58. makegroups.py (new; DESIGN 5.10, PSEUDOCODE
+  11.3.f): the sequential bispectrum grouping helper,
+  dual-mode (importable `group_by_bispectrum` + a
+  `__main__` CLI; shebang + exec bit).  Steps: run
+  makeinput on the skeleton with the LOEN params (C57)
+  and no grouping; run `imago.py -loen -scf no`; read
+  the enriched `fort.21` via
+  `BispecMatcher.parse_loen_output` (C89); bucket atoms
+  by fingerprint distance within the floor; rewrite the
+  skeleton with explicit per-element species tags
+  (`Si1,Si2,...,O1,O2,...` restarting at 1 per element,
+  DESIGN 5.10.4).  Round-trip test on the per-element
+  numbering.  No makeinput self-invocation, no recursion
+  guard.  Replaces the retired nested-bootstrap design.
+- [ ] C59. makeinput.py: implement the Phase-2 species
+  pass (DESIGN 5.6.4-5.6.7) for the schemes makeinput
+  still owns -- position-based (`-target`, `-block`) and
+  reduce.  Bucket reduce atoms by fingerprint distance
+  (in-Python) with the matcher's similarity floor; pick
+  one manifest entry per reduce species via fingerprint
+  match + floor + default-tag fallback; propagate
+  species choices through the type pass (XANES intact);
+  emit per-type potentials in today's on-the-wire format.
+  Bispectrum grouping and bispectrum potential-picking
+  are NOT here -- makegroups (C58) / the orchestrator do
+  them and hand makeinput explicit types (and `-pot`).
 - [~] C60. build_initial_potentials.py: bump the
   manifest reader to v2 (new `default` per entry,
   new `[[reference_solid.entry.fingerprint]]`
@@ -1632,18 +1639,40 @@ shipped.
   `shell_code` (DESIGN 5.2, species dropped as
   non-transferable).  REMAINING: the Fortran-side
   (bispectrum) harvest -- currently refused with
-  NotImplementedError -- needs C55 (BispecMatcher
-  body) + C58 (loen bootstrap) + build_loen_units.
-- [ ] C61. Add end-to-end Phase-2 tests: a small
-  reference structure runs through the bootstrap +
-  loen + bucketing + entry-pick + emit chain
-  producing a deterministic Imago input file.
-  Include negative tests for the preflight coverage
-  check (missing fingerprint family aborts cleanly),
-  the mutual exclusion (`-reduce -bispec` together
-  errors at parse time), and the similarity floor
+  NotImplementedError.  This is the PRODUCER's sequential
+  loen flow (DESIGN 5.10, producer half), NOT a nested
+  bootstrap: `build_loen_units` dispatches `-loen -scf no`
+  runs as kaleidoscope units; `harvestLoenFingerprint`
+  reads each enriched `fort.21` (C89) and maps rows to
+  atoms via the row identity columns.  For a non-crystalline
+  reference the producer first groups it with makegroups
+  (C58); for an already-typed crystal it harvests one
+  witness fingerprint per existing type (no grouping).
+  C55 (BispecMatcher body) is DONE; C58 is the makegroups
+  helper, not a makeinput bootstrap.
+- [ ] C61. Add end-to-end Phase-2 tests.  For the
+  in-makeinput path: a small reference runs through
+  reduce bucketing + entry-pick + emit producing a
+  deterministic Imago input file, with negative tests
+  for the preflight coverage check (missing fingerprint
+  family aborts cleanly) and the similarity floor
   (sub-threshold match falls back to default with a
-  warning).
+  warning).  For the makegroups path (C58): the
+  sequential loen -> bucket -> skeleton-rewrite chain
+  produces the expected per-element species tags.
+- [ ] C89. fort.21 enrichment + parser fix (DESIGN
+  5.10.3).  Fortran: extend the loen writer in
+  `loen.f90` (the `open(unit=21,...)` block) so each
+  row carries its identity -- `site#`, `element`,
+  `species`, `type_in_species`, `type_flat` -- ahead of
+  the components and sum, and the header names them.
+  Python: revise `BispecMatcher.parse_loen_output` to
+  skip the header and read the identity columns plus the
+  `2*twoj2+1` components.  This fixes the C55 first cut,
+  which assumed a bare components-plus-sum row with no
+  header or site# column and would mis-read the real
+  file; update `test_makeinput_bispec.py` to the real
+  format.  Prerequisite for C58 and the C60 loen harvest.
 - [ ] C88. Dedup storage model + native/witness
   fingerprints (DESIGN 5.2.2-5.2.4).  The database
   stores *distinct environments, not atoms*, so a

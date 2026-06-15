@@ -3250,14 +3250,15 @@ in the parsed structure:
    element's atoms will participate in species grouping
    normally but cannot match any fingerprint scheme;
    they receive the legacy isolated-atom potential.
-4. **Coverage check** (only when an environment-based
-   scheme is in play).  Confirm that at least one entry
-   in the loaded database carries a fingerprint record
-   matching the requested `(method, sub_spec)` for the
-   active scheme.  If not, abort with a message naming
-   the element and the missing `(method, sub_spec)`.
-   This fails fast before the expensive nested-makeinput
-   bootstrap (5.10) starts.
+4. **Coverage check** (only when an in-makeinput
+   environment scheme -- today, `-reduce` -- is in play).
+   Confirm that at least one entry in the loaded database
+   carries a fingerprint record matching the requested
+   `(method, sub_spec)` for the active scheme.  If not,
+   abort with a message naming the element and the missing
+   `(method, sub_spec)`.  The bispectrum scheme runs its
+   own coverage check inside `makegroups.py` (5.10), since
+   its grouping happens before makeinput.
 
 #### 5.6.4 Species pass
 
@@ -3271,19 +3272,29 @@ today's `assign_group`).  For each flag whose `op` is
   keep their current assignment.  The named region is
   remembered for any subsequent environment-scheme
   scope reference.
-- **Environment-based** (`-reduce scope=N`, or
-  `-bispec scope=N`).  Determine the atom set:
+- **Environment-based, reduce only** (`-reduce
+  scope=N`).  Determine the atom set:
     - No `scope=`: all atoms of the active element.
     - `scope=N`: only atoms inside the spatial region
       named `N`.
     - `scope=~N`: only atoms outside the named region.
-  Compute the per-atom fingerprint vectors over that
-  set (in-Python for `-reduce`; via the nested loen
-  bootstrap of 5.10 for `-bispec`).  Bucket atoms whose
-  vectors agree within tolerance into species (the
-  matcher's `distance` and `default_similarity_floor`,
-  ARCHITECTURE 8.9).  Atoms outside the scope keep
-  whatever assignment earlier flags produced.
+  Compute the per-atom reduce fingerprints over that set
+  in-Python, then bucket atoms whose vectors agree within
+  tolerance into species (the matcher's `distance` and
+  `default_similarity_floor`, ARCHITECTURE 8.9).  Atoms
+  outside the scope keep whatever assignment earlier flags
+  produced.
+
+  **Bispectrum is not grouped here.**  A Fortran-side
+  descriptor can only come from a completed Imago run, so
+  bispectrum grouping happens *before* makeinput, in
+  `makegroups.py` (5.10): it runs the loen sequence and
+  rewrites the skeleton with explicit per-element species
+  tags.  By the time this species pass runs, those atoms
+  already carry their bispectrum-derived species (read from
+  the skeleton, structure_control `use_file_species=True`),
+  so makeinput does nothing special for them -- it is a
+  plain input-writer.
 
 After the species pass, every atom has a final
 `atom_species_id[atom]`.
@@ -3307,14 +3318,22 @@ bottom:
    any in-scope element that lacks the label is fatal --
    `-pot` is a deliberate override and a silent fallback
    would mask user intent.
-2. **Fingerprint match** (only for atoms assigned by an
-   environment-based scheme).  For each species' atoms,
-   ask the matcher to summarize them into one
-   representative fingerprint via its `representative`
-   method (8.9).  The matcher chooses semantics
-   appropriate to its descriptor space: `BispecMatcher`
-   returns the element-wise mean of the member vectors;
-   `ReduceMatcher` returns the first member's shell-code
+2. **Fingerprint match** (reduce only, in makeinput).
+   This in-process pick covers the one environment scheme
+   makeinput still groups -- `reduce` -- whose fingerprints
+   it has in hand.  Bispectrum species carry no fingerprint
+   inside makeinput (those live in `fort.21`, read by
+   `makegroups`), so a bispectrum-derived potential pick is
+   the orchestrator's job (`makegroups` / the producer),
+   passed to makeinput as an explicit `-pot` per species.
+   For each reduce species' atoms, ask the matcher to
+   summarize them into one representative fingerprint via
+   its `representative` method (8.9).  The matcher chooses
+   semantics appropriate to its descriptor space: the
+   `representative` of `BispecMatcher` (used by the
+   orchestrator) returns the element-wise mean of the
+   member vectors, while `ReduceMatcher` returns the first
+   member's shell-code
    (intra-species reduce fingerprints agree within the
    matcher's tolerance by construction, so any member
    is equally good).  Future matchers may use a medoid
@@ -4095,164 +4114,159 @@ filed under Phase 2.
   blending scheme requires accumulated experience
   with how often the floor is exceeded in practice.
 
-### 5.10 Nested-makeinput Bootstrap for Fortran-side Matchers
+### 5.10 Sequential loen for Fortran-side matchers
 
-Matchers split into two families by where the
-descriptor computation lives:
+Matchers split into two families by where the descriptor
+computation lives:
 
 - **Python-side** (`reduce`).  Computes from
-  `StructureControl` in-process during the species
-  pass of 5.6.4.  No external program invocation; no
-  intermediate files.
-- **Fortran-side** (`bispectrum`).  Computes inside
-  `imago.f90`'s `O_LocalEnv::bispec` path, which needs
-  a populated `imago.dat` to read structure, k-points,
-  and the `(twoj1, twoj2)` parameters.  The Imago build
-  produces `fort.21` machine-readable output: one row
-  per potential site, `2 * twoj2 + 1` real
-  bispectrum-component values plus a sum.
+  `StructureControl` in-process during the species pass
+  of 5.6.4.  No external program; no intermediate files.
+- **Fortran-side** (`bispectrum`).  Computes inside the
+  Imago engine's loen path, which needs a populated
+  `imago.dat` to read the structure, the k-points, and
+  the `(twoj1, twoj2)` parameters.  The run writes
+  `fort.21`: one row per potential site (the columns are
+  given in 5.10.3).
 
-The producer (5.7) and the consumer (5.6) both need to
-run Fortran-side matchers but for different
-structures:
+Because a Fortran-side descriptor can only come from a
+*completed* engine run, it is obtained by a short,
+explicit **sequence** of ordinary program runs
+orchestrated from *outside* `makeinput.py` -- never by
+`makeinput.py` launching a copy of itself.  `makeinput.py`
+stays a plain input-writer: it reads whatever type
+assignment the skeleton (`imago.skl`) already gives it
+(the per-element species tags `si1`, `si2`, ... that
+`structure_control` honours under `use_file_species=True`)
+and writes the matching `imago.dat`.  All bispectrum
+reasoning lives in the orchestrator and reuses the
+`BispecMatcher` methods of 8.9 (`parse_loen_output`,
+`distance`, `representative`).
 
-- The **producer** runs them on each curated reference
-  structure during harvest, harvesting one row from
-  `fort.21` per declared
-  `[[reference_solid.entry.fingerprint]]`.  This happens
-  at database-build time, in `build_initial_potentials.py`.
-- The **consumer** runs them on the *user's* structure
-  during the species pass, harvesting one row from
-  `fort.21` per atom of the active element.  This
-  happens at input-generation time, inside
-  `makeinput.py`.
+The orchestrator is `build_initial_potentials.py` for the
+producer (5.7), and an outside script or a human for any
+other caller.  The producer already runs full Imago jobs
+through kaleidoscope (DESIGN 6), so each loen run is just
+one more dispatched unit -- and kaleidoscope's run-reuse
+cache (6.2.5) already avoids recomputing it.  No special
+machinery in `makeinput.py` is required.
 
-The producer already has a full Imago-run orchestration
-in place (the SCF caching loop of 5.7).  Adding a
-follow-on `imago.py -loen -scf no` invocation is a
-small extension of that loop.
+#### 5.10.1 The two situations
 
-The consumer's orchestration is the new piece this
-section specifies.  `makeinput.py` is itself the script
-that produces `imago.dat` files; to run loen on the
-user's structure during the species pass it must, in
-effect, generate a throwaway `imago.dat` and then run
-loen against it -- a nested self-invocation.
+A Fortran-side descriptor is needed in exactly two cases,
+and only one of them rewrites the skeleton:
 
-#### 5.10.1 When the bootstrap runs
+1. **Assign types by bispectrum** -- defect structures,
+   amorphous materials, nanostructures, and the like.
+   These are non-crystalline: the `imago.skl` is already
+   in space group P1, or `makeinput.py` effectively makes
+   it so, so every atom is explicit.  The bispectrum
+   fingerprints decide which atoms share a type.
+2. **Witness fingerprint for an already-typed crystal**
+   -- a crystalline reference whose types come from
+   symmetry.  Here the bispectrum is purely
+   *informational* (a witness record for the database,
+   5.2.2); the types are not derived from it.
+   **Crystalline systems are never grouped by
+   bispectrum.**
 
-A bootstrap is triggered when both conditions hold:
+Case 1 is the only one that writes a new skeleton; case 2
+harvests one fingerprint per existing type and leaves the
+skeleton untouched.
 
-1. The active environment-based scheme is a
-   Fortran-side matcher (`needs_loen_run = true`
-   on the matcher's protocol object, 8.9).
-2. The per-element preflight (5.6.3 step 4) has
-   already confirmed that every element in the
-   structure has at least one manifest entry carrying
-   a fingerprint matching the active `(method,
-   sub_spec)`.
+#### 5.10.2 The sequence
 
-Python-side matchers (`reduce`) skip the bootstrap
-entirely; they compute fingerprints in-process and
-proceed to 5.6.4's bucketing.
+1. **First makeinput.**  Run `makeinput.py` on the
+   skeleton with no environment grouping; the types are
+   whatever the skeleton already declares (for case 1,
+   typically every atom its own type in P1).  This writes
+   a provisional `imago.dat`.  The potential each atom
+   receives is irrelevant -- the bispectrum is geometric
+   -- so the per-element default-tagged entry (5.6.5
+   step 3) is fine and no `-pot` is needed.  The
+   `LOEN_INPUT_DATA` block of this `imago.dat` carries the
+   matcher's `(twoj1, twoj2, ...)` parameters via
+   `BispecMatcher.to_loen_input` (5.10.5).
+2. **Run loen.**  Invoke `imago.py -loen -scf no` against
+   that `imago.dat`, producing `fort.21` (5.10.3).
+3. **Orchestrate on `fort.21`.**
+   - *Case 1 (grouping).*  Bucket the atoms by
+     `BispecMatcher` fingerprint distance (the species
+     logic of 5.6.4, run in the orchestrator rather than
+     inside makeinput), then **rewrite the skeleton** with
+     explicit per-element species tags (5.10.4).
+   - *Case 2 (witness).*  Take one fingerprint per
+     existing type (any member -- symmetry makes them
+     identical) and attach it as a witness record (5.2.2).
+     No skeleton rewrite.
+4. **Second makeinput (case 1 only).**  Run `makeinput.py`
+   again on the rewritten skeleton; it reads the new
+   per-element species tags and writes the final, grouped
+   `imago.dat`.  The run then proceeds (SCF and harvest,
+   for the producer).
 
-#### 5.10.2 Bootstrap procedure
+There is no self-invocation and nothing to guard against
+recursion: each step is a separate, ordinary process the
+orchestrator runs in order, and the only state passed
+between the two makeinput runs is the skeleton file
+itself.
 
-The bootstrap runs from inside `makeinput.py`'s species
-pass, before any environment-based grouping decision is
-made:
+#### 5.10.3 fort.21 carries its own identity
 
-1. **Set up the scratch directory.**  Use the existing
-   `.inputTemp/` scratch convention; create a
-   `.inputTemp/loen_bootstrap/` subdirectory so the
-   bootstrap inputs are isolated from the main run's
-   eventual outputs.
-2. **Build a minimal `imago.dat` in the scratch
-   directory.**  Re-invoke `makeinput.py` as a
-   subprocess with a stripped-down argument list:
-      - The user's structure file (same skeleton, same
-        lattice, same atom list).
-      - No `-pot LABEL` flag.  The nested call's
-        per-element preflight (5.6.3) loads each
-        element's database file and falls through to
-        the default-tagged entry on the no-scheme
-        branch -- exactly the path we want.  Each
-        element gets its curated default potential
-        without any per-element `-pot` machinery on
-        the CLI.
-      - No grouping flags (`-target`, `-block`,
-        `-reduce`, `-bispec`, `-xanes` all suppressed).
-        Every atom in the nested call is its own
-        species and type.  The grouping doesn't matter
-        for loen, which iterates over potential sites
-        regardless.  With no environment-based flag
-        active, the nested call's selection algorithm
-        never reaches step 2 of 5.6.5; the
-        default-tag fallback in step 3 is the sole
-        manifest-pick branch exercised.
-      - A trivial k-point spec (Γ-only is sufficient).
-        `loen` reads the k-point block but does not
-        use it for fingerprint output.
-      - The active matcher's loen-side parameters
-        (`BispecMatcher.to_loen_input(sub_spec)`, etc.)
-        flow into the existing
-        `LOEN_INPUT_DATA` block that `makeinput.py`
-        already emits (currently with hardcoded
-        defaults; see 5.10.5 for the parameter
-        contract and C58 for the wiring).
+So that the orchestrator can map a `fort.21` row to the
+atom and type it describes without a separate
+cross-reference file, `fort.21` is **self-describing**:
+each row leads with the site's identity and then the
+descriptor.  The columns are:
 
-The **recursion guard** -- both the no-environment-
-flag construction and the explicit
-`--no-loen-bootstrap` flag of 5.10.3 -- is the sole
-mechanism preventing the nested call from triggering
-its own bootstrap.  No special `-pot`-driven bypass
-is needed.
-3. **Run loen.**  Invoke
-   `imago.py -loen -scf no` against the scratch
-   `imago.dat`, writing `fort.21` into the scratch
-   directory.  Errors abort the parent makeinput run
-   with a message naming the scratch directory so the
-   user can inspect what was attempted.
-4. **Parse `fort.21`.**  Read the per-site row.  For
-   each potential site, build a fingerprint vector of
-   length `2 * twoj2 + 1` (the matcher's
-   `parse_loen_output` method, 8.9).
-5. **Hand back to 5.6.4.**  The species pass now has a
-   per-atom fingerprint vector for the active matcher
-   and proceeds to bucketing.
+  Column           Meaning
+  -----------------------------------------------------
+  site#            Engine potential-site index
+                   (element-sorted "dat" order).
+  element          Element symbol of the site.
+  species          Per-element species index (the
+                   `si1` / `si2` number).
+  type_in_species  Per-element-species type index.
+  type_flat        The single global type index
+                   (1, 2, 3, ...) the engine derives by
+                   element-sorted expansion.
+  components       The `2 * twoj2 + 1` real bispectrum
+                   values.
+  sum              Trailing sum column (ignored by the
+                   matcher).
 
-The nested-call boundary is the key architectural
-property: the bootstrap is a self-contained subprocess
-whose only output is `fort.21`.  The parent run is
-unaffected by any side-effects of the nested call
-beyond the scratch directory's contents.
+With these columns the mapping the orchestrator needs --
+row -> (element, species, type) -- is read straight off
+the file, which is more robust than re-deriving it through
+`datSkl.map`; this codebase has a history of cross-file
+numbering bugs, and a self-describing output removes that
+class of error here.
 
-#### 5.10.3 Recursion guard
+*Implementation note.*  Today's `fort.21` carries only
+`site#`, the `components`, and `sum` (loen.f90, the
+write block opening `open(unit=21,...)`); it also writes
+a header line.  Adding the `element` / `species` /
+`type_in_species` / `type_flat` columns is a Fortran
+change to the loen writer, which already has each site's
+identity in hand.  `BispecMatcher.parse_loen_output` (8.9)
+must then skip the header line and read the identity
+columns -- the C55 first cut assumed a bare
+components-plus-sum row with no header and must be revised
+to the real format before any live use.
 
-The nested `makeinput.py` invocation must not itself
-trigger a bootstrap.  This is enforced two ways:
+#### 5.10.4 Writing the new skeleton (case 1)
 
-- The nested call uses `-pot LABEL` rather than any
-  environment-based scheme, so no matcher is selected
-  and no bootstrap fires by the trigger condition of
-  5.10.1.
-- As belt-and-suspenders, the nested call carries an
-  internal `--no-loen-bootstrap` flag (or equivalent
-  environment variable) that suppresses the bootstrap
-  unconditionally.  If a future code path somehow
-  enables a matcher during the nested call, the flag
-  prevents infinite recursion.
-
-#### 5.10.4 Caching deferred
-
-`fort.21` recomputes from scratch on every makeinput
-run.  Per the parked memory note's
-"caching-deferred" decision, the rerun cost is judged
-acceptable for the first cut.  If user feedback
-indicates otherwise, a content-keyed cache (structure
-bytes + `(method, sub_spec)` + Imago commit) under
-`.inputTemp/loen_cache/` can be added without
-algorithmic change to the bootstrap itself.
+When the orchestrator rewrites the skeleton with its
+bispectrum grouping, it must follow the **per-element
+species numbering** convention the engine expects: each
+element's species restart at 1 -- e.g. `Si1, Si2, Si3`
+then `O1, O2, O3` -- *not* a single run-on sequence like
+`O4, O5, O6`.  The engine builds its flat type list
+(1, 2, 3, ...) by element-sorted expansion of these
+per-element species, so a run-on numbering would corrupt
+the derived types.  A round-trip test -- group, write the
+skeleton, reread it, and recover the same per-element
+grouping -- guards this.
 
 #### 5.10.5 Producer vs consumer parameter mapping
 
@@ -6160,8 +6174,7 @@ Two CLI couplings are retired from the API path:
   `initial_potential_db`, `element_data`) were audited and
   contain no `sys.exit`; the subprocess execs it spawns
   (`makeKPoints`, `contract`) are exempt, because a child
-  process's exit cannot kill the parent worker -- exactly as
-  the nested-makeinput bootstrap is exempt (6.3.7).
+  process's exit cannot kill the parent worker.
 
 #### 6.3.6 Relationship to run_structure (closes 6.1.3)
 
@@ -6210,12 +6223,11 @@ none changes the contracts above.
   in-memory `StructureControl` in addition to an skl path
   depends on the ASE-free factory of D12/C64; 6.3 commits
   only to the skl-path form, matching 6.1.3.
-- **Nested-makeinput bootstrap.**  The Fortran-side-matcher
-  bootstrap of 5.10 re-invokes makeinput as a *subprocess*.
-  A child process's `sys.exit` cannot kill the parent
-  worker, so the bootstrap is safe as-is; whether it should
-  eventually call `build_inputs` in-process instead is a
-  later cleanup, not required here.
+- **Sequential loen for bispectrum.**  A bispectrum
+  fingerprint comes from the sequential loen flow (5.10)
+  that `makegroups.py` orchestrates as ordinary dispatched
+  units -- makeinput no longer re-invokes itself, so there
+  is no nested-subprocess concern to handle here.
 - **Call-provenance recording.**  What replaces
   `record_clp` in API mode (record the resolved options, or
   skip the `command` file) is an implementation detail.

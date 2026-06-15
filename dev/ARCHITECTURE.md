@@ -23,6 +23,8 @@ src/
                        packages
     imago.py           Imago driver: CLI and callable API (9.2)
     makeinput.py       Input file orchestrator
+    makegroups.py      Bispectrum type-grouping helper (8.9,
+                       DESIGN 5.10): CLI + importable
     ase_imago.py       ASE Calculator, ImagoCalculator (9.3)
     cod_fish.py        COD acquisition front-end -> CIF (9.5)
     cif2skl.py         CIF -> imago.skl converter (9.5)
@@ -110,6 +112,25 @@ Modules directly affected by the current development:
      bond order, PDOS) will not be correct unless the
      user has taken extreme care to provide a symmetric
      mesh. Not produced by makeinput.
+- **makegroups.py** (`src/scripts/makegroups.py`): the
+  bispectrum type-grouping helper (8.9, DESIGN 5.10).  A
+  Fortran-side descriptor can only come from a completed
+  Imago run, so grouping atoms by bispectrum is a *sequence*
+  -- makeinput (no grouping) -> `imago -loen -scf no` ->
+  read the enriched `fort.21` -> bucket with `BispecMatcher`
+  -> rewrite the skeleton with explicit per-element species
+  tags -- orchestrated outside `makeinput.py`.  This script
+  owns that sequence and is **dual-mode**: an importable
+  `group_by_bispectrum(...)` the producer
+  (`build_initial_potentials.py`) calls, plus a `__main__`
+  CLI for manual use.  `makeinput.py` stays a plain
+  input-writer that reads whatever explicit types the
+  skeleton already carries; the bispectrum reasoning never
+  enters it.  Reduce grouping remains in `makeinput.py` for
+  now (the two environment schemes are deliberately
+  asymmetric); the long-term direction is for `makegroups.py`
+  to absorb *all* type assignment (reduce, target, block),
+  leaving `makeinput.py` purely an input-writer.
 
 ---
 
@@ -855,10 +876,12 @@ from `makeinput.py`.
                                   (loen path), false
                                   for matchers that
                                   compute in Python.
-                                  Drives the
-                                  nested-makeinput
-                                  bootstrap of DESIGN
-                                  5.10.
+                                  True means the
+                                  descriptor is obtained
+                                  by the sequential loen
+                                  flow that `makegroups`
+                                  orchestrates (DESIGN
+                                  5.10), not in-process.
   default_similarity_floor (float) Per-matcher default
                                   distance threshold
                                   used by the
@@ -888,19 +911,19 @@ from `makeinput.py`.
                                   Only meaningful when
                                   `needs_loen_run` is
                                   true.
-  compute_query(structure,        For Python-side
-    sub_spec)                     matchers, computes
+  compute_query(structure,        Python-side matchers
+    sub_spec)                     only: computes
                                   per-atom fingerprint
                                   vectors from
-                                  `StructureControl`.
-                                  For loen-side
-                                  matchers, this is
-                                  the outer entry
-                                  point that triggers
-                                  the bootstrap of
-                                  DESIGN 5.10 and
-                                  returns the parsed
-                                  vectors.
+                                  `StructureControl`
+                                  in-process.  Loen-side
+                                  matchers do not
+                                  implement it -- their
+                                  vectors come from the
+                                  sequential loen flow
+                                  (DESIGN 5.10), read off
+                                  `fort.21` by
+                                  `parse_loen_output`.
   distance(vec_a, vec_b)          Symmetric scalar
                                   distance in the
                                   matcher's descriptor
