@@ -2864,13 +2864,15 @@ class ReduceMatcher extends Matcher:
         # numbering does not transfer across structures,
         # so only the transferable element symbols are
         # kept.  All symbols are lowercased.
+        # shell_code.levels is 1-indexed with a None
+        # placeholder at slot 0, so iterate from slot 1.
         return {"shell_code": {
-            "element": lower(shell_code.element_symbol),
+            "element": lower(shell_code.element_name),
             "levels": [
                 {"distance":  level.distance,
                  "neighbors": lower_each(
-                     level.neighbor_symbols)}
-                for level in shell_code.levels]}}
+                     level.member_names)}
+                for level in shell_code.levels[1:]]}}
 
     function to_loen_input(sub_spec):
         error("ReduceMatcher is Python-side; no LOEN"
@@ -4094,24 +4096,79 @@ function harvestFingerprints(flight, ref, spec,
     # [[reference_solid.entry.fingerprint]].  An entry
     # with no declarations harvests nothing and never
     # touches the structure -- the common case so far.
-    # The Python-side / Fortran-side split mirrors the
-    # consumer's matcher dispatch (11.3.a): the matcher
-    # knows whether it computes in process or was
-    # dispatched as a -loen unit.
     if spec.fingerprints is empty:
         return []
+
+    # INTERIM (until C55/C58): the Fortran-side bispectrum
+    # harvest is not built yet, so refuse any loen-side
+    # declaration up front rather than silently dropping a
+    # fingerprint the curator asked for.  When C55/C58 land,
+    # this guard is replaced by a per-declaration dispatch to
+    # harvestLoenFingerprint (specified below) for every
+    # matcher whose needs_loen_run is true.
+    for fp_decl in spec.fingerprints:
+        if MATCHERS[fp_decl["method"]]().needs_loen_run:
+            raise NotImplementedError(
+                "method needs a loen run; the Fortran-side "
+                "harvest is C55/C58 and is not built yet")
+
+    # Every remaining declaration is Python-side (reduce).
+    # Read the run's EXPANDED full-cell structure
+    # (outputs["structure"], makeinput's imago.fract-mi) and
+    # build its minimum-image distance matrix ONCE, sized to
+    # the LARGEST cutoff any declaration requests, then reuse
+    # the one structure for them all.  Reading the run's own
+    # expansion -- not re-expanding the materialized source --
+    # reuses the exact geometry and numbering the run computed
+    # and avoids duplicating applySpaceGroup.  No subprocess
+    # and no on-disk cache: recomputing the shells in process
+    # is cheaper than the cache bookkeeping would be.  Sharing
+    # one matrix built to the max cutoff is safe because
+    # compute_query independently trims neighbors to each
+    # declaration's own sub_spec cutoff, so a smaller request
+    # ignores the matrix's extra reach (periodic boundary
+    # conditions enter only here).  Today only one declaration
+    # ever appears, so "max" is just that cutoff; the build-
+    # once form matters only once differing cutoffs coexist.
+    max_cutoff = max(fp_decl["sub_spec"]["cutoff"]
+                     for fp_decl in spec.fingerprints)
+    structure = read_structure(
+        result_toml.outputs["structure"])
+    build_min_dist_matrix(structure, max_cutoff)
+
+    # The expanded skeleton is ordered by the run's sorted
+    # (dat) numbering, but atom_site is a skeleton index, so
+    # map it to the structure row through datSkl.map (the same
+    # map step i reads); the map yields both the row and that
+    # row's element symbol.
+    (dat_index, map_element) = skeleton_to_dat(
+        result_toml.outputs["datSkl_map"])[spec.atom_site]
+    # Guard the numbering assumption: the structure row and
+    # the map must name the same element, or the expansion and
+    # the map have desynced and the fingerprint would describe
+    # the wrong atom.  Strict refusal beats a silent mismatch.
+    if lower(structure.atom_element_name[dat_index])
+            != lower(map_element):
+        raise ValueError(
+            f"site {spec.atom_site}: datSkl.map names "
+            f"{map_element} but the expanded structure row "
+            f"{dat_index} is a different element; "
+            f"numbering desync")
+
     fingerprints = []
     for fp_decl in spec.fingerprints:
         method   = fp_decl["method"]
         sub_spec = fp_decl["sub_spec"]
         matcher  = MATCHERS[method]()
-        if matcher.needs_loen_run:
-            payload = harvestLoenFingerprint(flight,
-                ref, spec.atom_site, matcher, sub_spec)
-        else:
-            payload = harvestPythonFingerprint(
-                result_toml, spec.atom_site, matcher,
-                sub_spec)
+        # In-process compute against the shared structure;
+        # compute_query trims to this declaration's own
+        # sub_spec cutoff.  Wrap the chosen vector via
+        # matcher.build_payload so the per-matcher payload
+        # field name (DESIGN 5.2: bispec uses `values`, reduce
+        # uses `shell_code`) flows through the same accessor
+        # the loen-side branch uses.
+        vectors = matcher.compute_query(structure, sub_spec)
+        payload = matcher.build_payload(vectors[dat_index])
         fingerprints.append(FingerprintRecord(
             method   = method,
             sub_spec = sub_spec,
@@ -4121,17 +4178,18 @@ function harvestFingerprints(flight, ref, spec,
 
 function harvestLoenFingerprint(flight, ref,
         atom_site, matcher, sub_spec):
-    # Read the fort.21 of the `-loen -scf no` unit that
-    # kaleidoscope already dispatched for this
-    # (solid, method, sub_spec) back in step 1b.  No
-    # loen run happens here and there is no separate
-    # loen cache -- kaleidoscope's run-reuse cache
-    # (DESIGN 6.2.5) already owns recompute avoidance.
-    # The unit's run directory follows the calc-tag
-    # convention (DESIGN 6.2.4): id = reference_id,
-    # calc = "loen-<method>-<slug>"; the slug encodes
-    # the sub_spec so two declarations differing in any
-    # key or value land in different run directories by
+    # FINISHED-STATE path (C55/C58): the per-declaration
+    # dispatch the interim guard in harvestFingerprints stands
+    # in for.  Read the fort.21 of the `-loen -scf no` unit
+    # that kaleidoscope already dispatched for this
+    # (solid, method, sub_spec) back in step 1b.  No loen run
+    # happens here and there is no separate loen cache --
+    # kaleidoscope's run-reuse cache (DESIGN 6.2.5) already
+    # owns recompute avoidance.  The unit's run directory
+    # follows the calc-tag convention (DESIGN 6.2.4): id =
+    # reference_id, calc = "loen-<method>-<slug>"; the slug
+    # encodes the sub_spec so two declarations differing in
+    # any key or value land in different run directories by
     # construction.
     slug     = sub_spec_slug(sub_spec)
     calc_tag = "loen-" + matcher.name + "-" + slug
@@ -4141,45 +4199,17 @@ function harvestLoenFingerprint(flight, ref,
 
     rows = matcher.parse_loen_output(out_path,
         sub_spec)
-    # atom_site is 1-based per the manifest contract;
-    # the row list is 0-indexed.  The matcher's
-    # build_payload accessor wraps the vector in the
-    # per-matcher payload shape (DESIGN 5.2: bispec
-    # uses `values`, reduce uses `shell_code`) so the
-    # producer and consumer stay symmetric on field
-    # naming.
+    # atom_site is a skeleton index per the manifest contract;
+    # like the Python-side branch it must be mapped to the
+    # run's row numbering through datSkl.map before indexing
+    # rows (left naive here -- wire the same skeleton_to_dat
+    # step when C55/C58 land).  The matcher's build_payload
+    # accessor wraps the vector in the per-matcher payload
+    # shape (DESIGN 5.2: bispec uses `values`, reduce uses
+    # `shell_code`) so producer and consumer stay symmetric on
+    # field naming.
     return matcher.build_payload(
         rows[atom_site - 1])
-
-
-function harvestPythonFingerprint(result_toml,
-        atom_site, matcher, sub_spec):
-    # In-process matcher call against the run's EXPANDED
-    # full-cell structure (outputs["structure"], makeinput's
-    # imago.fract-mi).  Reading the run's own expansion --
-    # not re-expanding the materialized source -- reuses the
-    # exact geometry and numbering the run computed and
-    # avoids duplicating applySpaceGroup.  No subprocess and
-    # no on-disk cache file: recomputing the shells in
-    # process is cheaper than the cache bookkeeping would be.
-    structure = read_structure(
-        result_toml.outputs["structure"])
-    # The reduce shells need neighbor distances out to the
-    # sub_spec cutoff; build the minimum-image matrix to at
-    # least that radius (periodic boundary conditions enter
-    # only here, exactly as in makeinput's grouping pass).
-    build_min_dist_matrix(structure, sub_spec["cutoff"])
-    vectors = matcher.compute_query(structure, sub_spec)
-    # That expanded skeleton is ordered by the run's sorted
-    # (dat) numbering, but atom_site is a skeleton index, so
-    # map it to the structure row through datSkl.map -- the
-    # same map step i reads.  Wrap the chosen vector via
-    # matcher.build_payload so the per-matcher payload field
-    # name (DESIGN 5.2) flows through the same accessor the
-    # loen-side branch uses.
-    dat_index = skeleton_to_dat(
-        result_toml.outputs["datSkl_map"])[atom_site]
-    return matcher.build_payload(vectors[dat_index])
 
 
 function sub_spec_slug(sub_spec):

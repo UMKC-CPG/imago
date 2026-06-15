@@ -2286,8 +2286,9 @@ the C48.3 wiring (C74) is the first major consumer.
   `status.toml` first and skips failed/result-less units.  **What
   remains for C74: the live cluster smoke run** to validate the seam
   end to end (the `jobs/c74_si_test/` manifest, re-run with `--force`
-  per the reminder above), plus the still-stubbed C54/C60 fingerprint
-  harvest.
+  per the reminder above).  C54 and the C60 light half (the reduce
+  fingerprint harvest) are done; only the C55/C58 bispectrum half of
+  the harvest remains stubbed.
 - [ ] C75. Seed `share/historicalGuidanceDB/entries/`
   via a deliberate stratified seed flight.  ~150-250
   calculations covering the chemistry surface

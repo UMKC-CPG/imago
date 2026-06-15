@@ -3102,6 +3102,48 @@ bottom:
    similarity floor — use `default_entry(db)` for that
    element.  Guaranteed to succeed by rule 7.
 
+**Why one representative, not a per-atom pick.**  A species
+groups atoms whose environments are interchangeable to within the
+matcher's tolerance, yet every atom of the species must receive
+the *same* initial potential.  The tempting question -- "matched
+against *which* atom?" -- is a trap.  Singling out the first atom
+(or any fixed atom) makes the chosen potential depend on the order
+the atoms happen to appear in, which for a non-crystalline cell is
+arbitrary; renumbering the atoms would then change the result,
+which is unacceptable.  Collapsing the whole group into one
+order-independent representative removes the question entirely --
+no atom is privileged, and the answer is stable under renumbering.
+
+The two descriptor families sit in genuinely different positions
+here.  Reduce fingerprints match as a hard yes/no, so every atom
+in a reduce species carries an *identical* shell-code by
+construction; "which member speaks for the group" is moot and the
+first member is exact.  Bispectrum fingerprints match by
+closeness, so the members of a bispectrum species scatter around a
+centroid; the element-wise mean is the order-independent summary
+that speaks for all of them.  Should that scatter ever grow wide
+enough that the choice of representative changes which database
+entry is matched, the correct response is to tighten the scheme's
+similarity tolerance and split the species -- not to smooth over a
+loose cluster.
+
+We deliberately do *not* search for the single database entry that
+best fits *all* of a species' atoms at once (an all-to-all
+comparison).  Such a search is affordable -- a species holds tens
+of atoms, not the whole system -- but it is the wrong tool on two
+counts.  First, it hides exactly the loose-cluster signal above,
+quietly returning a least-bad compromise where a split was called
+for.  Second, the initial potential is only a *starting guess*:
+the self-consistent iteration relaxes it to the true potential
+regardless of where it began, so optimizing a launch point the
+calculation is about to iterate away is poor return on complexity.
+A representative of a tight cluster is good enough by the only
+standard that matters here -- fast, reliable convergence.  The
+medoid (the member collectively closest to the others) is the
+robustness fallback should a family's clusters ever prove skewed
+by an outlier; the protocol leaves the choice to each matcher
+(8.9) rather than pinning it in this section.
+
 The chosen entry is attached to the species and
 flows through to every type born from it (5.6.6).
 
