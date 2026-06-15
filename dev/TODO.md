@@ -1633,6 +1633,38 @@ shipped.
   errors at parse time), and the similarity floor
   (sub-threshold match falls back to default with a
   warning).
+- [ ] C88. Dedup storage model + native/witness
+  fingerprints (DESIGN 5.2.2-5.2.4).  The database
+  stores *distinct environments, not atoms*, so a
+  tens-of-thousands-atom model adds entries only for
+  its genuinely distinct environments.  Work:
+  (a) add the `type_assignment` provenance field
+  (already in 5.2's table) and derive each
+  fingerprint's native/witness role from it
+  (`M == type_assignment`); the producer must record
+  the run's grouping scheme.  (b) Symmetric dual
+  harvest: compute *both* registered methods (native +
+  witness) for every harvested atom -- reduce is free
+  given the structure, a bispectrum loen pass is cheap
+  next to the SCF.  (c) Add a per-entry `multiplicity`
+  integer (default 1) and thread it through the field
+  list + validation (5.2), the `PotentialEntry`
+  dataclass (5.4), the emitter (5.5), and the harvest
+  (5.7).  (d) Make the harvest an *insert-or-merge*:
+  dedup on insert at a tolerance (the producer-side
+  mirror of C61's similarity floor), incrementing
+  `multiplicity` on a duplicate.  The dedup rule must
+  be *conservative* -- keep an environment if it is
+  novel under *any* method, merge only when it is a
+  duplicate under *all* methods -- so no per-method
+  coverage is lost and the later bundled->normalized
+  migration stays lossless (5.2.4).  Optional: carry
+  the origin label onto records so the per-atom
+  cross-method pairing survives normalization.  Lands
+  after the Phase-2 base chain (C53-C61); the
+  bundled->normalized (potential pool + per-method
+  index) migration and the learned-predictor training
+  pipeline are separate, later items this sets up.
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 

@@ -2454,6 +2454,14 @@ fingerprint.
                                  shifts, density value,
                                  etc.).  Recorded for
                                  provenance only.
+  type_assignment        string  Scheme that assigned this
+                                 entry's species/type, e.g.
+                                 "symmetry", "reduce", or
+                                 "bispectrum".  Derives
+                                 each fingerprint's native
+                                 vs witness role (5.2.2):
+                                 method M is native iff
+                                 M == type_assignment.
   scf_threshold          float   SCF convergence
                                  threshold of the
                                  reference run.
@@ -2611,6 +2619,239 @@ atomSCF baseline, rule 6) and `"default_solid"` (the
 Phase-1 single-bulk improved entry) keep their fixed
 names; the mechanical scheme governs only the
 producer-harvested solid entries that Phase 2 adds.
+
+#### 5.2.2 Native and witness fingerprints
+
+A fingerprint plays one of two roles for the entry that
+carries it, and the role is *derived*, not stored -- it
+follows from how the reference run assigned its types.
+
+- **Native.**  The run's species/type partition was
+  computed *from* this fingerprint method; its grouping
+  decided which atoms share the harvested potential (the
+  environment-based species pass of 5.6.4).
+- **Witness.**  The method did *not* drive the partition.
+  It was computed only to record the geometry under a
+  second descriptor, while the types were assigned by
+  something else -- crystallographic symmetry, a
+  position-based flag, or the *other* fingerprint method.
+
+Method `M`'s role on an entry is exactly
+`M == provenance.type_assignment`: native when the names
+match, witness otherwise.  Deriving the role rather than
+storing a per-record flag removes a field that could drift
+out of agreement with `type_assignment`.
+
+**Symmetric dual harvesting.**  Every harvested atom
+records *both* registered fingerprint methods -- the
+native one and the witness one -- regardless of which
+assigned the types.  The witness computation is cheap next
+to any SCF: the Python-side reduce shells are free given
+the structure the run already wrote, and a bispectrum
+(loen) pass is a single non-self-consistent Imago
+invocation, small relative to the converged run that
+produced the potential.  So there is no eager/deferred
+asymmetry: a reduce-assigned run still computes the
+bispectrum witness, and a bispectrum-assigned run still
+computes the reduce witness.  Every stored environment is
+thus dual-indexed, so a later run that assigns types by
+*either* method can find a match.
+
+**A witness is valid but approximate.**  The witness
+fingerprint is faithful to its own atom -- it is that
+atom's true descriptor under the second method.  What it
+inherits from the assigning method is the *potential* it
+points at: that potential was converged under the
+assigning method's grouping, which may be coarser than the
+witness method's own grouping would have been.  A future
+query that matches a witness therefore imports a potential
+built under a different partition.  This is safe because
+the imported potential is only the *starting guess* for
+the new run's self-consistent iteration (5.6.5, 5.6.6):
+the new run sets its own partition and relaxes the guess
+to the truth, so a witness import can cost convergence
+speed, never correctness.
+
+Symmetry-assigned entries are the limiting good case: when
+crystallographic symmetry assigns the types
+(`type_assignment = "symmetry"`), *both* methods are
+witnesses, but exact ones -- symmetry-equivalent atoms
+share one environment, so their reduce and their
+bispectrum fingerprints are identical across the type and
+the shared potential genuinely belongs to each.  The
+witness coarseness above appears only in the disordered,
+cross-method case.
+
+#### 5.2.3 Environment storage model: dedup and weights
+
+The database stores **distinct environments, not atoms.**
+This is the rule that keeps it from exploding as model
+sizes grow into the tens of thousands of atoms, and it is
+the substrate both the present nearest-neighbour lookup
+and the future learned predictor (5.2.4) want.
+
+**Why not one entry per atom.**  A naive harvest that
+emitted one entry per atom would grow the database with
+the *total atom count ever harvested*: a single
+10,000-atom amorphous model would add 10,000 entries, and
+the consumer's per-query cost -- (new-system atoms) x
+(database entries) -- would grow with it.  But the atoms
+of such a model are not 10,000 distinct environments; they
+cluster heavily (that clustering is the whole premise of
+grouping atoms into types).  Two atoms with near-identical
+fingerprints also carry near-identical potentials, so the
+second adds almost no information.  The quantity of value
+is *coverage of environment space*, which is far
+lower-dimensional than the atom count and **saturates**:
+once the chemistry is covered, a new model of the same
+material contributes almost no new environments.
+
+**Dedup on insert, weight by multiplicity.**  Harvesting
+is therefore an *insert-or-merge*.  When a harvested
+environment duplicates one already stored, the producer
+does not append a new entry; it increments a
+**multiplicity** weight on the existing one (how many
+atoms, across how many models, have collapsed into it).
+The database grows with environment *diversity*, which is
+sub-linear in atoms and plateaus as the space fills in.
+The dedup tolerance is the producer-side mirror of the
+consumer-side similarity floor (5.6.5, TODO C61): the
+consumer asks "is this query close enough to a stored
+environment to *import* its potential?", and the producer
+asks "is this new environment close enough to a stored one
+that storing it *adds nothing*?" -- one tolerance, two
+uses.
+
+**Dedup subsumes the symmetry gate.**  No special case is
+needed for crystals.  A symmetry-assigned type's atoms are
+identical, so they dedup to a single entry automatically
+(multiplicity equal to the type's size) -- exactly "one
+representative per type."  A disordered type's atoms vary,
+so they dedup to however many genuinely distinct
+environments exist, generally far fewer than the atom
+count.  The crystalline case is just the degenerate
+collapse of the same rule.
+
+**Dedup must be conservative -- the union of per-method
+distinctness.**  An environment is a duplicate only when
+it is close under *every* method at once; if it is novel
+under *any* method it must be kept.  This matters because,
+within a reduce-assigned type, all atoms share one reduce
+fingerprint but carry *different* bispectrum witnesses:
+deduping by the reduce metric alone would collapse the
+type and discard that bispectrum coverage irrecoverably.
+Merging only on an all-methods duplicate keeps every
+method's index complete, and the multiplicity counts only
+true all-methods duplicates.
+
+**Search cost.**  Controlling the entry count via dedup is
+the first-order fix.  Beyond it, the search is already
+partitioned -- per element, and per `(method, sub_spec)`
+-- so no query ever compares across elements or
+incomparable descriptors, and fingerprint vectors admit
+spatial indexing (a k-d / ball tree, or approximate
+nearest neighbour) for sub-linear lookup once an index is
+large.  Redundant per-method copies that the bundled shape
+still carries (5.2.4) can additionally be collapsed into a
+per-method index *in memory at load time*, so search
+efficiency does not wait on any on-disk change.
+
+#### 5.2.4 Forward compatibility and the learned predictor
+
+The schema today is **bundled**: one entry carries one
+potential, the reduce record, and the bispectrum record
+together.  At scale a **normalized** shape is more
+efficient: a pool of distinct potentials, plus a separate
+deduplicated index per method that references them (so a
+potential is stored once, and the coarser method's
+fingerprints are not duplicated).  The migration from the
+first to the second is **lossless for everything the
+database is for**, provided two constraints -- already
+satisfied -- are honoured:
+
+1. **Retain type/observation identity.**  The label
+   (`...-t<type>-a<site>`, 5.2.1) and provenance carry the
+   type a potential belongs to, so the potential pool can
+   be reformed by grouping on that identity.  This must
+   not be dropped as an optimization.
+2. **Dedup conservatively** (5.2.3).  Because the bundled
+   shape keeps an entry whenever *any* method finds it
+   novel, every method's coverage is present; normalizing
+   merely collapses the redundancy each method carries.
+   Had dedup discarded a method's novelty, normalization
+   could not recover it.
+
+Under those, the bundled form is a lossless *superset* of
+the normalized form, and the conversion is a contained
+schema-version bump confined to `initial_potential_db.py`
+(ARCHITECTURE 8.7); producers and consumers above the
+library barely change.  Deferral costs only a constant
+factor of disk (duplicated potentials and coarser-method
+fingerprints, bounded by environment diversity, not atom
+count) -- not data, and not a scaling regression.
+
+**The one thing normalization drops** is the *per-atom
+pairing*: that one atom carried reduce fingerprint A *and*
+bispectrum fingerprint B.  After the split you still see
+that A and B map to the same potential, but within a
+multi-atom type you cannot always tell which A paired with
+which B.  That pairing is useful only for cross-method
+correlation or a learned reduce/bispectrum translator,
+both deprioritized as fragile, approximate paths.  If we
+ever want it, carrying the originating entry's identity
+(its label) onto each split record at normalization
+preserves it at no schema cost -- so even this is
+recoverable by choice, not lost by default.
+
+**The learned predictor (a future consumer).**  A natural
+endpoint is a neural network trained on the database to
+predict a converged-quality potential directly from an
+atom's environment, so that the starting guess becomes the
+*answer* and the SCF iteration is shortened or skipped.
+This is a *different* consumer from the nearest-neighbour
+lookup, and it reshapes none of the above -- it *wants*
+exactly the deduplicated, weighted, coverage-oriented
+corpus the dedup model produces:
+
+- At inference the network pays no per-query search cost;
+  the lookup is amortized into its weights.  So the search
+  concern of 5.2.3 does not apply to it.
+- Its *training* is harmed by raw near-duplicates: they
+  teach nothing new and *bias* the model toward
+  over-represented environments (a network trained on raw
+  per-atom data would be dominated by bulk-like sites and
+  under-learn the rare defect environments that matter
+  most).  A deduplicated set with multiplicity available
+  as a *sample weight* -- rather than baked in as
+  duplication -- is the correct corpus.
+- It may eventually want a *richer* descriptor than the
+  coarse lookup key (possibly the raw local environment),
+  so the fidelity retained per stored environment is worth
+  keeping in mind -- a "do not paint ourselves into a
+  corner" note, not a present decision.
+
+Designing for dedup, coverage, and weights therefore
+serves the nearest-neighbour present and the learned-
+predictor future with one structure.  Should the predictor
+become a committed goal rather than a possibility, it
+should be promoted to a VISION-level objective; it is
+recorded here as the dataspace's intended trajectory.
+
+**Schema implications (deferred to implementation).**  The
+native/witness model adds the `type_assignment` provenance
+field (already listed in 5.2's provenance table), and the
+dedup model adds a per-entry `multiplicity` integer
+(default 1, still to be threaded through 5.2, 5.4, 5.5,
+and 5.7).  The per-atom-pairing safeguard costs nothing
+until normalization, when the origin label is carried onto
+split records.  As an implementation status: the present
+producer -- the C60 harvest -- emits neither
+`type_assignment` nor `multiplicity` and writes one entry
+per declared site, so the loader does not yet enforce
+them; the schema above specifies the target.  The
+insert-or-merge harvest, the conservative dedup rule, and
+the validation that enforces both fields are scheduled
+work (TODO C88), not part of the current bispectrum half.
 
 ### 5.3 Sketch (gold, two entries with fingerprints)
 
