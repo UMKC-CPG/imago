@@ -2964,7 +2964,10 @@ class BispecMatcher extends Matcher:
         return payload["values"]
 
     function build_payload(query_vector):
-        return {"values": query_vector}
+        # Stored under `values` (DESIGN 5.2 / 5.4); copy
+        # into a fresh list so the record never aliases a
+        # vector the caller may still reuse.
+        return {"values": list(query_vector)}
 
 
 # Module-level registry (ARCHITECTURE 8.9).

@@ -2826,25 +2826,179 @@ class ReduceMatcher(Matcher):
 
 
 class BispecMatcher(Matcher):
-    """Loen-side matcher for the bispectrum descriptor (registered here;
-    body implemented in C55/C58).
+    """Loen-side matcher for the bispectrum descriptor (ARCHITECTURE 8.9).
 
-    The bispectrum captures angular detail about an atom's neighborhood and
-    is computed by the Imago Fortran engine rather than in Python, so
-    ``needs_loen_run`` is True.  C55 fills in ``to_loen_input`` (mapping a
-    ``sub_spec = {twoj1, twoj2}`` to the LOEN input block),
-    ``parse_loen_output`` (reading ``fort.21`` rows into vectors of length
-    ``2 * twoj2 + 1``), ``distance``, and ``representative`` (the
-    element-wise mean); C58 supplies the nested-makeinput bootstrap that
-    actually runs the engine.  Until then
-    the inherited methods raise ``NotImplementedError`` so any premature use
-    fails loudly.
+    The bispectrum captures *angular* detail about an atom's neighborhood
+    -- how its neighbors are distributed over directions, not merely which
+    radial shells they fall in -- and is computed by the Imago Fortran
+    engine (the "loen" local-environment path), not in Python.  So
+    ``needs_loen_run`` is True: producing a query vector means actually
+    running the engine, which the nested-makeinput bootstrap of DESIGN
+    5.10 performs.
+
+    This class supplies the parts that do *not* themselves run the engine:
+    the parameter mapping (:meth:`to_loen_input`), the ``fort.21`` reader
+    (:meth:`parse_loen_output`), the vector distance (:meth:`distance`),
+    the species representative (:meth:`representative`), and the on-disk
+    payload (de)serialization.  The bootstrap entry point
+    (:meth:`compute_query`) that wires these together is supplied by C58;
+    until then it inherits the base ``NotImplementedError`` so any
+    premature use fails loudly.
     """
 
     name = "bispectrum"
     needs_loen_run = True
     # DESIGN 5.6.5 starting value for the bispectrum similarity floor.
     default_similarity_floor = 0.10
+
+    def to_loen_input(self, sub_spec):
+        """Map a bispectrum ``sub_spec`` to the LOEN parameter dict the
+        ``LOEN_INPUT_DATA`` block of ``imago.dat`` expects (DESIGN 5.10.5).
+
+        Both the producer (harvesting a fingerprint) and the consumer
+        (bootstrapping a query) call this, so the loen parameters they emit
+        stay aligned by construction.  ``twoj1`` and ``twoj2`` are required
+        -- they set the angular-momentum pair and hence the output vector
+        length ``2 * twoj2 + 1``.  The remaining three parameters are
+        optional and default to the values ``makeinput.py`` has
+        historically hardcoded, so an omitted key reproduces today's
+        behavior exactly.
+
+        Parameters
+        ----------
+        sub_spec : dict
+            Must contain ``twoj1`` and ``twoj2`` (ints).  May contain
+            ``max_neigh`` (int), ``cutoff`` (real, Bohr), and
+            ``angle_squeeze`` (real).  An optional ``by_element`` key is
+            reserved for the element-aware variant (TODO C62 / D10) and is
+            rejected here until that lands.
+
+        Returns
+        -------
+        dict
+            Keys ``loenCode``, ``twoj1``, ``twoj2``, ``max_neigh``,
+            ``cutoff``, ``angleSqueeze`` -- every parameter the LOEN block
+            reads.
+        """
+
+        # Element-aware bispectrum changes the loen output shape and is not
+        #   built yet; refuse it loudly rather than silently emitting the
+        #   element-blind parameters.  C62 replaces this guard with the
+        #   real `bispecByElement` handling (DESIGN 5.10.5).
+        if sub_spec.get("by_element", False):
+            raise NotImplementedError(
+                "element-aware bispectrum (sub_spec by_element=true) is "
+                "not yet implemented; see TODO C62 / D10")
+
+        if "twoj1" not in sub_spec:
+            raise ValueError(
+                "BispecMatcher.to_loen_input requires sub_spec['twoj1']")
+        if "twoj2" not in sub_spec:
+            raise ValueError(
+                "BispecMatcher.to_loen_input requires sub_spec['twoj2']")
+
+        return {
+            "loenCode":     1,
+            "twoj1":        sub_spec["twoj1"],
+            "twoj2":        sub_spec["twoj2"],
+            "max_neigh":    sub_spec.get("max_neigh", 20),
+            "cutoff":       sub_spec.get("cutoff", 5.0),
+            "angleSqueeze": sub_spec.get("angle_squeeze", 0.85),
+        }
+
+    def parse_loen_output(self, path, sub_spec):
+        """Read a loen ``fort.21`` file into per-site bispectrum vectors.
+
+        ``fort.21`` carries one row per potential site of the whole
+        structure, in site-index order.  Each row holds ``2 * twoj2 + 1``
+        real bispectrum components followed by a trailing sum column that
+        this matcher ignores; only the leading components are kept.
+
+        Parameters
+        ----------
+        path : str
+            Path to the ``fort.21`` produced by the loen run.
+        sub_spec : dict
+            The same parameters used to produce the file; ``twoj2`` fixes
+            the per-row vector length.
+
+        Returns
+        -------
+        list[list[float]]
+            One vector of length ``2 * twoj2 + 1`` per site, ordered by
+            site index (0-based list position).
+        """
+
+        num_components = 2 * sub_spec["twoj2"] + 1
+
+        vectors = []
+        with open(path) as fort21_file:
+            for line_number, line in enumerate(fort21_file, start=1):
+                tokens = line.split()
+                if not tokens:
+                    # Skip blank lines so a trailing newline does not
+                    #   become a spurious zero-length site.
+                    continue
+                if len(tokens) < num_components:
+                    raise ValueError(
+                        f"{path}:{line_number}: expected at least "
+                        f"{num_components} bispectrum components "
+                        f"(2 * twoj2 + 1) but found {len(tokens)}")
+                vectors.append(
+                    [float(token)
+                     for token in tokens[:num_components]])
+        return vectors
+
+    def distance(self, vector_a, vector_b):
+        """Euclidean (L2) distance between two bispectrum vectors.
+
+        Symmetric and cheap, and consistent with the element-wise mean
+        used by :meth:`representative`: the mean is the point that
+        minimizes the summed squared L2 distance to its members, so the
+        representative sits at the center of the metric this distance
+        defines.  The two vectors must share a length (the same
+        ``sub_spec`` produced them); a mismatch is a hard error rather
+        than a silently truncated comparison.
+        """
+
+        if len(vector_a) != len(vector_b):
+            raise ValueError(
+                f"bispectrum distance over vectors of unequal length "
+                f"{len(vector_a)} and {len(vector_b)}; they must come "
+                f"from the same sub_spec")
+        return math.dist(vector_a, vector_b)
+
+    def representative(self, members):
+        """Collapse a species' member vectors into one representative: the
+        element-wise arithmetic mean (DESIGN 5.6.5, ARCHITECTURE 8.9).
+
+        Bispectrum species group atoms whose environments are *similar*,
+        not identical, so the members scatter around a center; the mean is
+        the order-independent summary that speaks for the whole group --
+        no single atom is privileged.  All members share one length
+        because they come from one bootstrap run under one ``sub_spec``,
+        so the mean is well-defined slot by slot.
+        """
+
+        if not members:
+            raise ValueError(
+                "BispecMatcher.representative needs at least one member")
+        num_members = len(members)
+        num_components = len(members[0])
+        return [sum(member[slot] for member in members) / num_members
+                for slot in range(num_components)]
+
+    def build_payload(self, vector):
+        """Serialize one bispectrum vector into the stored record payload
+        (DESIGN 5.2 / 5.4): the components live under the ``values`` key."""
+
+        return {"values": list(vector)}
+
+    def extract_query_vector(self, payload):
+        """Read a stored bispectrum vector back out of a record payload
+        (DESIGN 5.4).  Bispectrum records keep it under ``values``."""
+
+        return payload["values"]
 
 
 # The registry the species pass and the producer consult by manifest

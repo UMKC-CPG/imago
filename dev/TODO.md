@@ -1544,7 +1544,7 @@ shipped.
   workflow.  New test_makeinput_reduce.py adds two
   hand-traced regression fixtures plus matcher-surface
   unit tests; full suite 648 passed.
-- [ ] C55. makeinput.py: add `BispecMatcher` class
+- [x] C55. makeinput.py: add `BispecMatcher` class
   with `needs_loen_run = true`.  Implement
   `to_loen_input(sub_spec)` returning the full LOEN
   parameter dict per DESIGN 5.10.5 (`loenCode`,
@@ -1559,6 +1559,17 @@ shipped.
   element-wise mean (ARCHITECTURE 8.9).  Reject the
   optional `by_element` sub_spec key with a clear
   "not yet implemented" error (placeholder for C62).
+  DONE: `to_loen_input` rejects `by_element` (the
+  guard C62 will replace), requires `twoj1`/`twoj2`,
+  defaults the other three; `parse_loen_output` reads
+  the leading `2*twoj2+1` floats per row and refuses a
+  short row; `distance` is L2 (rejects unequal length);
+  `representative` is the element-wise mean (rejects
+  empty); also added `build_payload`/
+  `extract_query_vector` (the `values` field) to
+  complete the protocol surface.  14 unit tests in
+  `test_makeinput_bispec.py`.  The bootstrap entry
+  point `compute_query` stays inherited (it is C58).
 - [ ] C56. makeinput.py: add `name=NAME` keyword to
   the `-target` and `-block` argparse handlers.
   Validate uniqueness across the run; store the name
