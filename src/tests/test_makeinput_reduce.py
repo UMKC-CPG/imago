@@ -34,6 +34,7 @@ structure, so the tests stay pure and fast.
 """
 
 import math
+import os
 import types
 
 import pytest
@@ -179,6 +180,139 @@ def test_group_reduce_splits_distinct_environments(tmp_path,
     assert settings.atom_species_id == [None, 1, 2, 1, 2]
     assert settings.num_species[1] == 2
     assert settings.num_species[2] == 2
+
+
+# Four equivalent Si atoms in two pairs: each atom's nearest neighbor is
+# another Si at 2.0 Angstrom (atoms 1-2 pair, atoms 3-4 pair), so all four
+# see an identical single-Si shell and would normally collapse to one
+# species.  Used by the scope tests, where only part of the cell is
+# regrouped.
+_FOUR_EQUIVALENT_SI = [
+    [None, None, None, None, None],
+    [None, 0.0,  2.0,  4.0,  4.0],   # atom 1 -> nn atom 2 at 2.0
+    [None, 2.0,  0.0,  4.0,  4.0],   # atom 2 -> nn atom 1 at 2.0
+    [None, 4.0,  4.0,  0.0,  2.0],   # atom 3 -> nn atom 4 at 2.0
+    [None, 4.0,  4.0,  2.0,  0.0],   # atom 4 -> nn atom 3 at 2.0
+]
+
+
+def _scoped_spec(scope, complement=False):
+    spec = dict(_ONE_SHELL)
+    spec["scope"] = scope
+    spec["scope_complement"] = complement
+    return spec
+
+
+def test_group_reduce_scope_regroups_only_inside_region(
+        tmp_path, monkeypatch):
+    """``scope=NAME`` regroups only the atoms inside region NAME; the
+    rest keep the species an earlier flag gave them, and the new species
+    are offset past those so the two sets never collide (DESIGN 5.6.4)."""
+
+    monkeypatch.chdir(tmp_path)
+    settings, sc = _make_reduce_state(
+        _FOUR_EQUIVALENT_SI,
+        element_id=[None, 1, 1, 1, 1],
+        element_name=[None, "Si", "Si", "Si", "Si"],
+        species_id=[None, 1, 1, 1, 1],          # all start at species 1
+        reduce_spec=_scoped_spec("core"),
+    )
+    settings.named_regions = {"core": {1, 2}}
+
+    makeinput.group_reduce(settings, sc, 0)
+
+    # Atoms 1,2 (in region) regroup to one species, offset past the
+    #   species 1 that the preserved atoms 3,4 still carry -> species 2.
+    assert settings.atom_species_id == [None, 2, 2, 1, 1]
+    assert settings.num_species[1] == 2
+
+
+def test_group_reduce_scope_complement_regroups_outside_region(
+        tmp_path, monkeypatch):
+    """``scope=~NAME`` regroups only the atoms OUTSIDE region NAME."""
+
+    monkeypatch.chdir(tmp_path)
+    settings, sc = _make_reduce_state(
+        _FOUR_EQUIVALENT_SI,
+        element_id=[None, 1, 1, 1, 1],
+        element_name=[None, "Si", "Si", "Si", "Si"],
+        species_id=[None, 1, 1, 1, 1],
+        reduce_spec=_scoped_spec("core", complement=True),
+    )
+    settings.named_regions = {"core": {1, 2}}
+
+    makeinput.group_reduce(settings, sc, 0)
+
+    # The complement {3,4} regroups (offset past the preserved 1,2's
+    #   species 1 -> species 2); atoms 1,2 are left untouched.
+    assert settings.atom_species_id == [None, 1, 1, 2, 2]
+    assert settings.num_species[1] == 2
+
+
+def test_group_reduce_scope_unknown_region_is_fatal(
+        tmp_path, monkeypatch):
+    """A scope naming a region no earlier flag defined is a contract
+    fault and raises rather than silently regrouping nothing."""
+
+    monkeypatch.chdir(tmp_path)
+    settings, sc = _make_reduce_state(
+        _FOUR_EQUIVALENT_SI,
+        element_id=[None, 1, 1, 1, 1],
+        element_name=[None, "Si", "Si", "Si", "Si"],
+        species_id=[None, 1, 1, 1, 1],
+        reduce_spec=_scoped_spec("nope"),
+    )
+    settings.named_regions = {"core": {1, 2}}
+
+    with pytest.raises(makeinput.MakeinputError, match="nope"):
+        makeinput.group_reduce(settings, sc, 0)
+
+
+def _bare_settings():
+    """A ScriptSettings with just the grouping lists the sub-option
+    parsers append to, bypassing the heavy __init__."""
+    settings = makeinput.ScriptSettings.__new__(makeinput.ScriptSettings)
+    settings.reduces = []
+    settings.targets = []
+    settings.blocks = []
+    settings.methods = []
+    return settings
+
+
+def test_parse_reduce_scope_tokens():
+    """``-reduce`` accepts ``scope=NAME`` and ``scope=~NAME``, recording
+    the region name and whether the complement was requested (the
+    parsers load rc defaults, so this needs $IMAGO_RC)."""
+    if not os.getenv("IMAGO_RC"):
+        pytest.skip("$IMAGO_RC not set")
+    settings = _bare_settings()
+
+    settings._parse_reduce(["-level", "2", "scope=core"])
+    assert settings.reduces[0]["scope"] == "core"
+    assert settings.reduces[0]["scope_complement"] is False
+
+    settings._parse_reduce(["scope=~core"])
+    assert settings.reduces[1]["scope"] == "core"
+    assert settings.reduces[1]["scope_complement"] is True
+
+    # Omitting scope leaves it None -- the whole-structure default.
+    settings._parse_reduce(["-thick", "0.2"])
+    assert settings.reduces[2]["scope"] is None
+
+
+def test_parse_target_and_block_name_tokens():
+    """``-target``/``-block`` accept ``name=NAME``, recording the region
+    label a later ``-reduce scope=`` can reference."""
+    if not os.getenv("IMAGO_RC"):
+        pytest.skip("$IMAGO_RC not set")
+    settings = _bare_settings()
+
+    settings._parse_target(["-atom", "5", "-sphere", "3.0", "name=core"])
+    assert settings.targets[0]["name"] == "core"
+
+    settings._parse_block(["name=slab", "-abc",
+                           "0", "a", "0", "b", "0", "2.5"])
+    assert settings.blocks[0]["name"] == "slab"
 
 
 def test_group_reduce_rejects_non_species_op(tmp_path, monkeypatch):

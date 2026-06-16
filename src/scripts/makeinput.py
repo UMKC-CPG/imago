@@ -382,6 +382,11 @@ class ScriptSettings:
         self.reduces = []       # list of dicts, one per -reduce invocation
         self.targets = []       # list of dicts, one per -target invocation
         self.blocks = []        # list of dicts, one per -block invocation
+        # Named spatial regions: region name -> set of atom indices the
+        #   region encloses.  A -target/-block name=NAME records the atoms
+        #   it selects here, and a later -reduce scope=NAME / scope=~NAME
+        #   reads them to restrict its regrouping (DESIGN 5.6.4).
+        self.named_regions = {}
 
         # XANES.
         self.xanes = rc["xanes"]
@@ -949,7 +954,9 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
                             nargs=ap.REMAINDER, default=None,
                             help="Target grouping: group atoms near a point.  "
                                  "Sub-opts: -atom/-atxyz/-atabc, -sphere, "
-                                 "-zone, -operand, -relate.  Repeatable.")
+                                 "-zone, -operand, -relate, name=NAME (label "
+                                 "the sphere region for a later -reduce "
+                                 "scope=).  Repeatable.")
         # The -block option groups atoms within a 3D slab defined by
         # from/to values along each lattice direction.  Sub-options:
         #   -abc fromA toA fromB toB fromC toC
@@ -961,8 +968,9 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
         parser.add_argument("-block", dest="block", action="append",
                             nargs=ap.REMAINDER, default=None,
                             help="Block grouping: group atoms in a 3D slab.  "
-                                 "Sub-opts: -abc, -zone, -operand, -relate.  "
-                                 "Repeatable.")
+                                 "Sub-opts: -abc, -zone, -operand, -relate, "
+                                 "name=NAME (label the slab region for a "
+                                 "later -reduce scope=).  Repeatable.")
         # The -reduce option groups atoms by local-environment similarity
         # using concentric spherical shells.  Sub-options:
         #   -level N        Number of neighbor shells (default 2).
@@ -971,14 +979,18 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
         #   -operand X      species (default) or type.
         #   -tolerance D    Distance match threshold in Ang (default 0.05).
         #   -selection S    Atom subset (0=all, default).
+        #   scope=NAME      Regroup only atoms inside the named -target/
+        #                   -block region; scope=~NAME regroups only those
+        #                   outside it.  Default: the whole structure.
         # This method only makes species out of elements (not types out of
         # species).  It has no zone/relation parameters.
         parser.add_argument("-reduce", dest="reduce", action="append",
                             nargs=ap.REMAINDER, default=None,
                             help="Reduce grouping: group by local-environment "
                                  "similarity.  Sub-opts: -level, -thick, "
-                                 "-cutoff, -operand, -tolerance, -selection.  "
-                                 "Repeatable.")
+                                 "-cutoff, -operand, -tolerance, -selection, "
+                                 "scope=NAME/scope=~NAME (restrict to a named "
+                                 "region).  Repeatable.")
 
         # ---- XANES ----
         # The -xanes option causes the script to generate one set of input
@@ -1321,6 +1333,11 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             "op":        rc["reduce_op"],
             "tolerance": rc["reduce_tolerance"],
             "selection": rc["reduce_selection"],
+            # Scope restriction (DESIGN 5.6.4): the name of a -target /
+            #   -block region to regroup within, None for the whole
+            #   structure; scope_complement True regroups OUTSIDE it.
+            "scope":            None,
+            "scope_complement": False,
         }
         i = 0
         while i < len(tokens):
@@ -1337,6 +1354,12 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
                 i += 1; r["tolerance"] = float(tokens[i])
             elif tag == "-selection":
                 i += 1; r["selection"] = int(tokens[i])
+            elif tag.startswith("scope="):
+                # A single token "scope=NAME" or "scope=~NAME"; the
+                #   leading ~ selects the region's complement.
+                value = tag[len("scope="):]
+                r["scope_complement"] = value.startswith("~")
+                r["scope"] = value[1:] if value.startswith("~") else value
             else:
                 break
             i += 1
@@ -1354,12 +1377,15 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             "relation": rc["target_relation"],
             "loc":      None,
             "loc_type": None,   # 1=atom, 2=xyz, 3=abc
+            "name":     None,   # region name for a later scope= reference
         }
         i = 0
         while i < len(tokens):
             tag = tokens[i]
             if tag == "-atom":
                 i += 1; t["loc"] = int(tokens[i]); t["loc_type"] = 1
+            elif tag.startswith("name="):
+                t["name"] = tag[len("name="):]
             elif tag == "-atxyz":
                 t["loc"] = [float(tokens[i+1]), float(tokens[i+2]),
                             float(tokens[i+3])]
@@ -1391,11 +1417,14 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             "op":       rc["block_op"],
             "relation": rc["block_relation"],
             "borders":  None,   # [[from_a,to_a],[from_b,to_b],[from_c,to_c]]
+            "name":     None,   # region name for a later scope= reference
         }
         i = 0
         while i < len(tokens):
             tag = tokens[i]
-            if tag == "-abc":
+            if tag.startswith("name="):
+                b["name"] = tag[len("name="):]
+            elif tag == "-abc":
                 b["borders"] = [
                     [tokens[i+1], tokens[i+2]],
                     [tokens[i+3], tokens[i+4]],
@@ -2400,6 +2429,11 @@ def group_block(settings, sc, block_idx):
     # (axis) and inner (from/to) dimensions, so we bridge with
     # ``axis - 1`` on every border lookup.  This preserves Perl's
     # 1-indexed access into ``$directABC_ref->[$atom][1..3]``.
+    # Collect the atoms geometrically inside the block so a later
+    #   -reduce scope= can restrict its regrouping to (or outside) this
+    #   region (DESIGN 5.6.4).
+    region_atoms = set()
+
     for atom in range(1, settings.num_atoms + 1):
         abc = sc.direct_abc[atom]  # [None, a, b, c]
 
@@ -2413,12 +2447,18 @@ def group_block(settings, sc, block_idx):
                 inside = False
                 break
         status = 1 if inside else 0
+        if inside:
+            region_atoms.add(atom)
 
         compare_status_and_request(settings, status, zone, relation, op,
                                    atom, track_flag)
 
     # Finalise "alike" counts.
     update_from_track_flag(settings, relation, op, track_flag)
+
+    # Register the named region for any later scope= reference.
+    if block["name"] is not None:
+        settings.named_regions[block["name"]] = region_atoms
 
 
 def group_target(settings, sc, target_idx):
@@ -2455,6 +2495,12 @@ def group_target(settings, sc, target_idx):
     # matrix row is num_atoms + target_idx + 1.
     target_row = settings.num_atoms + target_idx + 1
 
+    # Collect the atoms geometrically inside the sphere so a later
+    #   -reduce scope= can restrict its regrouping to (or outside) this
+    #   region (DESIGN 5.6.4).  The region is the geometric set, recorded
+    #   independently of the zone/relation/op grouping logic below.
+    region_atoms = set()
+
     for atom in range(1, settings.num_atoms + 1):
         current_distance = sc.min_dist[target_row][atom]
 
@@ -2462,6 +2508,7 @@ def group_target(settings, sc, target_idx):
         # within the specified radius.
         if current_distance <= radius:
             status = 1
+            region_atoms.add(atom)
         else:
             status = 0
 
@@ -2470,6 +2517,39 @@ def group_target(settings, sc, target_idx):
 
     # Finalise "alike" counts.
     update_from_track_flag(settings, relation, op, track_flag)
+
+    # Register the named region for any later scope= reference.
+    if target["name"] is not None:
+        settings.named_regions[target["name"]] = region_atoms
+
+
+def _resolve_reduce_scope(settings, r):
+    """Resolve a reduce flag's ``scope=`` into the set of in-scope atom
+    indices, or ``None`` for the whole structure (DESIGN 5.6.4).
+
+    ``scope=NAME`` restricts the regrouping to the atoms of the region
+    ``NAME`` that an earlier ``-target``/``-block name=`` defined;
+    ``scope=~NAME`` restricts it to the atoms *outside* that region; no
+    scope at all means every atom.  A scope naming a region no earlier
+    flag defined is a contract fault and raises (rather than silently
+    regrouping nothing or everything), which would mask a typo or a
+    flag-ordering mistake.
+    """
+
+    scope_name = r.get("scope")
+    if scope_name is None:
+        return None
+    regions = settings.named_regions
+    if scope_name not in regions:
+        raise MakeinputError(
+            f"-reduce scope names region {scope_name!r}, which no earlier "
+            f"-target/-block name= defined; known regions: "
+            f"{sorted(regions)}")
+    region = regions[scope_name]
+    if r.get("scope_complement"):
+        return {atom for atom in range(1, settings.num_atoms + 1)
+                if atom not in region}
+    return set(region)
 
 
 def group_reduce(settings, sc, reduce_idx):
@@ -2634,18 +2714,32 @@ def group_reduce(settings, sc, reduce_idx):
     )
     fingerprints = matcher.compute_query(structure, r)
 
-    # Record each atom's reduce fingerprint and the descriptor's
+    # Determine the in-scope atom set (DESIGN 5.6.4).  An unscoped reduce
+    #   regroups every atom; a scoped one (scope=NAME / scope=~NAME)
+    #   regroups only the atoms inside, or outside, a region an earlier
+    #   -target/-block name= defined, leaving the rest with the species an
+    #   earlier flag gave them.  None means "all atoms".
+    scope_atoms = _resolve_reduce_scope(settings, r)
+
+    # Record each in-scope atom's reduce fingerprint and the descriptor's
     #   defining parameters so the per-species potential pick (DESIGN
     #   5.6.5 precedence 2, in _obtain_pot_info) can match a species'
     #   environment against the augmented database without recomputing.
     #   The fingerprints are kept per ATOM, not per species, so they
     #   survive the species renumbering relax_group does after this:
     #   intra-species reduce fingerprints are identical by construction,
-    #   so any member of a species is an exact representative of it.  The
-    #   stored sub_spec carries only the four descriptor-defining keys
-    #   (the same set a manifest reduce fingerprint declares), so it
-    #   compares equal to an entry's recorded sub_spec under rule 8.
-    settings.atom_reduce_fingerprint = list(fingerprints)
+    #   so any member of a species is an exact representative of it.  Only
+    #   in-scope atoms are recorded -- a species an out-of-scope position
+    #   flag formed carries no reduce fingerprint and so takes the default
+    #   potential, not an environment match.  The stored sub_spec carries
+    #   only the four descriptor-defining keys (the same set a manifest
+    #   reduce fingerprint declares), so it compares equal to an entry's
+    #   recorded sub_spec under rule 8.
+    if getattr(settings, "atom_reduce_fingerprint", None) is None:
+        settings.atom_reduce_fingerprint = [None] * (num_atoms + 1)
+    for atom in range(1, num_atoms + 1):
+        if scope_atoms is None or atom in scope_atoms:
+            settings.atom_reduce_fingerprint[atom] = fingerprints[atom]
     settings.reduce_match_sub_spec = {
         key: r[key] for key in ("level", "thick", "cutoff", "tolerance")}
 
@@ -2654,36 +2748,39 @@ def group_reduce(settings, sc, reduce_idx):
 
     # ==================================================================
     # Assign species from the shell-code fingerprints.
-    #
-    # Walk the atoms in order.  Each atom that is not yet assigned starts
-    # a new species ("reduction atom", RA); every later atom whose reduce
-    # distance to it is zero -- i.e. it passes every equivalence test --
-    # joins that species.  This single-pass assignment is makeinput's own
-    # workflow; the shell-build and the equivalence tests it relies on now
-    # live solely in ReduceMatcher (compute_query and distance).
     # ==================================================================
 
-    # Initialize the temporary per-atom species assignment (0 = not yet
-    #   assigned) and the per-element species counts.
+    # The temporary per-atom species assignment and per-element species
+    #   counts.  When a scope is set, out-of-scope atoms keep the species
+    #   an earlier flag assigned (seeded here); in-scope atoms are
+    #   regrouped below.
     temp_atom_species_id = [0] * (num_atoms + 1)
     temp_num_species = [0] * (num_elements + 1)
+    if scope_atoms is not None:
+        for atom in range(1, num_atoms + 1):
+            if atom not in scope_atoms:
+                temp_atom_species_id[atom] = settings.atom_species_id[atom]
 
-    # Clear the type counts — they will be re-initialized to 1 after
-    # the new species assignments are finalized.
+    # Clear the type counts — re-initialized to 1 after the new species
+    # assignments are finalized.
     settings.num_types = []
 
-    # Bucket the atoms of each element into species by their shell-code
-    #   fingerprints.  bucket_by_fingerprint (DESIGN 5.6.4) is the single
-    #   grouping routine the makegroups bispectrum flow also uses, so the
-    #   two cannot drift apart.  Partitioning by element first keeps each
-    #   element's species numbered from 1 and reflects that the reduce
-    #   distance returns infinity across elements (cross-element atoms
-    #   never merge).  The bucket's seed is the species' reduction atom:
-    #   the routine compares a candidate as distance(seed, candidate) and
-    #   ReduceMatcher.representative keeps the seed as the representative,
-    #   so this reproduces the historical reduction-atom/comparison-atom
-    #   pass -- including the directional, seed-as-reference tolerance
-    #   band -- exactly.
+    # Bucket the in-scope atoms of each element into species by their
+    #   shell-code fingerprints.  bucket_by_fingerprint (DESIGN 5.6.4) is
+    #   the single grouping routine the makegroups bispectrum flow also
+    #   uses, so the two cannot drift apart.  Partitioning by element
+    #   first keeps each element's species numbered from 1 and reflects
+    #   that the reduce distance returns infinity across elements
+    #   (cross-element atoms never merge).  The bucket's seed is the
+    #   species' reduction atom: the routine compares a candidate as
+    #   distance(seed, candidate) and ReduceMatcher.representative keeps
+    #   the seed as the representative, so this reproduces the historical
+    #   reduction-atom/comparison-atom pass -- including its directional,
+    #   seed-as-reference tolerance band -- exactly.  When a scope leaves
+    #   some of an element's atoms out, the new species are offset past
+    #   the highest species those out-of-scope atoms already hold so the
+    #   two sets never collide; relax_group compresses the numbering after
+    #   the pass.
     atoms_of_element = {}
     for atom in range(1, num_atoms + 1):
         atoms_of_element.setdefault(
@@ -2691,15 +2788,30 @@ def group_reduce(settings, sc, reduce_idx):
 
     for element in range(1, num_elements + 1):
         element_atoms = atoms_of_element.get(element, [])
-        if not element_atoms:
+        in_scope = [atom for atom in element_atoms
+                    if scope_atoms is None or atom in scope_atoms]
+        if not in_scope:
+            # No atom of this element is regrouped; its species count is
+            #   whatever the preserved out-of-scope assignments use.
+            temp_num_species[element] = max(
+                (temp_atom_species_id[atom] for atom in element_atoms),
+                default=0)
             continue
+        in_scope_set = set(in_scope)
+        # Offset the new species past any the out-of-scope atoms of this
+        #   element already carry (0 in the unscoped case).
+        offset = max(
+            (temp_atom_species_id[atom] for atom in element_atoms
+             if atom not in in_scope_set), default=0)
         bucket_of = bucket_by_fingerprint(
-            [fingerprints[atom] for atom in element_atoms],
+            [fingerprints[atom] for atom in in_scope],
             matcher, matcher.default_similarity_floor)
-        temp_num_species[element] = max(bucket_of) + 1
-        for position, atom in enumerate(element_atoms):
-            # bucket_of is 0-based per element; species numbers start at 1.
-            temp_atom_species_id[atom] = bucket_of[position] + 1
+        for position, atom in enumerate(in_scope):
+            # bucket_of is 0-based; species numbers start after the offset.
+            temp_atom_species_id[atom] = offset + bucket_of[position] + 1
+        temp_num_species[element] = max(
+            (temp_atom_species_id[atom] for atom in element_atoms),
+            default=0)
 
     # Write the reduceSummary diagnostic: one block per species, keyed by
     #   its reduction atom -- the first atom, in atom order, carrying that

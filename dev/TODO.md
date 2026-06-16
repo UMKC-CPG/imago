@@ -1634,7 +1634,7 @@ shipped.
   `fort.21` -- `_find_loen_descriptor` globs `*loen*.plot`
   and raises if absent (absence = the loen run failed).
   Also confirms the C89 enriched fort.21 format live.
-- [ ] C59. makeinput.py: implement the Phase-2 species
+- [x] C59. makeinput.py: implement the Phase-2 species
   pass (DESIGN 5.6.4-5.6.7) for the schemes makeinput
   still owns -- position-based (`-target`, `-block`) and
   reduce.  Bucket reduce atoms by fingerprint distance
@@ -1646,6 +1646,25 @@ shipped.
   Bispectrum grouping and bispectrum potential-picking
   are NOT here -- makegroups (C58) / the orchestrator do
   them and hand makeinput explicit types (and `-pot`).
+  DONE 2026-06-16 in two commits.  Part 1 (08d87ca): the
+  matcher protocol gained `match_distance` (reduce
+  element-only per DESIGN 5.2; bispectrum L2);
+  `bucket_by_fingerprint` fixed to compare
+  distance(representative, candidate) so the asymmetric
+  reduce distance keeps the seed as reference; precedence
+  2 (fingerprint match) added to `_select_augmented_pot_
+  entry`; `_obtain_pot_info` picks per (element, species);
+  `group_reduce` stores per-atom fingerprints + sub_spec
+  and now buckets via the shared helper (retiring its own
+  loop).  Part 2 (this commit): `scope=NAME`/`scope=~NAME`
+  on `-reduce` + `name=NAME` on `-target`/`-block` with a
+  `settings.named_regions` registry, so reduce regroups
+  only inside/outside a position region (new species
+  offset past preserved out-of-scope ones; relax_group
+  compresses).  This also finishes C57's deferred
+  `scope=NAME` reduce handler.  REMAINING (-> C61): a full
+  end-to-end "small reference -> deterministic imago.dat"
+  test; the unit-level pieces are covered.
 - [~] C60. build_initial_potentials.py: bump the
   manifest reader to v2 (new `default` per entry,
   new `[[reference_solid.entry.fingerprint]]`
