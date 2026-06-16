@@ -329,14 +329,16 @@ def _resolve_sibling(name):
         "run the loen sequence.")
 
 
-def _loen_input_values(matcher, sub_spec):
+def loen_input_values(matcher, sub_spec):
     """Turn a bispectrum sub_spec into the six -loeninput values.
 
     ``to_loen_input`` is the single mapping both the producer and this
     orchestrator share (DESIGN 5.10.5), so the LOEN block makeinput writes
     matches the descriptor contract.  The values are emitted in
     LOEN-block order -- method code, the 2j1/2j2 pair, max_neigh, cutoff,
-    angleSqueeze -- as strings ready for the makeinput command line.
+    angleSqueeze -- as strings ready for the makeinput command line (the
+    producer's build_loen_units imports this so its loen units and this
+    grouping flow emit identical LOEN blocks).
     """
 
     params = matcher.to_loen_input(sub_spec)
@@ -375,7 +377,7 @@ def _run_loen(work_dir):
     subprocess.run(command, cwd=work_dir, check=True)
 
 
-def _find_loen_descriptor(work_dir):
+def find_loen_descriptor(work_dir):
     """Locate the bispectrum descriptor file the loen run produced.
 
     The loen pass writes its descriptor table to Fortran unit 21, which
@@ -456,12 +458,12 @@ def group_by_bispectrum(skeleton_path, sub_spec, similarity_floor=None,
 
     # 3-4. First makeinput (ungrouped, carrying the LOEN params), then the
     #      loen pass that computes the fingerprints.
-    _run_makeinput(work_dir, _loen_input_values(matcher, sub_spec))
+    _run_makeinput(work_dir, loen_input_values(matcher, sub_spec))
     _run_loen(work_dir)
 
     # 5. Read the self-describing loen descriptor into per-site records.
     rows = matcher.parse_loen_output(
-        _find_loen_descriptor(work_dir), sub_spec)
+        find_loen_descriptor(work_dir), sub_spec)
 
     # 6. Bucket each element's fingerprints into species.
     new_species_by_key = _assign_species_from_rows(

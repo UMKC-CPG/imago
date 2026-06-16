@@ -27,7 +27,7 @@ from makegroups import (
     _assign_species_from_rows,
     _rewrite_skeleton_species,
     _require_p1,
-    _loen_input_values,
+    loen_input_values,
     group_by_bispectrum,
 )
 from matchers import MATCHERS, BispecMatcher, LoenSite
@@ -213,7 +213,7 @@ def test_require_p1_rejects_a_nonunit_supercell():
 
 
 # ==============================================================
-#  _loen_input_values -- the sub_spec -> CLI mapping
+#  loen_input_values -- the sub_spec -> CLI mapping
 # ==============================================================
 
 def test_loen_input_values_in_block_order():
@@ -222,7 +222,7 @@ def test_loen_input_values_in_block_order():
     max_neigh, cutoff, angleSqueeze.  Unspecified parameters take the
     descriptor-contract defaults."""
     matcher = BispecMatcher()
-    values = _loen_input_values(matcher, {"twoj1": 6, "twoj2": 4})
+    values = loen_input_values(matcher, {"twoj1": 6, "twoj2": 4})
     assert values == ["1", "6", "4", "50", "9.0", "0.85"]
 
 
@@ -249,7 +249,7 @@ def _fake_loen_writing_descriptor(work_dir):
     """Stand-in for _run_loen: drop the descriptor file the real engine
     leaves behind.  imago.py renames the loen fort.21 to the
     ``<edge>_loen<basis>.plot`` 1D-profile output, so the fake uses that
-    naming (``gs_loen-fb.plot``) -- the exact name _find_loen_descriptor
+    naming (``gs_loen-fb.plot``) -- the exact name find_loen_descriptor
     globs for, confirmed against a live run."""
     with open(os.path.join(work_dir, "gs_loen-fb.plot"), "w") as handle:
         handle.write(_FAKE_LOEN_DESCRIPTOR)

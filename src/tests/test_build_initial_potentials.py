@@ -898,10 +898,56 @@ def test_make_imago_provenance_satisfies_schema():
     ipdb.require_provenance(prov, "x.toml", "default_solid")
 
 
-def test_build_loen_units_still_deferred():
-    # The loen-side (bispectrum) descriptor needs the C55 matcher
-    #   body and the C58 bootstrap, so no loen units are dispatched.
-    assert build_loen_units(_ref(), "au.skel") == []
+_BISPEC_DECL = ManifestFingerprint(
+    method="bispectrum",
+    sub_spec={"twoj1": 4, "twoj2": 4, "cutoff": 9.0})
+
+
+def test_build_loen_units_skips_python_side():
+    # Python-side (reduce) declarations need no dispatched unit -- they
+    #   are computed in process during the harvest -- and the default
+    #   entry declares no fingerprints at all, so nothing is built.
+    assert build_loen_units(_ref(), "au.skel", {}) == []
+
+
+def test_build_loen_units_builds_one_run_per_subspec():
+    """A bispectrum declaration yields one structure-only loen unit:
+    kind "fingerprint" (so the convergence harvest skips it), the job
+    overridden to ``loen``/``-scf no``, the LOEN block carried via
+    ``-loeninput``, and a calc tag encoding the method and every
+    sub_spec key.  Two entries that share the sub_spec collapse to a
+    single unit -- one descriptor table covers every site."""
+    ref = _ref(entries=[
+        ReferenceEntry(element="Si", atom_site=1, label="a",
+                       default=True, description="d",
+                       fingerprints=[_BISPEC_DECL]),
+        ReferenceEntry(element="O", atom_site=2, label="b",
+                       default=False, description="d",
+                       fingerprints=[_BISPEC_DECL])])
+    options = {"xccode": 100, "imago_commit": "abc", "converg": 1.0e-6}
+    units = build_loen_units(ref, "si.skel", options)
+
+    assert len(units) == 1
+    unit = units[0]
+    assert unit.kind == "fingerprint"
+    assert unit.id == "au_fcc"
+    assert unit.structure == "si.skel"
+    assert unit.options["job"] == "loen"
+    assert unit.options["scf_basis"] == "no"
+    assert unit.options["loeninput"] == [
+        "1", "4", "4", "50", "9.0", "0.85"]
+    # cutoff=9.0 formats slug-safe to "9"; keys are alphabetical.
+    assert unit.calc == ("loen-bispectrum-cutoff_9-twoj1_4-twoj2_4",)
+    # The base build options survive on the copy (not mutated away).
+    assert unit.options["xccode"] == 100
+
+
+def test_sub_spec_slug_is_slug_safe_and_ordered():
+    # Floats format %.6g and any forbidden character (a dot) is
+    #   sanitized to "_", so the tag is always a valid run-dir slug.
+    slug = bip._sub_spec_slug(
+        {"twoj2": 4, "cutoff": 7.5, "twoj1": 8})
+    assert slug == "cutoff_7_5-twoj1_8-twoj2_4"
 
 
 def test_harvest_fingerprints_no_declarations_is_empty():
@@ -983,16 +1029,76 @@ def test_harvest_fingerprints_reduce(tmp_path, monkeypatch):
         }}
 
 
-def test_harvest_fingerprints_refuses_loen_side(monkeypatch):
-    """A Fortran-side (bispectrum) declaration raises rather than
-    silently dropping a fingerprint: the loen harvest is C55/C58."""
+def _write_loen_descriptor(tmp_path, reference_id, sub_spec, rows_text):
+    """Create the loen unit's run directory under a flight root and drop
+    a fake ``gs_loen-fb.plot`` descriptor in it, returning the flight.
+    Mirrors what kaleidoscope would have produced for the loen unit
+    build_loen_units dispatched for ``(reference_id, bispectrum,
+    sub_spec)``."""
+    calc_tag = bip._loen_calc_tag("bispectrum", sub_spec)
+    run_dir = tmp_path / "wingbeats" / reference_id / calc_tag
+    run_dir.mkdir(parents=True)
+    header = ("site# element species type_in_species type_flat  "
+              "c0 c1 c2 c3 c4  sum\n")
+    (run_dir / "gs_loen-fb.plot").write_text(header + rows_text)
+    return Flight(root=str(tmp_path), units=[])
+
+
+def test_harvest_fingerprints_loen_side(tmp_path):
+    """A bispectrum declaration harvests the descriptor row of the loen
+    unit kaleidoscope ran: the harvest reconstructs the run dir from the
+    calc tag, finds the ``*loen*.plot`` descriptor, maps atom_site
+    (skeleton) to its dat row via datSkl.map, and wraps that row's
+    vector as a ``values`` payload (DESIGN 5.10.3 / 5.2)."""
+    # datSkl.map: skeleton site 1 -> dat row 2 (Si).
+    dat_skl = tmp_path / "datSkl.map"
+    dat_skl.write_text("DAT SKEL ELEM SPECIES TYPE\n"
+                       "  2    1   Si       1    1\n"
+                       "  1    2   O        1    1\n")
+    result_toml = {"outputs": {"datSkl_map": str(dat_skl)}}
+
+    sub_spec = {"twoj1": 4, "twoj2": 4, "cutoff": 9.0}
+    flight = _write_loen_descriptor(
+        tmp_path, "au_fcc", sub_spec,
+        "1 O  1 1 1   9 9 9 9 9   0\n"
+        "2 Si 1 1 2   1 2 3 4 5   0\n")
+
     spec = ReferenceEntry(
         element="Si", atom_site=1, label="t", default=True,
         description="d",
         fingerprints=[ManifestFingerprint(
-            method="bispectrum", sub_spec={"twoj1": 8, "twoj2": 8})])
-    with pytest.raises(NotImplementedError):
-        harvest_fingerprints(None, _ref(), spec, {})
+            method="bispectrum", sub_spec=sub_spec)])
+    records = harvest_fingerprints(flight, _ref(), spec, result_toml)
+
+    assert len(records) == 1
+    assert records[0].method == "bispectrum"
+    assert records[0].sub_spec == sub_spec
+    # atom_site 1 -> dat row 2 (Si) -> that row's five components.
+    assert records[0].payload == {
+        "values": [1.0, 2.0, 3.0, 4.0, 5.0]}
+
+
+def test_harvest_fingerprints_loen_guards_numbering_desync(tmp_path):
+    """When the descriptor row's self-describing element disagrees with
+    datSkl.map for a site, the numbering has desynced and the loen
+    harvest refuses rather than storing the wrong atom's fingerprint."""
+    dat_skl = tmp_path / "datSkl.map"
+    dat_skl.write_text("DAT SKEL ELEM SPECIES TYPE\n"
+                       "  1    1   Si       1    1\n")   # map says Si
+    result_toml = {"outputs": {"datSkl_map": str(dat_skl)}}
+
+    sub_spec = {"twoj1": 4, "twoj2": 4, "cutoff": 9.0}
+    flight = _write_loen_descriptor(                     # row says O
+        tmp_path, "au_fcc", sub_spec,
+        "1 O 1 1 1   1 2 3 4 5   0\n")
+
+    spec = ReferenceEntry(
+        element="Si", atom_site=1, label="t", default=True,
+        description="d",
+        fingerprints=[ManifestFingerprint(
+            method="bispectrum", sub_spec=sub_spec)])
+    with pytest.raises(ValueError):
+        harvest_fingerprints(flight, _ref(), spec, result_toml)
 
 
 def test_harvest_fingerprints_guards_numbering_desync(

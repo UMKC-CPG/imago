@@ -1665,19 +1665,29 @@ shipped.
   atom_site->dat via datSkl.map, computes the shell
   code with ReduceMatcher, and stores an element-only
   `shell_code` (DESIGN 5.2, species dropped as
-  non-transferable).  REMAINING: the Fortran-side
-  (bispectrum) harvest -- currently refused with
-  NotImplementedError.  This is the PRODUCER's sequential
-  loen flow (DESIGN 5.10, producer half), NOT a nested
-  bootstrap: `build_loen_units` dispatches `-loen -scf no`
-  runs as kaleidoscope units; `harvestLoenFingerprint`
-  reads each enriched `fort.21` (C89) and maps rows to
-  atoms via the row identity columns.  For a non-crystalline
-  reference the producer first groups it with makegroups
-  (C58); for an already-typed crystal it harvests one
-  witness fingerprint per existing type (no grouping).
-  C55 (BispecMatcher body) is DONE; C58 is the makegroups
-  helper, not a makeinput bootstrap.
+  non-transferable).  FORTRAN-SIDE (bispectrum) HARVEST
+  DONE 2026-06-16: `build_loen_units(ref, struct, options)`
+  now builds one structure-only `-loen -scf no` CalcUnit
+  per distinct (method, sub_spec) -- kind="fingerprint"
+  (convergence harvest skips it), job=loen/scf_basis=no,
+  LOEN block via makegroups.loen_input_values, calc tag
+  `loen-<method>-<sub_spec slug>` (slug-safe, %.6g floats).
+  `harvest_loen_fingerprint` reconstructs that run dir from
+  the same tag, finds the `*loen*.plot` descriptor
+  (makegroups.find_loen_descriptor, live-validated),
+  maps atom_site->dat via datSkl.map, guards the row's
+  self-describing element, and wraps the vector via
+  build_payload.  harvest_fingerprints now dispatches
+  per-declaration (reduce in-process / bispectrum from the
+  loen run) sharing one skeleton_to_dat.  This is the
+  WITNESS path (per-entry atom_site = one fingerprint per
+  declared type, no grouping) -- correct for crystalline
+  references.  REMAINING (follow-on): a NON-crystalline
+  reference would need the producer to call
+  makegroups.group_by_bispectrum first (rewrite skeleton
+  -> re-materialize) before harvest; not wired, since the
+  current manifest references are crystalline.  C55 + C58
+  + C89 all DONE; loen seam live-validated via makegroups.
 - [ ] C61. Add end-to-end Phase-2 tests.  For the
   in-makeinput path: a small reference runs through
   reduce bucketing + entry-pick + emit producing a

@@ -112,9 +112,10 @@ import initial_potential_db as ipdb
 import guidance_db
 import guidance_harvest
 from guidance_db import VALID_SYSTEM_TYPES
-from kaleidoscope import Flight, LocalExecutor, SweepRecord, dispatch
+from kaleidoscope import CalcUnit, Flight, LocalExecutor, SweepRecord, \
+    dispatch
 from kaleidoscope.builders.kpoint_convergence import (
-    build_kpoint_convergence)
+    build_kpoint_convergence, standard_key_fields)
 from kaleidoscope.workspace import read_status, toml_line
 # The Phase-2 matcher registry (ARCHITECTURE 8.9) lives in the neutral
 #   matchers module; the fingerprint harvest dispatches reduce
@@ -122,6 +123,13 @@ from kaleidoscope.workspace import read_status, toml_line
 #   structure for those shells.
 from matchers import MATCHERS
 from structure_control import StructureControl
+# makegroups owns the two loen-side helpers the producer shares: the
+#   sub_spec -> -loeninput value mapping (so loen units and the
+#   makegroups grouping flow emit identical LOEN blocks) and the
+#   <edge>_loen<basis>.plot descriptor finder (validated live, DESIGN
+#   5.10.3).  Keeping them in one place stops the producer and
+#   makegroups from drifting on the loen seam.
+import makegroups
 
 
 # ============================================================
@@ -1008,22 +1016,106 @@ def make_producer_options(ref: ReferenceSolid,
     return options
 
 
-def build_loen_units(ref: ReferenceSolid, struct_path: str) -> list:
-    """Structure-only ``imago -loen -scf no`` units, one per
-    Fortran-side fingerprint declaration (PSEUDOCODE 11.4).
+def _slug_safe(text: Any) -> str:
+    """Lowercase ``text`` and replace every character a kaleidoscope
+    slug forbids (anything outside ``[a-z0-9_-]``) with ``_``.
 
-    DEFERRED (C55/C58): the loen-side (bispectrum) descriptor is
-    computed by the Imago Fortran engine, so each Fortran-side
-    declaration needs a dispatched ``-loen -scf no`` unit.  The
-    matcher registry (C54) now exists, but the bispectrum matcher
-    body (C55) and the nested-makeinput loen bootstrap (C58) do not,
-    so the producer dispatches no loen units yet.  Python-side
-    (reduce) fingerprints need no unit -- they are computed in the
-    harvest from the run's expanded structure (see
-    :func:`harvest_fingerprints`).  Returns an empty list, tagged
-    here so the wiring point is obvious when C55/C58 fill it in."""
+    Run-directory components must be slugs (DESIGN 6.2.4), but a
+    sub_spec value formatted for a tag -- a float like ``9.0`` -> ``9``
+    or ``0.85`` -> ``0.85`` -- can carry a dot, so it is sanitized here
+    before it ever reaches the directory name."""
 
-    return []
+    return re.sub(r"[^a-z0-9_-]", "_", str(text).lower())
+
+
+def _sub_spec_slug(sub_spec: dict[str, Any]) -> str:
+    """Deterministic slug for a fingerprint sub_spec (PSEUDOCODE 11.4
+    ``sub_spec_slug``).
+
+    Keys are taken in alphabetical order and joined as ``key_value``
+    segments, hyphen-separated; floats format as ``%.6g`` (long enough
+    to tell apart the parameters humans pick, short enough for a
+    directory name).  Both halves are slug-sanitized.  The same
+    (method, sub_spec) therefore always produces the same slug, so the
+    loen unit a declaration builds (in :func:`build_loen_units`) and the
+    descriptor the harvest reads (in :func:`harvest_loen_fingerprint`)
+    resolve to one and the same run directory."""
+
+    parts = []
+    for key in sorted(sub_spec):
+        value = sub_spec[key]
+        text = f"{value:.6g}" if isinstance(value, float) else str(value)
+        parts.append(f"{_slug_safe(key)}_{_slug_safe(text)}")
+    return "-".join(parts)
+
+
+def _loen_calc_tag(method: str, sub_spec: dict[str, Any]) -> str:
+    """The single ``calc`` directory component of a loen unit (DESIGN
+    6.2.4): ``loen-<method>-<sub_spec slug>``.  Encoding the method and
+    every sub_spec key in the tag means two declarations that differ in
+    any parameter land in different run directories by construction, so
+    one loen run is never reused for the wrong descriptor."""
+
+    return f"loen-{method}-{_sub_spec_slug(sub_spec)}"
+
+
+def build_loen_units(ref: ReferenceSolid, struct_path: str,
+                     options: dict[str, Any]) -> list:
+    """Structure-only ``imago -loen -scf no`` units, one per distinct
+    Fortran-side fingerprint declaration (PSEUDOCODE 11.4; DESIGN 5.10
+    producer half).
+
+    A loen-side (bispectrum) descriptor is computed by the Imago Fortran
+    engine, so each such declaration needs its own dispatched
+    ``-loen -scf no`` run.  The bispectrum is geometry-only, so these
+    runs need no converged SCF -- they share the solid's structure and
+    build options but override the job to ``loen`` and the SCF basis to
+    ``no``, and add the ``-loeninput`` LOEN block that
+    :func:`makegroups.loen_input_values` derives from the declaration's
+    sub_spec (the same mapping the makegroups grouping flow uses, so the
+    descriptors are comparable, DESIGN 5.10.5).
+
+    One run serves every site that shares a (method, sub_spec): the
+    descriptor table holds one row per atom, so declarations are
+    de-duplicated by their calc tag and at most one unit is built per
+    distinct tag.  Each unit is tagged ``kind="fingerprint"`` so the
+    convergence harvest (:func:`pick_converged_unit`, which keeps only
+    ``"convergence"``) ignores it and only the fingerprint harvest reads
+    its descriptor.  Python-side (reduce) declarations need no unit --
+    they are computed in process during the harvest -- so they are
+    skipped here.
+
+    ``options`` is the solid's ``make_producer_options`` dict; the loen
+    overrides are layered on a copy so the convergence units are
+    untouched."""
+
+    units = []
+    seen_tags: set[str] = set()
+    for entry in ref.entries:
+        for declaration in entry.fingerprints:
+            matcher = MATCHERS[declaration.method]()
+            if not matcher.needs_loen_run:
+                continue            # Python-side: harvested in process.
+            calc_tag = _loen_calc_tag(
+                declaration.method, declaration.sub_spec)
+            if calc_tag in seen_tags:
+                continue            # One run already covers this sub_spec.
+            seen_tags.add(calc_tag)
+
+            loen_options = dict(options)
+            loen_options["job"] = "loen"
+            loen_options["scf_basis"] = "no"
+            loen_options["loeninput"] = makegroups.loen_input_values(
+                matcher, declaration.sub_spec)
+            units.append(CalcUnit(
+                id=ref.reference_id,
+                structure=struct_path,
+                options=loen_options,
+                calc=(calc_tag,),
+                kind="fingerprint",
+                key_fields=standard_key_fields(
+                    struct_path, loen_options)))
+    return units
 
 
 def _read_structure_with_distances(structure_path: str,
@@ -1092,55 +1184,112 @@ def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
     element-only, so the stored fingerprint transfers across
     structures (DESIGN 5.2).
 
-    ``flight`` and ``ref`` are accepted for the loen-side (bispectrum)
-    harvest the protocol shares; that path is C55/C58, so a
-    Fortran-side declaration here raises rather than silently
-    dropping a fingerprint the curator asked for."""
+    Each declaration is dispatched by its matcher's family.  Python-side
+    matchers (``reduce``) compute in process from the run's *expanded*
+    full-cell structure (``outputs["structure"]``); Fortran-side
+    matchers (``bispectrum``) read the descriptor of the
+    ``-loen -scf no`` unit ``build_loen_units`` already dispatched for
+    this solid (:func:`harvest_loen_fingerprint`), which is why
+    ``flight`` and ``ref`` are needed.  ``atom_site`` (a skeleton index)
+    is mapped to the run's dat numbering through ``datSkl.map`` once and
+    shared by both families."""
 
     if not spec.fingerprints:
         return []
 
-    # Refuse loen-side declarations: the bispectrum matcher body
-    #   (C55) and the loen bootstrap (C58) are not built, so the
-    #   producer cannot satisfy a Fortran-side fingerprint yet.
-    #   Strict refusal beats silently omitting a declared record.
-    for declaration in spec.fingerprints:
-        if MATCHERS[declaration.method]().needs_loen_run:
-            raise NotImplementedError(
-                f"fingerprint method {declaration.method!r} needs a "
-                f"loen run; the Fortran-side harvest is C55/C58 and "
-                f"is not implemented yet")
-
-    # Every remaining declaration is Python-side (reduce).  Build the
-    #   expanded structure once, sized to the largest cutoff the
-    #   declarations request, and resolve atom_site to its dat row.
-    cutoff = max(declaration.sub_spec["cutoff"]
-                 for declaration in spec.fingerprints)
-    structure = _read_structure_with_distances(
-        result_toml["outputs"]["structure"], cutoff)
+    # atom_site is a skeleton index; the run's structure and descriptor
+    #   are both in sorted (dat) numbering, so resolve it once here and
+    #   reuse the (dat row, element) for every declaration.  The element
+    #   is the cross-check both families guard against.
     skeleton_to_dat = read_skeleton_to_dat_map(result_toml)
+    dat_atom, map_element = skeleton_to_dat[spec.atom_site]
 
-    dat_atom, element = skeleton_to_dat[spec.atom_site]
-    # Guard the numbering assumption: the structure row and the map
-    #   must name the same element, or the expansion and the map have
-    #   desynced and the fingerprint would describe the wrong atom.
-    structure_element = structure.atom_element_name[dat_atom]
-    if structure_element.lower() != element.lower():
-        raise ValueError(
-            f"site {spec.atom_site}: datSkl.map names element "
-            f"{element!r} but the expanded structure row {dat_atom} "
-            f"is {structure_element!r}; numbering desync")
+    # The expanded structure is read only when a Python-side
+    #   declaration needs it -- a loen-only entry never touches it -- and
+    #   then only once, sized to the largest cutoff those declarations
+    #   request (each matcher trims to its own sub_spec cutoff).
+    python_decls = [declaration for declaration in spec.fingerprints
+                    if not MATCHERS[declaration.method]().needs_loen_run]
+    structure = None
+    if python_decls:
+        cutoff = max(declaration.sub_spec["cutoff"]
+                     for declaration in python_decls)
+        structure = _read_structure_with_distances(
+            result_toml["outputs"]["structure"], cutoff)
+        # Guard the numbering assumption: the structure row and the map
+        #   must name the same element, or the expansion and the map
+        #   have desynced and the fingerprint would describe the wrong
+        #   atom.  (The loen branch guards the same way against the
+        #   descriptor's own identity column.)
+        structure_element = structure.atom_element_name[dat_atom]
+        if structure_element.lower() != map_element.lower():
+            raise ValueError(
+                f"site {spec.atom_site}: datSkl.map names element "
+                f"{map_element!r} but the expanded structure row "
+                f"{dat_atom} is {structure_element!r}; numbering desync")
 
     records = []
     for declaration in spec.fingerprints:
         matcher = MATCHERS[declaration.method]()
-        vectors = matcher.compute_query(structure, declaration.sub_spec)
-        payload = matcher.build_payload(vectors[dat_atom])
+        if matcher.needs_loen_run:
+            payload = harvest_loen_fingerprint(
+                flight, ref, dat_atom, map_element, matcher,
+                declaration.sub_spec)
+        else:
+            vectors = matcher.compute_query(
+                structure, declaration.sub_spec)
+            payload = matcher.build_payload(vectors[dat_atom])
         records.append(ipdb.FingerprintRecord(
             method=declaration.method,
             sub_spec=declaration.sub_spec,
             payload=payload))
     return records
+
+
+def harvest_loen_fingerprint(flight: Flight, ref: ReferenceSolid,
+                             dat_atom: int, element: str,
+                             matcher, sub_spec: dict) -> dict:
+    """Read one site's bispectrum payload from its loen unit's
+    descriptor (PSEUDOCODE 11.4 ``harvestLoenFingerprint``).
+
+    No engine run happens here: ``build_loen_units`` already dispatched
+    the ``-loen -scf no`` unit for this ``(solid, method, sub_spec)``,
+    and kaleidoscope's run-reuse cache (DESIGN 6.2.5) owns recompute
+    avoidance.  The unit's run directory is reconstructed from the same
+    calc tag the build used -- ``<root>/wingbeats/<reference_id>/
+    loen-<method>-<slug>`` -- and the descriptor is the
+    ``<edge>_loen<basis>.plot`` file makegroups' finder locates (DESIGN
+    5.10.3, validated against a live run).
+
+    The descriptor table has one row per atom in dat order; ``dat_atom``
+    is the row this site maps to (the caller resolved it through
+    ``datSkl.map``).  The row's self-describing ``element`` column is
+    cross-checked against the map's element so a numbering desync fails
+    loudly rather than storing the wrong atom's fingerprint.  The chosen
+    vector is wrapped through ``matcher.build_payload`` so the on-disk
+    payload field (``values`` for bispectrum) matches what the consumer
+    reads (DESIGN 5.2)."""
+
+    calc_tag = _loen_calc_tag(matcher.name, sub_spec)
+    run_dir = os.path.join(
+        flight.root, "wingbeats", ref.reference_id, calc_tag)
+    descriptor_path = makegroups.find_loen_descriptor(run_dir)
+    rows = matcher.parse_loen_output(descriptor_path, sub_spec)
+
+    rows_by_site = {row.site: row for row in rows}
+    if dat_atom not in rows_by_site:
+        raise ValueError(
+            f"loen descriptor {descriptor_path!r} has no row for dat "
+            f"site {dat_atom} (it holds sites "
+            f"{sorted(rows_by_site)}); the descriptor and the run's "
+            f"numbering have desynced")
+    row = rows_by_site[dat_atom]
+    if row.element.lower() != element.lower():
+        raise ValueError(
+            f"dat site {dat_atom}: datSkl.map names element "
+            f"{element!r} but the loen descriptor row is "
+            f"{row.element!r}; numbering desync")
+    return matcher.build_payload(row.vector)
 
 
 # ============================================================
@@ -1543,7 +1692,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             id=ref.reference_id,
             center=ref.kpoint_spec.get("density"))
         all_units.extend(flight_i.units)
-        all_units.extend(build_loen_units(ref, struct))
+        all_units.extend(build_loen_units(ref, struct, options))
         # Store the plain dict (metadata must be TOML-serializable).
         predictions[ref.reference_id] = asdict(record_i)
 
