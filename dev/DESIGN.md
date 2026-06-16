@@ -8722,3 +8722,134 @@ accumulates.
   ever referenced from the section-7 (convergence) side --
   against the no-cross-reference boundary -- is to be settled
   here, not assumed.
+
+## 9. Parallel Decomposition
+
+### 9.1 Overview and Motivation
+
+This section pins down the data-distribution algorithms for
+parallelizing a single imago calculation across MPI ranks --
+the intra-problem axis of VISION Goal 7, architected in
+ARCHITECTURE 6.5-6.7. It transcribes the block-cyclic scheme
+designed in the sibling upolcao branch onto imago's terms,
+records the work-assignment decision that scheme rests on,
+and specifies the grid load balancer and parallel-I/O
+alignment that are already proven. Backend choices that
+remain open -- which distributed eigensolver, how device
+placement is expressed -- are collected in 9.6 rather than
+committed here, consistent with VISION's intent to keep
+every parallel axis open.
+
+### 9.2 One-Dimensional Grid Load Balance
+
+The real-space site loops in electrostatics and exchange-
+correlation are independent per site, so they parallelize by
+handing each rank a contiguous range of site indices and
+reducing the partial results. Given a quantity `toBalance`
+to divide among `mpiSize` ranks:
+
+```
+jobsPer   = toBalance / mpiSize       (integer divide)
+remainder = mod(toBalance, mpiSize)
+```
+
+Each rank receives `jobsPer` sites, and the highest
+`remainder` ranks each take one additional site so that no
+work is dropped when the division is uneven. The rank then
+loops over its `[initialIdx, finalIdx]` range and the
+partials are combined with `MPI_REDUCE` under `MPI_SUM`.
+This is the `loadBalMPI` algorithm from the sibling branch
+and the lowest-risk parallelism imago can adopt; it is the
+recommended first increment.
+
+### 9.3 Block-Cyclic Matrix Distribution
+
+The interaction-integral and Hamiltonian matrices are
+distributed across a two-dimensional process grid in a
+block-cyclic pattern -- the layout that distributed dense
+linear algebra (ScaLAPACK, ELPA) requires for load balance.
+The matrix is tiled into equal blocks, and the blocks are
+dealt out to ranks cyclically in both dimensions so that, as
+an elimination front sweeps the matrix, every rank stays
+busy rather than idling once its corner is consumed. A naive
+contiguous split would leave all but one rank idle near the
+end of a factorization, which is why the cyclic deal is not
+optional.
+
+The process grid is chosen as close to square as the rank
+count allows -- a perfect square when possible, otherwise
+the most balanced integer factorization of the rank count --
+because square grids minimize communication volume in the
+factorization. Each rank allocates only its local portion of
+the matrix and maintains a descriptor that maps local
+(row, col) indices back to global matrix indices and forward
+again. The `MatrixDescriptor` type and the most-square grid
+helper from the sibling branch's `mpi.f90` are the concrete
+starting point.
+
+### 9.4 Work Assignment: Redundant Atom Pairs
+
+A subtlety distinguishes *computing* the matrix from
+*distributing* it. Each matrix block draws contributions
+from atom-pair orbital interactions, and an atom pair's sub-
+matrix generally will not align with block boundaries. Three
+strategies were weighed in the sibling branch:
+
+1. Each rank computes only the elements it owns. Rejected:
+   an atom pair straddling a block boundary forces different
+   ranks to compute different orbital-orbital interactions
+   of the *same* pair, demanding intricate partial-
+   computation logic.
+2. Distribute atom pairs once, then communicate the stray
+   elements each rank computed but does not own. Rejected:
+   each pair is computed once, but the communication
+   bookkeeping is again costly and error-prone.
+3. **Adopted:** distribute atom pairs so each rank computes
+   every element its own blocks need, accepting that a few
+   atom pairs are computed by more than one rank. Each rank
+   keeps the elements that fall in its blocks and discards
+   the rest.
+
+Strategy 3 trades a little redundant arithmetic for *no
+communication and simple logic* during assembly -- the right
+trade when integral evaluation is cheap relative to
+interconnect cost. This decision is inherited from upolcao's
+design and is the recommended starting point; it is revisited
+only if profiling shows the redundant computation dominates.
+
+### 9.5 Parallel HDF5 Alignment
+
+The distributed matrices are written to and read from HDF5
+collectively. For compression and write efficiency the on-
+disk chunk size should align with the block-cyclic block
+size, so each rank's write touches whole chunks rather than
+splitting them. The exact collective-write pattern against
+compressed chunks needs measurement -- one chunk per block
+per rank, versus larger chunks filled by several ranks'
+collective contributions -- and is flagged as an open
+calibration in 9.6.
+
+### 9.6 Open Design Questions
+
+- **Distributed eigensolver backend.** ScaLAPACK `PZHEGVX`
+  (the interface upolcao declared) versus ELPA (a faster
+  two-stage solver with a single API across CPU and GPU)
+  versus a GPU vendor solver. ELPA is the leading candidate
+  because it reuses the block-cyclic layout of 9.3 and
+  unifies the CPU/GPU axis behind one call, but the choice
+  is deferred to a benchmark on representative secular
+  dimensions. See ARCHITECTURE 6.6.
+- **Device-placement expression in Fortran.** How the per-
+  kernel CPU/GPU boundary (VISION Principle 14) is expressed
+  -- OpenACC, OpenMP target, CUDA Fortran, or a library
+  boundary such as ELPA -- is open and will likely differ
+  per kernel.
+- **Parallel-HDF5 chunk/block strategy.** The collective-
+  write pattern against compressed chunks (9.5) is settled
+  by measurement, not assumed.
+- **Replicate-and-broadcast retirement.** The order in which
+  the interim replicate-and-broadcast paths (ARCHITECTURE
+  6.5) are replaced by genuine distribution -- grid work
+  first, then integral assembly, then the solve -- and the
+  validation gate between each stage, is sequenced here as
+  implementation begins.

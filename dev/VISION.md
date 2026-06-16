@@ -167,6 +167,32 @@ flight instead of an exhaustive grid search.
    and pure scaling studies, with no schema change.  Like
    Goal 5, it grows monotonically through a staging step
    that a curator promotes.
+7. **Parallelize across scales and devices, keeping every
+   axis open.** Imago must scale along two orthogonal axes
+   that serve different needs and must never be conflated.
+   *Intra-problem* parallelism distributes a single large
+   secular problem -- thousands or more basis functions --
+   across many MPI ranks and nodes, so that a system too
+   large for one node's memory still becomes tractable.
+   *Inter-problem* parallelism runs many independent
+   calculations at once; this is the kaleidoscope flight
+   axis of Goal 4, and the two axes trade against each other
+   on a fixed core budget. A third, cross-cutting concern is
+   *device placement*: some phases of imago (dense integral
+   assembly, the eigenvalue solve) may run best on GPU while
+   others (branchy setup, I/O orchestration, latency-bound
+   logic) stay on CPU. The architecture must let each phase
+   run where it performs best rather than forcing one global
+   device mode. The near-term deliverable is the cheap,
+   proven win -- the distributed real-space-grid work and
+   the inter-problem axis already underway -- while the
+   distributed eigensolve and GPU offload are staged
+   research targets, validated one phase at a time, not
+   day-one commitments. A sibling branch (upolcao) already
+   explored MPI parallelization of the common-ancestor OLCAO
+   code; its design is mined as reference (ARCHITECTURE 6.7),
+   not merged, because the two codebases diverged from that
+   shared ancestor and have drifted file by file.
 
 ## Design Principles
 
@@ -285,3 +311,25 @@ flight instead of an exhaustive grid search.
     "domain-specific machinery lives at the adapter layer";
     Principle 12 says specifically what the flight layer
     refuses to absorb.
+13. **Two axes of parallelism, never conflated.** Intra-
+    problem (one large solve spread across many ranks) and
+    inter-problem (many small solves, one rank-set each)
+    are different problems with different bottlenecks and
+    different ideal hardware shapes. A design that serves
+    one must not silently assume the other. The resource-
+    and-cost dataspace (Goal 6) records both ranks-per-run
+    and runs-per-flight precisely because they trade
+    against each other on a fixed core budget, and the
+    flight layer must be able to request either shape.
+14. **Device placement is empirical and per-kernel.**
+    Whether a phase belongs on CPU or GPU is decided by
+    measurement, not assumption. The cost of moving data
+    across the CPU-GPU boundary can erase a kernel's
+    on-device speedup, so a phase that is dense, regular,
+    and single-precision-tolerant may win on GPU while a
+    branchy, memory-bound, or latency-sensitive phase does
+    not. The architecture exposes a placement boundary so
+    individual kernels move between devices without
+    rewrites, and the decision for each kernel is backed by
+    the cost dataspace (Goal 6) rather than asserted up
+    front.

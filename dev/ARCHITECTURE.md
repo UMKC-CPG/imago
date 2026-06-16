@@ -381,6 +381,124 @@ processes all pairs, enabling SIMD over the contiguous
 segments. This pattern is the starting point for the
 restructure in A4.
 
+### 6.5 Distributed-Memory Parallelism (MPI)
+
+The directions above (6.1-6.4) attack *intra-node*
+performance. This section addresses *intra-problem*
+scaling across nodes: distributing one large secular
+problem over many MPI ranks so a system too large for a
+single node's memory still runs. This is the first of the
+two parallel axes named in VISION Goal 7; the second,
+inter-problem throughput, is the flight layer of section
+9.
+
+A sibling branch of the common-ancestor OLCAO code (see
+6.7) already located where MPI must reach into the
+algorithm. That seam map carries directly to imago:
+
+- **Real-space grid work** -- the site and grid loops in
+  `elecStat` (electrostatic potential) and `exchCorr`
+  (exchange-correlation). These are embarrassingly
+  parallel: a one-dimensional load balance hands each
+  rank a disjoint range of sites, and an `MPI_REDUCE`
+  accumulates the partials. This is the cheap, proven
+  win and the right first target.
+- **Integral assembly** -- the atom-pair loops in
+  `integrals.F90`. The interim, correct-but-non-scaling
+  pattern is replicate-and-broadcast: rank 0 computes,
+  then `MPI_BCAST` makes every rank consistent. This
+  provides *no* speedup and must not be mistaken for the
+  finished state. Genuine distribution assigns atom pairs
+  to ranks under the block-cyclic layout (DESIGN section
+  9).
+- **The secular solve** -- the eigenvalue problem
+  `H c = e S c`. This is the actual scaling wall and the
+  subject of 6.6.
+
+The MPI lifecycle, a one-dimensional load balancer, and
+parallel-HDF5 helpers belong in a dedicated module
+(`mpi.f90` in the sibling branch). imago does not yet
+carry this module; introducing it is the first build-
+level step, paired with switching the gamma and k-point
+targets from the serial data reader (`readDataSerial`) to
+the parallel one.
+
+### 6.6 Eigensolver Backend Abstraction
+
+The secular solve must sit behind one interface with
+swappable backends, chosen by problem size and available
+hardware:
+
+- **Serial LAPACK** (`ZHEGV` / `DSYGV`) -- today's path,
+  correct for systems that fit one node.
+- **Distributed (ScaLAPACK / ELPA)** -- for problems too
+  large for one node. Both consume the same block-cyclic
+  BLACS data layout, so the distribution machinery is
+  shared. ELPA is the leading candidate: its two-stage
+  solver outperforms ScaLAPACK on the dense generalized
+  problem typical of an LCAO method, and a single ELPA
+  API spans CPU and GPU.
+- **GPU** -- via ELPA's GPU backend, or a vendor solver
+  (cuSOLVER / MAGMA) for the single-node case.
+
+This is the single most important architectural boundary
+for parallelization. The sibling branch *declared* a
+ScaLAPACK generalized-eigensolver interface (`PZHEGVX`)
+but never called it; imago should define the boundary
+cleanly and can then complete the distributed arm
+(likely with ELPA) rather than inherit an unfinished
+stub. Because the abstraction names CPU and GPU backends
+behind one call site, it is also where VISION's "device
+placement is per-kernel" principle (Principle 14) is
+realized for the most expensive kernel in the program.
+
+### 6.7 Reference: upolcao MPI Exploration
+
+A sibling branch of the common-ancestor OLCAO code lives
+outside this repository at:
+
+```
+~/olcao/src/upolcao/
+```
+
+It is *not* a parent of imago and *not* a merge source.
+upolcao branched from an older serial OLCAO to add MPI,
+while imago rebranded and further developed that same
+ancestor on a separate path. The two have since diverged
+file by file, so upolcao is mined for design, not
+cherry-picked.
+
+What is real and reusable:
+- `mpi.f90` -- MPI lifecycle (`initMPI` / `closeMPI` /
+  `stopMPI`), a one-dimensional load balancer
+  (`loadBalMPI`), a most-square process-grid helper, and
+  a parallel-HDF5 attribute check (`checkAttributeHDF5`).
+- Genuine grid parallelism in `elecStat` and `exchCorr`
+  (the `loadBalMPI` + `MPI_REDUCE` pattern of 6.5).
+- ScaLAPACK interface declarations (`PZHEGVX`, `pzgemm`,
+  `pdgemm`, `numroc`, a BLACS descriptor type) that are
+  tedious to write correctly and reusable as-is.
+- The block-cyclic distribution reasoning in `mpi.f90`'s
+  header, including the deliberate decision to recompute
+  a few atom pairs redundantly rather than communicate
+  partial sub-matrices (transcribed in DESIGN section 9).
+
+What is design-only and must not be mistaken for working
+code:
+- `createProcessGrid` and `createBlockCyclicDistribution`
+  are empty stubs.
+- The ScaLAPACK eigensolver interface has *zero* call
+  sites; the SCF solve still runs serial LAPACK on a
+  broadcast copy of the full matrix, on every rank.
+- The integral and secular paths use replicate-and-
+  broadcast, which is correct but does not scale.
+
+The honest summary: upolcao finished the grid-parallel
+half and left the distributed-linear-algebra half as an
+elaborate design with stubs. imago can take the finished
+half directly and treat the unfinished half as a vetted
+design study rather than a starting implementation.
+
 ---
 
 ## 7. Python Scripts Refactoring Direction
