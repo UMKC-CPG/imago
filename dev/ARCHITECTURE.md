@@ -25,6 +25,8 @@ src/
     makeinput.py       Input file orchestrator
     makegroups.py      Bispectrum type-grouping helper (8.9,
                        DESIGN 5.10): CLI + importable
+    matchers.py        Matcher protocol library: Reduce/Bispec
+                       matchers + MATCHERS registry (8.9)
     ase_imago.py       ASE Calculator, ImagoCalculator (9.3)
     cod_fish.py        COD acquisition front-end -> CIF (9.5)
     cif2skl.py         CIF -> imago.skl converter (9.5)
@@ -852,13 +854,19 @@ so the species pass and the producer can call it without
 caring which family it is.
 
 **Location.**  The matcher protocol and its concrete
-implementations live inside `src/scripts/makeinput.py`,
-not in a new script.  Per the parked memory note's
-decision to avoid script proliferation, the matcher
-classes are co-located with the species-pass machinery
-that drives them.  Producer-side use of matchers
-(`build_initial_potentials.py`) imports the protocol
-from `makeinput.py`.
+implementations live in `src/scripts/matchers.py`, a
+neutral *library* module (not a CLI script, so it does not
+add to script proliferation).  The protocol first lived
+inside `makeinput.py`, but moved here once `makegroups.py`
+needed `BispecMatcher`: keeping it in `makeinput` would
+have forced `makeinput` to import upward from `makegroups`
+(a cycle).  Every caller now imports it downward --
+`makeinput.py` (`ReduceMatcher` / `ReduceStructureView`
+for the reduce grouping), `makegroups.py` (`BispecMatcher`
+for the sequential loen flow), and
+`build_initial_potentials.py` (the `MATCHERS` registry).
+This also stages the eventual split in which `makegroups`
+owns all environment-based grouping.
 
 **Protocol surface.**  Each matcher class exposes:
 
@@ -904,10 +912,15 @@ from `makeinput.py`.
                                   meaningful when
                                   `needs_loen_run` is
                                   true.
-  parse_loen_output(path,         Reads `fort.21` from
-    sub_spec)                     a loen run and
-                                  returns per-site
-                                  fingerprint vectors.
+  parse_loen_output(path,         Reads the enriched,
+    sub_spec)                     self-describing
+                                  `fort.21` of a loen run
+                                  (DESIGN 5.10.3) into
+                                  per-site records --
+                                  each carrying the row's
+                                  identity (element,
+                                  species, type) plus its
+                                  fingerprint vector.
                                   Only meaningful when
                                   `needs_loen_run` is
                                   true.
@@ -1003,8 +1016,10 @@ rule 9 (unknown `method` is a hard error).
   and consumer reach it through the same surface.
 - `BispecMatcher` (`needs_loen_run = true`).  Maps
   `sub_spec = {twoj1, twoj2}` to the LOEN input
-  block; parses `fort.21` rows into vectors of length
-  `2 * twoj2 + 1`.  Element-aware mode is gated by an
+  block; parses `fort.21` rows into per-site records
+  whose vector has `twoj2 + 1` components (the coupling
+  channels `j` in `|j1 - j2| <= j <= j1 + j2`, with
+  `twoj1 >= twoj2`).  Element-aware mode is gated by an
   optional `by_element` key in `sub_spec`, currently
   ignored (Phase-2 follow-up; DESIGN 5.9 and
   TODO).

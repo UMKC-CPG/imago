@@ -2402,7 +2402,8 @@ not validated by the schema.  As examples for the two
 matchers Phase 2 ships with:
 
 - `"bispectrum"` records carry `values` (array of reals,
-  length `2 * twoj2 + 1`).
+  length `twoj2 + 1` -- the count of coupling channels `j`
+  in `|j1 - j2| <= j <= j1 + j2`, with `twoj1 >= twoj2`).
 - `"reduce"` records carry a `shell_code` inline table:
   the central atom's `element` symbol plus a `levels`
   array, one entry per reduction level holding that
@@ -2918,7 +2919,7 @@ method   = "bispectrum"
 sub_spec = { twoj1 = 8, twoj2 = 8 }
 values   = [
    1.2345678901234567e-01,
-   ...  (9 entries; length = 2 * twoj2 + 1)  ...
+   ...  (9 entries; length = twoj2 + 1 = 9)  ...
 ]
 
 [[potential.fingerprint]]
@@ -4230,8 +4231,9 @@ descriptor.  The columns are:
   type_flat        The single global type index
                    (1, 2, 3, ...) the engine derives by
                    element-sorted expansion.
-  components       The `2 * twoj2 + 1` real bispectrum
-                   values.
+  components       The `twoj2 + 1` real bispectrum values
+                   (coupling channels j in the triangle
+                   range; twoj1 >= twoj2).
   sum              Trailing sum column (ignored by the
                    matcher).
 
@@ -4305,7 +4307,10 @@ must populate all of them:
   twoj2          `sub_spec["twoj2"]`   Integer.  The
                                        output vector
                                        length is
-                                       `2 * twoj2 + 1`.
+                                       `twoj2 + 1` (the
+                                       coupling channels
+                                       j in the triangle
+                                       range).
   max_neigh      `sub_spec.get(        Integer cap on
                   "max_neigh", 20)`    the per-site
                                        neighbor list

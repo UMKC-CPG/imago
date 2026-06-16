@@ -39,7 +39,7 @@ import types
 import pytest
 
 import makeinput
-from makeinput import MATCHERS, ReduceMatcher
+from matchers import MATCHERS, ReduceMatcher
 
 
 # Pure tests: no Fortran binaries, no database reads, no full build.

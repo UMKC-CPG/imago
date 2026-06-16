@@ -571,7 +571,8 @@ subroutine computeBispectrumComponent
    ! Use necessary modules
    use O_Kinds
    use O_Input, only : twoj1, twoj2
-   use O_PotSites, only : numPotSites
+   use O_PotSites, only : numPotSites, potSites
+   use O_PotTypes, only : potTypes
    use O_MathSubs, only : clebschGordan
 
    ! Make sure no variables are accidentally declared.
@@ -877,8 +878,15 @@ subroutine computeBispectrumComponent
    ! Open the output file for machine readable results.
    open (unit=21,file='fort.21',status='new',form='formatted')
 
-   ! Create header: site index + all 2j bispectrum component values + total
-   write (21,fmt="(a8)",advance="no") "  site# "
+   ! Create header.  Each row is self-describing (DESIGN 5.10.3): the
+   !   identity of the potential site -- index, element, per-element
+   !   species, per-element-species type, and the flat global type --
+   !   precedes the 2j bispectrum components and their accumulated sum.
+   !   The number of components is twoj2+1: the count of allowed coupling
+   !   channels j in the triangle range |j1-j2| <= j <= j1+j2, since
+   !   twoj1 >= twoj2 by construction (input.f90 swaps to ensure it).
+   write (21,fmt="(a)",advance="no") &
+         & "  site#  element  species  type_sp  type_flat"
    do i = 1, twoj2+1
       write (21,fmt="(9x,a3,i3.3,x)",advance="no") "2j_", &
             & (twoj1+twoj2) - (i-1)*2
@@ -887,8 +895,14 @@ subroutine computeBispectrumComponent
 
    ! Print data for each potential site.
    do i = 1, numPotSites
-      ! Print the site index.
-      write (21,fmt="(i7,x)",advance="no") i
+      ! Identity columns, looked up from the potential type this site is
+      !   assigned to (potSites(i)%potTypeAssn indexes the potTypes array).
+      write (21,fmt="(i7,x,a8,x,i8,x,i8,x,i10,x)",advance="no") &
+            & i, &
+            & adjustl(potTypes(potSites(i)%potTypeAssn)%elementName), &
+            & potTypes(potSites(i)%potTypeAssn)%speciesID, &
+            & potTypes(potSites(i)%potTypeAssn)%typeID, &
+            & potSites(i)%potTypeAssn
 
       ! Print each of the bispectrum components.
       do j = 1, twoj2+1

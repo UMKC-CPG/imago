@@ -116,10 +116,11 @@ from kaleidoscope import Flight, LocalExecutor, SweepRecord, dispatch
 from kaleidoscope.builders.kpoint_convergence import (
     build_kpoint_convergence)
 from kaleidoscope.workspace import read_status, toml_line
-# The Phase-2 matcher registry (ARCHITECTURE 8.9) lives in makeinput;
-#   the fingerprint harvest dispatches reduce fingerprints through it.
-#   StructureControl reads the run's expanded structure for those shells.
-from makeinput import MATCHERS
+# The Phase-2 matcher registry (ARCHITECTURE 8.9) lives in the neutral
+#   matchers module; the fingerprint harvest dispatches reduce
+#   fingerprints through it.  StructureControl reads the run's expanded
+#   structure for those shells.
+from matchers import MATCHERS
 from structure_control import StructureControl
 
 

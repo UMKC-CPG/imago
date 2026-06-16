@@ -1,10 +1,10 @@
 """test_makeinput_bispec.py -- Unit tests for the bispectrum matcher
-(C55; ARCHITECTURE 8.9, DESIGN 5.10.5, PSEUDOCODE 11.3).
+(C55, C89; ARCHITECTURE 8.9, DESIGN 5.10, PSEUDOCODE 11.3).
 
 The bispectrum descriptor captures the *angular* arrangement of an
 atom's neighbors and is computed by the Imago Fortran engine (the
 "loen" path), not in Python -- so ``BispecMatcher`` carries
-``needs_loen_run = True``.  C55 supplies every part of the matcher
+``needs_loen_run = True``.  It supplies every part of the matcher
 that does not itself run the engine:
 
 * ``to_loen_input`` -- maps a ``sub_spec`` to the full ``LOEN_INPUT_DATA``
@@ -12,25 +12,27 @@ that does not itself run the engine:
   values makeinput has historically hardcoded (DESIGN 5.10.5).  The
   reserved ``by_element`` key is refused until the element-aware variant
   lands (TODO C62).
-* ``parse_loen_output`` -- reads a ``fort.21`` file into one real vector
-  of length ``2 * twoj2 + 1`` per site, dropping the trailing sum column.
+* ``parse_loen_output`` -- reads a self-describing ``fort.21`` (DESIGN
+  5.10.3) into one ``LoenSite`` per site: the identity columns (site#,
+  element, species, type_in_species, type_flat) plus the leading
+  ``twoj2 + 1`` components, skipping the header and dropping the sum.
 * ``distance`` -- the Euclidean distance between two vectors.
 * ``representative`` -- the element-wise mean of a species' members.
 * ``build_payload`` / ``extract_query_vector`` -- the on-disk ``values``
   (de)serialization.
 
-The bootstrap entry point (``compute_query``) that actually runs the
-engine is C58 and is intentionally not exercised here.  conftest.py's
-``SCRIPTS_DIR`` insertion lets us import ``makeinput`` directly without
-installing the package; these tests touch no Fortran binary -- the
-``fort.21`` reader is fed a hand-written fixture file via ``tmp_path``.
+``compute_query`` is not implemented for bispectrum (the makegroups flow
+reads ``fort.21`` instead) and is not exercised here.  conftest.py's
+``SCRIPTS_DIR`` insertion lets us import the matchers module directly
+without installing the package; these tests touch no Fortran binary --
+the ``fort.21`` reader is fed a hand-written fixture file via ``tmp_path``.
 """
 
 import math
 
 import pytest
 
-from makeinput import MATCHERS, BispecMatcher
+from matchers import MATCHERS, BispecMatcher
 
 
 # Pure tests: no Fortran binaries, no database reads, no full build.
@@ -111,34 +113,50 @@ def test_to_loen_input_rejects_by_element():
 #  parse_loen_output -- the fort.21 reader
 # ==============================================================
 
-def test_parse_loen_output_reads_per_site_vectors(tmp_path):
-    """Each ``fort.21`` row yields one vector of the leading
-    ``2 * twoj2 + 1`` components; the trailing sum column is dropped and
-    blank lines are skipped so a trailing newline is not a phantom site."""
+def test_parse_loen_output_reads_per_site_records(tmp_path):
+    """Each ``fort.21`` data row yields one ``LoenSite``: the identity
+    columns (site#, element, species, type_in_species, type_flat) plus the
+    leading ``twoj2 + 1`` components.  The header is skipped, the trailing
+    sum dropped, and blank lines ignored so a trailing newline is not a
+    phantom site (DESIGN 5.10.3)."""
 
-    # twoj2 = 2 -> 2*2 + 1 = 5 components, plus one ignored sum column.
+    # twoj2 = 2 -> twoj2 + 1 = 3 components, after 5 identity columns and
+    #   before the ignored sum column.
     fort21 = tmp_path / "fort.21"
     fort21.write_text(
-        "1.0 2.0 3.0 4.0 5.0 15.0\n"
-        "0.5 0.5 0.5 0.5 0.5 2.5\n"
+        "  site#  element  species  type_sp  type_flat"
+        "      2j_NNN   total\n"
+        "      1       Si        1        1          1"
+        "   1.0 2.0 3.0   6.0\n"
+        "      2        O        1        1          2"
+        "   0.5 0.5 0.5   1.5\n"
         "\n")               # trailing blank line: must be skipped
-    vectors = BispecMatcher().parse_loen_output(
+    sites = BispecMatcher().parse_loen_output(
         str(fort21), {"twoj1": 4, "twoj2": 2})
 
-    assert vectors == [
-        [1.0, 2.0, 3.0, 4.0, 5.0],
-        [0.5, 0.5, 0.5, 0.5, 0.5],
-    ]
+    assert len(sites) == 2
+    first = sites[0]
+    assert first.site == 1
+    assert first.element == "Si"
+    assert first.species == 1
+    assert first.type_in_species == 1
+    assert first.type_flat == 1
+    assert first.vector == [1.0, 2.0, 3.0]
+    assert sites[1].element == "O"
+    assert sites[1].type_flat == 2
+    assert sites[1].vector == [0.5, 0.5, 0.5]
 
 
 def test_parse_loen_output_rejects_short_row(tmp_path):
-    """A row with fewer than ``2 * twoj2 + 1`` components means the file
-    does not match the declared ``sub_spec``; that is a hard error, not a
-    truncated vector."""
+    """A data row with fewer than 5 identity + ``twoj2 + 1`` component
+    columns means the file does not match the declared ``sub_spec``; that
+    is a hard error, not a truncated record."""
 
     fort21 = tmp_path / "fort.21"
-    fort21.write_text("1.0 2.0\n")          # only 2 of the needed 5
-    with pytest.raises(ValueError, match="components"):
+    fort21.write_text(
+        "  site#  element  species  type_sp  type_flat  2j  total\n"
+        "      1       Si        1        1\n")   # missing components
+    with pytest.raises(ValueError, match="columns"):
         BispecMatcher().parse_loen_output(
             str(fort21), {"twoj1": 4, "twoj2": 2})
 

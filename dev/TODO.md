@@ -1660,19 +1660,45 @@ shipped.
   warning).  For the makegroups path (C58): the
   sequential loen -> bucket -> skeleton-rewrite chain
   produces the expected per-element species tags.
-- [ ] C89. fort.21 enrichment + parser fix (DESIGN
-  5.10.3).  Fortran: extend the loen writer in
-  `loen.f90` (the `open(unit=21,...)` block) so each
-  row carries its identity -- `site#`, `element`,
-  `species`, `type_in_species`, `type_flat` -- ahead of
-  the components and sum, and the header names them.
-  Python: revise `BispecMatcher.parse_loen_output` to
-  skip the header and read the identity columns plus the
-  `2*twoj2+1` components.  This fixes the C55 first cut,
-  which assumed a bare components-plus-sum row with no
-  header or site# column and would mis-read the real
-  file; update `test_makeinput_bispec.py` to the real
-  format.  Prerequisite for C58 and the C60 loen harvest.
+- [~] C89. fort.21 enrichment + parser fix (DESIGN
+  5.10.3).  CODE DONE, pending a live recompile + loen
+  run to validate the Fortran format.  Fortran (loen.f90,
+  the `open(unit=21,...)` block): each row now leads with
+  `site#`, `element`, `species`, `type_in_species`,
+  `type_flat` (looked up from
+  `potTypes(potSites(i)%potTypeAssn)`), and the header
+  names them.  Python (`BispecMatcher.parse_loen_output`):
+  skips the header, reads the 5 identity columns + the
+  `twoj2+1` components, returns a `LoenSite` record per
+  site.  Also fixed the second bug: the component count is
+  `twoj2+1` (coupling channels j in `|j1-j2| <= j <=
+  j1+j2`), NOT `2*twoj2+1` -- corrected in code, DESIGN
+  (5.2/5.3/5.10), PSEUDOCODE, ARCHITECTURE 8.9, and the
+  tests.  `test_makeinput_bispec.py` updated to the real
+  format.  REMAINING: the live recompile/run check.
+  Prerequisite for C58 and the C60 loen harvest.
+- [x] C89.1. Extract the matcher protocol from
+  makeinput.py into a neutral `src/scripts/matchers.py`
+  library (Matcher / Reduce* / Bispec* / LoenSite /
+  MATCHERS).  makeinput imports ReduceMatcher +
+  ReduceStructureView inside `group_reduce`;
+  build_initial_potentials and the bispec/reduce tests
+  import from `matchers`.  Done so `makegroups.py` (C58)
+  can import `BispecMatcher` without a makeinput<->makegroups
+  import cycle.  ARCHITECTURE 8.9 "Location" + layout
+  updated.  669 tests pass.
+- [ ] C90. Full grouping extraction (the makeinput /
+  makegroups split proper).  Move the geometric species
+  pass -- `group_reduce`, the `-target` / `-block`
+  handlers, and `scope=` resolution -- out of makeinput
+  into makegroups, so makeinput becomes a pure
+  input-writer (reading explicit skeleton types + the
+  xanes electronic pass).  Deferred deliberately: reduce
+  grouping composes with the position-based flags via the
+  `scope=` feature (a `-reduce scope=region` confined to a
+  `-target`/`-block` region, in CLI order, DESIGN 5.6.4),
+  so this is a real refactor with the reduce regression
+  tests (C54 fixtures) to carry, not a mechanical move.
 - [ ] C88. Dedup storage model + native/witness
   fingerprints (DESIGN 5.2.2-5.2.4).  The database
   stores *distinct environments, not atoms*, so a

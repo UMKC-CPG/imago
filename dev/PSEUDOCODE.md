@@ -2903,7 +2903,7 @@ class BispecMatcher extends Matcher:
 
     function distance(a, b):
         # Euclidean distance between bispectrum
-        # vectors of length 2*twoj2 + 1.  Symmetric,
+        # vectors of length twoj2 + 1.  Symmetric,
         # cheap to compute, and consistent with the
         # element-wise mean used by `representative`
         # below.
@@ -2912,7 +2912,7 @@ class BispecMatcher extends Matcher:
     function representative(members):
         # Element-wise arithmetic mean of the member
         # vectors.  All members share the same length
-        # (2*twoj2 + 1) because they come from one loen
+        # (twoj2 + 1) because they come from one loen
         # run under one sub_spec, so the mean is
         # well-defined slot by slot.
         n = len(members)
@@ -2945,11 +2945,11 @@ class BispecMatcher extends Matcher:
         # row per potential site of the whole structure in
         # site-index order.  Each row leads with identity
         # columns -- site#, element, species,
-        # type_in_species, type_flat -- then 2*twoj2 + 1
+        # type_in_species, type_flat -- then twoj2 + 1
         # real bispectrum values, then a trailing sum the
         # matcher ignores.  Skip the header; from each data
         # row return the identity fields plus the
-        # 2*twoj2 + 1 components.  (The orchestrator,
+        # twoj2 + 1 components.  (The orchestrator,
         # 11.3.f, uses the identity fields to map a row to
         # its atom/type without a separate datSkl.map.)
         n_slots   = 2 * sub_spec["twoj2"] + 1
