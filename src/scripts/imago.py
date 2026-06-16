@@ -1659,6 +1659,15 @@ def manage_output(settings, fn, proj_home, spin_pol,
                 f".iterTDOS{fn.plot}",
                 rt,
             )
+    else:
+        # A "-scf no" run (e.g. a loen pass) reads the converged
+        #   potential in on fort.8 but produces no SCF output, so
+        #   the SCF block above is skipped and fort.8 is left
+        #   behind in the scratch directory.  It is only a copy of
+        #   the inputs/ scfV.dat the run was handed, so discard it
+        #   rather than leave a stray fort.## file in scratch.
+        if os.path.exists("fort.8"):
+            safe_delete("fort.8")
 
     # --- Property-specific output --- #
 
