@@ -108,6 +108,24 @@ class Matcher:
         raise NotImplementedError(
             "distance is implemented by concrete Matcher subclasses")
 
+    def match_distance(self, query, entry_vector):
+        """Cross-structure distance from a query representative to a
+        STORED, already-extracted fingerprint (DESIGN 5.6.5 precedence 2).
+
+        The makeinput per-species potential pick calls this
+        matcher-agnostically: ``query`` is the output of
+        :meth:`representative` for one species, and ``entry_vector`` is
+        :meth:`extract_query_vector` applied to a stored
+        ``FingerprintRecord`` payload.  It is deliberately separate from
+        :meth:`distance`, which compares two *in-structure* fingerprints
+        for grouping.  Where a descriptor's transferable form differs from
+        its in-structure form -- ``reduce`` drops species, since species
+        numbering does not cross structures (DESIGN 5.2) -- the two
+        comparisons differ; where they coincide (``bispectrum`` is plain
+        geometry) the implementation simply delegates to ``distance``."""
+        raise NotImplementedError(
+            "match_distance is implemented by concrete Matcher subclasses")
+
     def representative(self, members):
         """Reduce a species' member fingerprints to one representative."""
         raise NotImplementedError(
@@ -395,6 +413,66 @@ class ReduceMatcher(Matcher):
 
         return 0.0
 
+    def match_distance(self, query, entry_vector):
+        """Cross-structure reduce match (DESIGN 5.6.5 precedence 2): 0.0
+        when the stored fingerprint is equivalent to the query
+        representative, ``math.inf`` the moment any test fails.
+
+        This is the element-only counterpart of :meth:`distance`.
+        ``distance`` compares two in-structure ``ReduceShellCode`` objects
+        on their ``(element, species)`` neighbor multiset to *group* atoms;
+        this compares the query representative against a STORED,
+        element-only fingerprint (the ``extract_query_vector`` output: a
+        dict with a central ``element``, and per-level ``distance`` and
+        ``neighbors`` element-symbol list).  Species are absent by design,
+        because species numbering does not transfer across structures
+        (DESIGN 5.2), so the composition test runs on neighbor *element
+        symbols* rather than ``(element, species)`` pairs.  The other two
+        tests are unchanged -- per-level distance within the query's own
+        tolerance band, and equal neighbor counts (subsumed by the
+        element-symbol multiset equality, exactly as in ``distance``).
+
+        Parameters
+        ----------
+        query : ReduceShellCode
+            The species representative (:meth:`representative` output); its
+            ``tolerance`` sets the acceptance bands, mirroring the
+            directional historical test.
+        entry_vector : dict
+            A stored reduce fingerprint as returned by
+            :meth:`extract_query_vector`: ``{"element": str, "levels":
+            [{"distance": float, "neighbors": [str, ...]}, ...]}``.
+        """
+
+        # Test 0: central elements must agree (element-only, lowercased).
+        if (query.element_name.lower()
+                != str(entry_vector["element"]).lower()):
+            return math.inf
+
+        # query.levels is 1-indexed with a None placeholder at 0; the
+        #   stored levels are a plain 0-indexed list (build_payload sliced
+        #   the placeholder off), so compare query.levels[1:] against them.
+        query_levels = query.levels[1:]
+        entry_levels = entry_vector["levels"]
+        if len(query_levels) != len(entry_levels):
+            return math.inf
+
+        for query_shell, entry_shell in zip(query_levels, entry_levels):
+            # Test 1: level distances within the query's tolerance band.
+            if (abs(query_shell.distance - entry_shell["distance"]) >
+                    query.tolerance * query_shell.distance):
+                return math.inf
+            # Tests 2 + 3: equal neighbor count and identical element-symbol
+            #   multiset (Counter equality covers both, lowercased).
+            query_neighbors = Counter(
+                name.lower() for name in query_shell.member_names)
+            entry_neighbors = Counter(
+                str(name).lower() for name in entry_shell["neighbors"])
+            if query_neighbors != entry_neighbors:
+                return math.inf
+
+        return 0.0
+
     def representative(self, members):
         """Return the first member's fingerprint as the species
         representative.  Intra-species reduce fingerprints agree within
@@ -637,6 +715,19 @@ class BispecMatcher(Matcher):
                 f"from the same sub_spec")
         return math.dist(vector_a, vector_b)
 
+    def match_distance(self, query, entry_vector):
+        """Cross-structure bispectrum match (DESIGN 5.6.5 precedence 2).
+
+        The bispectrum descriptor is plain geometry and carries no
+        species, so its transferable (stored) form is the same vector its
+        in-structure form is: the cross-structure comparison is just the
+        L2 :meth:`distance` between the query representative vector and the
+        stored vector.  ``entry_vector`` is the list
+        :meth:`extract_query_vector` returns, identical in shape to a
+        :meth:`representative` result, so this delegates directly."""
+
+        return self.distance(query, entry_vector)
+
     def representative(self, members):
         """Collapse a species' member vectors into one representative: the
         element-wise arithmetic mean (DESIGN 5.6.5, ARCHITECTURE 8.9).
@@ -727,9 +818,12 @@ def bucket_by_fingerprint(fingerprints, matcher, similarity_floor):
     matcher : Matcher
         Supplies ``distance(a, b)`` and ``representative(members)`` for this
         descriptor family.  Each candidate is compared as
-        ``matcher.distance(candidate, bucket_representative)``; for an
-        asymmetric distance (the reduce family) the representative is the
-        second argument, a detail the C59 retrofit must preserve.
+        ``matcher.distance(bucket_representative, candidate)`` -- the
+        representative is the FIRST argument.  For an asymmetric distance
+        (the reduce family) that makes the bucket's seed the reference
+        whose level distance scales the tolerance band, reproducing
+        ``group_reduce``'s historical reference-first comparison; a
+        symmetric distance (bispectrum) is unaffected by the order.
     similarity_floor : float
         The largest distance at which a candidate still joins an existing
         bucket.  Callers pass an explicit override or the matcher's
@@ -758,7 +852,7 @@ def bucket_by_fingerprint(fingerprints, matcher, similarity_floor):
         #   the earliest-discovered group it is close enough to match.
         joined = False
         for bucket_index, bucket in enumerate(buckets):
-            if matcher.distance(fingerprint, bucket["representative"]) \
+            if matcher.distance(bucket["representative"], fingerprint) \
                     <= similarity_floor:
                 bucket["members"].append(atom_index)
                 bucket["representative"] = matcher.representative(

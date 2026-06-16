@@ -349,3 +349,89 @@ def test_extract_query_vector_unwraps_build_payload():
                               "neighbors": ["si", "si"]}]}
     payload = {"shell_code": shell_code}
     assert matcher.extract_query_vector(payload) is shell_code
+
+
+# ==============================================================
+#  match_distance: the cross-structure (element-only) pick test
+#  (DESIGN 5.6.5 precedence 2)
+# ==============================================================
+
+def _si_with_one_o():
+    """A ReduceMatcher fingerprint for a silicon atom whose single shell
+    holds one oxygen neighbor at 2.0 Angstrom, built through the real
+    compute_query so the shape matches production exactly."""
+
+    min_dist = [
+        [None, None, None],
+        [None, 0.0,  2.0],
+        [None, 2.0,  0.0],
+    ]
+    structure = _structure_view(
+        min_dist,
+        element_id=[None, 1, 2],
+        element_name=[None, "Si", "O"],
+        species_id=[None, 1, 1],
+    )
+    return ReduceMatcher().compute_query(structure, _ONE_SHELL)[1]
+
+
+def test_match_distance_zero_against_own_stored_payload():
+    """A query representative matches the element-only fingerprint that
+    its own ``build_payload`` produced -- the full producer-to-consumer
+    round trip (build_payload then extract_query_vector) compares equal."""
+
+    matcher = ReduceMatcher()
+    query = _si_with_one_o()
+    stored = matcher.extract_query_vector(matcher.build_payload(query))
+    assert matcher.match_distance(query, stored) == 0.0
+
+
+def test_match_distance_ignores_neighbor_species():
+    """The stored form is element-only, so a stored fingerprint matches
+    regardless of any species the query happened to carry: only the
+    neighbor ELEMENT symbols are compared (DESIGN 5.2)."""
+
+    matcher = ReduceMatcher()
+    query = _si_with_one_o()                     # query neighbor is (O, sp1)
+    stored = {"element": "si",
+              "levels": [{"distance": 2.0, "neighbors": ["o"]}]}
+    assert matcher.match_distance(query, stored) == 0.0
+
+
+def test_match_distance_inf_on_element_distance_or_composition():
+    """Any of the three tests failing yields ``math.inf``: a different
+    central element, a level distance outside the query's tolerance band,
+    or a different neighbor element multiset."""
+
+    matcher = ReduceMatcher()
+    query = _si_with_one_o()        # central si, one o at 2.0, tol 0.05
+    # Different central element.
+    assert matcher.match_distance(
+        query, {"element": "o",
+                "levels": [{"distance": 2.0, "neighbors": ["o"]}]}
+    ) == math.inf
+    # Level distance outside the band (|2.5 - 2.0| = 0.5 > 0.05*2.0).
+    assert matcher.match_distance(
+        query, {"element": "si",
+                "levels": [{"distance": 2.5, "neighbors": ["o"]}]}
+    ) == math.inf
+    # Different neighbor composition.
+    assert matcher.match_distance(
+        query, {"element": "si",
+                "levels": [{"distance": 2.0, "neighbors": ["n"]}]}
+    ) == math.inf
+    # Within the band (|2.08 - 2.0| = 0.08 <= 0.1) still matches.
+    assert matcher.match_distance(
+        query, {"element": "si",
+                "levels": [{"distance": 2.08, "neighbors": ["o"]}]}
+    ) == 0.0
+
+
+def test_match_distance_bispectrum_is_l2():
+    """For the geometric bispectrum descriptor the transferable form is
+    the same vector, so match_distance is just the L2 distance."""
+
+    from matchers import BispecMatcher
+    matcher = BispecMatcher()
+    assert matcher.match_distance([1.0, 2.0], [1.0, 2.0]) == 0.0
+    assert matcher.match_distance([0.0, 0.0], [3.0, 4.0]) == pytest.approx(5.0)

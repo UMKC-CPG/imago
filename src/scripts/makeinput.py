@@ -2613,7 +2613,8 @@ def group_reduce(settings, sc, reduce_idx):
     #   (ARCHITECTURE 8.9); import it here, matching this file's
     #   convention of importing local modules inside the functions that
     #   use them.
-    from matchers import ReduceMatcher, ReduceStructureView
+    from matchers import (ReduceMatcher, ReduceStructureView,
+                          bucket_by_fingerprint)
 
     # Build the shell-code fingerprint for every atom through the reduce
     #   matcher (ARCHITECTURE 8.9), which now owns the shell-build and
@@ -2633,6 +2634,21 @@ def group_reduce(settings, sc, reduce_idx):
     )
     fingerprints = matcher.compute_query(structure, r)
 
+    # Record each atom's reduce fingerprint and the descriptor's
+    #   defining parameters so the per-species potential pick (DESIGN
+    #   5.6.5 precedence 2, in _obtain_pot_info) can match a species'
+    #   environment against the augmented database without recomputing.
+    #   The fingerprints are kept per ATOM, not per species, so they
+    #   survive the species renumbering relax_group does after this:
+    #   intra-species reduce fingerprints are identical by construction,
+    #   so any member of a species is an exact representative of it.  The
+    #   stored sub_spec carries only the four descriptor-defining keys
+    #   (the same set a manifest reduce fingerprint declares), so it
+    #   compares equal to an entry's recorded sub_spec under rule 8.
+    settings.atom_reduce_fingerprint = list(fingerprints)
+    settings.reduce_match_sub_spec = {
+        key: r[key] for key in ("level", "thick", "cutoff", "tolerance")}
+
     # Open the diagnostic summary file.
     reduce_fh = open("reduceSummary", "w")
 
@@ -2647,63 +2663,76 @@ def group_reduce(settings, sc, reduce_idx):
     # live solely in ReduceMatcher (compute_query and distance).
     # ==================================================================
 
-    # Initialize a temporary atom species ID array (0 = not yet assigned).
+    # Initialize the temporary per-atom species assignment (0 = not yet
+    #   assigned) and the per-element species counts.
     temp_atom_species_id = [0] * (num_atoms + 1)
-
-    # Initialize a temporary counter for the number of species per element.
     temp_num_species = [0] * (num_elements + 1)
 
     # Clear the type counts — they will be re-initialized to 1 after
     # the new species assignments are finalized.
     settings.num_types = []
 
+    # Bucket the atoms of each element into species by their shell-code
+    #   fingerprints.  bucket_by_fingerprint (DESIGN 5.6.4) is the single
+    #   grouping routine the makegroups bispectrum flow also uses, so the
+    #   two cannot drift apart.  Partitioning by element first keeps each
+    #   element's species numbered from 1 and reflects that the reduce
+    #   distance returns infinity across elements (cross-element atoms
+    #   never merge).  The bucket's seed is the species' reduction atom:
+    #   the routine compares a candidate as distance(seed, candidate) and
+    #   ReduceMatcher.representative keeps the seed as the representative,
+    #   so this reproduces the historical reduction-atom/comparison-atom
+    #   pass -- including the directional, seed-as-reference tolerance
+    #   band -- exactly.
+    atoms_of_element = {}
     for atom in range(1, num_atoms + 1):
+        atoms_of_element.setdefault(
+            settings.atom_element_id[atom], []).append(atom)
 
-        # If this atom already has a species assignment (from being
-        # matched to an earlier atom), skip it.
-        if temp_atom_species_id[atom] != 0:
+    for element in range(1, num_elements + 1):
+        element_atoms = atoms_of_element.get(element, [])
+        if not element_atoms:
             continue
+        bucket_of = bucket_by_fingerprint(
+            [fingerprints[atom] for atom in element_atoms],
+            matcher, matcher.default_similarity_floor)
+        temp_num_species[element] = max(bucket_of) + 1
+        for position, atom in enumerate(element_atoms):
+            # bucket_of is 0-based per element; species numbers start at 1.
+            temp_atom_species_id[atom] = bucket_of[position] + 1
 
-        # This is a new "reduction atom" (RA).  Increment the species
-        # counter for its element and assign it the new species ID.
-        elem = settings.atom_element_id[atom]
-        temp_num_species[elem] += 1
-        temp_atom_species_id[atom] = temp_num_species[elem]
+    # Write the reduceSummary diagnostic: one block per species, keyed by
+    #   its reduction atom -- the first atom, in atom order, carrying that
+    #   (element, species).  Walking atoms in order and emitting on first
+    #   sight reproduces the historical per-reduction-atom listing.
+    seen_species = set()
+    for atom in range(1, num_atoms + 1):
+        species_key = (settings.atom_element_id[atom],
+                       temp_atom_species_id[atom])
+        if species_key in seen_species:
+            continue
+        seen_species.add(species_key)
 
-        # --- Diagnostic output for this reduction atom. ---
         reduce_fh.write("---------------------------------------\n")
         reduce_fh.write(
             f"{atom} {settings.atom_element_name[atom]}"
             f"{temp_atom_species_id[atom]}\n"
         )
 
-        # Write this reduction atom's per-level distances and shell
-        # neighbor element names to the summary file, reading them
-        # straight from its precomputed shell-code fingerprint.
+        # The reduction atom's per-level distances and shell neighbor
+        #   element names, read straight from its shell-code fingerprint.
         ra_code = fingerprints[atom]
         for level in range(1, num_levels + 1):
             shell = ra_code.levels[level]
             reduce_fh.write(
                 f"Distance to level {level} = {shell.distance}\n"
             )
-
             # The shell's neighbor element names, space-prefixed, exactly
             # as the historical summary listed them (atom-index order).
             level_atoms_str = ""
             for member_name in shell.member_names:
                 level_atoms_str += f" {member_name}"
             reduce_fh.write(f"Atoms in level {level} :  {level_atoms_str}\n")
-
-        # ---------------------------------------------------------------
-        # Check each subsequent atom against this RA.  A zero reduce
-        # distance means the comparison atom passes every equivalence
-        # test (same central element, per-level distances within
-        # tolerance, matching neighbor counts, and identical neighbor
-        # (element, species) composition), so it joins this species.
-        # ---------------------------------------------------------------
-        for atom2 in range(atom + 1, num_atoms + 1):
-            if matcher.distance(ra_code, fingerprints[atom2]) == 0.0:
-                temp_atom_species_id[atom2] = temp_atom_species_id[atom]
 
     # ==================================================================
     # Finalize: copy temporary results into the permanent arrays.
@@ -4198,26 +4227,60 @@ def _contract_basis(settings, sc):
     os.chdir(orig_dir)
 
 
-def _select_augmented_pot_entry(ipdb, db, pot_override, elem_name):
-    """Pick one ``PotentialEntry`` from an element's augmented db.
+def _species_query_fingerprint(settings, element_id, species_id, matcher):
+    """Summarize one ``(element, species)``'s atoms into a single query
+    fingerprint for the environment match (DESIGN 5.6.5 precedence 2).
 
-    Implements the reduced (no-environment-matcher) selection flow
-    of PSEUDOCODE 11.3.0:
+    Reads the per-atom reduce fingerprints ``group_reduce`` stored on
+    ``settings`` and hands the matcher every member of this species so it
+    can form an order-independent representative (for ``ReduceMatcher``,
+    the first member -- exact, since intra-species reduce fingerprints are
+    identical by construction).  Returns ``None`` when no reduce scheme
+    ran or when none of this species' atoms carry a fingerprint (a
+    position-grouped or explicitly tagged species), which sends the pick
+    to the default entry.
+    """
 
-    * **Precedence 1 -- manual override.**  When ``pot_override``
-      (the ``-pot LABEL`` value) is given, return the entry with
-      that label.  A label that is absent from this element's
-      database is a *hard error*: the program prints a clear
-      message naming the element and label, then exits.  A
-      deliberate override must never silently fall back to a
-      different potential.
-    * **Precedence 3 -- default tag.**  With no override, return
-      the database's default-tagged entry, guaranteed to exist and
-      be unique by validation rule 7.
+    atom_fingerprints = getattr(
+        settings, "atom_reduce_fingerprint", None)
+    if atom_fingerprints is None:
+        return None
+    members = [atom_fingerprints[atom]
+               for atom in range(1, settings.num_atoms + 1)
+               if settings.atom_element_id[atom] == element_id
+               and settings.atom_species_id[atom] == species_id
+               and atom_fingerprints[atom] is not None]
+    if not members:
+        return None
+    return matcher.representative(members)
 
-    Precedence 2 (fingerprint matching) never applies in the
-    reduced flow, because no environment matcher is active; it
-    arrives with the Phase-2 matcher chain (C54+).
+
+def _select_augmented_pot_entry(ipdb, db, pot_override, elem_name,
+                                query=None, matcher=None,
+                                sub_spec=None, species=None):
+    """Pick one ``PotentialEntry`` from an element's augmented db for a
+    single ``(element, species)`` (DESIGN 5.6.5).
+
+    Precedence, top to bottom:
+
+    * **1 -- manual override.**  When ``pot_override`` (the ``-pot
+      LABEL`` value) is given, return the entry with that label.  A
+      label absent from this element's database is a *hard error*: a
+      deliberate override must never silently fall back to a different
+      potential.
+    * **2 -- environment fingerprint match** (reduce only, in
+      makeinput).  Active only when the caller supplies a ``query``
+      representative, the ``matcher``, and the descriptor ``sub_spec`` --
+      i.e. a reduce scheme grouped this species and produced a
+      fingerprint for it.  Among the entries that carry a comparable
+      ``(method, sub_spec)`` fingerprint, pick the one whose recorded
+      fingerprint minimizes ``matcher.match_distance``; accept it only if
+      that distance is within the matcher's ``default_similarity_floor``,
+      otherwise warn (naming the species and the best-but-rejected entry)
+      and fall through to precedence 3.
+    * **3 -- default tag.**  Otherwise return the database's
+      default-tagged entry, guaranteed to exist and be unique by
+      validation rule 7.
 
     Parameters
     ----------
@@ -4226,11 +4289,18 @@ def _select_augmented_pot_entry(ipdb, db, pot_override, elem_name):
     db : ipdb.ElementDatabase
         The element's loaded database.
     pot_override : str or None
-        The ``-pot LABEL`` value, or None for the default entry.
+        The ``-pot LABEL`` value, or None.
     elem_name : str
-        Element symbol, used only in the error message.
+        Element symbol, used in messages.
+    query, matcher, sub_spec : optional
+        The species' representative fingerprint, the active matcher, and
+        the descriptor sub_spec.  All three together enable precedence 2;
+        any left None disables it (the reduced flow of PSEUDOCODE 11.3.0).
+    species : int, optional
+        The species number, used only in the precedence-2 warning.
     """
 
+    # Precedence 1: manual override.
     if pot_override is not None:
         try:
             return ipdb.lookup(db, pot_override)
@@ -4244,6 +4314,51 @@ def _select_augmented_pot_entry(ipdb, db, pot_override, elem_name):
                 f"potential database for element {elem_name!r}.  A "
                 f"manual -pot override must name an entry that exists "
                 f"in the database for every element it applies to.")
+
+    # Precedence 2: environment fingerprint match.
+    if query is not None and matcher is not None and sub_spec is not None:
+        best_entry = None
+        best_distance = float("inf")
+        candidates_existed = False
+        for entry in db.potentials:
+            try:
+                record = ipdb.find_fingerprint(
+                    entry, matcher.name, sub_spec)
+            except KeyError:
+                continue        # no comparable fingerprint on this entry
+            candidates_existed = True
+            distance = matcher.match_distance(
+                query, matcher.extract_query_vector(record.payload))
+            if distance < best_distance:
+                best_distance = distance
+                best_entry = entry
+        if (best_entry is not None
+                and best_distance <= matcher.default_similarity_floor):
+            return best_entry
+        # Warn only when there WAS something to match against but nothing
+        #   landed within the floor -- naming the best-but-rejected entry
+        #   when a finite best exists (a near miss), or reporting no match
+        #   at all when every candidate was incomparable (the reduce
+        #   distance is binary, so a non-match is infinite).  When the
+        #   database carries no comparable fingerprint at all, this is the
+        #   ordinary reduced flow, so it falls through to the default
+        #   silently.
+        if candidates_existed:
+            where = f"element {elem_name!r}"
+            if species is not None:
+                where += f" species {species}"
+            floor = matcher.default_similarity_floor
+            if best_entry is not None:
+                print(f"WARNING: the closest fingerprint match for "
+                      f"{where} is entry {best_entry.label!r} at distance "
+                      f"{best_distance}, beyond the similarity floor "
+                      f"{floor}; using the default-tagged entry instead.")
+            else:
+                print(f"WARNING: no stored fingerprint matched {where} "
+                      f"within the similarity floor {floor}; using the "
+                      f"default-tagged entry instead.")
+
+    # Precedence 3: default tag.
     return ipdb.default_entry(db)
 
 
@@ -4334,6 +4449,7 @@ def _obtain_pot_info(settings, sc):
     """
     import re
     import initial_potential_db as ipdb
+    from matchers import ReduceMatcher
 
     # Parse potential substitutions (-subpot).  A -subpot target
     # takes precedence over the augmented database for the
@@ -4359,19 +4475,16 @@ def _obtain_pot_info(settings, sc):
 
         # Per-element augmented-database preflight (PSEUDOCODE
         # 11.3.b).  Load the element's s_gaussian_pot.toml once if
-        # present and pick its entry once -- the reduced-flow pick
-        # is per element, not per species.  known_methods is None:
-        # the matcher registry (rule 9) arrives with C54, and the
-        # reduced flow activates no matcher.
+        # present; the entry pick now happens per (element, species)
+        # inside the species loop (DESIGN 5.6.5), because two species of
+        # one element may match different stored potentials by their
+        # environment fingerprints.
         aug_path = os.path.join(
             settings.atomic_pdb, elem_name.lower(),
             "s_gaussian_pot.toml")
         aug_db = None
-        aug_entry = None
         if os.path.exists(aug_path):
             aug_db = ipdb.load(aug_path)
-            aug_entry = _select_augmented_pot_entry(
-                ipdb, aug_db, settings.pot_override, elem_name)
         elif settings.pot_override is not None:
             # The user asked for a database entry, but this element
             # has none; fall back to the legacy files rather than
@@ -4380,6 +4493,13 @@ def _obtain_pot_info(settings, sc):
                   f"requested, but element {elem_name!r} has no "
                   f"augmented potential database ({aug_path}); "
                   f"using legacy pot1/coeff1 for this element.")
+
+        # The reduce environment matcher and the descriptor sub_spec a
+        # reduce scheme stored on settings (None when no reduce ran);
+        # together they drive precedence 2 of the per-species pick.
+        reduce_matcher = ReduceMatcher()
+        reduce_sub_spec = getattr(
+            settings, "reduce_match_sub_spec", None)
 
         for species in range(1, settings.num_species[element] + 1):
             # Does a -subpot substitution target this
@@ -4396,13 +4516,23 @@ def _obtain_pot_info(settings, sc):
                     curr_coeff = f"coeff{in_num}"
                     subpot_hit = True
 
-            if aug_entry is not None and not subpot_hit:
-                # ---- Augmented path: materialize legacy-format
-                #      files from the chosen database entry.  The
-                #      pick is per element, so one generated pair
-                #      serves every species of this element.
-                pot_tagged = f"pot_aug_{elem_name}"
-                coeff_tagged = f"coeff_aug_{elem_name}"
+            if aug_db is not None and not subpot_hit:
+                # ---- Augmented path: pick THIS species' entry (DESIGN
+                #      5.6.5 -- -pot override, else an environment
+                #      fingerprint match, else the default-tagged entry)
+                #      and materialize legacy-format files from it.  Each
+                #      (element, species) gets its own file pair, since
+                #      different species may resolve to different entries.
+                query = None
+                if reduce_sub_spec is not None:
+                    query = _species_query_fingerprint(
+                        settings, element, species, reduce_matcher)
+                aug_entry = _select_augmented_pot_entry(
+                    ipdb, aug_db, settings.pot_override, elem_name,
+                    query=query, matcher=reduce_matcher,
+                    sub_spec=reduce_sub_spec, species=species)
+                pot_tagged = f"pot_aug_{elem_name}_{species}"
+                coeff_tagged = f"coeff_aug_{elem_name}_{species}"
                 pot_dst = os.path.join(INPUT_TEMP, pot_tagged)
                 coeff_dst = os.path.join(INPUT_TEMP, coeff_tagged)
                 if not os.path.exists(pot_dst):
@@ -4410,7 +4540,7 @@ def _obtain_pot_info(settings, sc):
                         aug_db, aug_entry, pot_dst, coeff_dst)
                     print(f"INFO: using augmented potential entry "
                           f"{aug_entry.label!r} for element "
-                          f"{elem_name!r}.")
+                          f"{elem_name!r} species {species}.")
             else:
                 # ---- Legacy path: copy pot<N>/coeff<N> as before
                 #      (the default pot1, or the -subpot target).

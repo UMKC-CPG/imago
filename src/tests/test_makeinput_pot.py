@@ -144,6 +144,131 @@ class TestSelectAugmentedPotEntry:
 
 
 # ============================================================
+#  _select_augmented_pot_entry precedence 2: the per-species
+#  environment fingerprint match (DESIGN 5.6.5; C59)
+# ============================================================
+
+import types                                            # noqa: E402
+
+from matchers import (ReduceMatcher, ReduceShellCode,    # noqa: E402
+                      ReduceShellLevel)
+
+# The descriptor sub_spec a reduce scheme stores and an entry records.
+_REDUCE_SUB_SPEC = {"level": 1, "thick": 0.1,
+                    "cutoff": 5.0, "tolerance": 0.05}
+
+
+def _reduce_entry(label, default, neighbor, distance):
+    """A PotentialEntry carrying one reduce fingerprint: a single shell
+    with the given neighbor element symbol at the given distance."""
+
+    record = ipdb.FingerprintRecord(
+        method="reduce", sub_spec=dict(_REDUCE_SUB_SPEC),
+        payload={"shell_code": {
+            "element": "si",
+            "levels": [{"distance": distance,
+                        "neighbors": [neighbor]}]}})
+    return PotentialEntry(
+        label=label, default=default, description="d",
+        num_gaussians=1, alpha_min=1.0, alpha_max=1.0,
+        coefficients=[1.0], alphas=[1.0],
+        provenance=_imago_provenance(), fingerprints=[record])
+
+
+def _si_fingerprinted_db() -> ElementDatabase:
+    """A Si database with two fingerprinted entries -- bulk-like (a Si
+    neighbor at 2.35) and oxide-like (an O neighbor at 1.60) -- plus the
+    oxide entry flagged default."""
+
+    db = ElementDatabase(
+        schema_version=2, element_symbol="Si", nuclear_z=14.0,
+        nuclear_alpha=10.0, covalent_radius=1.1)
+    db.potentials.append(_reduce_entry("si-bulk", False, "si", 2.35))
+    db.potentials.append(_reduce_entry("si-oxide", True, "o", 1.60))
+    return db
+
+
+def _si_query(neighbor, distance):
+    """A ReduceShellCode query: central Si with one neighbor of the given
+    element symbol at the given distance."""
+
+    return ReduceShellCode(
+        element_id=1, element_name="Si", tolerance=0.05,
+        levels=[None, ReduceShellLevel(
+            distance=distance, members=[(1, 1)],
+            member_names=[neighbor])])
+
+
+class TestSelectAugmentedPotEntryFingerprint:
+    """Precedence 2: when a reduce scheme supplies a species' query
+    fingerprint, the pick matches it against the entries' stored
+    fingerprints instead of defaulting (DESIGN 5.6.5)."""
+
+    def test_match_picks_closest_entry_over_default(self):
+        # A query that looks like the bulk environment selects si-bulk,
+        #   even though si-oxide is the default-tagged entry.
+        db = _si_fingerprinted_db()
+        matcher = ReduceMatcher()
+        entry = makeinput._select_augmented_pot_entry(
+            ipdb, db, None, "Si",
+            query=_si_query("si", 2.35), matcher=matcher,
+            sub_spec=_REDUCE_SUB_SPEC, species=1)
+        assert entry.label == "si-bulk"
+
+    def test_no_match_within_floor_falls_to_default(self, capsys):
+        # A query unlike either stored environment exceeds the floor on
+        #   both, so the pick warns and falls back to the default entry.
+        db = _si_fingerprinted_db()
+        matcher = ReduceMatcher()
+        entry = makeinput._select_augmented_pot_entry(
+            ipdb, db, None, "Si",
+            query=_si_query("au", 9.9), matcher=matcher,
+            sub_spec=_REDUCE_SUB_SPEC, species=2)
+        assert entry.label == "si-oxide"        # the default
+        assert "similarity floor" in capsys.readouterr().out
+
+    def test_pot_override_beats_fingerprint_match(self):
+        # Precedence 1 outranks precedence 2: an explicit -pot label wins
+        #   even when a fingerprint would have matched a different entry.
+        db = _si_fingerprinted_db()
+        matcher = ReduceMatcher()
+        entry = makeinput._select_augmented_pot_entry(
+            ipdb, db, "si-oxide", "Si",
+            query=_si_query("si", 2.35), matcher=matcher,
+            sub_spec=_REDUCE_SUB_SPEC, species=1)
+        assert entry.label == "si-oxide"
+
+
+class TestSpeciesQueryFingerprint:
+    """``_species_query_fingerprint`` summarizes a species' atoms into one
+    representative, or None when the species has no reduce fingerprint."""
+
+    def _settings(self, atom_fingerprints):
+        return types.SimpleNamespace(
+            num_atoms=len(atom_fingerprints) - 1,
+            atom_element_id=[None, 1, 1, 2],
+            atom_species_id=[None, 1, 2, 1],
+            atom_reduce_fingerprint=atom_fingerprints)
+
+    def test_returns_first_member_of_species(self):
+        seed = _si_query("si", 2.35)
+        other = _si_query("si", 2.35)
+        settings = self._settings([None, seed, other, _si_query("o", 1.6)])
+        result = makeinput._species_query_fingerprint(
+            settings, 1, 1, ReduceMatcher())
+        assert result is seed                     # first member, species 1
+
+    def test_returns_none_without_fingerprints(self):
+        # No reduce scheme ran (the attribute is absent) -> None, which
+        #   sends the pick to the default entry.
+        settings = types.SimpleNamespace(
+            num_atoms=2, atom_element_id=[None, 1, 1],
+            atom_species_id=[None, 1, 1])
+        assert makeinput._species_query_fingerprint(
+            settings, 1, 1, ReduceMatcher()) is None
+
+
+# ============================================================
 #  _write_legacy_pot_files_from_entry (legacy-format emission)
 # ============================================================
 
