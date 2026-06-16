@@ -4312,13 +4312,20 @@ must populate all of them:
                                        j in the triangle
                                        range).
   max_neigh      `sub_spec.get(        Integer cap on
-                  "max_neigh", 20)`    the per-site
+                  "max_neigh", 50)`    the per-site
                                        neighbor list
-                                       length.
+                                       length; sized
+                                       for the cutoff
+                                       reach below.
   cutoff         `sub_spec.get(        Real radial
-                  "cutoff", 5.0)`      cutoff in Bohr
-                                       on the
-                                       neighbor list.
+                  "cutoff", 9.0)`      cutoff in Bohr
+                                       on the neighbor
+                                       list; wide
+                                       enough to
+                                       enclose every
+                                       atom's first
+                                       shell (see
+                                       below).
   angleSqueeze   `sub_spec.get(        Real angular
                   "angle_squeeze",     compression
                   0.85)`               factor (see
@@ -4328,11 +4335,27 @@ must populate all of them:
 
 The required `sub_spec` keys are `twoj1` and `twoj2`.
 The remaining three are optional, with the defaults
-shown -- matching the current hardcoded values
-`makeinput.py` emits today.  Two fingerprints whose
-`sub_spec` differs in *any* of these five values
-produce different bispectrum vectors and must coexist
-as separate fingerprint records per DESIGN 5.2 rule 8.
+shown -- the database-wide values `makeinput.py`
+emits today.  The `cutoff` default of 9.0 Bohr (about
+4.76 Angstrom) is chosen to enclose the first
+coordination shell of *every* atom, including large,
+loosely bonded cations whose first shell sits farther
+out.  A cutoff too small to reach an atom's first
+shell leaves that atom with an empty neighbor list and
+an all-zero descriptor that carries no information and
+cannot match anything in the database; 9.0 Bohr avoids
+that failure mode across atom sizes.  The `max_neigh`
+default of 50 caps the per-site neighbor list and must
+be large enough for that reach -- a dense first shell
+within 9.0 Bohr can hold a few dozen neighbors, and
+the loen neighbor list has no internal bound check, so
+an undersized cap would overrun its arrays.  (The
+principled long-term answer to the single-global-cutoff
+limitation is the element-aware cutoff, TODO C62 / D10.)
+Two fingerprints whose `sub_spec` differs in *any* of
+these five values produce different bispectrum vectors
+and must coexist as separate fingerprint records per
+DESIGN 5.2 rule 8.
 When comparing `sub_spec`s for rule-8 uniqueness, the
 canonical form is the post-default-resolution dict
 (omitting a key is equivalent to specifying the

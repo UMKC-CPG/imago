@@ -494,10 +494,15 @@ class BispecMatcher(Matcher):
         they set the angular-momentum pair and hence the output vector
         length ``twoj2 + 1`` (the count of coupling channels ``j`` in the
         triangle range ``|j1 - j2| <= j <= j1 + j2``, with ``twoj1 >=
-        twoj2``).  The remaining three parameters are
-        optional and default to the values ``makeinput.py`` has
-        historically hardcoded, so an omitted key reproduces today's
-        behavior exactly.
+        twoj2``).  The remaining three parameters are optional and
+        default to the database-wide values ``makeinput.py`` emits: a
+        ``cutoff`` of 9.0 Bohr (large enough to enclose the first
+        coordination shell of every atom, so no atom is left with an
+        empty neighbor list and an all-zero descriptor) and a
+        ``max_neigh`` of 50 (the per-site neighbor-list cap, sized for
+        that reach).  These defaults are part of the descriptor itself:
+        every stored and queried fingerprint must share them for
+        distances to be comparable (DESIGN 5.2 rule 8).
 
         Parameters
         ----------
@@ -536,8 +541,8 @@ class BispecMatcher(Matcher):
             "loenCode":     1,
             "twoj1":        sub_spec["twoj1"],
             "twoj2":        sub_spec["twoj2"],
-            "max_neigh":    sub_spec.get("max_neigh", 20),
-            "cutoff":       sub_spec.get("cutoff", 5.0),
+            "max_neigh":    sub_spec.get("max_neigh", 50),
+            "cutoff":       sub_spec.get("cutoff", 9.0),
             "angleSqueeze": sub_spec.get("angle_squeeze", 0.85),
         }
 

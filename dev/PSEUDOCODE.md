@@ -2933,10 +2933,14 @@ class BispecMatcher extends Matcher:
             "loenCode"     : 1,
             "twoj1"        : sub_spec["twoj1"],
             "twoj2"        : sub_spec["twoj2"],
+            # cutoff (Bohr) must enclose every atom's
+            #   first shell or that atom gets an all-zero
+            #   descriptor; max_neigh caps the per-site
+            #   list and must fit that reach (DESIGN 5.10.5).
             "max_neigh"    : sub_spec.get(
-                "max_neigh", 20),
+                "max_neigh", 50),
             "cutoff"       : sub_spec.get(
-                "cutoff", 5.0),
+                "cutoff", 9.0),
             "angleSqueeze" : sub_spec.get(
                 "angle_squeeze", 0.85)}
 

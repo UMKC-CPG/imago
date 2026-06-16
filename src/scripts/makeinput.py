@@ -4889,13 +4889,21 @@ def _print_imago_input(settings, sc, file_set,
     imago_fh.write("1"
                    "                             ! 1=Produce dipole output\n")
 
-    # Local environment (LOEN) input data.
+    # Local environment (LOEN) input data.  The cutoff is the radial
+    #   reach of the neighbor list (Bohr): it must enclose at least the
+    #   first coordination shell of every atom, including large, loosely
+    #   bonded cations whose first shell sits farther out, or those atoms
+    #   get an empty neighbor list and an all-zero (useless) descriptor.
+    #   9.0 Bohr (about 4.76 Angstrom) comfortably encloses first shells
+    #   across atom sizes; max_neigh (50) caps the per-site neighbor list
+    #   and must be large enough for that reach -- a denser shell within
+    #   9.0 Bohr can hold a few dozen neighbors.
     imago_fh.write("LOEN_INPUT_DATA\n")
     imago_fh.write("1"
                    "                          ! Method: 1 Bispec. Comp.\n")
     imago_fh.write("4 4"
                    "                        ! Bispec-Comp.: 2j1 2j2\n")
-    imago_fh.write("20 5.0 0.85"
+    imago_fh.write("50 9.0 0.85"
                    "                ! max_neigh cutoff angleSqueeze\n")
 
     # End of data marker.

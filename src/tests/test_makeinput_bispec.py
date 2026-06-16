@@ -60,16 +60,18 @@ def test_bispec_matcher_registered():
 
 def test_to_loen_input_fills_defaults():
     """With only the required ``twoj1`` / ``twoj2``, the optional
-    parameters take the documented defaults that reproduce makeinput's
-    historically-hardcoded LOEN block."""
+    parameters take the documented database-wide defaults makeinput
+    emits: a 9.0 Bohr cutoff (wide enough to enclose every atom's first
+    coordination shell, so no atom gets an all-zero descriptor) and a
+    max_neigh of 50."""
 
     params = BispecMatcher().to_loen_input({"twoj1": 8, "twoj2": 6})
     assert params == {
         "loenCode":     1,
         "twoj1":        8,
         "twoj2":        6,
-        "max_neigh":    20,
-        "cutoff":       5.0,
+        "max_neigh":    50,
+        "cutoff":       9.0,
         "angleSqueeze": 0.85,
     }
 
