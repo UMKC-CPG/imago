@@ -1702,12 +1702,20 @@ def manage_output(settings, fn, proj_home, spin_pol,
         _manage_field_output(
             edge_, basis, fn, ph, spin_pol, rt
         )
-    elif job_id % 100 == 11:  # Polarization (mtop)
+    elif job_id % 100 == 11 and job_id < 300:  # Polariz. (mtop)
         _manage_mtop_output(
             edge_, basis, fn, ph, spin_pol, rt
         )
 
-    if job_id == 311:  # Local environment
+    # Local environment (loen) is jobID 311.  It shares the
+    #   property code 11 (job_id % 100) with polarization (mtop),
+    #   but mtop only ever lives in the 100/200 bands (111, 211 --
+    #   see JOB_DEFS), never the 300 band.  Without the "job_id <
+    #   300" bound above, a loen run would fall into the mtop
+    #   branch and _manage_mtop_output would die hunting for a
+    #   fort.180 that a loen run never writes -- aborting before
+    #   this block could copy out the fort.21 it does write.
+    if job_id == 311:
         _manage_loen_output(
             edge_, basis, fn, ph, rt
         )
@@ -2531,11 +2539,19 @@ def project_home_outputs(settings):
     #   ".up"/".dn" variants; the collector keeps whichever
     #   files exist on disk. Full per-property enumeration is
     #   deferred (PSEUDOCODE 12.2 property_outputs note).
-    prop_tag = {
-        1: fn.dos, 2: fn.bond, 3: fn.dimo, 4: fn.optc,
-        5: fn.pacs, 6: fn.optc, 7: fn.sige, 8: fn.sybd,
-        9: fn.force, 10: fn.field, 11: fn.mtop,
-    }.get(job_id % 100)
+    # Restrict the property lookup to the 100/200 bands: the
+    #   300-series loen job (311) reduces to property code 11
+    #   under "% 100" and would otherwise be mislabeled as an
+    #   mtop "total" output it never writes (the same 311-vs-11
+    #   collision guarded in manage_output).  loen records its
+    #   own key below instead.
+    prop_tag = None
+    if job_id < 300:
+        prop_tag = {
+            1: fn.dos, 2: fn.bond, 3: fn.dimo, 4: fn.optc,
+            5: fn.pacs, 6: fn.optc, 7: fn.sige, 8: fn.sybd,
+            9: fn.force, 10: fn.field, 11: fn.mtop,
+        }.get(job_id % 100)
     if prop_tag is not None:
         outputs["property"] = (
             f"{edge}_{prop_tag}{basis}{fn.tot}"
