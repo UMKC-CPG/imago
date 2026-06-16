@@ -3432,13 +3432,39 @@ an importable `group_by_bispectrum` the producer
 CLI for manual use.  It runs the loen flow and rewrites the
 skeleton with explicit per-element species tags; makeinput
 then reads those tags like any other explicit assignment.
+Grouping applies only to non-crystalline (P1) systems; a
+symmetry-bearing skeleton is refused up front, since
+rewriting its types in P1 would drop the space group that
+k-point folding depends on (DESIGN 5.10.1).
 
 ```
 function group_by_bispectrum(skeleton_path, sub_spec,
         similarity_floor):
     matcher = MATCHERS["bispectrum"]()
 
-    # 1. First makeinput: a provisional imago.dat with no
+    # 1. P1 guard.  Grouping rewrites every atom's type
+    #    from its fingerprint, which only makes sense for a
+    #    non-crystalline cell.  Read the skeleton and refuse
+    #    unless its space group resolves to number 1 (the
+    #    `space` line reads `1_a`) and its supercell is
+    #    1 1 1.  Regrouping a real crystal would force it
+    #    into P1 and discard the space group the
+    #    Brillouin-zone k-point folding relies on, so a
+    #    symmetry-bearing skeleton is rejected here rather
+    #    than silently corrupted; a crystal is harvested on
+    #    the witness path instead (DESIGN 5.10.1, 5.10.4).
+    structure = read_skeleton(skeleton_path)
+    require(structure.space_group_num == 1
+            and structure.supercell == [1, 1, 1],
+        skeleton_path + " is not P1 (space group "
+        + structure.space_group + ", supercell "
+        + str(structure.supercell) + "); bispectrum "
+        + "grouping rewrites types in P1 and would drop "
+        + "the space group k-point folding needs.  Group "
+        + "only non-crystalline (P1, `1_a`) skeletons; "
+        + "harvest a crystal on the witness path instead.")
+
+    # 2. First makeinput: a provisional imago.dat with no
     #    grouping.  The LOEN_INPUT_DATA block carries the
     #    sub_spec via matcher.to_loen_input; the potential
     #    is irrelevant (bispectrum is geometric), so the
@@ -3446,19 +3472,19 @@ function group_by_bispectrum(skeleton_path, sub_spec,
     run_makeinput(skeleton_path,
         loen_params = matcher.to_loen_input(sub_spec))
 
-    # 2. Run loen.  -scf no skips the SCF; loen needs only
+    # 3. Run loen.  -scf no skips the SCF; loen needs only
     #    the structure and the LOEN block.  Produces a
     #    self-describing fort.21 (DESIGN 5.10.3).
     run_imago(flags = ["-loen", "-scf", "no"])
 
-    # 3. Read fort.21.  Each row carries its own identity
+    # 4. Read fort.21.  Each row carries its own identity
     #    (site#, element, species, type_in_species,
     #    type_flat) and the bispectrum vector, so the
     #    row -> atom mapping is read off the file -- no
     #    separate datSkl.map lookup (DESIGN 5.10.3).
     rows = matcher.parse_loen_output("fort.21", sub_spec)
 
-    # 4. Bucket atoms by fingerprint distance within the
+    # 5. Bucket atoms by fingerprint distance within the
     #    floor, per element, refreshing each bucket's
     #    representative as it grows (the same bucketing as
     #    11.3.c, but run here in the orchestrator rather
@@ -3466,7 +3492,7 @@ function group_by_bispectrum(skeleton_path, sub_spec,
     species_of = bucketByFingerprint(rows, matcher,
         similarity_floor)
 
-    # 5. Rewrite the skeleton with explicit per-element
+    # 6. Rewrite the skeleton with explicit per-element
     #    species tags -- Si1,Si2,...,O1,O2,... restarting
     #    at 1 for each element (DESIGN 5.10.4).  A
     #    round-trip test guards the numbering.

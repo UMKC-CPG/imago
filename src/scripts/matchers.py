@@ -677,3 +677,102 @@ MATCHERS = {
     "reduce":     ReduceMatcher,
     "bispectrum": BispecMatcher,
 }
+
+
+# ===========================================================================
+# Shared species bucketing (DESIGN 5.6.4; PSEUDOCODE 11.3.c, 11.3.f)
+# ===========================================================================
+#
+# Grouping atoms into species is the same operation for every descriptor
+# family: walk the atoms once, and either join each atom to an existing
+# group whose representative is "close enough" or let it start a new
+# group.  The only family-specific pieces are the distance and the
+# representative, and those already live on the matcher -- so the
+# bucketing loop itself is written once here and shared.  The makegroups
+# bispectrum flow (PSEUDOCODE 11.3.f) calls it now; the reduce species
+# pass (``group_reduce``) is slated to adopt it as well (TODO C59),
+# retiring its in-place copy so the two implementations cannot drift apart.
+
+
+def bucket_by_fingerprint(fingerprints, matcher, similarity_floor):
+    """Greedy single-pass leader clustering of per-atom fingerprints.
+
+    This is the one shared "group atoms by how similar their environments
+    are" routine (DESIGN 5.6.4).  It walks ``fingerprints`` in order and,
+    for each one, joins the first existing bucket whose representative is
+    within ``similarity_floor`` of it, or opens a new bucket when none is
+    close enough.  Each time a bucket gains a member its representative is
+    refreshed through ``matcher.representative`` so it tracks the running
+    set (cheap at our atom counts); that refresh is what lets a loose floor
+    grow a bucket around a moving center rather than around its first
+    member alone.
+
+    The routine is descriptor-agnostic: it never inspects a fingerprint
+    itself, only hands pairs of them to ``matcher.distance`` and groups of
+    them to ``matcher.representative``.  So the same code serves the
+    bispectrum flow (where a fingerprint is a component vector) and, once
+    ``group_reduce`` adopts it (TODO C59), the reduce flow (where a
+    fingerprint is a shell-code object).  A caller that must not merge
+    across a category -- e.g. atoms of different elements under the
+    element-blind bispectrum distance -- partitions its inputs first and
+    calls this once per category.
+
+    Parameters
+    ----------
+    fingerprints : list
+        One fingerprint per atom, in the order the caller wants the buckets
+        numbered by (first appearance defines bucket order).  The objects
+        are whatever ``matcher.distance`` / ``matcher.representative``
+        accept; they are never interpreted here.
+    matcher : Matcher
+        Supplies ``distance(a, b)`` and ``representative(members)`` for this
+        descriptor family.  Each candidate is compared as
+        ``matcher.distance(candidate, bucket_representative)``; for an
+        asymmetric distance (the reduce family) the representative is the
+        second argument, a detail the C59 retrofit must preserve.
+    similarity_floor : float
+        The largest distance at which a candidate still joins an existing
+        bucket.  Callers pass an explicit override or the matcher's
+        ``default_similarity_floor`` (DESIGN 5.6.5).
+
+    Returns
+    -------
+    list of int
+        ``bucket_of`` parallel to ``fingerprints``: ``bucket_of[i]`` is the
+        0-based index of the bucket atom ``i`` landed in, in first-
+        appearance order.  A caller turns these into per-element species
+        numbers by adding 1 within each element's run (DESIGN 5.10.4).
+    """
+
+    # Each bucket tracks its running representative and the indices of its
+    #   members (so the representative can be recomputed as the bucket
+    #   grows).  Buckets are kept in discovery order, which fixes the
+    #   bucket numbering the caller reads back out.
+    buckets = []                          # list of {representative, members}
+    bucket_of = [None] * len(fingerprints)
+
+    for atom_index, fingerprint in enumerate(fingerprints):
+
+        # Join the first bucket whose representative is within the floor.
+        #   "First" keeps the assignment deterministic and ties an atom to
+        #   the earliest-discovered group it is close enough to match.
+        joined = False
+        for bucket_index, bucket in enumerate(buckets):
+            if matcher.distance(fingerprint, bucket["representative"]) \
+                    <= similarity_floor:
+                bucket["members"].append(atom_index)
+                bucket["representative"] = matcher.representative(
+                    [fingerprints[member] for member in bucket["members"]])
+                bucket_of[atom_index] = bucket_index
+                joined = True
+                break
+
+        # No bucket was close enough: this atom seeds a brand new one.
+        if not joined:
+            buckets.append({
+                "representative": fingerprint,
+                "members":        [atom_index],
+            })
+            bucket_of[atom_index] = len(buckets) - 1
+
+    return bucket_of

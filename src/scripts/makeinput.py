@@ -262,6 +262,26 @@ class ScriptSettings:
         self.bf_cutoff = rc["bf_cutoff"]
         self.es_cutoff = rc["es_cutoff"]
 
+        # Local-environment (LOEN) descriptor parameters.  These fill the
+        #   LOEN_INPUT_DATA block of imago.dat that the engine's loen path
+        #   reads (O_Input::readLoEnControl).  The defaults below reproduce
+        #   the values this writer used to hardcode, and they match the
+        #   bispectrum descriptor contract shared with BispecMatcher
+        #   (DESIGN 5.2 rule 8 / 5.10.5): loen_code 1 selects the
+        #   bispectrum-component algorithm; (twoj1, twoj2) = (4, 4) sets the
+        #   angular-momentum pair; the 9.0-Bohr cutoff encloses the first
+        #   coordination shell of every atom; max_neigh 50 caps the per-site
+        #   neighbor list for that reach; angle_squeeze 0.85 is the angular
+        #   weighting.  The -loeninput flag overrides all six so an external
+        #   orchestrator (makegroups.py, DESIGN 5.10.2) can emit a LOEN block
+        #   that matches a chosen sub_spec rather than these defaults.
+        self.loen_code = 1
+        self.loen_twoj1 = 4
+        self.loen_twoj2 = 4
+        self.loen_max_neigh = 50
+        self.loen_cutoff = 9.0
+        self.loen_angle_squeeze = 0.85
+
         # Exchange correlation mesh.
         self.xc_code = rc["xc_code"]
         self.xc_in_weight = rc["xc_in_weight"]
@@ -1009,6 +1029,25 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
         parser.add_argument("-escort", dest="escort", type=float, default=None,
                             help="Electrostatic interaction cutoff exponent.  "
                                  "Default: 16.")
+        # The -loeninput option fills the LOEN_INPUT_DATA block of imago.dat
+        # from an explicit parameter set instead of the built-in defaults.
+        # It is a plain input-writer flag (it does NOT group atoms): the
+        # makegroups.py orchestrator uses it to make the first, ungrouped
+        # imago.dat carry the loen parameters of a chosen bispectrum
+        # sub_spec (DESIGN 5.10.2), so the descriptor a later loen run
+        # computes matches what the database expects.  The six values are
+        # given in LOEN-block order: the method code, the angular-momentum
+        # pair 2j1 2j2, then max_neigh, cutoff (Bohr), and angleSqueeze.
+        parser.add_argument(
+            "-loeninput", dest="loeninput", nargs=6, default=None,
+            metavar=("CODE", "TWOJ1", "TWOJ2", "MAXNEIGH",
+                     "CUTOFF", "ANGLESQUEEZE"),
+            help="Fill the LOEN_INPUT_DATA block from six explicit values "
+                 "(method code, 2j1, 2j2, max_neigh, cutoff in Bohr, "
+                 "angleSqueeze) in LOEN-block order.  The first four are "
+                 "integers and the last two are reals.  Default when "
+                 "omitted: 1 4 4 50 9.0 0.85, the bispectrum descriptor "
+                 "contract values.")
         # The -pdb option generates a PDB (Protein Data Bank) crystal
         # structure file for visualization in external programs.
         parser.add_argument("-pdb", dest="pdb", action="store_true",
@@ -1238,6 +1277,20 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             self.bf_cutoff = args.bfcut
         if args.escort is not None:
             self.es_cutoff = args.escort
+        if args.loeninput is not None:
+            # Six values in LOEN-block order: the first four are integer
+            #   (method code, the 2j1/2j2 pair, the neighbor-list cap) and
+            #   the last two are real (radial cutoff in Bohr, angular
+            #   weighting).  to_loen_input on the matcher side produces
+            #   exactly this set (DESIGN 5.10.5), so makegroups can hand
+            #   them straight through.
+            code, twoj1, twoj2, max_neigh, cutoff, squeeze = args.loeninput
+            self.loen_code = int(code)
+            self.loen_twoj1 = int(twoj1)
+            self.loen_twoj2 = int(twoj2)
+            self.loen_max_neigh = int(max_neigh)
+            self.loen_cutoff = float(cutoff)
+            self.loen_angle_squeeze = float(squeeze)
         if args.pdb:
             self.pdb = 1
         if args.cif_flag:
@@ -4898,12 +4951,18 @@ def _print_imago_input(settings, sc, file_set,
     #   across atom sizes; max_neigh (50) caps the per-site neighbor list
     #   and must be large enough for that reach -- a denser shell within
     #   9.0 Bohr can hold a few dozen neighbors.
+    #   The six values come from the settings (built-in defaults above, or
+    #   the -loeninput override an orchestrator like makegroups.py supplies);
+    #   the engine reads the leading number(s) on each line and treats the
+    #   trailing "! ..." as a comment, so only one separating space is
+    #   required before it.
     imago_fh.write("LOEN_INPUT_DATA\n")
-    imago_fh.write("1"
+    imago_fh.write(f"{settings.loen_code}"
                    "                          ! Method: 1 Bispec. Comp.\n")
-    imago_fh.write("4 4"
+    imago_fh.write(f"{settings.loen_twoj1} {settings.loen_twoj2}"
                    "                        ! Bispec-Comp.: 2j1 2j2\n")
-    imago_fh.write("50 9.0 0.85"
+    imago_fh.write(f"{settings.loen_max_neigh} {settings.loen_cutoff} "
+                   f"{settings.loen_angle_squeeze}"
                    "                ! max_neigh cutoff angleSqueeze\n")
 
     # End of data marker.

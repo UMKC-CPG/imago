@@ -4169,7 +4169,18 @@ and only one of them rewrites the skeleton:
    *informational* (a witness record for the database,
    5.2.2); the types are not derived from it.
    **Crystalline systems are never grouped by
-   bispectrum.**
+   bispectrum.**  The reason is sharper than "the types
+   are already known."  Grouping works in P1: it
+   reassigns every atom a type from its fingerprint,
+   which means it must first drop the space group and
+   treat the cell as having no symmetry.  But the
+   k-point machinery folds the full Brillouin-zone mesh
+   onto the irreducible wedge *using that space group*,
+   so regrouping a crystal in P1 would silently discard
+   the symmetry the k-point sampling depends on and
+   corrupt the band structure.  The witness path
+   therefore leaves both the symmetry and the skeleton
+   untouched.
 
 Case 1 is the only one that writes a new skeleton; case 2
 harvests one fingerprint per existing type and leaves the
@@ -4191,7 +4202,12 @@ skeleton untouched.
 2. **Run loen.**  Invoke `imago.py -loen -scf no` against
    that `imago.dat`, producing `fort.21` (5.10.3).
 3. **Orchestrate on `fort.21`.**
-   - *Case 1 (grouping).*  Bucket the atoms by
+   - *Case 1 (grouping).*  Requires a P1 skeleton --
+     space group 1 (the mandatory `space` line reads
+     `1_a`) and a unit (`1 1 1`) supercell; the
+     orchestrator refuses a symmetry-bearing skeleton
+     here rather than silently drop its space group
+     (5.10.1, 5.10.4).  Bucket the atoms by
      `BispecMatcher` fingerprint distance (the species
      logic of 5.6.4, run in the orchestrator rather than
      inside makeinput), then **rewrite the skeleton** with
@@ -4257,6 +4273,16 @@ components-plus-sum row with no header and must be revised
 to the real format before any live use.
 
 #### 5.10.4 Writing the new skeleton (case 1)
+
+This rewrite runs only for a P1 skeleton -- no space
+group line and a unit (`1 1 1`) supercell -- because case
+1 is by construction non-crystalline (5.10.1).  The
+orchestrator enforces this as a hard precondition: handed
+a symmetry-bearing skeleton it refuses to rewrite rather
+than discard the space group, which would corrupt
+Brillouin-zone k-point folding.  A crystalline reference
+belongs on the witness path (case 2), which leaves the
+skeleton untouched.
 
 When the orchestrator rewrites the skeleton with its
 bispectrum grouping, it must follow the **per-element

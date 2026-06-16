@@ -53,6 +53,47 @@ if SCRIPTS_DIR not in sys.path:
 
 
 # ---------------------------------------------------------------------------
+# Scratch-file cleanup
+# ---------------------------------------------------------------------------
+# StructureControl.apply_space_group() drives the applySpaceGroup Fortran
+# program, which communicates through two fixed-name files in the current
+# directory: it reads 'sginput' and writes 'sgoutput'.  Any test that loads
+# a real (symmetry-bearing) skeleton therefore leaves those two scratch
+# files behind in whatever directory pytest was launched from -- usually
+# the repository's src/ tree -- where they show up as stray untracked
+# files.  This autouse fixture removes them after every test so the working
+# tree stays clean.  It is deliberately conservative: it only deletes the
+# two known scratch names, and only ever fails silently (a missing file is
+# the normal case for the many tests that never touch a space group).
+
+_SPACE_GROUP_SCRATCH = ('sginput', 'sgoutput')
+
+
+@pytest.fixture(autouse=True)
+def _clean_space_group_scratch():
+    """Remove the applySpaceGroup scratch files (sginput / sgoutput) a
+    test may have written into its working directory.
+
+    The directory pytest started in is captured up front; both it and the
+    directory the test ends in are swept, so the cleanup still works for a
+    test that changed directories (e.g. via monkeypatch.chdir) without
+    restoring afterwards.  Tests that chdir into a tmp_path clean
+    themselves when pytest removes that tmp_path, so this is belt and
+    suspenders for them and the real fix for the in-place src/ runs."""
+
+    start_dir = os.getcwd()
+    yield
+    for directory in {start_dir, os.getcwd()}:
+        for name in _SPACE_GROUP_SCRATCH:
+            try:
+                os.remove(os.path.join(directory, name))
+            except OSError:
+                # The normal case: this test never ran a space group, so
+                #   the scratch file simply is not there.
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Environment check
 # ---------------------------------------------------------------------------
 

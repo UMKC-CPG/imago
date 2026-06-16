@@ -6,20 +6,22 @@ message("At the set of scripts.")
 set (SCRIPTS
    ab2pf.py angle_utils.py
    bond_analysis.py build_initial_potentials.py
-   condense.py
+   collectSYBD.py condense.py
    deadmd.py dump2skl.py
    element_data.py element_pct.py
    graspElems.py
    guidance_db.py guidance_harvest.py guidance_promote.py
    hdf5Comp.py
-   imago.py initial_potential_db.py interFit.py
+   imago.py initial_potential_db.py insert3cbo.py interFit.py
    lmp2skl.py
-   make_veusz_graph.py makeBDB.py makePDOS.py makePotDB.py make_reactions.py
-   makeSGDB.py makeSYBD.py makeinput.py mod_struct.py
+   make_veusz_graph.py makeBDB.py makeBOND.py makeFittedRhoV.py
+   makegroups.py makePDOS.py makePotDB.py make_reactions.py makeSGDB.py
+   makeSYBD.py makeinput.py matchers.py mod_struct.py
    nanoTube.py
    org_radwavefn.py osrecurintg.py osrecurintgana.py osrecurintgnum.py
    osrecurintglib.py osrecurintg_makenum.py
-   pdb2skl.py plot_deadmd.py plotgraph.py pot2plot.py processPOPTC.py
+   pdb2skl.py plot_deadmd.py plotgraph.py porosity.py pot2plot.py
+   processPOPTC.py
    runIsoAtoms.py
    skl2isaacs.py skl2pdb.py skl2vasp.py struct2skl.py structure_control.py
    unpackImagoDB.py

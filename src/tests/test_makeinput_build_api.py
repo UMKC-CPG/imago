@@ -87,6 +87,21 @@ def test_args_from_options_unknown_key_raises():
         settings._args_from_options({"not_a_real_option": 1})
 
 
+def test_args_from_options_carries_loeninput_list():
+    """The -loeninput dest (C57) is a registered argparse option, so
+    the producer can drive the LOEN block in-process by passing a
+    six-value list through the options mapping -- the same set that
+    BispecMatcher.to_loen_input yields (DESIGN 5.10.5), in LOEN-block
+    order."""
+    settings = _bare_settings()
+    args = settings._args_from_options(
+        {"loeninput": ["1", "6", "4", "40", "7.5", "0.9"]})
+    assert args.loeninput == ["1", "6", "4", "40", "7.5", "0.9"]
+    # Omitting it leaves the dest at its argparse default of None, so a
+    #   bare invocation falls back to the built-in contract values.
+    assert _bare_settings()._args_from_options({}).loeninput is None
+
+
 # ==============================================================
 #  record_clp -- CLI-only command-file append (DESIGN 6.3.5)
 # ==============================================================
@@ -197,6 +212,31 @@ def test_from_options_builds_reconciled_settings(imago_data_dir):
     # The rc defaults were loaded by the constructor: a
     #   representative rc-backed attribute exists.
     assert hasattr(settings, "makekpoints_exec")
+
+
+def test_loeninput_overrides_all_six_loen_settings(imago_data_dir):
+    """-loeninput (C57) reconciles all six LOEN-block values, replacing
+    the built-in bispectrum-contract defaults.  The first four parse as
+    integers and the last two as reals, matching the LOEN-block order
+    the engine reads (DESIGN 5.10.2 / 5.10.5)."""
+    if not os.getenv("IMAGO_RC"):
+        pytest.skip("$IMAGO_RC not set")
+    # With no override the constructor leaves the contract defaults in
+    #   place: code 1, the (4, 4) angular-momentum pair, 50 neighbors,
+    #   a 9.0-Bohr cutoff, and an angleSqueeze of 0.85.
+    plain = ScriptSettings.from_options({})
+    assert (plain.loen_code, plain.loen_twoj1, plain.loen_twoj2,
+            plain.loen_max_neigh, plain.loen_cutoff,
+            plain.loen_angle_squeeze) == (1, 4, 4, 50, 9.0, 0.85)
+    # An explicit -loeninput overlays every one of the six.
+    overridden = ScriptSettings.from_options(
+        {"loeninput": ["1", "6", "4", "40", "7.5", "0.9"]})
+    assert overridden.loen_code == 1
+    assert overridden.loen_twoj1 == 6
+    assert overridden.loen_twoj2 == 4
+    assert overridden.loen_max_neigh == 40
+    assert overridden.loen_cutoff == 7.5
+    assert overridden.loen_angle_squeeze == 0.9
 
 
 # ==============================================================

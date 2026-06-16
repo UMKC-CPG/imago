@@ -1582,17 +1582,26 @@ shipped.
   Validate uniqueness across the run; store the name
   in the existing spatial-flag records so subsequent
   scope references can resolve it.
-- [ ] C57. makeinput.py: add `scope=NAME` /
+- [~] C57. makeinput.py: add `scope=NAME` /
   `scope=~NAME` to the `-reduce` handler.  Add a
   LOEN-block flag (e.g. `-loeninput`) that fills the
-  `LOEN_INPUT_DATA` block (makeinput.py:5477-5484) from
+  `LOEN_INPUT_DATA` block from
   a `to_loen_input(sub_spec)` parameter dict instead of
   the hardcoded `4 4` -- this is a plain input-writer
   flag, NOT a grouping flag, used by makegroups' first
   makeinput call (DESIGN 5.10.2).  The `-bispec`
   *grouping* handler does NOT live in makeinput; it
   belongs to makegroups (C58).
-- [ ] C58. makegroups.py (new; DESIGN 5.10, PSEUDOCODE
+  LOEN HALF DONE: `-loeninput CODE TWOJ1 TWOJ2 MAXNEIGH
+  CUTOFF ANGLESQUEEZE` (six values in LOEN-block order)
+  reconciles into six `loen_*` settings whose defaults
+  reproduce the old hardcoded `1 / 4 4 / 50 9.0 0.85`
+  and match the descriptor contract; the writer now
+  emits them.  Flows through `_args_from_options` too,
+  so the producer can drive it in-process.  REMAINING:
+  the `scope=NAME` reduce handler (belongs with the C59
+  reduce species pass, not the bispectrum path).
+- [x] C58. makegroups.py (new; DESIGN 5.10, PSEUDOCODE
   11.3.f): the sequential bispectrum grouping helper,
   dual-mode (importable `group_by_bispectrum` + a
   `__main__` CLI; shebang + exec bit).  Steps: run
@@ -1606,6 +1615,25 @@ shipped.
   DESIGN 5.10.4).  Round-trip test on the per-element
   numbering.  No makeinput self-invocation, no recursion
   guard.  Replaces the retired nested-bootstrap design.
+  DONE: pure core (P1 guard `_require_p1`; per-element
+  bucketing `_assign_species_from_rows` via the shared
+  `bucket_by_fingerprint`; in-place tag rewrite
+  `_rewrite_skeleton_species`) + subprocess
+  orchestration (`_run_makeinput`/`_run_loen`, fort.21
+  discovery, `<skeleton>.orig` backup, scratch workdir).
+  Row->atom mapping keys on (element, first-pass
+  species) off the self-describing fort.21 -- no
+  datSkl.map.  17 tests (round-trip via StructureControl,
+  crystal/supercell rejection, CLI).  LIVE-VALIDATED
+  2026-06-16 against the real engine (4-carbon P1 cell:
+  c1 alone, symmetric c2/c3/c4 merged -> 2 species).  The
+  live run fixed two seam bugs: makeinput takes no
+  skeleton positional (reads ./imago.skl in cwd), and the
+  loen descriptor is renamed by imago.py to
+  `<edge>_loen<basis>.plot` (e.g. `gs_loen-fb.plot`), NOT
+  `fort.21` -- `_find_loen_descriptor` globs `*loen*.plot`
+  and raises if absent (absence = the loen run failed).
+  Also confirms the C89 enriched fort.21 format live.
 - [ ] C59. makeinput.py: implement the Phase-2 species
   pass (DESIGN 5.6.4-5.6.7) for the schemes makeinput
   still owns -- position-based (`-target`, `-block`) and

@@ -32,7 +32,7 @@ import math
 
 import pytest
 
-from matchers import MATCHERS, BispecMatcher
+from matchers import MATCHERS, BispecMatcher, bucket_by_fingerprint
 
 
 # Pure tests: no Fortran binaries, no database reads, no full build.
@@ -215,6 +215,69 @@ def test_build_payload_and_extract_roundtrip():
     payload = matcher.build_payload(vector)
     assert payload == {"values": [0.1, -0.2, 0.3, 0.4, 0.5]}
     assert matcher.extract_query_vector(payload) == vector
+
+
+# ==============================================================
+#  bucket_by_fingerprint -- the shared species bucketing
+#  (DESIGN 5.6.4; PSEUDOCODE 11.3.c / 11.3.f)
+# ==============================================================
+
+def test_bucket_groups_by_similarity():
+    """Well-separated clusters each collapse to one bucket, numbered in
+    first-appearance order: two near 0, two near 10, one near 100 give
+    bucket ids [0, 0, 1, 1, 2]."""
+
+    matcher = BispecMatcher()
+    fingerprints = [[0.0, 0.0], [0.1, 0.0],
+                    [10.0, 0.0], [10.05, 0.0],
+                    [100.0, 0.0]]
+    bucket_of = bucket_by_fingerprint(fingerprints, matcher, 0.5)
+    assert bucket_of == [0, 0, 1, 1, 2]
+
+
+def test_bucket_empty_input():
+    """No atoms means no buckets -- an empty assignment, not an error."""
+
+    assert bucket_by_fingerprint([], BispecMatcher(), 0.5) == []
+
+
+def test_bucket_floor_zero_merges_only_exact_duplicates():
+    """A zero floor keeps every distinct fingerprint in its own bucket;
+    only exact duplicates (distance 0) share one.  This is the degenerate
+    case the reduce family relies on, where ``distance`` is already a
+    binary 0/inf verdict."""
+
+    matcher = BispecMatcher()
+    bucket_of = bucket_by_fingerprint(
+        [[1.0], [1.0], [2.0]], matcher, 0.0)
+    assert bucket_of == [0, 0, 1]
+
+
+def test_bucket_refreshes_representative_as_it_grows():
+    """The running representative -- not the seed alone -- decides
+    membership.  With floor 1.0 and the chain 0.0, 0.8, 1.3: the third
+    atom is 1.3 from the seed (> floor, would start a new bucket) but only
+    0.9 from the mean of the first two (<= floor), so it joins.  A bucketer
+    that compared against the fixed seed would split it off; getting one
+    bucket proves the representative is refreshed."""
+
+    matcher = BispecMatcher()
+    bucket_of = bucket_by_fingerprint(
+        [[0.0], [0.8], [1.3]], matcher, 1.0)
+    assert bucket_of == [0, 0, 0]
+
+
+def test_bucket_joins_earliest_matching_bucket():
+    """When a fingerprint is within the floor of more than one existing
+    bucket, it joins the earliest-discovered one, keeping the assignment
+    deterministic.  Seeds at 0.0 and 0.9 (0.9 apart, just outside a 0.8
+    floor so they stay separate); a third atom at 0.45 is within 0.8 of
+    both, and lands in bucket 0 because it was discovered first."""
+
+    matcher = BispecMatcher()
+    bucket_of = bucket_by_fingerprint(
+        [[0.0], [0.9], [0.45]], matcher, 0.8)
+    assert bucket_of == [0, 1, 0]
 
 
 def test_distance_consistent_with_representative_center():
