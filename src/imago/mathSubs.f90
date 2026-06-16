@@ -474,10 +474,10 @@ function clebschGordan(twoj1, twoj2, twoj, twom1, twom2, twom)
    coefficient = sqrt( &
       & real(preCompFactorial((twoj + twom)/2),double) &
       & * real(preCompFactorial((twoj - twom)/2) * (twoj + 1),double) &
-      & / real(preCompFactorial((twoj1 + twom1)/2),double) &
+      & / (real(preCompFactorial((twoj1 + twom1)/2),double) &
       & * real(preCompFactorial((twoj1 - twom1)/2),double) &
       & * real(preCompFactorial((twoj2 + twom2)/2),double) &
-      & * real(preCompFactorial((twoj2 - twom2)/2),double))
+      & * real(preCompFactorial((twoj2 - twom2)/2),double)))
 !write (6,fmt="(a,e15.4)") "coefficient", coefficient
 
    clebschGordan = 0.0_double
