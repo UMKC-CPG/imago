@@ -2609,13 +2609,17 @@ seven concerns, one per sub-section below.  The driver
 pass and the entry pick stay agnostic of which
 descriptor family is in play.
 
-Most runs exercise only a reduced subset of this flow.
-Sub-section 11.3.0 pins that subset -- the path active
-when no environment-based matcher (`-reduce` / `-bispec`)
-is selected.  It is the path the first consumer milestone
-(C47) implements before C54 onward layer in the matcher
-machinery; reading it first makes the seven full-flow
-sub-sections easier to place.
+Fingerprint matching runs by default (DESIGN 5.6.5, the
+C93 decoupling): the entry pick applies to *every* species,
+no matter how it was grouped.  A reduced subset of this flow
+is still common, though -- sub-section 11.3.0 pins it: the
+path active when fingerprint matching is turned off
+(`-nofingerprint`) or no element's database carries a usable
+(preferred) fingerprint, so the pick collapses to the `-pot`
+override and the default tag.  It is also the path the first
+consumer milestone (C47) implemented before C54 onward layered
+in the matcher machinery; reading it first makes the seven
+full-flow sub-sections easier to place.
 
 The mapping from DESIGN to PSEUDOCODE here is one-to-
 one:
@@ -2640,48 +2644,46 @@ one:
 
 ---
 
-#### 11.3.0 Reduced Flow (no environment matcher; DESIGN 5.6)
+#### 11.3.0 Reduced Flow (no fingerprint pick; DESIGN 5.6)
 
 The seven sub-sections above specify the full Phase-2
-selection flow.  Most runs -- and the first consumer
-milestone (C47) -- travel only the reduced path taken
-when the CLI selects no environment-based matcher
-(`-reduce` / `-bispec`).  This sub-section names which
-branches are live in that path so the reduced consumer
-has a self-contained spec, separate from the matcher
-machinery that C54 and onward layer in.
+selection flow.  A reduced path skips the fingerprint pick
+entirely and collapses to the `-pot` override plus the
+default tag.  It is taken when EITHER the user passed
+`-nofingerprint` (an explicit opt-out, DESIGN 5.6.1) OR no
+element in the structure carries a usable (preferred)
+fingerprint, so there is nothing to match against.  This
+sub-section names which branches are live in that path so the
+reduced consumer has a self-contained spec, separate from the
+matcher machinery that C54 and onward layer in.
 
-When `first_environment_matcher` (11.3.g) returns None:
+In the reduced path:
 
-  - No bispectrum grouping is involved; that happens
-    earlier, in makegroups (11.3.f), and never inside this
-    makeinput driver.
   - The preflight (11.3.b) still loads each element's
     database and still marks missing ones for the legacy
-    path, but skips `noteCoverage` -- that note is
-    meaningful only while a matcher is active.
-  - The species pass (11.3.c) returns an empty
-    `env_species_ids` set; only the position-based flags
-    (`-target`, `-block`, `-xanes`) and the default
-    one-species-per-element grouping remain.
-  - The entry pick (11.3.d) loses its precedence-2
-    fingerprint branch: that branch is gated on both
-    `active_matcher is not None` and `species_id in
-    env_species_ids`, and the latter set is now empty.
-    Only precedence 1 (`-pot LABEL`) and precedence 3
+    path.  `noteCoverage` may still fire (info-level) to
+    report an element with no fingerprints, unless
+    `-nofingerprint` suppressed it (DESIGN 5.6.3 step 4).
+  - Grouping (11.3.c) is unaffected -- crystallographic,
+    position-based (`-target`, `-block`), or an explicit
+    environment scheme still partition the atoms; the reduced
+    path is about the PICK, not the grouping.
+  - The entry pick (11.3.d) skips precedence 2: with the
+    fingerprint match disabled or unmatchable, only
+    precedence 1 (`-pot LABEL`) and precedence 3
     (`default_entry`) survive.
 
 An element whose augmented file is absent is handled the
 same way as in the full flow: the preflight marks
-`databases[elem] = None` and the driver (11.3.g, steps 5
-and 7) emits it via the legacy `pot1`/`coeff1` path, with
+`databases[elem] = None` and the driver (11.3.g, steps 6
+and 8) emits it via the legacy `pot1`/`coeff1` path, with
 no library entry consulted.  There is no schema-v1 case
 to consider here -- the reader rejects any
 `schema_version != 2` (DESIGN 5.2), and the producer
 (11.4) regenerates every on-disk file as v2, so a loaded
 database is always v2 and always carries a `default` tag.
 
-The reduced entry pick is the `active_matcher = None`
+The reduced entry pick is the fingerprint-disabled
 restriction of 11.3.d:
 
 ```
@@ -2700,18 +2702,16 @@ function pickEntryReduced(db, pot_override):
 
     # Precedence 3: the default-tagged entry, guaranteed
     # to exist and be unique by validation rule 7.  With
-    # no active environment matcher there is no
-    # precedence-2 fingerprint match to attempt first.
+    # the fingerprint pick off (or nothing to match), there
+    # is no precedence-2 step to attempt first.
     return default_entry(db)
 ```
 
-**Carry-forward to the full flow.**  When C54 onward turn
-the matcher machinery on, this reduced pick is subsumed by
-the full 11.3.d: precedence 2 slots back in between the
-override and the default, gated on the now-non-empty
-`env_species_ids`.  No branch written for the reduced flow
-is rewritten -- the full flow only inserts the middle
-precedence.
+**Carry-forward to the full flow.**  The full 11.3.d simply
+inserts precedence 2 between the override and the default;
+this reduced pick is its `-nofingerprint`-or-no-match
+restriction.  No branch written for the reduced flow is
+rewritten -- the full flow only adds the middle precedence.
 
 ---
 
@@ -2727,6 +2727,20 @@ on matchers whose `needs_loen_run` is true.  The protocol
 isolates Imago's Fortran side from manifest-schema
 growth: a new descriptor family is a new class plus a
 new `MATCHERS` registry entry.
+
+The entry pick also needs a query for a `needs_loen_run`
+matcher in its file-dictated branch (11.3.d): when the
+database's preferred record for a crystalline/pre-assigned
+species is a bispectrum one, the pick obtains the per-atom
+descriptors through `loen_descriptors(structure, matcher,
+sub_spec)` -- a thin reuse-or-run wrapper over the same
+loen seam (`to_loen_input` -> run `imago.py -loen -scf no`
+-> `parse_loen_output`).  It reuses a loen run already
+performed for grouping (the makegroups `fort.21`, 11.3.f)
+when one exists for this `(method, sub_spec)`, and
+otherwise triggers one fast loen run for the pick.  Python-
+side matchers (reduce) never need it -- `compute_query`
+serves the pick in-process.
 
 ```
 class Matcher:
@@ -2992,27 +3006,24 @@ MATCHERS = {
 Runs once before the species pass starts.  Loads the
 augmented database for every element in the structure,
 marks elements without a database for the legacy
-fallback path, and -- when an environment-based scheme is
-active -- notes (info-level, never fatal) any element
-whose database carries no fingerprint matching the
-requested `(method, sub_spec)`.  Such an element still
-groups normally; its species simply fall through to the
-default-tagged entry at the per-species pick (11.3.d step
-3), exactly as `-reduce` behaved before Phase 2.  We do
-not abort: an environment scheme is a *grouping* scheme
-first, and the fingerprint pick is a bonus that the
-default entry always backstops (DESIGN 5.6.3 step 4).
-(For bispectrum the equivalent coverage note lives in
-makegroups, 11.3.f, since its grouping runs before
-makeinput.)
+fallback path, and -- when fingerprint matching is enabled
+(the default; `-nofingerprint` turns it off) -- notes
+(info-level, never fatal) any element whose database
+carries no fingerprint records at all.  Such an element
+still groups normally; its species simply fall through to
+the default-tagged entry at the per-species pick (11.3.d
+step 3).  We do not abort: the fingerprint pick is a bonus
+layered on grouping that the default entry always backstops
+(DESIGN 5.6.3 step 4).  (The bispectrum *grouping* path
+reports its own loen-coverage condition in makegroups,
+11.3.f; that is about grouping, not this pick coverage.)
 
 ```
 function perElementPreflight(structure,
-        active_matcher):
-    # `active_matcher` is None when no environment-
-    # based scheme is in play.  Returns a mapping
-    # elem -> ElementDatabase | None; None marks the
-    # legacy-fallback path that 11.3.g consumes.
+        fingerprinting_enabled):
+    # `fingerprinting_enabled` is False under -nofingerprint.
+    # Returns a mapping elem -> ElementDatabase | None; None
+    # marks the legacy-fallback path that 11.3.g consumes.
     databases = {}
     elements = unique_element_symbols(structure)
 
@@ -3036,47 +3047,33 @@ function perElementPreflight(structure,
         databases[elem] = load(path,
             known_methods = MATCHERS.keys())
 
-        # Coverage note (5.6.3 step 4).  Only
-        # meaningful when an environment-based
-        # matcher is active; with only spatial flags
-        # or a manual -pot override, the default-tag
-        # fallback in 11.3.d step 3 always succeeds
-        # regardless of fingerprint records.  Never
-        # fatal -- it only tells the user why a
-        # species may get the default potential.
-        if active_matcher is not None:
-            noteCoverage(databases[elem],
-                active_matcher, elem, path)
+        # Coverage note (5.6.3 step 4).  Independent of the
+        # grouping scheme now (C93): the pick runs for every
+        # species, so the only question is whether this
+        # element has any fingerprint to match.  Suppressed
+        # under -nofingerprint, where the default is the
+        # deliberate choice.  Never fatal.
+        if fingerprinting_enabled:
+            noteCoverage(databases[elem], elem, path)
 
     return databases
 
 
-function noteCoverage(db, matcher, elem, path):
-    # Emit an info note when NO entry in `db` carries a
-    # FingerprintRecord whose (method, sub_spec) matches
-    # the active matcher.  We use the library's
-    # find_fingerprint to keep the sub_spec comparison
-    # canonical (matching rule 8's equality semantics).
-    # This does not abort: the per-species pick (11.3.d
-    # step 3) falls through to the default-tagged entry,
-    # so the run proceeds exactly as a pre-Phase-2
-    # -reduce run would.
-    method   = matcher.name
-    sub_spec = matcher.active_sub_spec
+function noteCoverage(db, elem, path):
+    # Emit an info note when NO entry in `db` carries ANY
+    # FingerprintRecord (of any registered matcher), so its
+    # species can only take the default potential.  This does
+    # not abort: the per-species pick (11.3.d step 3) falls
+    # through to the default-tagged entry.
     for entry in db.potentials:
-        try:
-            find_fingerprint(entry, method, sub_spec)
+        if len(entry.fingerprints) > 0:
             return       # coverage exists; nothing to note
-        except KeyError:
-            continue
-    info("environment scheme active but no entry in "
-        + path + " carries a fingerprint for ("
-        + method + ", " + str(sub_spec) + "); this"
-        + " element's species will use the default"
-        + " potential.  To enable a fingerprint match,"
-        + " add the [[reference_solid.entry.fingerprint]]"
-        + " declaration to the curation manifest and"
-        + " regenerate the database (DESIGN 5.7).")
+    info("element " + elem + " has no fingerprint records"
+        + " in " + path + "; its species will use the"
+        + " default potential.  To enable a fingerprint"
+        + " match, add a fingerprint declaration to the"
+        + " curation manifest and regenerate the database"
+        + " (DESIGN 5.7).")
 ```
 
 ---
@@ -3093,36 +3090,34 @@ bucket the in-scope atoms by descriptor distance.
 Atoms outside the active scope keep whatever species ID
 earlier flags produced.
 
+With the C93 decoupling the entry pick (11.3.d) runs for
+*every* species regardless of how it was grouped, so the
+species pass no longer tracks an `env_species_ids` set: it
+returns only the per-atom species assignment and the named
+spatial regions.  The per-atom grouping descriptors stay
+with the driver (11.3.g), which passes them to the pick so
+the explicit-scheme regime can reuse them for its
+representative.
+
 ```
 function speciesPass(structure, settings, databases,
         atom_fingerprints):
-    # `atom_fingerprints` is None when no environment-
-    # based matcher is active.  When non-None it
-    # holds one vector per atom of the whole
-    # structure (in site-index order); the bucketing
-    # step indexes into it by full-structure index.
-    #
-    # The third return value, env_species_ids, is the
-    # set of species IDs that were produced by an
-    # environment-based scheme.  Per DESIGN 5.6.5
-    # step 2, fingerprint matching applies only to
-    # those species; the entry-pick pass (11.3.d)
-    # gates on this set rather than on the presence
-    # of fingerprint vectors.
+    # `atom_fingerprints` is None when the user selected
+    # no environment-based grouping scheme.  When non-None
+    # it holds one vector per atom of the whole structure
+    # (in site-index order) from the grouping matcher; the
+    # bucketing step indexes into it by full-structure
+    # index, and the driver later hands the same vectors
+    # to the pick (11.3.d) for descriptor reuse.
     n_atoms          = len(structure.atoms)
     atom_species_id  = [1] * n_atoms
     named_regions    = {}     # name -> atom-index set
-    env_species_ids  = set()  # species made by an
-                              # environment scheme
 
     for method in settings.methods:
         if method.op == "spatial":
             # Position-based (-target, -block).
             # Existing geometric grouping; the new
             # `name=` keyword is consumed here.
-            # Spatially-grouped species do NOT join
-            # env_species_ids -- DESIGN 5.6.5 step 2
-            # forbids fingerprint matching on them.
             in_region = compute_spatial_membership(
                 structure, method)
             assign_new_species(atom_species_id,
@@ -3137,29 +3132,26 @@ function speciesPass(structure, settings, databases,
             # atoms by matcher distance.  Mutual
             # exclusion (DESIGN 5.6.2) means at most
             # one environment method appears in this
-            # loop.  The new species IDs the
-            # bucketing produces are recorded in
-            # env_species_ids so 11.3.d knows to
-            # attempt fingerprint matching on them.
+            # loop.  The grouped species flow on to
+            # the pick like any other -- no env-only
+            # gate (C93).
             scope = resolve_scope(method.scope,
                 named_regions, n_atoms)
             atoms_in_scope = \
                 atoms_of_element_in_scope(structure,
                     method.element, scope)
-            new_ids = assign_species_by_bucketing(
+            assign_species_by_bucketing(
                 atom_species_id,
                 atoms_in_scope,
                 atom_fingerprints,
                 method.matcher)
-            env_species_ids.update(new_ids)
 
         elif method.op == "electronic":
             # -xanes etc. defer to the type pass
             # (11.3.e); no species-level effect.
             continue
 
-    return (atom_species_id, named_regions,
-            env_species_ids)
+    return (atom_species_id, named_regions)
 
 
 function resolve_scope(scope_spec, named_regions,
@@ -3218,20 +3210,16 @@ function assign_species_by_bucketing(atom_species_id,
                 representative = vec,
                 atom_indices   = [atom_i]))
 
-    # Assign a fresh species ID to each bucket.
-    # Atoms outside `atoms_in_scope` keep whatever
-    # species ID earlier flags produced.  Return the
-    # set of newly-minted species IDs so the caller
-    # can record them in env_species_ids (consumed
-    # by 11.3.d to gate the fingerprint-match step).
-    new_species_ids = set()
+    # Assign a fresh species ID to each bucket.  Atoms
+    # outside `atoms_in_scope` keep whatever species ID
+    # earlier flags produced.  Mutates atom_species_id in
+    # place; the caller needs no return value (the pick no
+    # longer gates on which species were env-grouped, C93).
     next_id = max(atom_species_id) + 1
     for b in buckets:
         for i in b.atom_indices:
             atom_species_id[i] = next_id
-        new_species_ids.add(next_id)
         next_id += 1
-    return new_species_ids
 ```
 
 ---
@@ -3240,112 +3228,146 @@ function assign_species_by_bucketing(atom_species_id,
 
 For each `(element, species)` pair, chooses exactly
 one `PotentialEntry` from the element's database.
-Three-step precedence: `-pot LABEL` manual override,
-fingerprint match against entry-attached records, then
-default-tag fallback.  The default fallback is the
-single point that always succeeds, guaranteed by
-per-element-database rule 7.
+Precedence: `-pot LABEL` manual override; then a single
+best-effort fingerprint match (disabled by
+`-nofingerprint`); then the default-tag fallback, the one
+point that always succeeds (rule 7).  The match (DESIGN
+5.6.5 step 2, the C93 model) fixes exactly one descriptor
+family and one `sub_spec` -- the user's when they grouped
+with `-reduce`, otherwise the database's `preferred` record
+-- computes one query, and accepts a miss.  It never
+searches across families or sub_specs, and it never aborts:
+a database that lacks the chosen `(method, sub_spec)` is a
+silent fall-through to the default, the database never
+overruling the user.
 
 ```
-function pickManifestEntry(species_id, species_atoms,
-        element, db, active_matcher, pot_override,
-        atom_fingerprints, env_species_ids):
-    # species_id        -- the species being picked
-    # species_atoms     -- atom indices in this
-    #                      (element, species) bucket
-    # db                -- the element's
-    #                      ElementDatabase
-    # active_matcher    -- the active environment-
-    #                      based matcher, or None
-    # pot_override      -- the -pot LABEL value, or
-    #                      None
-    # atom_fingerprints -- per-atom fingerprint
-    #                      vectors (length = N), or
-    #                      None
-    # env_species_ids   -- set of species IDs
-    #                      produced by an environment-
-    #                      based scheme.  Per DESIGN
-    #                      5.6.5 step 2, fingerprint
-    #                      matching applies only to
-    #                      members of this set.
+function pickManifestEntry(species_atoms, element, db,
+        pot_override, fingerprinting_enabled,
+        user_scheme, structure, grouping_descriptors):
+    # species_atoms          -- atom indices in this
+    #                           (element, species) bucket
+    # db                     -- the element's ElementDatabase
+    # pot_override           -- the -pot LABEL value, or None
+    # fingerprinting_enabled -- False under -nofingerprint
+    # user_scheme            -- the active matcher object the
+    #                           user grouped with (carries
+    #                           active_sub_spec), or None.  In
+    #                           makeinput this is the reduce
+    #                           scheme; a -bispec run is
+    #                           grouped upstream by makegroups
+    #                           (11.3.f) and arrives as
+    #                           pre-assigned species -> the
+    #                           file-dictated branch below.
+    # structure              -- for computing a query on demand
+    # grouping_descriptors   -- per-atom vectors from the
+    #                           grouping pass (reused in the
+    #                           user-scheme regime), or None
 
-    # Precedence 1: manual override.
-    # KeyError here is fatal; -pot is a deliberate
-    # user choice and silently falling back would
-    # mask the intent.
+    # Precedence 1: manual override.  KeyError is fatal;
+    # -pot is a deliberate choice and a silent fallback
+    # would mask the intent.
     if pot_override is not None:
         try:
             return lookup(db, pot_override)
         except KeyError:
-            error("-pot " + pot_override
-                + " not found in "
+            error("-pot " + pot_override + " not found in "
                 + "share/atomicPDB/" + lower(element)
-                + "/s_gaussian_pot.toml; manual"
-                + " override must match an existing"
-                + " label")
+                + "/s_gaussian_pot.toml; manual override"
+                + " must match an existing label")
 
-    # Precedence 2: fingerprint match.  Gated on
-    # species_id in env_species_ids per DESIGN 5.6.5
-    # step 2 -- spatially-grouped species (-target,
-    # -block) skip this branch even when an
-    # environment-based matcher is active elsewhere
-    # in the run.
-    if (species_id in env_species_ids
-            and active_matcher is not None
-            and atom_fingerprints is not None):
-        member_vectors = [atom_fingerprints[i]
-                          for i in species_atoms]
-        rep = active_matcher.representative(
-            member_vectors)
-        best_entry    = None
-        best_distance = +infinity
-        method   = active_matcher.name
-        sub_spec = active_matcher.active_sub_spec
-        for entry in db.potentials:
-            try:
-                fp = find_fingerprint(entry, method,
-                    sub_spec)
-            except KeyError:
-                continue      # entry has no matching
-                              # fingerprint; skip
-            # The payload's vector field name is
-            # matcher-specific (DESIGN 5.2: bispec
-            # uses `values`, reduce uses
-            # `shell_code`); the matcher's
-            # extract_query_vector accessor knows
-            # which key to read so this code stays
-            # descriptor-agnostic.
-            entry_vector = \
-                active_matcher.extract_query_vector(
-                    fp.payload)
-            d = active_matcher.distance(rep,
-                entry_vector)
-            if d < best_distance:
-                best_distance = d
-                best_entry    = entry
-        if (best_entry is not None
-                and best_distance
-                    <= active_matcher
-                       .default_similarity_floor):
-            return best_entry
-        if best_entry is not None:
-            warn("species in " + element
-                + " has best fingerprint match "
-                + best_entry.label + " at distance "
-                + str(best_distance) + " (> floor "
-                + str(active_matcher
-                      .default_similarity_floor)
-                + "); falling back to default tag")
-        # If best_entry is None, the preflight
-        # already confirmed at least one entry has
-        # the fingerprint for this element -- the
-        # per-species absence here is normal when
-        # the curator added the fingerprint only to
-        # the most-relevant entries.  Fall through.
+    # -nofingerprint (and the reduced flow, 11.3.0): skip
+    # the match entirely.
+    if not fingerprinting_enabled:
+        return default_entry(db)
 
-    # Precedence 3: default tag.  Guaranteed to
-    # succeed by per-element-database rule 7.
+    # Precedence 2: a single best-effort fingerprint match.
+    # Fix exactly one (matcher, sub_spec) and one query,
+    # chosen by regime (DESIGN 5.6.5 step 2).
+    if user_scheme is not None:
+        # The user grouped with an environment scheme: honor
+        # it.  Match that family at the user's sub_spec,
+        # reusing the per-atom descriptors grouping computed.
+        matcher  = user_scheme
+        sub_spec = user_scheme.active_sub_spec
+        per_atom = grouping_descriptors
+    else:
+        # File-dictated species (crystalline / pre-assigned):
+        # the database decides via its preferred records --
+        # bispectrum if it has a preferred bispectrum record,
+        # else reduce.  One family only, no cascade.
+        pref = find_preferred(db, "bispectrum")
+        if pref is None:
+            pref = find_preferred(db, "reduce")
+        if pref is None:
+            return default_entry(db)   # nothing to match
+        matcher  = MATCHERS[pref.method]
+        sub_spec = pref.sub_spec
+        # Compute the one query this family needs: reduce
+        # in-process, bispectrum via the loen seam (reuse a
+        # grouping/loen run if one exists, else a fast loen
+        # run for the pick; 11.3.a, 11.3.f).
+        if matcher.needs_loen_run:
+            per_atom = loen_descriptors(structure, matcher,
+                sub_spec)
+        else:
+            per_atom = matcher.compute_query(structure,
+                sub_spec)
+
+    rep = matcher.representative(
+        [per_atom[i] for i in species_atoms])
+
+    # Shared match: nearest entry fingerprint at (method,
+    # sub_spec), accepted only within the similarity floor.
+    best_entry    = None
+    best_distance = +infinity
+    for entry in db.potentials:
+        try:
+            fp = find_fingerprint(entry, matcher.name,
+                sub_spec)
+        except KeyError:
+            continue      # this entry has no record at the
+                          # chosen (method, sub_spec); skip
+        # extract_query_vector reads the matcher-specific
+        # payload field (bispec `values`, reduce `shell_code`)
+        # so this stays descriptor-agnostic.
+        d = matcher.distance(rep,
+            matcher.extract_query_vector(fp.payload))
+        if d < best_distance:
+            best_distance = d
+            best_entry    = entry
+
+    if (best_entry is not None
+            and best_distance
+                <= matcher.default_similarity_floor):
+        return best_entry
+    if best_entry is not None:
+        # A near miss: records exist but none is close enough.
+        warn("species in " + element + " best fingerprint"
+            + " match " + best_entry.label + " at distance "
+            + str(best_distance) + " (> floor "
+            + str(matcher.default_similarity_floor)
+            + "); using the default tag")
+    # best_entry is None -> no comparable record at all (e.g.
+    # the user ran at a sub_spec the database lacks): a silent
+    # best-effort miss, the database never overruling the user.
+
+    # Precedence 3: default tag.  Guaranteed by rule 7.
     return default_entry(db)
+
+
+function find_preferred(db, method):
+    # Return the FingerprintRecord flagged preferred = true
+    # for `method` in this element's database, or None if the
+    # family is absent.  Per-element rule 10 guarantees
+    # exactly one preferred per present family (None means the
+    # family is absent, never present-but-unpreferred), so the
+    # first hit is it.
+    for entry in db.potentials:
+        for fp in entry.fingerprints:
+            if fp.method == method and fp.preferred:
+                return fp
+    return None
 ```
 
 ---
@@ -3533,53 +3555,57 @@ registry.
 ```
 function emitInitialPotentials(structure, settings,
         imago_input):
-    # 1. Identify the active environment-based
-    #    matcher.  DESIGN 5.6.2 mutual exclusion is
-    #    enforced at argparse time, so at most one
-    #    matcher is active here -- often none, when
-    #    only spatial flags and/or -pot are used.
-    active_matcher = first_environment_matcher(
+    # 1. Identify the in-makeinput environment scheme
+    #    the user grouped with (reduce), if any.  DESIGN
+    #    5.6.2 mutual exclusion is enforced at argparse
+    #    time, so at most one is active -- often none, when
+    #    species are crystallographic, spatial, or
+    #    pre-assigned (bispectrum, grouped upstream by
+    #    makegroups, 11.3.f).  `user_scheme` is None in
+    #    that file-dictated case.
+    user_scheme = first_environment_matcher(
         settings.methods)
 
-    # 2. Per-element preflight.  Loads each element's
-    #    database, emits the coverage note when a
-    #    matcher is active, and marks elements
-    #    without a database for the legacy fallback.
+    # 2. Whether the fingerprint pick runs at all.  On by
+    #    default (the C93 decoupling); off under
+    #    -nofingerprint.
+    fingerprinting_enabled = not settings.nofingerprint
+
+    # 3. Per-element preflight.  Loads each element's
+    #    database, emits the (info, never fatal) coverage
+    #    note when fingerprinting is enabled, and marks
+    #    elements without a database for the legacy fallback.
     databases = perElementPreflight(structure,
-        active_matcher)
+        fingerprinting_enabled)
 
-    # 3. Compute per-atom fingerprints once (if
-    #    needed) so both the species-pass bucketing
-    #    and the entry-pick representative comparison
-    #    see the same vectors.  Only Python-side
-    #    matchers (reduce) reach this driver:
-    #    compute_query stays in process.  Loen-side
-    #    (bispectrum) grouping never runs here -- it is
-    #    done ahead of makeinput by makegroups (11.3.f),
-    #    so those atoms arrive already typed.
-    atom_fingerprints = None
-    if active_matcher is not None:
-        atom_fingerprints = \
-            active_matcher.compute_query(structure,
-                active_matcher.active_sub_spec)
+    # 4. Compute per-atom grouping descriptors once when the
+    #    user grouped with an environment scheme, so the
+    #    species-pass bucketing and the pick's representative
+    #    see the same vectors (the pick reuses them).  Only
+    #    Python-side matchers (reduce) group here;
+    #    bispectrum grouping is done ahead of makeinput by
+    #    makegroups (11.3.f), so those atoms arrive typed and
+    #    take the file-dictated branch in the pick.
+    grouping_descriptors = None
+    if user_scheme is not None:
+        grouping_descriptors = \
+            user_scheme.compute_query(structure,
+                user_scheme.active_sub_spec)
 
-    # 4. Species pass.  Position-based and
-    #    environment-based flags compose in CLI
-    #    order; output is a per-atom species ID
-    #    array, the dict of named regions used in
-    #    scope resolution, and the set of species
-    #    IDs produced by an environment-based scheme
-    #    (consumed by 11.3.d to gate fingerprint
-    #    matching per DESIGN 5.6.5 step 2).
-    atom_species_id, named_regions, env_species_ids \
-        = speciesPass(structure, settings, databases,
-            atom_fingerprints)
+    # 5. Species pass.  Position-based and environment-based
+    #    flags compose in CLI order; output is a per-atom
+    #    species ID array and the dict of named regions used
+    #    in scope resolution.  No env-only set -- the pick
+    #    runs for every species (C93).
+    atom_species_id, named_regions = speciesPass(
+        structure, settings, databases,
+        grouping_descriptors)
 
-    # 5. Manifest-entry pick per species.  Atoms in
+    # 6. Manifest-entry pick per species.  Atoms in
     #    elements with no database file
     #    (databases[elem] is None) bypass the
     #    manifest machinery and emit via the legacy
-    #    pot1/coeff1 path in step 7.
+    #    pot1/coeff1 path in step 8.
     species_potentials = {}
     for species in unique_species(atom_species_id):
         atoms   = atoms_of_species(species,
@@ -3589,29 +3615,30 @@ function emitInitialPotentials(structure, settings,
             species_potentials[species] = \
                 LegacyEntry(element)    # marker
                                         # consumed in
-                                        # step 7
+                                        # step 8
             continue
         species_potentials[species] = \
             pickManifestEntry(
-                species_id        = species,
-                species_atoms     = atoms,
-                element           = element,
-                db                = databases[element],
-                active_matcher    = active_matcher,
-                pot_override      = settings
-                                     .pot_override,
-                atom_fingerprints =
-                    atom_fingerprints,
-                env_species_ids   = env_species_ids)
+                species_atoms        = atoms,
+                element              = element,
+                db                   = databases[element],
+                pot_override         = settings
+                                        .pot_override,
+                fingerprinting_enabled =
+                    fingerprinting_enabled,
+                user_scheme          = user_scheme,
+                structure            = structure,
+                grouping_descriptors =
+                    grouping_descriptors)
 
-    # 6. Type pass.  Inherit from the species pass
+    # 7. Type pass.  Inherit from the species pass
     #    and apply electronic-state flags (XANES
     #    today; future flags layer in unchanged).
     atom_type_id, type_potential = typePass(
         structure, atom_species_id,
         species_potentials, settings)
 
-    # 7. Emit per-Imago-type blocks in today's on-
+    # 8. Emit per-Imago-type blocks in today's on-
     #    the-wire format.  Imago is unaware of the
     #    manifest or the matcher; it sees only the
     #    resolved per-type numbers.

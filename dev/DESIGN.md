@@ -2396,6 +2396,21 @@ record's remaining fields.
                            values are non-comparable and
                            coexist on the same entry
                            (rule 8).
+  preferred  bool          Optional, default false.  Marks
+                           the one record per matcher family
+                           that the consumer's file-dictated
+                           (crystalline) match uses (5.6.5
+                           step 2).  Exactly one record per
+                           present family carries `preferred
+                           = true` (rule 10); the preferred
+                           `sub_spec`
+                           for a family is uniform across the
+                           whole database (set once in the
+                           curation manifest, 5.7).  Storing
+                           extra non-preferred sub_specs of
+                           the same family is always allowed;
+                           only the divergent *preferred
+                           flag* is forbidden.
 
 Additional fields on the record are matcher-specific and
 not validated by the schema.  As examples for the two
@@ -2506,11 +2521,24 @@ fingerprint.
    one bispectrum fingerprint at `twoj1=8, twoj2=8`
    alongside another at `twoj1=6, twoj2=4`).
 9. `method` must be one of the matcher names
-   registered in `makeinput.py` at load time (8.9).
+   registered in `matchers.py` at load time (8.9).
    Unknown methods are a hard error rather than a
    silent skip, so that a typo in the manifest fails
    loudly rather than quietly omitting the fingerprint
    from the lookup.
+10. For each `method` that appears in the file's
+    fingerprint records, exactly one record carries
+    `preferred = true` -- the record the consumer's
+    file-dictated match uses (5.6.5 step 2).  Zero (a
+    family present but none preferred) or two-or-more
+    preferred for one `method` is a hard error.  The
+    database-wide constraint that all elements' preferred
+    records of a family share one `sub_spec` (manifest
+    rule 11) is cross-file and cannot be checked from a
+    single per-element file; the loader trusts the
+    producer to have written a consistent database, in
+    keeping with VISION Principle 5 (the database is
+    regenerated from the manifest, never hand-edited).
 
 #### 5.2.1 Label naming
 
@@ -2914,14 +2942,20 @@ kpoint_spec    = "12 12 12 0 0 0"
 scf_threshold  = 1.0e-6
 scf_iterations = 28
 
+# The preferred = true record is the one the consumer uses
+# for a file-dictated (crystalline) match (5.6.5 step 2); the
+# preferred sub_spec for a family is uniform database-wide.
 [[potential.fingerprint]]
-method   = "bispectrum"
-sub_spec = { twoj1 = 8, twoj2 = 8 }
-values   = [
+method    = "bispectrum"
+sub_spec  = { twoj1 = 8, twoj2 = 8 }
+preferred = true
+values    = [
    1.2345678901234567e-01,
    ...  (9 entries; length = twoj2 + 1 = 9)  ...
 ]
 
+# A second sub_spec is freely stored (e.g. for validation
+# comparison); it just may not also be preferred.
 [[potential.fingerprint]]
 method   = "bispectrum"
 sub_spec = { twoj1 = 6, twoj2 = 4 }
@@ -2930,8 +2964,9 @@ values   = [
 ]
 
 [[potential.fingerprint]]
-method   = "reduce"
-sub_spec = { level = 2, thick = 5.0e-01, cutoff = 5.0e+00 }
+method    = "reduce"
+sub_spec  = { level = 2, thick = 5.0e-01, cutoff = 5.0e+00 }
+preferred = true
 shell_code.element = "au"
 shell_code.levels  = [
    { distance = 2.88e+00, neighbors = ["au", "au", "au"] },
@@ -2993,6 +3028,10 @@ class FingerprintRecord:
                                 #   bispectrum,
                                 #   shell_code for
                                 #   reduce)
+    preferred: bool             # the family's consumer-
+                                #   chosen record (5.6.5
+                                #   step 2); <=1 true per
+                                #   method per file
 
 @dataclass
 class PotentialEntry:
@@ -3144,6 +3183,20 @@ electronic-state flags (XANES today).
                         carry different labels.  Optional.
                         See precedence in 5.6.3.
 
+-nofingerprint          Disable the environment fingerprint
+                        pick.  Force every species to its
+                        default-tagged (isolated-atom) entry,
+                        skipping the fingerprint match in
+                        5.6.5.  A manual `-pot` override still
+                        applies.  This is the opt-out for a
+                        run that wants the plain isolated-atom
+                        potential regardless of what
+                        fingerprints the database carries --
+                        the way `-reduce` ran before Phase 2.
+                        Optional; the default is fingerprint
+                        matching ON whenever the database
+                        carries comparable records.
+
 -target name=NAME ...   Position-based species/type
 -block  name=NAME ...   grouping.  Existing flag
                         families gain a `name=NAME`
@@ -3251,34 +3304,34 @@ in the parsed structure:
    element's atoms will participate in species grouping
    normally but cannot match any fingerprint scheme;
    they receive the legacy isolated-atom potential.
-4. **Coverage note** (only when an in-makeinput
-   environment scheme -- today, `-reduce` -- is in play).
-   Check whether at least one entry in the loaded database
-   carries a fingerprint record matching the requested
-   `(method, sub_spec)` for the active scheme.  If none
-   does, do **not** abort: emit an info-level message
-   naming the element and the missing `(method, sub_spec)`,
-   and let the element's atoms fall through to the
+4. **Coverage note** (whenever fingerprint matching is
+   enabled -- the default; `-nofingerprint` turns it off).
+   Check whether the loaded database carries at least one
+   fingerprint record for *any* registered matcher.  If none
+   does, do **not** abort: emit an info-level message naming
+   the element, and let its atoms fall through to the
    default-tagged entry (the isolated-atom potential) at the
-   per-species pick (5.6.5 step 3).  An environment scheme is
-   fundamentally a *grouping* scheme -- its species split is
-   pure geometry and needs no database -- so the fingerprint
-   *pick* layered on top (5.6.5 step 2) is a bonus, not a
-   precondition; when the database carries no matching
-   fingerprints the scheme still groups normally and every
-   species takes the default potential, exactly as `-reduce`
-   behaved before Phase 2.  Aborting here would be wrong: it
-   would break an otherwise-valid run merely because the
-   database is not yet populated for that `(method,
-   sub_spec)`, which is the *current* state of every shipped
+   per-species pick (5.6.5 step 3).  The fingerprint pick is
+   *decoupled* from how species are grouped (5.6.4, 5.6.5):
+   it runs for every species regardless of the grouping
+   scheme, but it is still a bonus layered on top of grouping
+   that the default entry always backstops, so an element
+   with no stored fingerprints simply takes the default
+   potential -- exactly as a run did before Phase 2.  Aborting
+   here would be wrong: it would break an otherwise-valid run
+   merely because the database is not yet populated for that
+   element, which is the *current* state of every shipped
    element (none carries fingerprint records yet -- see the
    producer side-quest in TODO C91), and which is never the
-   user's error.  The info note keeps the fall-through
-   visible -- a user who expected a fingerprint match is told
-   why every species received the same default potential --
-   without making it fatal.  The bispectrum scheme reports
-   the same condition inside `makegroups.py` (5.10), since
-   its grouping happens before makeinput.
+   user's error.  The info note keeps the fall-through visible
+   -- a user who expected a fingerprint match is told why
+   every species received the same default potential -- without
+   making it fatal.  The note is suppressed under
+   `-nofingerprint`, where the default is the deliberate
+   choice.  (The bispectrum *grouping* path still reports its
+   own loen-coverage condition inside `makegroups.py` (5.10);
+   that is a separate report about grouping, not about this
+   potential-pick coverage.)
 
 #### 5.6.4 Species pass
 
@@ -3319,12 +3372,89 @@ today's `assign_group`).  For each flag whose `op` is
 After the species pass, every atom has a final
 `atom_species_id[atom]`.
 
+**Grouping and the potential pick are independent.**  The
+species pass decides only *how atoms are partitioned* into
+species.  Which database entry each species then receives is a
+separate step (5.6.5) that runs for *every* species, no matter
+how it was grouped -- crystallographic default, position-based
+(`-target`/`-block`), or environment-based (`-reduce`,
+`-bispec`).  In particular, the per-atom reduce descriptors
+computed here for *bucketing* are not the only road to a
+fingerprint match: a crystallographically grouped species,
+which the species pass never touched with a matcher, is still
+eligible for the fingerprint pick, because 5.6.5 computes
+whatever query descriptor it needs at pick time from the
+species' own atoms.  Phase 2's first cut wired the pick to the
+reduce grouping's descriptors and so matched only when
+`-reduce` was active; C93 decoupled the two, making the pick
+the default for any grouping (with `-nofingerprint` the
+opt-out).
+
+**Where the representative comes from depends on the system.**
+The order of operations is always the same -- *group first,
+then summarize each group into one representative, then match
+the representative against the database* (5.6.5 step 2) -- but
+what performs the grouping differs by system, and that decides
+whether the representative is fresh work or reused:
+
+- *Crystalline or position-grouped systems.*  Crystallography
+  (or a `-target`/`-block` flag) defines the species without
+  any environment matcher.  No per-atom environment descriptor
+  was computed during grouping, so the pick computes a fresh
+  representative for each species from its member atoms -- one
+  query per matcher family it tries.
+
+- *Amorphous and other non-crystalline systems.*  There is no
+  symmetry to define the species, so an environment scheme
+  (`-reduce` or `-bispec`) must run *first*, precisely to do
+  the grouping.  Only after that grouping exists can a
+  representative be formed for each group.  The per-atom
+  descriptors the scheme computed for bucketing are exactly
+  what that representative is built from, so for the family
+  that did the grouping the descriptors are computed once and
+  reused -- the grouping pass and the database match share one
+  descriptor computation rather than repeating it.  When the
+  user invoked the scheme explicitly, that choice is *honored*:
+  the user's `sub_spec` drives both the grouping and the match,
+  and if the database happens to carry no fingerprint at that
+  `sub_spec` the species simply misses and takes the default
+  entry (5.6.5 step 3).  This is best-effort, never an error --
+  the database does not overrule the user's choice, and a user
+  who deviates from the curation convention (5.7) accepts that
+  the stored fingerprints may not match.  In normal use the
+  user runs at the convention `sub_spec`, so the reuse is exact
+  and matches are dense.
+
+Which descriptor family the match uses depends on the regime,
+and the bispectrum-then-reduce priority applies only to the
+file-dictated case -- it never overrules an explicit user
+choice:
+
+- *User chose a scheme* (`-reduce` or `-bispec`).  The match
+  uses *that* family at the user's `sub_spec`; the other family
+  is never run behind the user's back.  So `-reduce` on an
+  amorphous model matches against reduce fingerprints only,
+  even when the database also carries bispectrum ones.
+
+- *Species are file-dictated* (crystalline or pre-assigned, no
+  environment flag).  The consumer has no user `sub_spec`, so
+  the *database* decides: it reads the `preferred` record per
+  family (the 5.7 convention -- one preferred `sub_spec` per
+  family, uniform database-wide) and uses bispectrum when the
+  database carries a preferred bispectrum record, otherwise
+  reduce.  Exactly one family, one `sub_spec`, one query -- the
+  match is a simple best-effort lookup, never a search across
+  multiple sub_specs or a per-element tuning exercise.
+
 #### 5.6.5 Manifest-entry pick per species
 
 For each `(element, species)` pair appearing in the
 final assignment, pick exactly one `PotentialEntry`
-from that element's database.  Precedence, top to
-bottom:
+from that element's database.  The pick runs for *every*
+species, independent of how the species was grouped
+(5.6.4) -- the C93 decoupling, so a crystallographically
+grouped species is as eligible for a fingerprint match as
+a `-reduce`-grouped one.  Precedence, top to bottom:
 
 1. **`-pot` (manual override).**  Each `-pot LABEL`
    applies its label to the species in its `scope=`
@@ -3338,48 +3468,64 @@ bottom:
    any in-scope element that lacks the label is fatal --
    `-pot` is a deliberate override and a silent fallback
    would mask user intent.
-2. **Fingerprint match** (reduce only, in makeinput).
-   This in-process pick covers the one environment scheme
-   makeinput still groups -- `reduce` -- whose fingerprints
-   it has in hand.  Bispectrum species carry no fingerprint
-   inside makeinput (those live in `fort.21`, read by
-   `makegroups`), so a bispectrum-derived potential pick is
-   the orchestrator's job (`makegroups` / the producer),
-   passed to makeinput as an explicit `-pot` per species.
-   For each reduce species' atoms, ask the matcher to
-   summarize them into one representative fingerprint via
-   its `representative` method (8.9).  The matcher chooses
-   semantics appropriate to its descriptor space: the
-   `representative` of `BispecMatcher` (used by the
-   orchestrator) returns the element-wise mean of the
-   member vectors, while `ReduceMatcher` returns the first
-   member's shell-code
-   (intra-species reduce fingerprints agree within the
-   matcher's tolerance by construction, so any member
-   is equally good).  Future matchers may use a medoid
-   or another scheme; the protocol does not pin the
-   choice.  Among the element's database entries that
-   carry a fingerprint record matching
-   `(method, sub_spec)`, pick the entry whose recorded
-   fingerprint minimizes
-   `distance(representative, entry_fingerprint)`.  If
-   the best distance exceeds the matcher's
-   `default_similarity_floor`, fall through to step 3
-   with a warning naming the species and the best-but-
-   rejected entry.  Each matcher carries a heuristic
-   default for its similarity floor; the concrete
-   numbers (e.g., 0.05 for `ReduceMatcher`, 0.10 for
-   `BispecMatcher`) are starting values intended to be
-   tuned during the Phase-2 validation pass (TODO C61)
-   against the benchmark systems' actual fingerprint-
-   distance distributions, and users may override them
-   per scheme on the CLI when a particular system
-   warrants a tighter or looser tolerance.
-3. **Default tag.**  For any species not yet assigned a
-   potential — atoms grouped by a position-based flag,
-   atoms outside any environment-scheme scope, or
-   atoms whose fingerprint match was rejected at the
-   similarity floor — use `default_entry(db)` for that
+2. **Fingerprint match** (enabled by default; disabled for
+   the whole run by `-nofingerprint`, which sends every species
+   straight to step 3).  Match is a single best-effort lookup,
+   not a search: it picks exactly one descriptor family and one
+   `sub_spec`, computes one query, and accepts a miss.  Which
+   family and `sub_spec` are used depends on the regime (5.6.4):
+
+   - **User chose a scheme** (`-reduce` or `-bispec`).  Match
+     uses *that* family at the user's `sub_spec`.  The per-atom
+     descriptors already computed for grouping are reused for
+     the representative.  The database is not allowed to
+     overrule the choice: if it carries no fingerprint at that
+     `(method, sub_spec)`, the species misses and falls to step
+     3 -- silently, since a deviation from the convention (5.7)
+     is the user's call, not an error.
+
+   - **Species are file-dictated** (crystalline or
+     pre-assigned).  There is no user `sub_spec`, so the
+     database decides: read the `preferred` record per family
+     (the 5.7 convention -- one preferred `sub_spec` per family,
+     uniform database-wide), and use bispectrum when the
+     element's database carries a preferred bispectrum record,
+     otherwise reduce.  Compute that one query -- the bispectrum
+     query Fortran-side via the loen path (fast), the reduce
+     query in-process from geometry.  No loen run is triggered
+     for an element whose database carries no preferred
+     bispectrum record.
+
+   In both regimes, once the family and `sub_spec` are fixed:
+   ask the matcher to summarize the species' atoms into one
+   representative fingerprint via its `representative` method
+   (8.9); among the element's entries carrying a comparable
+   `(method, sub_spec)` fingerprint, pick the one minimizing
+   `distance(representative, entry_fingerprint)`; accept it
+   only if that distance is within the matcher's
+   `default_similarity_floor`, otherwise warn (naming the
+   species and the best-but-rejected entry) and fall to step 3.
+   The matcher chooses representative semantics appropriate to
+   its descriptor space: `BispecMatcher.representative` returns
+   the element-wise mean of the member vectors, `ReduceMatcher`
+   returns the first member's shell-code (symmetry-equivalent
+   or reduce-grouped atoms carry identical shell-codes by
+   construction, so any member is exact); future matchers may
+   use a medoid or another scheme -- the protocol does not pin
+   the choice.
+
+   Each matcher carries a heuristic default for its similarity
+   floor; the concrete numbers (e.g., 0.05 for `ReduceMatcher`,
+   0.10 for `BispecMatcher`) are starting values intended to be
+   tuned during the Phase-2 validation pass (TODO C61) against
+   the benchmark systems' actual fingerprint-distance
+   distributions, and users may override them per scheme on the
+   CLI when a particular system warrants a tighter or looser
+   tolerance.
+3. **Default tag.**  For any species not assigned by steps
+   1-2 — `-nofingerprint` in force, no fingerprint family
+   matched within its floor, or the database carried no
+   comparable fingerprints — use `default_entry(db)` for that
    element.  Guaranteed to succeed by rule 7.
 
 **Why one representative, not a per-atom pick.**  A species
@@ -3641,18 +3787,25 @@ kpoint_integration    = "linear-tetrahedral"
   default     = true
   description = "Au in fcc bulk (Fm-3m)."
 
+    # preferred = true is the record the consumer uses for a
+    # file-dictated match; one preferred sub_spec per family,
+    # uniform database-wide (see the convention note below).
     [[reference_solid.entry.fingerprint]]
-    method   = "bispectrum"
-    sub_spec = { twoj1 = 8, twoj2 = 8 }
+    method    = "bispectrum"
+    sub_spec  = { twoj1 = 8, twoj2 = 8 }
+    preferred = true
 
+    # A non-preferred alternate sub_spec is allowed (stored for
+    # validation comparison); it just may not also be preferred.
     [[reference_solid.entry.fingerprint]]
     method   = "bispectrum"
     sub_spec = { twoj1 = 6, twoj2 = 4 }
 
     [[reference_solid.entry.fingerprint]]
-    method   = "reduce"
-    sub_spec = { level = 2, thick = 0.5, cutoff = 5.0,
-                 tolerance = 0.05 }
+    method    = "reduce"
+    sub_spec  = { level = 2, thick = 0.5, cutoff = 5.0,
+                  tolerance = 0.05 }
+    preferred = true
 
 [[reference_solid]]
 # ... another solid ...
@@ -3765,12 +3918,42 @@ record is written into the database entry's
 `[[potential.fingerprint]]` array per 5.2.
 
 - `method` (string): matcher name.  Must be a method known
-  to the matcher registry in `makeinput.py` (8.9).
+  to the matcher registry in `matchers.py` (8.9).
 - `sub_spec` (inline table): method-specific parameters.
   Two declarations on the same entry with the same `method`
   and the same `sub_spec` keys-and-values are a hard error
   (rule 8); same `method` with differing `sub_spec` is
-  explicitly allowed.
+  explicitly allowed -- the database stores as many sub_specs
+  per family as the curator wants.
+- `preferred` (bool, *optional*, default false): marks the one
+  record per matcher family the consumer uses for a
+  file-dictated (crystalline) match (5.6.5 step 2).  Exactly
+  one declaration per `method` is preferred for each element
+  that carries any fingerprint of that family, and the
+  preferred `sub_spec` for a family is *uniform across the
+  whole database* -- declared once and stamped onto the
+  matching record in every element file.  Storing additional
+  non-preferred sub_specs of the same family is always allowed;
+  what the validator forbids is a second preferred record, or a
+  preferred `sub_spec` that diverges from the database-wide one
+  for that family.
+
+**Canonical-sub_spec convention (the `preferred` record).**  A
+file-dictated match (5.6.5 step 2) needs one unambiguous
+`sub_spec` per family to query at, so that a multi-element
+structure costs a single loen run rather than one per distinct
+sub_spec.  The `preferred` flag supplies it: across the whole
+database, exactly one bispectrum `sub_spec` and one reduce
+`sub_spec` are marked preferred, and every element's preferred
+record sits at that same sub_spec.  The consumer reads the
+preferred record straight off each element's database and never
+searches across sub_specs.  Non-preferred records (alternate
+sub_specs harvested for validation or comparison) ride along in
+the same files without affecting the consumer -- they are
+simply never the one it picks.  This keeps the runtime analysis
+a simple best-effort lookup that never steps outside the
+convention, while leaving the database free to accumulate
+alternate descriptors over time.
 
 Producing a fingerprint requires the matcher's compute step.
 For Python-side matchers (`reduce`), this runs in-process
@@ -3841,6 +4024,23 @@ file (5.2):
    declaration must be a name known to the matcher registry
    in `makeinput.py` (8.9).  Unknown methods are a hard
    error rather than a silent skip.
+10. For every `(element, method)` that appears with any
+    fingerprint declaration across the manifest, *exactly one*
+    of those declarations carries `preferred = true`.  Zero
+    preferred (a family present but none marked) or two-or-more
+    preferred for the same `(element, method)` is a hard error.
+    This mirrors rule 7 for the entry-level `default` tag:
+    the manifest is the single source of truth for which
+    record the consumer picks.
+11. The preferred `sub_spec` for a family is *uniform across
+    the whole manifest*: all `preferred = true` declarations
+    sharing a `method` must carry the identical `sub_spec`,
+    regardless of element.  A preferred record whose `sub_spec`
+    diverges from the family's database-wide preferred one is a
+    hard error naming both.  (Non-preferred declarations may
+    use any `sub_spec`; only the preferred ones are constrained
+    to agree, which is what guarantees a single loen run per
+    structure -- DESIGN 5.6.5 step 2.)
 
 **Structure materialization.**
 

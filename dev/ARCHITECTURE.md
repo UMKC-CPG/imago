@@ -1108,8 +1108,10 @@ owns all environment-based grouping.
                                   and consumer agree on
                                   field naming.
 
-**Registry.**  `makeinput.py` maintains a module-level
-dict mapping matcher names to matcher classes:
+**Registry.**  `matchers.py` defines a module-level dict
+mapping matcher names to matcher classes (imported by every
+caller -- `makeinput.py`, `makegroups.py`, and
+`build_initial_potentials.py`):
 
 ```python
 MATCHERS = {
@@ -1141,6 +1143,45 @@ rule 9 (unknown `method` is a hard error).
   optional `by_element` key in `sub_spec`, currently
   ignored (Phase-2 follow-up; DESIGN 5.9 and
   TODO).
+
+**The pick is a per-species step, decoupled from
+grouping.**  The fingerprint-based potential pick is not a
+side effect of an environment grouping flag: it runs for
+*every* species, however that species was grouped --
+crystallographic, position-based, or environment-based
+(the C93 decoupling; DESIGN 5.6.4/5.6.5).  It is on by
+default and disabled per run by `-nofingerprint`.  Which
+matcher and parameters the pick uses split by regime:
+
+- *User grouped with an environment scheme* (reduce in
+  makeinput; bispectrum is grouped upstream by
+  `makegroups`).  That family and the user's `sub_spec`
+  drive the match, reusing the per-atom descriptors the
+  grouping pass already computed.  The database never
+  overrules the user: a database lacking that `sub_spec` is
+  a silent best-effort miss to the default entry, never an
+  error.
+
+- *Species are file-dictated* (crystalline or pre-assigned).
+  The matcher carries no user `sub_spec`, so the database
+  supplies it: each element's database marks one
+  `preferred` fingerprint record per family, and the
+  preferred `sub_spec` for a family is uniform across the
+  whole database (the curation convention, DESIGN 5.7).  The
+  pick reads the preferred record -- bispectrum if present,
+  else reduce -- computes exactly one query, and matches.
+  No search across families or sub_specs, and at most one
+  loen run per structure.
+
+This adds one protocol obligation beyond grouping: a
+`needs_loen_run` matcher must be able to produce a query
+for the pick's file-dictated branch.  It does so through
+the same loen seam used for grouping (`to_loen_input` ->
+loen run -> `parse_loen_output`), reusing a `makegroups`
+run when one exists and otherwise paying one fast loen run.
+The bispectrum compute is cheap enough that the consumer
+simply pays it; optimizing it away is not warranted unless
+it ever becomes a measured problem.
 
 **Why this is architectural, not just design.**  The
 matcher abstraction is what isolates the Imago Fortran

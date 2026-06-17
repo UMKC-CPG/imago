@@ -293,6 +293,21 @@
   cod_revision, strict on failure) and cif2skl.py (ASE
   CIF read -> StructureControl factory -> skl write).
   PSEUDOCODE for D11-D14 follows once each design lands.
+- [ ] D19. Design the user-facing flight-construction surface
+  (ARCH 9 / DESIGN 6).  Today a flight exists only as a
+  hand-written Python `Flight` of `CalcUnit`s built on the C71
+  `build_kpoint_convergence` helper; there is no way for a user to
+  assemble a campaign without writing Python.  Decision 2026-06-17:
+  design the front-end BEFORE coding it (design-first).  Settle the
+  surface: a CLI, a config/spec file (e.g. a campaign TOML listing
+  structures x option axes), or a thin convenience module; how the
+  structure list is supplied (skl paths now; CIF/COD once D14 lands);
+  how option-axis sweeps are expressed and mapped onto the existing
+  SweepRecord; and where this sits relative to kaleidoscope's
+  domain-agnostic core (Principle 9 -- the builder is a client of
+  the dispatcher, never inside it).  Pairs later with a C-level
+  implementation task once the surface is fixed.  Relates to D14
+  (structure intake) and the C92 single-structure guidance path.
 - [x] D16. Design the historical-guidance dataspace
   (VISION Goal 5, ARCHITECTURE §10).  Done 2026-05-28
   (categorical signature shape, Jaccard lookup); rewritten
@@ -1707,6 +1722,82 @@ shipped.
   -> re-materialize) before harvest; not wired, since the
   current manifest references are crystalline.  C55 + C58
   + C89 all DONE; loen seam live-validated via makegroups.
+- [ ] C93. Revise the design chain to DECOUPLE the
+  fingerprint-based initial-potential pick from the grouping
+  scheme.  Decision 2026-06-17: precedence 2 (the environment
+  fingerprint match, DESIGN 5.6.5) was wired to fire only when a
+  `-reduce` scheme populated per-atom fingerprints, so a crystalline
+  run using the normal crystallographic/space-group type grouping
+  never matched and always fell through to the default isolated-atom
+  entry.  That conflates two independent concerns -- how species are
+  GROUPED vs which DB entry each species PICKS (the phase-i
+  potential/type unification note).  Fix: the pick runs for every
+  species, default-on, with a `-nofingerprint` opt-out that disables
+  it (forcing the default-tagged entry; `-pot` still applies).
+  TWO REGIMES settled across this session:
+  (a) USER chose `-reduce`/`-bispec`: that family + the user's
+  sub_spec drive both grouping and the match (grouping descriptors
+  reused for the representative); the database NEVER overrules the
+  user -- if it carries no fingerprint at that sub_spec the species
+  misses to the default SILENTLY (best-effort, NOT a hard error;
+  this SUPERSEDES the earlier "require-to-match / abort on mismatch"
+  decision).
+  (b) FILE-DICTATED species (crystalline / pre-assigned, no env
+  flag): the database decides via the `preferred` record per family;
+  the bispectrum-then-reduce priority applies ONLY here (prefer a
+  preferred bispectrum record, else reduce).  Exactly one family,
+  one sub_spec, one query -- a simple best-effort lookup, never a
+  search across multiple sub_specs, never more than one loen run.
+  The bispectrum (loen) query is fast, so the file-dictated case
+  pays it up front; no loen run when the element has no preferred
+  bispectrum record.
+  PREFERRED-RECORD MECHANISM (the linchpin): the schema keeps
+  allowing many sub_specs per family, but exactly one per family is
+  flagged `preferred = true`, and the preferred sub_spec for a
+  family is UNIFORM database-wide (set once in the manifest, stamped
+  on every element file).  A non-preferred record at another
+  sub_spec is always storable; only a divergent preferred flag is
+  rejected.  This is what makes the file-dictated lookup
+  unambiguous and one-loen-run.
+  DESIGN DONE this session: 5.6.1 (`-nofingerprint`), 5.6.3 step 4
+  (coverage note generalized, never fatal, no step 5), 5.6.4
+  (grouping/pick decoupling + the two regimes + group->
+  representative->match order + descriptor reuse), 5.6.5 step 2
+  (two-regime single-sub_spec best-effort pick), 5.2 (FingerprintRecord
+  `preferred` field + dataclass + per-element rule 10), 5.7 (manifest
+  `preferred` field + canonical-sub_spec convention note + rules
+  10/11).  PSEUDOCODE DONE: 11.3 intro + 11.3.0 (reduced flow now
+  the -nofingerprint / no-preferred path), 11.3.a (consumer-side
+  loen query via loen_descriptors), 11.3.b (noteCoverage
+  generalized, fingerprinting_enabled), 11.3.c (env_species_ids
+  pick-gate dropped), 11.3.d (two-regime preferred-driven pick +
+  find_preferred), 11.3.g driver (new signatures, step renumber).
+  ARCH DONE: 8.9 ("the pick is a per-species step" -- regime split,
+  -nofingerprint, preferred/convention, consumer loen seam).
+  DESIGN-CHAIN COMPLETE for C93; only the C94 code remains.  C61's
+  negative tests follow the new default-on, never-abort behavior.
+- [ ] C94. Implement the C93 decoupling in code.
+  makeinput.py: lift the reduce-only gate in
+  `_species_query_fingerprint` (today it returns None unless
+  `group_reduce` populated `atom_reduce_fingerprint`).  Implement
+  the two-regime precedence-2 pick: when the user chose an env
+  scheme, match that family at the user's sub_spec (reuse the
+  grouping descriptors), miss -> default SILENTLY, never error on a
+  DB that lacks the sub_spec; when species are file-dictated, read
+  the element db's `preferred` record per family and use bispectrum
+  if a preferred bispectrum record exists else reduce -- one family,
+  one sub_spec, one query, accept misses.  Add the `-nofingerprint`
+  CLI flag (disables precedence 2; `-pot` still wins).  Keep
+  precedence 1 (`-pot` override) and the similarity-floor warn-and-
+  fall-through unchanged.  initial_potential_db.py: parse, validate
+  (per-element rule 10: exactly one preferred per PRESENT method --
+  a family with records but no preferred is a load error), expose,
+  and `save()` the `preferred` field on FingerprintRecord.
+  build_initial_potentials.py (ties into C60): the harvest stamps
+  `preferred` per manifest rules 10/11 (one preferred per
+  (element, method); preferred sub_spec uniform database-wide).
+  Depends on C93 (design); most meaningful once C91 seeds real
+  fingerprints, but the wiring is independent of the seed.
 - [ ] C91. **Side-quest (NEXT TO DEVELOP): populate the
   augmented potential database with real fingerprint
   records.**  Today every
@@ -2541,6 +2632,25 @@ the C48.3 wiring (C74) is the first major consumer.
   (0 metal/1 direct/2 indirect).  Verified end to end: diamond
   -> 0.184 a.u. ~ 5.0 eV, kind 2 (indirect); aluminum -> 0.0,
   kind 0 (metal).  C76 COMPLETE; unblocks C72.
+- [ ] C92. Make historical guidance reachable from an INDIVIDUAL
+  Imago run, not only through a flight.  Today the predictor
+  (`guidance_db.predict`) is consumed exclusively by the
+  flight-builder helper (`build_kpoint_convergence`, C71), so a
+  user who wants to run one structure must hand-write a flight to
+  borrow the cluster's accumulated guidance.  Provide a direct
+  path: EITHER a `-guidance` switch on `makeinput.py` (load the
+  dataspace, build the Signature query from the structure +
+  settings, call `predict`, and fill the k-point density from the
+  prediction unless the user pinned one explicitly) OR a thin
+  standalone tool (`predict_settings.py`) that takes a structure +
+  the calculation settings and prints the recommended settings for
+  the user to apply by hand.  Decision pending on switch-vs-tool
+  (the makeinput switch is the lower-friction default; the standalone
+  tool keeps makeinput free of a dataspace dependency).  Must reuse
+  the same predict-then-fallback contract as the flight path
+  (under-trained -> wide-grid default, DESIGN 7.9) so individual and
+  flight runs never disagree.  Needs a seeded dataspace (C75) to do
+  anything useful, but the wiring is independent of the seed.
 
 ### Phase L -- resource & cost dataspace (VISION 6, ARCH 11, DESIGN 8)
 
