@@ -1707,16 +1707,50 @@ shipped.
   -> re-materialize) before harvest; not wired, since the
   current manifest references are crystalline.  C55 + C58
   + C89 all DONE; loen seam live-validated via makegroups.
+- [ ] C91. **Side-quest (NEXT TO DEVELOP): populate the
+  augmented potential database with real fingerprint
+  records.**  Today every
+  `share/atomicPDB/<elem>/s_gaussian_pot.toml` is
+  Phase-1-shaped -- a single `default = true` entry and zero
+  `[[potential.fingerprint]]` records (an audit of all 103
+  element files on 2026-06-16 found no fingerprints anywhere
+  in the installed database).  The Phase-2 consumer path
+  (the `-reduce` / `-bispec` per-species entry pick,
+  precedence 2 in DESIGN 5.6.5) therefore has nothing to
+  match against: grouping still runs, but every species
+  falls through to the default entry, so the fingerprint
+  pick cannot be exercised against live data at all.  This
+  task runs the producer chain end-to-end to seed real
+  fingerprints: curate a small reference set (building on
+  C49's first solid), run `build_initial_potentials.py` as a
+  kaleidoscope client (C48.3 / C74) so each reference solid
+  converges its SCF and the C60 harvest attaches both the
+  reduce (Python-side, in-process) and bispectrum (loen)
+  `FingerprintRecord`s, and land the updated per-element
+  TOML files back under `share/atomicPDB/`.  Deliverable: at
+  least the benchmark elements carry one or more
+  fingerprint-bearing entries so the Phase-2 selection (C61)
+  and the later dedup harvest (C88) have genuine data to
+  work with.  Dependencies: C49 (curation pattern), C74 (the
+  one remaining live producer-as-client validation seam),
+  and cluster time for the SCF + loen runs.  Note: C61's
+  synthetic-DB fixture for its positive case still stands
+  (deterministic, no cluster needed), but seeding real data
+  lets C61's positive path also be confirmed against the
+  wild database and surfaces any producer<->consumer schema
+  drift that hand-built fixtures would miss.
 - [ ] C61. Add end-to-end Phase-2 tests.  For the
   in-makeinput path: a small reference runs through
   reduce bucketing + entry-pick + emit producing a
   deterministic Imago input file, with negative tests
-  for the preflight coverage check (missing fingerprint
-  family aborts cleanly) and the similarity floor
-  (sub-threshold match falls back to default with a
-  warning).  For the makegroups path (C58): the
-  sequential loen -> bucket -> skeleton-rewrite chain
-  produces the expected per-element species tags.
+  for the missing-fingerprint-family case (the run does
+  NOT abort -- it emits the coverage info note and every
+  species falls through to the default entry, DESIGN
+  5.6.3 step 4 / PSEUDOCODE 11.3.b `noteCoverage`) and
+  the similarity floor (sub-threshold match falls back to
+  default with a warning).  For the makegroups path
+  (C58): the sequential loen -> bucket -> skeleton-rewrite
+  chain produces the expected per-element species tags.
 - [~] C89. fort.21 enrichment + parser fix (DESIGN
   5.10.3).  CODE DONE, pending a live recompile + loen
   run to validate the Fortran format.  Fortran (loen.f90,

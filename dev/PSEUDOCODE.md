@@ -2626,7 +2626,7 @@ one:
                LOEN parameter contract)
   11.3.b       5.6.3        (per-element preflight,
                              including the rule-4
-                             coverage check)
+                             coverage note)
   11.3.c       5.6.4        (species pass and scope
                              resolution)
   11.3.d       5.6.5        (manifest-entry pick per
@@ -2658,7 +2658,7 @@ When `first_environment_matcher` (11.3.g) returns None:
     makeinput driver.
   - The preflight (11.3.b) still loads each element's
     database and still marks missing ones for the legacy
-    path, but skips `require_coverage` -- that check is
+    path, but skips `noteCoverage` -- that note is
     meaningful only while a matcher is active.
   - The species pass (11.3.c) returns an empty
     `env_species_ids` set; only the position-based flags
@@ -2992,11 +2992,17 @@ MATCHERS = {
 Runs once before the species pass starts.  Loads the
 augmented database for every element in the structure,
 marks elements without a database for the legacy
-fallback path, and confirms (when an environment-based
-scheme is active) that every element's database covers
-the requested `(method, sub_spec)`.  Failing fast here
-keeps a doomed run out of the "nothing to harvest" case.
-(For bispectrum the equivalent coverage check lives in
+fallback path, and -- when an environment-based scheme is
+active -- notes (info-level, never fatal) any element
+whose database carries no fingerprint matching the
+requested `(method, sub_spec)`.  Such an element still
+groups normally; its species simply fall through to the
+default-tagged entry at the per-species pick (11.3.d step
+3), exactly as `-reduce` behaved before Phase 2.  We do
+not abort: an environment scheme is a *grouping* scheme
+first, and the fingerprint pick is a bonus that the
+default entry always backstops (DESIGN 5.6.3 step 4).
+(For bispectrum the equivalent coverage note lives in
 makegroups, 11.3.f, since its grouping runs before
 makeinput.)
 
@@ -3030,38 +3036,45 @@ function perElementPreflight(structure,
         databases[elem] = load(path,
             known_methods = MATCHERS.keys())
 
-        # Coverage check (5.6.3 step 4).  Only
+        # Coverage note (5.6.3 step 4).  Only
         # meaningful when an environment-based
         # matcher is active; with only spatial flags
         # or a manual -pot override, the default-tag
         # fallback in 11.3.d step 3 always succeeds
-        # regardless of fingerprint records.
+        # regardless of fingerprint records.  Never
+        # fatal -- it only tells the user why a
+        # species may get the default potential.
         if active_matcher is not None:
-            require_coverage(databases[elem],
+            noteCoverage(databases[elem],
                 active_matcher, elem, path)
 
     return databases
 
 
-function require_coverage(db, matcher, elem, path):
-    # At least one entry in `db` must carry a
-    # FingerprintRecord whose (method, sub_spec)
-    # matches the active matcher.  We use the
-    # library's find_fingerprint to keep the sub_spec
-    # comparison canonical (matching rule 8's
-    # equality semantics).
+function noteCoverage(db, matcher, elem, path):
+    # Emit an info note when NO entry in `db` carries a
+    # FingerprintRecord whose (method, sub_spec) matches
+    # the active matcher.  We use the library's
+    # find_fingerprint to keep the sub_spec comparison
+    # canonical (matching rule 8's equality semantics).
+    # This does not abort: the per-species pick (11.3.d
+    # step 3) falls through to the default-tagged entry,
+    # so the run proceeds exactly as a pre-Phase-2
+    # -reduce run would.
     method   = matcher.name
     sub_spec = matcher.active_sub_spec
     for entry in db.potentials:
         try:
             find_fingerprint(entry, method, sub_spec)
-            return       # coverage exists; done
+            return       # coverage exists; nothing to note
         except KeyError:
             continue
-    error("preflight coverage check: no entry in "
+    info("environment scheme active but no entry in "
         + path + " carries a fingerprint for ("
-        + method + ", " + str(sub_spec) + ").  Add"
-        + " the [[reference_solid.entry.fingerprint]]"
+        + method + ", " + str(sub_spec) + "); this"
+        + " element's species will use the default"
+        + " potential.  To enable a fingerprint match,"
+        + " add the [[reference_solid.entry.fingerprint]]"
         + " declaration to the curation manifest and"
         + " regenerate the database (DESIGN 5.7).")
 ```
@@ -3529,7 +3542,7 @@ function emitInitialPotentials(structure, settings,
         settings.methods)
 
     # 2. Per-element preflight.  Loads each element's
-    #    database, runs the coverage check when a
+    #    database, emits the coverage note when a
     #    matcher is active, and marks elements
     #    without a database for the legacy fallback.
     databases = perElementPreflight(structure,

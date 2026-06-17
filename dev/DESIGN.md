@@ -3251,14 +3251,33 @@ in the parsed structure:
    element's atoms will participate in species grouping
    normally but cannot match any fingerprint scheme;
    they receive the legacy isolated-atom potential.
-4. **Coverage check** (only when an in-makeinput
+4. **Coverage note** (only when an in-makeinput
    environment scheme -- today, `-reduce` -- is in play).
-   Confirm that at least one entry in the loaded database
+   Check whether at least one entry in the loaded database
    carries a fingerprint record matching the requested
-   `(method, sub_spec)` for the active scheme.  If not,
-   abort with a message naming the element and the missing
-   `(method, sub_spec)`.  The bispectrum scheme runs its
-   own coverage check inside `makegroups.py` (5.10), since
+   `(method, sub_spec)` for the active scheme.  If none
+   does, do **not** abort: emit an info-level message
+   naming the element and the missing `(method, sub_spec)`,
+   and let the element's atoms fall through to the
+   default-tagged entry (the isolated-atom potential) at the
+   per-species pick (5.6.5 step 3).  An environment scheme is
+   fundamentally a *grouping* scheme -- its species split is
+   pure geometry and needs no database -- so the fingerprint
+   *pick* layered on top (5.6.5 step 2) is a bonus, not a
+   precondition; when the database carries no matching
+   fingerprints the scheme still groups normally and every
+   species takes the default potential, exactly as `-reduce`
+   behaved before Phase 2.  Aborting here would be wrong: it
+   would break an otherwise-valid run merely because the
+   database is not yet populated for that `(method,
+   sub_spec)`, which is the *current* state of every shipped
+   element (none carries fingerprint records yet -- see the
+   producer side-quest in TODO C91), and which is never the
+   user's error.  The info note keeps the fall-through
+   visible -- a user who expected a fingerprint match is told
+   why every species received the same default potential --
+   without making it fatal.  The bispectrum scheme reports
+   the same condition inside `makegroups.py` (5.10), since
    its grouping happens before makeinput.
 
 #### 5.6.4 Species pass
