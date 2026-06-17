@@ -1,0 +1,16 @@
+# GitHub Pages / Jekyll configuration for the Imago project site.
+#
+# `theme:` selects one of the Jekyll themes that GitHub Pages ships
+# out of the box.  jekyll-theme-tactile renders `title` and
+# `description` in a header banner and then drops each page's body
+# content below it.  Switching themes later is a one-line change here
+# (e.g. jekyll-theme-cayman, jekyll-theme-slate, jekyll-theme-minimal).
+#
+# Note: a `.nojekyll` file must NOT be present for any of this to take
+# effect -- that file disables the Jekyll build a theme depends on.
+
+title: Imago
+description: >-
+  An all-electron electronic-structure code implementing the OLCAO
+  (Orthogonalized Linear Combination of Atomic Orbitals) method.
+theme: jekyll-theme-tactile
