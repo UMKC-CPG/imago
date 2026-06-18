@@ -139,8 +139,23 @@ def fresh_sc(_sc_import):
     return _sc_import()
 
 
+@pytest.fixture(scope='session')
+def _sc_file_cache():
+    """Session cache of loaded structures keyed by fixture filename.
+
+    Reading a symmetry-bearing skeleton drives the applySpaceGroup Fortran
+    subprocess (see the scratch-file note above), which is the dominant
+    per-test cost once many tests load the same handful of files.  Caching
+    one master copy per filename and handing out deep copies pays that
+    subprocess once per file per session while still giving each test an
+    independent, mutable instance (a StructureControl deep-copies in
+    microseconds, versus tenths of a second to re-read and re-symmetrize).
+    """
+    return {}
+
+
 @pytest.fixture
-def make_sc(_sc_import):
+def make_sc(_sc_import, _sc_file_cache):
     """Factory: read a .skl from fixtures/structures/ and return a loaded SC.
 
     Usage::
@@ -150,16 +165,26 @@ def make_sc(_sc_import):
             assert sc.num_atoms == 16
 
     Each call produces a *fresh* StructureControl instance so that mutations
-    in one test never affect another.
+    in one test never affect another.  The expensive read (which may spawn
+    the applySpaceGroup subprocess) happens once per filename per session;
+    every call returns an independent deep copy of that cached master, so
+    the per-test isolation is unchanged while the subprocess cost is paid
+    only once per distinct structure.
 
     Uses read_input_file() (not read_imago_skl() directly) so that
     map_element_number() and compute_implicit_info() are called automatically,
     making atomic_z and basis-set metadata available immediately.
     """
+    import copy
+
     def _factory(filename):
-        sc = _sc_import()
-        sc.read_input_file(os.path.join(STRUCTURES_DIR, filename))
-        return sc
+        master = _sc_file_cache.get(filename)
+        if master is None:
+            master = _sc_import()
+            master.read_input_file(
+                os.path.join(STRUCTURES_DIR, filename))
+            _sc_file_cache[filename] = master
+        return copy.deepcopy(master)
     return _factory
 
 
