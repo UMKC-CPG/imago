@@ -353,3 +353,65 @@ class TestDirectXYZ2FractABC:
         frac = fresh_sc.direct_xyz2fract_abc(xyz_orig)
         xyz_back = fresh_sc.fract_abc2direct_xyz(frac)
         assert xyz_back[1:] == pytest.approx(xyz_orig[1:], rel=1e-7)
+
+
+# ===========================================================================
+# from_arrays factory (ASE-free; ARCHITECTURE 9.3)
+# ===========================================================================
+
+class TestFromArrays:
+    """``StructureControl.from_arrays`` builds a populated instance from
+    plain (cell, fractional coords, element symbols) arrays, identical to
+    one read from an imago.skl file (the shared factory cif2skl uses)."""
+
+    def test_builds_cubic_cell(self, _sc_import):
+        # Two-atom bcc-style Si cell from arrays.
+        sc = _sc_import.from_arrays(
+            [5.43, 5.43, 5.43, 90.0, 90.0, 90.0],
+            [(0.0, 0.0, 0.0), (0.5, 0.5, 0.5)],
+            ["Si", "Si"])
+        assert sc.num_atoms == 2
+        assert sc.num_elements == 1
+        assert sc.element_list[1] == "si"
+        # The six conventional cell parameters survive verbatim.
+        assert sc.mag[1] == pytest.approx(5.43)
+        assert sc.mag[3] == pytest.approx(5.43)
+        assert sc.angle_deg[2] == pytest.approx(90.0)
+
+    def test_preserves_non_orthogonal_angles(self, _sc_import):
+        # A triclinic-ish angle round-trips into the lattice.
+        sc = _sc_import.from_arrays(
+            [4.0, 5.0, 6.0, 90.0, 89.6564, 90.0],
+            [(0.0, 0.0, 0.0)], ["Si"])
+        assert sc.mag[2] == pytest.approx(5.0)
+        assert sc.angle_deg[2] == pytest.approx(89.6564)
+
+    def test_species_tags_split_one_element(self, _sc_import):
+        # Explicit per-atom species numbers split one element into two
+        # species (the skeleton tags become si1 / si2).
+        sc = _sc_import.from_arrays(
+            [5.0, 5.0, 5.0, 90.0, 90.0, 90.0],
+            [(0.0, 0.0, 0.0), (0.5, 0.5, 0.5)],
+            ["Si", "Si"], species=[1, 2])
+        assert sc.num_species[1] == 2
+
+    def test_bare_symbols_are_one_species(self, _sc_import):
+        # Without species numbers all atoms of an element form one species.
+        sc = _sc_import.from_arrays(
+            [5.0, 5.0, 5.0, 90.0, 90.0, 90.0],
+            [(0.0, 0.0, 0.0), (0.5, 0.5, 0.5)],
+            ["Si", "Si"])
+        assert sc.num_species[1] == 1
+
+    def test_coord_count_mismatch_raises(self, _sc_import):
+        with pytest.raises(ValueError, match="match one-to-one"):
+            _sc_import.from_arrays(
+                [5.0, 5.0, 5.0, 90.0, 90.0, 90.0],
+                [(0.0, 0.0, 0.0)], ["Si", "Si"])
+
+    def test_species_count_mismatch_raises(self, _sc_import):
+        with pytest.raises(ValueError, match="match one-to-one"):
+            _sc_import.from_arrays(
+                [5.0, 5.0, 5.0, 90.0, 90.0, 90.0],
+                [(0.0, 0.0, 0.0), (0.5, 0.5, 0.5)],
+                ["Si", "Si"], species=[1])

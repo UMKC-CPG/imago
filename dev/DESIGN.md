@@ -4052,11 +4052,21 @@ returns its path:
 
 - For a `structure_path` entry it reads the on-disk file named by
   the manifest (resolved under the manifest's directory).  No
-  network.
+  network.  The file is an `imago.skl` (the run consumes skl);
+  for a crystal the curator authors or converts it with the
+  space group preserved (see `cif2skl`, ARCHITECTURE 9.5).
 - For a `cod_id` entry it fetches the structure once from the
-  Crystallography Open Database at the pinned `cod_revision` and
-  writes it to a plain local location, e.g.
-  `share/atomicBDB/cache/structures/<reference_id>.<ext>`.
+  Crystallography Open Database at the pinned `cod_revision`
+  (`cod_fish.py get`, the canonical fetch this step imports) and
+  converts the fetched CIF to an `imago.skl` with `cif2skl`,
+  which preserves the CIF's space group -- recovering the
+  asymmetric unit and the `spaceDB` setting rather than
+  flattening to P1, because the Brillouin-zone integration
+  samples the irreducible wedge using that space group
+  (ARCHITECTURE 9.5).  A CIF whose space group cannot be
+  resolved to a `spaceDB` setting is a hard error (no silent P1
+  fallback for a crystal); the curator then supplies a
+  pre-converted `structure_path` skl instead.
 
 This step is the producer's only network access and is
 **deliberately decoupled from any run cache**: its sole job is to

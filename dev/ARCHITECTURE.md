@@ -1403,33 +1403,122 @@ management (9.6).
 ### 9.5 Structure acquisition: cod_fish.py + cif2skl.py
 
 Structure acquisition is a front-end, separate from the
-flight dispatcher, in two small CLI tools:
+flight dispatcher, in two small CLI tools.  Both lean on
+existing services rather than reinventing them: COD's own
+HTTP query endpoint for search, ASE for CIF parsing, and
+Imago's own `apply_space_group` for symmetry expansion.
+Neither tool adds a dependency beyond `urllib` (standard
+library) and `ase` (already required to read CIF).
 
-- `cod_fish.py` pulls a structure from the
-  Crystallography Open Database by `cod_id` at a pinned
-  `cod_revision` and writes a CIF.  It uses `urllib`
-  (no `requests` dependency) and is strict on failure
-  (network down, revision missing) -- it errors rather
-  than silently substituting a different revision,
-  matching the COD-fetch contract in DESIGN 5.7.
-- `cif2skl.py` converts a CIF to an `imago.skl`.  It
-  reads the CIF with ASE (reusing ASE's CIF parser
-  rather than reinventing CIF symmetry/loop handling),
-  reads the lattice / fractional coordinates / element
-  symbols off the resulting `Atoms`, builds a
-  `StructureControl` through the ASE-free factory in
-  `structure_control.py` (9.3), and writes the skl with
-  `StructureControl`'s existing skeleton writer.  Only
-  the trivial `Atoms`-to-arrays read touches `ase`; the
-  factory itself is ASE-free, so `structure_control.py`
-  gains no ASE dependency.
+**`cod_fish.py` -- COD acquisition front-end.**  Four
+verbs, all thin wrappers over COD endpoints; it keeps no
+local database and writes no SQL of its own:
 
-Splitting acquisition from kaleidoscope keeps the
-flight layer agnostic about *where* a structure came
-from: kaleidoscope consumes `imago.skl` files, whether
-they came from COD via this front-end, from a
-hand-authored `structure_path`, or from any other
-source.
+- `get <cod_id> [--revision REV]` fetches one structure's
+  CIF via `urllib` and is **strict**: with `--revision`
+  it verifies the CIF's `$Revision:$` and refuses on a
+  mismatch; a network/COD failure or a missing pinned
+  revision errors rather than silently substituting a
+  different revision (the reproducible path the producer
+  and a manifest `cod_id` use; matches DESIGN 5.7).
+- `search --elements E [E ...] [--text AUTHOR]
+  [--max-extra K]` queries COD's `result.php` and prints
+  a **numbered** candidate table (cod_id, formula /
+  mineral / common name, spacegroup + number, the six
+  cell parameters, volume).  Exact composition is the
+  default: the query sets the distinct-element count
+  bounds to the length of the element list
+  (`strictmin = strictmax = len`), so `--elements Si`
+  returns single-element Si phases, not every
+  Si-containing compound; `--max-extra K` loosens the
+  upper bound to admit up to K further elements.  Search
+  also writes the result set to a small session file in
+  the working directory so later verbs can refer to rows
+  by their **index** rather than their eight-digit id.
+- `pin <index|id> [...]` resolves the chosen rows'
+  revisions (fetching only those few) and prints a pinned
+  list -- a human summary plus a paste-ready manifest
+  fragment with `cod_id`/`cod_revision` filled in.  This
+  is the bridge from browsing to a reproducible pull;
+  indices come from the saved search, so a student never
+  retypes long ids, and the echoed formula/spacegroup per
+  row makes a wrong pick obvious.
+- `rank` (or `search --rank`) is **advisory triage**, not
+  validation: when a composition has many COD entries it
+  annotates and orders them by interpretable signals
+  drawn only from the returned metadata -- ambient vs
+  high-P/T conditions, presence of a mineral/common name,
+  spacegroup consensus across the candidates, and
+  cell-volume-per-formula-unit outliers -- and prints the
+  reasons so the curator decides.  It narrows "which of
+  these is the real phase," it does not answer it.
+
+Discovery (`search`/`rank`/the index session) is kept
+strictly separate from acquisition (`get`/`pin` by pinned
+id+revision): a manifest only ever pins an id and a
+revision, so reproducibility never depends on a search.
+
+**`cif2skl.py` -- CIF to `imago.skl`, preserving the
+space group.**  An `imago.skl` is *not* a flat P1 list of
+atoms: it stores the asymmetric unit plus a space-group
+token, and `read_imago_skl`'s `apply_space_group`
+regenerates the full cell.  Preserving the space group
+matters for correctness, not just compactness -- the
+Brillouin-zone integration samples the irreducible wedge
+*using that space group*, so flattening a crystal to P1
+would silently corrupt every k-point-dependent result
+(the same hazard `makegroups.py` guards against).  So the
+converter recovers the CIF's space group rather than
+discarding it:
+
+1. ASE parses the CIF (`ase.io.cif`), which yields the
+   authored asymmetric unit (the raw `_atom_site_*`
+   list), the cell, the IT number and origin setting, and
+   -- read the ordinary way -- the fully symmetry-expanded
+   cell.  This is the only step that touches `ase`, and it
+   spares us a hand-written CIF parser (CIF's `loop_`
+   blocks and symmetry expansion are exactly what ASE
+   already handles).  Partial/mixed occupancy is refused
+   for now.
+2. The space group is resolved by **verification, not by
+   parsing operation tables**.  The `spaceDB` entries for
+   the CIF's IT number are the candidate settings (the
+   `<IT#>_a`, `<IT#>_b`, ... variants, ordered by ASE's
+   reported origin setting so the likely one is tried
+   first).  For each candidate the authored asymmetric
+   unit is written with that `space` token and run through
+   `apply_space_group`; the variant whose regenerated cell
+   matches ASE's full expansion (atom count and positions,
+   up to lattice translation and permutation, within a
+   tolerance) is the answer.  This reuses Imago's own
+   symmetry engine as the judge, so no `spaceDB` operation
+   set is ever parsed or canonicalized, and the origin
+   choice falls out of the match (translations are
+   origin-dependent).  It is the automated form of the
+   established manual practice -- default to `_a`, check
+   the resulting structure, try the others if it is wrong.
+3. On a unique match the skeleton is written as the
+   asymmetric unit plus that token.  No candidate
+   verifying is a **hard error** that names the IT number
+   and the tried variants; a `--space <token>` override
+   forces a specific setting (still verified).  P1
+   fallback is deliberately *not* offered for a crystal,
+   since it would reintroduce the corruption above.
+
+No symmetry library (e.g. `spglib`) is added: the CIF's
+symmetry is taken as authored (ASE reports it) and
+checked against Imago's expansion, rather than
+re-derived.  The ASE-free `StructureControl` factory
+(9.3) remains the shared primitive for genuinely P1
+inputs and the ASE adapter; `cif2skl`'s symmetric path
+writes the asymmetric unit and token directly and
+verifies through `apply_space_group`.
+
+Splitting acquisition from kaleidoscope keeps the flight
+layer agnostic about *where* a structure came from:
+kaleidoscope consumes `imago.skl` files, whether they
+came from COD via this front-end, from a hand-authored
+`structure_path`, or from any other source.
 
 ### 9.6 Organizational layout (flight workspace)
 

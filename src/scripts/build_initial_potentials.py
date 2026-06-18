@@ -932,24 +932,24 @@ def _cod_extension(ref: ReferenceSolid) -> str:
 def _fetch_cod_structure(cod_id: int, cod_revision: str,
                          dest: str) -> None:
     """Fetch one pinned COD revision to ``dest`` (DESIGN 5.7,
-    Option A).  Strict on failure: a network outage, a COD outage,
-    or a missing pinned revision raises -- the fetch NEVER falls
-    back to a different revision, because a silent fallback would
-    desync the reproducible build from the pinned manifest.
+    Option A).  Delegates to ``cod_fish.fetch_cif``, the canonical
+    strict COD fetch (ARCHITECTURE 9.5), so the producer and the
+    standalone ``cod_fish`` tool share one implementation.  The
+    pinned revision is verified against the served CIF: a mismatch,
+    a network outage, or a COD outage raises -- the fetch NEVER
+    falls back to a different revision, because a silent fallback
+    would desync the reproducible build from the pinned manifest.
 
     NOTE (C74 end-to-end): the live COD fetch needs network access
     and the COD per-revision API; it is exercised only on the
     cluster.  A ``structure_path`` manifest avoids it entirely for
     offline / unit-test runs."""
 
-    import urllib.error
-    import urllib.request
+    import cod_fish
 
-    url = f"https://www.crystallography.net/cod/{cod_id}.cif"
     try:
-        with urllib.request.urlopen(url) as response:
-            payload = response.read()
-    except urllib.error.URLError as exc:
+        payload = cod_fish.fetch_cif(cod_id, revision=cod_revision)
+    except cod_fish.CodFishError as exc:
         raise RuntimeError(
             f"COD fetch failed for cod_id={cod_id} (pinned "
             f"revision {cod_revision!r}): {exc}.  The build pins "

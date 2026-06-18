@@ -288,11 +288,25 @@
   Refined 2026-05-21: ARCH 9.6/9.8 updated to mark the
   workspace scheme resolved by DESIGN 6.2.4 (the open
   item under A7).  PSEUDOCODE follows as P6/P7.
-- [ ] D14. Design structure acquisition (ARCH 9.5):
-  cod_fish.py COD-fetch contract (urllib, pinned
-  cod_revision, strict on failure) and cif2skl.py (ASE
-  CIF read -> StructureControl factory -> skl write).
-  PSEUDOCODE for D11-D14 follows once each design lands.
+- [x] D14. Design structure acquisition (ARCH 9.5):
+  cod_fish.py and cif2skl.py.  cod_fish.py is a four-verb
+  COD front-end -- get (strict pinned fetch), search
+  (composition/author query over COD result.php, exact
+  composition via strictmin=strictmax=len(elements), a
+  numbered candidate table saved to a session file), pin
+  (resolve chosen rows' revisions by index -> manifest
+  fragment), and rank (advisory triage by ambient
+  conditions / named phase / spacegroup consensus / volume
+  outliers).  cif2skl.py PRESERVES the space group: ASE
+  parses the CIF (authored asymmetric unit + IT#/setting +
+  full expansion), the spaceDB <IT#>_<letter> variant is
+  chosen by VERIFICATION (write asymmetric unit + token,
+  apply_space_group, match ASE's expansion -- no operation
+  parsing, origin falls out), and the skl is written as
+  asymmetric unit + token; no match is a hard error with a
+  --space override.  No spglib (CIF symmetry taken as
+  authored, checked not re-derived).  PSEUDOCODE for
+  D11-D14 follows once each design lands.
 - [ ] D19. Design the user-facing flight-construction surface
   (ARCH 9 / DESIGN 6).  Today a flight exists only as a
   hand-written Python `Flight` of `CalcUnit`s built on the C71
@@ -2078,7 +2092,7 @@ and PSEUDOCODE landed before code.
   Fortran's within-run-dir checkpointing is preserved
   unchanged, but no Python-visible completion marker exists
   to report it), so they stay False/absent for now.
-- [ ] C64. Add the ASE-free StructureControl factory to
+- [x] C64. Add the ASE-free StructureControl factory to
   structure_control.py (ARCH 9.3, D12): build a
   StructureControl from (lattice, fractional coords,
   element symbols).  No ASE import; shared by C65 and
@@ -2086,11 +2100,20 @@ and PSEUDOCODE landed before code.
 - [ ] C65. Implement ase_imago.py ImagoCalculator (ARCH
   9.3, D12): calls the C63 API; the Atoms-reading glue
   uses the C64 factory.  Stays a flat module.
-- [ ] C66. Implement cod_fish.py (ARCH 9.5, D14): COD
-  structure fetch via urllib at a pinned cod_revision;
-  strict on failure (no silent revision substitution).
-- [ ] C67. Implement cif2skl.py (ARCH 9.5, D14): read
-  CIF with ASE -> C64 factory -> skl write.
+- [x] C66. Implement cod_fish.py (ARCH 9.5, D14): the
+  four-verb COD front-end -- get (strict pinned urllib
+  fetch, revision-verified), search (result.php query by
+  composition/author, exact-composition element-count
+  bounds, numbered table saved to a cwd session file),
+  pin (index -> resolved revision -> manifest fragment),
+  rank (advisory triage).  build_initial_potentials
+  imports its get for the canonical fetch (DRY with
+  _fetch_cod_structure).
+- [x] C67. Implement cif2skl.py (ARCH 9.5, D14): ASE CIF
+  read -> authored asymmetric unit + IT#/setting; resolve
+  the spaceDB variant by apply_space_group verification
+  against ASE's expansion; write asymmetric unit + token;
+  hard error + --space override on no match.  No spglib.
 - [ ] C68. Implement kaleidoscope/ (ARCH 9.4, 9.6, D13):
   Parsl dispatch, the pluggable wingbeat seam, status
   tracking (complete-and-report), the flight

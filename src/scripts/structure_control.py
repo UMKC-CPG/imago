@@ -1097,12 +1097,20 @@ class StructureControl:
                     f"decimal places (e.g. {numer / denom:.10f}) or "
                     f"the symmetry-exact value you intend.")
 
-    def read_imago_skl(self, filename=None, use_file_species=True):
+    def read_imago_skl(self, filename=None, use_file_species=True,
+                       lines=None):
         """Read the imago skeleton (.skl) input file.
 
         The skeleton file is the primary imago structure format.  It
         specifies the title, space group, lattice parameters, and all atom
         fractional coordinates with their species assignments.
+
+        The skeleton may come either from a file (``filename``) or from an
+        already-split list of text lines (``lines``).  The in-memory
+        ``lines`` form lets the ASE-free factory :meth:`from_arrays` reuse
+        this single tested parser without writing a temporary file, so an
+        array-built structure and a file-read one finish on exactly the
+        same code path.  When ``lines`` is given, ``filename`` is ignored.
 
         File format (all keywords are matched case-insensitively):
 
@@ -1178,11 +1186,15 @@ class StructureControl:
             distinguish different species of the same element.  When False,
             all atoms of a given element are collapsed to species 1.
         """
-        if filename is None:
-            filename = self.imago_skl
-
-        with open(filename) as fh:
-            skeleton = fh.readlines()
+        # The skeleton text comes either from an in-memory list of lines
+        # (the :meth:`from_arrays` factory path) or from a file on disk.
+        if lines is not None:
+            skeleton = list(lines)
+        else:
+            if filename is None:
+                filename = self.imago_skl
+            with open(filename) as fh:
+                skeleton = fh.readlines()
 
         def tok(line):
             return line.strip().split()
@@ -1690,6 +1702,109 @@ class StructureControl:
         # basis/potential sizing parameters from species counts.
         self.map_element_number()
         self.compute_implicit_info()
+
+    @classmethod
+    def from_arrays(cls, cell_lengths_and_angles, fractional_coords,
+                    element_symbols, species=None, title=None,
+                    use_file_species=True):
+        """Build a fully-populated StructureControl from plain arrays.
+
+        This is the ASE-free structure factory (ARCHITECTURE 9.3): it
+        turns the three primitive descriptions of a crystal -- the unit
+        cell, the fractional atom coordinates, and the per-atom element
+        symbols -- into a StructureControl identical to one read from an
+        ``imago.skl`` file.  It is the shared primitive behind the CIF
+        converter (``cif2skl.py``, which reads those arrays off an ASE
+        ``Atoms``) and the ASE calculator adapter, so neither of those
+        leaks an ``ase`` import into this module.
+
+        The cell is given as the six conventional parameters every CIF
+        and most papers report -- the lengths ``a, b, c`` (Angstroms) and
+        the angles ``alpha, beta, gamma`` (degrees) -- rather than as a
+        3x3 vector matrix, so the value round-trips recognizably.  The
+        structure is built as space group P1: callers that started from a
+        symmetric CIF should pass the symmetry-expanded coordinates (ASE's
+        CIF reader does this expansion), so every atom in the cell is
+        listed explicitly and no further symmetry generation is needed.
+
+        Rather than reimplement the skeleton-to-object construction, the
+        factory writes the canonical skeleton text in memory and feeds it
+        through :meth:`read_imago_skl` -- the same parser a file read uses
+        -- so an array-built structure and a file-read one can never drift
+        apart.
+
+        Parameters
+        ----------
+        cell_lengths_and_angles : sequence of six floats
+            ``(a, b, c, alpha, beta, gamma)`` in Angstroms and degrees.
+        fractional_coords : sequence of (x, y, z)
+            One fractional coordinate triple per atom, in [0, 1).
+        element_symbols : sequence of str
+            One element symbol per atom (e.g. ``"Si"``); same length as
+            ``fractional_coords``.
+        species : sequence of int, optional
+            Per-atom species number used to split atoms of one element
+            into distinct species (written as the skeleton tag
+            ``<symbol><species>``).  When omitted, every atom carries the
+            bare element symbol, so all atoms of an element form a single
+            species that later grouping (reduce/bispectrum/space group)
+            may refine.
+        title : str, optional
+            A one-line title recorded in the skeleton's title block.
+        use_file_species : bool, optional
+            Forwarded to :meth:`read_imago_skl`: honor the per-atom
+            species tags (default) or collapse each element to one species.
+
+        Returns
+        -------
+        StructureControl
+            The populated instance (also returned so the call reads as a
+            factory: ``sc = StructureControl.from_arrays(...)``).
+        """
+
+        a, b, c, alpha, beta, gamma = (
+            float(value) for value in cell_lengths_and_angles)
+        num_atoms = len(element_symbols)
+        if len(fractional_coords) != num_atoms:
+            raise ValueError(
+                "from_arrays: fractional_coords has "
+                f"{len(fractional_coords)} entries but element_symbols "
+                f"has {num_atoms}; they must match one-to-one")
+        if species is not None and len(species) != num_atoms:
+            raise ValueError(
+                "from_arrays: species has "
+                f"{len(species)} entries but element_symbols has "
+                f"{num_atoms}; they must match one-to-one")
+
+        # Assemble the canonical skeleton text (space group P1) the
+        #   factory hands to the shared reader.
+        skeleton = [
+            "title\n",
+            (title or
+             "Structure built by StructureControl.from_arrays.") + "\n",
+            "end\n",
+            "cell\n",
+            f"{a} {b} {c} {alpha} {beta} {gamma}\n",
+            f"fract {num_atoms}\n",
+        ]
+        for atom in range(num_atoms):
+            symbol = element_symbols[atom]
+            tag = (symbol if species is None
+                   else f"{symbol}{species[atom]}")
+            x, y, z = fractional_coords[atom]
+            skeleton.append(
+                f"{tag} {float(x):.10f} {float(y):.10f} "
+                f"{float(z):.10f}\n")
+        skeleton += ["space 1_a\n", "supercell 1 1 1\n", "full\n"]
+
+        structure = cls()
+        structure.setup_data_base_ref()
+        structure.read_imago_skl(
+            lines=skeleton, use_file_species=use_file_species)
+        # Mirror read_input_file's post-read derived-data setup.
+        structure.map_element_number()
+        structure.compute_implicit_info()
+        return structure
 
     def setup_data_base_ref(self):
         """Pull element property arrays from ElementData into this instance.
