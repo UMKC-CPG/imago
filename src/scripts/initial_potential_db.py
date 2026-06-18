@@ -75,13 +75,15 @@ ElementDatabase
 
 load(path, known_methods=None) -> ElementDatabase
     Read and validate a per-element TOML file.  Enforces the
-    nine validation rules from DESIGN 5.2.  Raises ``ValueError``
+    set of validation rules from DESIGN 5.2.  Raises ``ValueError``
     on any rule violation, with a message naming the file path,
     the entry label when applicable, and the field at fault.
     ``known_methods`` is the optional set of registered matcher
     names used to enforce rule 9 (a fingerprint ``method`` must
     be a registered matcher); callers without a registry
     (isolated unit tests) pass ``None`` and rule 9 is skipped.
+    Rule 10 requires exactly one preferred fingerprint record per
+    method present in the file (DESIGN 5.6.5).
 
 require_provenance(prov, path, label)
     Per-entry provenance validator used by :func:`load`.  Made
@@ -153,16 +155,33 @@ class FingerprintRecord:
       the same ``method`` but different ``sub_spec`` are
       non-comparable and may coexist (rule 8); two with the
       same ``(method, sub_spec)`` are a hard error.
-    * ``payload`` -- every record field other than ``method``
-      and ``sub_spec``.  Its shape is matcher-defined and is
-      *not* validated by the library (e.g., bispectrum records
-      carry a ``values`` real array; reduce records carry a
-      ``shell_code`` inline table).  The matcher validates its
-      own payload at lookup time.
+    * ``preferred`` -- the schema-v2 fingerprint-selection hint
+      (DESIGN 5.6.5 step 2).  When a run lets the input file
+      dictate the environment scheme (the crystalline /
+      pre-assigned regime, with no ``-reduce`` or ``-bispec`` on
+      the command line), the consumer must still decide which of
+      the entry's many fingerprint records to match against.  It
+      does so by matching the database's *preferred* record for
+      each present method.  Rule 10 guarantees exactly one record
+      per present method carries ``preferred = true``, so the
+      choice is unambiguous.  Manifest rule 11 further requires
+      the preferred sub-spec to be uniform database-wide so that
+      every element is matched at the same fidelity.  Records that
+      are not preferred still participate in user-scheme matching
+      (when the command line names a method and sub-spec
+      explicitly); ``preferred`` only governs the file-dictated
+      regime.
+    * ``payload`` -- every record field other than ``method``,
+      ``sub_spec``, and ``preferred``.  Its shape is
+      matcher-defined and is *not* validated by the library
+      (e.g., bispectrum records carry a ``values`` real array;
+      reduce records carry a ``shell_code`` inline table).  The
+      matcher validates its own payload at lookup time.
     """
 
     method: str
     sub_spec: dict[str, Any]
+    preferred: bool = False
     payload: dict[str, Any] = field(default_factory=dict)
 
 
@@ -242,7 +261,7 @@ def load(path: str,
          ) -> ElementDatabase:
     """Read and validate one per-element TOML database file.
 
-    Implements PSEUDOCODE 11.1 and enforces the nine validation
+    Implements PSEUDOCODE 11.1 and enforces the set of validation
     rules from DESIGN 5.2 (schema v2):
 
     1. ``schema_version`` must equal ``2``.
@@ -276,6 +295,14 @@ def load(path: str,
        unit tests) pass ``None`` and rule 9 is skipped, which
        decouples the library from the registry without weakening
        the rule for real consumer and producer runs.
+    10. For every fingerprint ``method`` *present* anywhere in
+       the file (across all entries), exactly one record carries
+       ``preferred = true``.  Zero preferred records for a
+       present method, or two or more, is a hard error: the
+       file-dictated selection regime (DESIGN 5.6.5) needs an
+       unambiguous representative record per method, and the
+       curator must declare it explicitly.  A method that is
+       wholly absent from the file is not subject to the rule.
 
     Any violation raises ``ValueError`` whose message names the
     file path, the entry label when applicable, and the field
@@ -334,6 +361,14 @@ def load(path: str,
     # rule 7 (exactly one) after the loop so a "zero" and a
     # "multiple" condition report through the same message.
     default_count = 0
+    # Rule 10 bookkeeping: how many fingerprint records carry
+    # preferred = true for each method seen anywhere in the file.
+    # A method appears as a key here as soon as any record names
+    # it (preferred or not), so after the loop a present method
+    # whose count is not exactly one is a hard error.  Methods
+    # wholly absent from the file never become keys and are thus
+    # exempt from the rule.
+    preferred_count_by_method: dict[str, int] = {}
     entry_required = (
         "default", "description", "num_gaussians", "alpha_min",
         "alpha_max", "coefficients", "alphas", "provenance",
@@ -430,14 +465,28 @@ def load(path: str,
                     f"fingerprint method {method!r} is not a "
                     f"registered matcher")
 
-            # The payload is every field other than method and
-            # sub_spec; the owning matcher validates its shape.
+            # Rule 10 bookkeeping: register the method (so it is
+            # counted as present) and tally its preferred records.
+            # The flag defaults to false when the curator omits
+            # it, so the common non-preferred record needs no key.
+            preferred = bool(fp_dict.get("preferred", False))
+            preferred_count_by_method.setdefault(method, 0)
+            if preferred:
+                preferred_count_by_method[method] += 1
+
+            # The payload is every field other than method,
+            # sub_spec, and preferred; the owning matcher
+            # validates its shape.  preferred is a library-level
+            # selection hint, not part of the matcher payload, so
+            # it is excluded here and carried on its own field.
             payload = {k: v for k, v in fp_dict.items()
-                       if k not in ("method", "sub_spec")}
+                       if k not in ("method", "sub_spec",
+                                    "preferred")}
             fingerprints.append(FingerprintRecord(
-                method   = method,
-                sub_spec = dict(sub_spec),
-                payload  = payload,
+                method    = method,
+                sub_spec  = dict(sub_spec),
+                preferred = preferred,
+                payload   = payload,
             ))
 
         db.potentials.append(PotentialEntry(
@@ -473,6 +522,22 @@ def load(path: str,
         raise ValueError(
             f"{path}: expected exactly one [[potential]] with "
             f"default = true; found {default_count}")
+
+    # ----- Rule 10: exactly one preferred fingerprint record per
+    # present method.  The file-dictated selection regime (DESIGN
+    # 5.6.5) matches against the preferred record, so an absent or
+    # ambiguous preference would leave the consumer with no
+    # well-defined representative to compare against.  Sorting the
+    # methods keeps the error message deterministic.
+    for method in sorted(preferred_count_by_method):
+        count = preferred_count_by_method[method]
+        if count != 1:
+            raise ValueError(
+                f"{path}: fingerprint method {method!r} is "
+                f"present but has {count} record(s) flagged "
+                f"preferred = true; exactly one is required so "
+                f"the file-dictated selection regime has an "
+                f"unambiguous representative")
 
     return db
 
@@ -603,6 +668,36 @@ def find_fingerprint(entry: PotentialEntry, method: str,
     raise KeyError(
         f"no fingerprint with method={method!r}, "
         f"sub_spec={sub_spec!r} on entry {entry.label!r}")
+
+
+def find_preferred(db: ElementDatabase, method: str
+                   ) -> FingerprintRecord | None:
+    """Return this database's preferred record for ``method``.
+
+    Implements PSEUDOCODE 11.3.d ``find_preferred``.  In the
+    file-dictated selection regime (DESIGN 5.6.5 step 2) the
+    consumer matches the input structure against the database's
+    single representative record for each candidate method rather
+    than against a command-line-named sub-spec.  This returns that
+    representative: the one fingerprint record (across all entries
+    in the file) whose ``method`` matches and whose ``preferred``
+    flag is set.
+
+    Returns ``None`` when the method is wholly absent from the
+    file, which the caller reads as "this database offers no
+    fingerprints of that family, fall through to the next method
+    or to the default entry".  Because rule 10 guarantees exactly
+    one preferred record per *present* method, a ``None`` result
+    can only mean "family absent", never "present but
+    unpreferred", and the first matching record is necessarily the
+    unique preferred one -- so the scan can stop at the first hit.
+    """
+
+    for entry in db.potentials:
+        for fp in entry.fingerprints:
+            if fp.method == method and fp.preferred:
+                return fp
+    return None
 
 
 def canonicalize_sub_spec(sub_spec: Any) -> Any:
@@ -819,10 +914,17 @@ def _emit_fingerprint_block(lines: list[str],
 
     Implements PSEUDOCODE 11.2 ``emit_fingerprint_block``.  The
     block opens with ``method`` and ``sub_spec`` (in that fixed
-    order), then the payload fields in the payload dict's
-    iteration order.  All ``=`` signs align within the block,
-    so the alignment width spans the two fixed keys plus every
-    payload key.
+    order), optionally followed by ``preferred = true``, then the
+    payload fields in the payload dict's iteration order.  All
+    ``=`` signs align within the block, so the alignment width
+    spans the fixed keys plus every payload key.
+
+    The ``preferred`` line is emitted *only* when the record is
+    preferred (DESIGN 5.6.5 step 2 / rule 10); a non-preferred
+    record omits the line entirely, matching the gold sketch in
+    which ``preferred`` defaults to false and is never spelled
+    out.  When present it sits immediately after ``sub_spec`` and
+    before the payload, and it joins the alignment-width key set.
 
     Payload values are rendered by kind:
 
@@ -842,7 +944,12 @@ def _emit_fingerprint_block(lines: list[str],
 
     lines.append("[[potential.fingerprint]]")
 
+    # The ``preferred`` key participates in alignment only when
+    # the record is preferred, since a non-preferred record omits
+    # the line and must not pad the block to its width.
     fixed_keys = ["method", "sub_spec"]
+    if fp.preferred:
+        fixed_keys.append("preferred")
     payload_keys = list(fp.payload.keys())
     width = max(len(k) for k in fixed_keys + payload_keys)
 
@@ -852,6 +959,11 @@ def _emit_fingerprint_block(lines: list[str],
     lines.append(
         f"{'sub_spec'.ljust(width)} = "
         f"{_format_inline_table(fp.sub_spec)}")
+    # Emit the selection hint only when set (gold sketch never
+    # spells out the false default).
+    if fp.preferred:
+        lines.append(
+            f"{'preferred'.ljust(width)} = true")
 
     for key in payload_keys:
         value = fp.payload[key]

@@ -377,6 +377,13 @@ class ScriptSettings:
         # is used.  Set from the command line below.
         self.pot_override = None
 
+        # Environment-fingerprint matching switch (DESIGN 5.6.5
+        # precedence 2).  Matching is on by default; -nofingerprint
+        # sets this True, sending every species straight to its
+        # database's default-tagged entry (precedence 3).  A -pot
+        # override still wins over both.  Set from the command line.
+        self.no_fingerprint = False
+
         # Grouping methods -- accumulated from CLI, each entry is a dict.
         self.methods = []       # ordered list of ("reduce"|"target"|"block", idx)
         self.reduces = []       # list of dicts, one per -reduce invocation
@@ -796,6 +803,22 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
                                  "augmented potential database uniformly "
                                  "across the structure.  Optional; defaults "
                                  "to each database's default-tagged entry.")
+        # -nofingerprint opts out of environment-fingerprint
+        # matching for the whole run (DESIGN 5.6.5).  Matching is
+        # on by default and is the C93 behavior: every species,
+        # however it was grouped, is matched against the element's
+        # stored fingerprints.  This flag turns that off.
+        parser.add_argument(
+            "-nofingerprint", dest="no_fingerprint",
+            action="store_true", default=False,
+            help="Disable environment-fingerprint potential "
+                 "matching.  By default every species is matched "
+                 "against its element's stored fingerprints and "
+                 "takes the nearest entry within the similarity "
+                 "floor; with this flag every species takes its "
+                 "database's default-tagged entry instead.  A "
+                 "-pot override still takes precedence.  Optional; "
+                 "defaults to fingerprint matching enabled.")
 
         # ---- K-points ----
         # The -scfkp option specifies the k-point mesh for SCF calculations.
@@ -1144,6 +1167,11 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
         # Augmented potential-database override (-pot LABEL).
         if args.pot is not None:
             self.pot_override = args.pot
+
+        # Fingerprint matching is enabled by default; -nofingerprint
+        # disables precedence 2 for the whole run (DESIGN 5.6.5).
+        if args.no_fingerprint:
+            self.no_fingerprint = True
 
         # K-points -- density mode vs. explicit mesh mode.
         # Check whether any density option was given.
@@ -4357,11 +4385,175 @@ def _species_query_fingerprint(settings, element_id, species_id, matcher):
         settings, "atom_reduce_fingerprint", None)
     if atom_fingerprints is None:
         return None
-    members = [atom_fingerprints[atom]
+    return _summarize_species(
+        matcher, atom_fingerprints, settings, element_id, species_id)
+
+
+def _summarize_species(matcher, per_atom, settings,
+                       element_id, species_id):
+    """Collapse one ``(element, species)``'s atoms into a single
+    representative query fingerprint (DESIGN 5.6.5 step 2).
+
+    ``per_atom`` is a 1-indexed list of per-atom descriptors (index
+    0 unused).  Every atom of the species contributes its
+    descriptor, and the matcher collapses them into one
+    order-independent representative through its ``representative``
+    method, so the chosen potential never depends on the order the
+    atoms happen to appear in.  Returns ``None`` when the species
+    has no usable descriptor (an empty member set), which sends the
+    pick to the default entry.
+    """
+
+    members = [per_atom[atom]
                for atom in range(1, settings.num_atoms + 1)
                if settings.atom_element_id[atom] == element_id
                and settings.atom_species_id[atom] == species_id
-               and atom_fingerprints[atom] is not None]
+               and per_atom[atom] is not None]
+    if not members:
+        return None
+    return matcher.representative(members)
+
+
+def _subspec_cache_key(sub_spec):
+    """Build a hashable, order-independent key for a descriptor
+    ``sub_spec``.
+
+    A file-dictated query is computed once over the whole structure
+    and reused for every species sharing the same ``sub_spec``; this
+    key lets that cache compare two sub-specs by their keys and
+    values regardless of key order.
+    """
+
+    return tuple(sorted(sub_spec.items()))
+
+
+def _resolve_species_query(settings, sc, ipdb, aug_db, element,
+                           species, elem_name, user_scheme_active,
+                           reduce_sub_spec, file_reduce_descriptors,
+                           loen_site_cache):
+    """Resolve the ``(matcher, sub_spec, query)`` triple the
+    fingerprint match (DESIGN 5.6.5 precedence 2) needs for one
+    ``(element, species)``, under the run's active regime.
+
+    Two regimes fix the descriptor family and sub_spec differently:
+
+    * **User scheme.**  The user grouped with ``-reduce``, so the
+      match honors that choice: the reduce family at the user's
+      stored sub_spec, reusing the per-atom shell codes the
+      grouping pass already computed.  When the database carries no
+      fingerprint at that sub_spec the species misses and takes the
+      default entry -- the database never overrules the user.
+
+    * **File-dictated.**  The species came from crystallography or
+      from explicit tags, with no environment scheme on the command
+      line, so the database decides through its ``preferred``
+      records: bispectrum when the element carries a preferred
+      bispectrum record, otherwise reduce.  Exactly one family and
+      one sub_spec; the single query that family needs is computed
+      on demand -- reduce in-process from the geometry, bispectrum
+      from a loen run.
+
+    Returns ``(None, None, None)`` when no fingerprint family
+    applies -- the database offers no preferred record, or the
+    species has no usable descriptor -- leaving the pick to fall
+    through to the default-tagged entry.
+    """
+
+    from matchers import ReduceMatcher, MATCHERS
+
+    if user_scheme_active:
+        matcher = ReduceMatcher()
+        query = _species_query_fingerprint(
+            settings, element, species, matcher)
+        return matcher, reduce_sub_spec, query
+
+    # File-dictated: the database's preferred records pick the
+    # family, bispectrum first then reduce, with no cascade beyond
+    # the single chosen family.
+    preferred = ipdb.find_preferred(aug_db, "bispectrum")
+    if preferred is None:
+        preferred = ipdb.find_preferred(aug_db, "reduce")
+    if preferred is None:
+        return None, None, None
+
+    matcher = MATCHERS[preferred.method]()
+    sub_spec = preferred.sub_spec
+    if matcher.needs_loen_run:
+        query = _file_bispectrum_query(
+            settings, matcher, sub_spec, species, elem_name,
+            loen_site_cache)
+    else:
+        query = _file_reduce_query(
+            settings, sc, matcher, sub_spec, element, species,
+            file_reduce_descriptors)
+    return matcher, sub_spec, query
+
+
+def _file_reduce_query(settings, sc, matcher, sub_spec, element,
+                       species, descriptor_cache):
+    """Compute a file-dictated reduce representative for one
+    ``(element, species)`` (DESIGN 5.6.5 step 2).
+
+    No reduce scheme ran, so there are no stored per-atom shell
+    codes to reuse; this builds them fresh over the whole structure
+    at the database's preferred sub_spec, then summarizes this
+    species' atoms into one representative.  The shell codes depend
+    only on the sub_spec, so they are computed at most once per
+    sub_spec and cached for every species and element that reads
+    them.
+    """
+
+    from matchers import ReduceStructureView
+
+    cache_key = _subspec_cache_key(sub_spec)
+    per_atom = descriptor_cache.get(cache_key)
+    if per_atom is None:
+        # Reduce shells are built from the periodic minimum-distance
+        # geometry; build that matrix now if no earlier grouping
+        # flag already did (a purely crystalline run never needed it
+        # before this point).
+        if not getattr(settings, "_min_dist_made", False):
+            make_min_dist_matrices(settings, sc)
+        structure_view = ReduceStructureView(
+            num_atoms         = settings.num_atoms,
+            num_elements      = settings.num_elements,
+            atom_element_id   = settings.atom_element_id,
+            atom_species_id   = settings.atom_species_id,
+            atom_element_name = settings.atom_element_name,
+            min_dist          = sc.min_dist,
+        )
+        per_atom = matcher.compute_query(structure_view, sub_spec)
+        descriptor_cache[cache_key] = per_atom
+    return _summarize_species(
+        matcher, per_atom, settings, element, species)
+
+
+def _file_bispectrum_query(settings, matcher, sub_spec, species,
+                           elem_name, site_cache):
+    """Compute a file-dictated bispectrum representative for one
+    ``(element, species)`` (DESIGN 5.6.5 step 2).
+
+    The bispectrum descriptor is produced by the Imago ``loen``
+    pass, so this runs that pass once over the whole structure --
+    through the shared makegroups loen seam -- and caches the
+    resulting per-site descriptor records by sub_spec.  Each site
+    carries its own ``(element, species)``, so the representative
+    for this species is the matcher's summary over exactly the
+    sites that share its element and species.  Returns ``None``
+    when no site matches, sending the pick to the default entry.
+    """
+
+    from makegroups import loen_site_descriptors
+
+    cache_key = _subspec_cache_key(sub_spec)
+    sites = site_cache.get(cache_key)
+    if sites is None:
+        sites = loen_site_descriptors(
+            os.path.join(os.getcwd(), IMAGO_SKL), sub_spec)
+        site_cache[cache_key] = sites
+    members = [site.vector for site in sites
+               if site.element.lower() == elem_name.lower()
+               and site.species == species]
     if not members:
         return None
     return matcher.representative(members)
@@ -4380,16 +4572,19 @@ def _select_augmented_pot_entry(ipdb, db, pot_override, elem_name,
       label absent from this element's database is a *hard error*: a
       deliberate override must never silently fall back to a different
       potential.
-    * **2 -- environment fingerprint match** (reduce only, in
-      makeinput).  Active only when the caller supplies a ``query``
-      representative, the ``matcher``, and the descriptor ``sub_spec`` --
-      i.e. a reduce scheme grouped this species and produced a
-      fingerprint for it.  Among the entries that carry a comparable
-      ``(method, sub_spec)`` fingerprint, pick the one whose recorded
-      fingerprint minimizes ``matcher.match_distance``; accept it only if
-      that distance is within the matcher's ``default_similarity_floor``,
-      otherwise warn (naming the species and the best-but-rejected entry)
-      and fall through to precedence 3.
+    * **2 -- environment fingerprint match.**  Active only when the
+      caller supplies a ``query`` representative, the ``matcher``, and
+      the descriptor ``sub_spec``.  The caller (:func:`_obtain_pot_info`)
+      fixes those three by regime (DESIGN 5.6.5): the user's family and
+      sub_spec when a ``-reduce`` scheme grouped the species, otherwise
+      the database's ``preferred`` record (bispectrum first, then
+      reduce) for a file-dictated crystalline or pre-assigned species.
+      Among the entries that carry a comparable ``(method, sub_spec)``
+      fingerprint, pick the one whose recorded fingerprint minimizes
+      ``matcher.match_distance``; accept it only if that distance is
+      within the matcher's ``default_similarity_floor``, otherwise warn
+      (naming the species and the best-but-rejected entry) and fall
+      through to precedence 3.
     * **3 -- default tag.**  Otherwise return the database's
       default-tagged entry, guaranteed to exist and be unique by
       validation rule 7.
@@ -4540,19 +4735,23 @@ def _obtain_pot_info(settings, sc):
        target overrides the augmented database for the atoms it
        names.
     2. **Augmented database.**  Otherwise, if the element carries
-       an ``s_gaussian_pot.toml`` database, the chosen entry
-       (``-pot LABEL`` override, else the default-tagged entry --
-       see :func:`_select_augmented_pot_entry`) is materialized
-       into legacy-format files via
-       :func:`_write_legacy_pot_files_from_entry`.
-    3. **Legacy default.**  Otherwise the historical
-       ``pot1``/``coeff1`` files are copied.  If ``-pot`` was
-       requested but this element has no database, a warning is
-       emitted and the legacy default is used for that element.
+       an ``s_gaussian_pot.toml`` database, one entry is chosen
+       per ``(element, species)`` -- a ``-pot LABEL`` override, an
+       environment-fingerprint match, or the default-tagged entry
+       (see :func:`_select_augmented_pot_entry` for the precedence
+       and :func:`_resolve_species_query` for how the fingerprint
+       query is formed) -- and materialized into legacy-format
+       files via :func:`_write_legacy_pot_files_from_entry`.  Each
+       species gets its own file pair, since two species of one
+       element can match different stored potentials.
+    3. **Legacy default.**  Otherwise the ``pot1``/``coeff1``
+       files are copied.  If ``-pot`` was requested but this
+       element has no database, a warning is emitted and the
+       legacy default is used for that element.
 
-    No augmented database files exist on disk until elements are
-    curated (C49), so until then every element takes path 1 or 3
-    and behavior is unchanged from the legacy pipeline.
+    A ``pot``/``coeff`` pair is written into ``.inputTemp/`` only
+    once per distinct tag and reused on later hits, so repeated
+    species of the same resolved entry share one file pair.
 
     Parameters
     ----------
@@ -4561,7 +4760,27 @@ def _obtain_pot_info(settings, sc):
     """
     import re
     import initial_potential_db as ipdb
-    from matchers import ReduceMatcher
+
+    # Run-level fingerprint-pick state, decided once and shared
+    # across every element (DESIGN 5.6.5).  Matching is on unless
+    # -nofingerprint was given.  The "user scheme" is the active
+    # environment scheme the user grouped with -- in makeinput
+    # that is reduce, whose per-atom descriptors and sub_spec the
+    # grouping pass stored on settings.  When none was given, the
+    # species are file-dictated (crystalline or pre-assigned) and
+    # the database's preferred records drive the match instead.
+    fingerprinting_enabled = not getattr(
+        settings, "no_fingerprint", False)
+    reduce_sub_spec = getattr(
+        settings, "reduce_match_sub_spec", None)
+    user_scheme_active = reduce_sub_spec is not None
+    # Lazily-built caches for the file-dictated query descriptors.
+    # A file-dictated query is computed over the whole structure
+    # once per sub_spec and reused for every species (rule 11
+    # keeps the preferred sub_spec uniform across the database):
+    # reduce shell codes per atom, and the loen bispectrum sites.
+    file_reduce_descriptors = {}
+    loen_site_cache = {}
 
     # Parse potential substitutions (-subpot).  A -subpot target
     # takes precedence over the augmented database for the
@@ -4606,13 +4825,6 @@ def _obtain_pot_info(settings, sc):
                   f"augmented potential database ({aug_path}); "
                   f"using legacy pot1/coeff1 for this element.")
 
-        # The reduce environment matcher and the descriptor sub_spec a
-        # reduce scheme stored on settings (None when no reduce ran);
-        # together they drive precedence 2 of the per-species pick.
-        reduce_matcher = ReduceMatcher()
-        reduce_sub_spec = getattr(
-            settings, "reduce_match_sub_spec", None)
-
         for species in range(1, settings.num_species[element] + 1):
             # Does a -subpot substitution target this
             # element/species?  If so it wins outright.
@@ -4635,14 +4847,26 @@ def _obtain_pot_info(settings, sc):
                 #      and materialize legacy-format files from it.  Each
                 #      (element, species) gets its own file pair, since
                 #      different species may resolve to different entries.
+                #
+                #      Resolve the matcher, sub_spec, and representative
+                #      query for the fingerprint match (precedence 2).
+                #      Skipped -- leaving all three None so the pick
+                #      falls to the override or the default entry -- when
+                #      matching is off or a -pot override already settles
+                #      the choice, which also avoids a needless loen run.
+                matcher = None
+                sub_spec = None
                 query = None
-                if reduce_sub_spec is not None:
-                    query = _species_query_fingerprint(
-                        settings, element, species, reduce_matcher)
+                if (fingerprinting_enabled
+                        and settings.pot_override is None):
+                    matcher, sub_spec, query = _resolve_species_query(
+                        settings, sc, ipdb, aug_db, element, species,
+                        elem_name, user_scheme_active, reduce_sub_spec,
+                        file_reduce_descriptors, loen_site_cache)
                 aug_entry = _select_augmented_pot_entry(
                     ipdb, aug_db, settings.pot_override, elem_name,
-                    query=query, matcher=reduce_matcher,
-                    sub_spec=reduce_sub_spec, species=species)
+                    query=query, matcher=matcher,
+                    sub_spec=sub_spec, species=species)
                 pot_tagged = f"pot_aug_{elem_name}_{species}"
                 coeff_tagged = f"coeff_aug_{elem_name}_{species}"
                 pot_dst = os.path.join(INPUT_TEMP, pot_tagged)

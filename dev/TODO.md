@@ -1722,7 +1722,7 @@ shipped.
   -> re-materialize) before harvest; not wired, since the
   current manifest references are crystalline.  C55 + C58
   + C89 all DONE; loen seam live-validated via makegroups.
-- [ ] C93. Revise the design chain to DECOUPLE the
+- [x] C93. Revise the design chain to DECOUPLE the
   fingerprint-based initial-potential pick from the grouping
   scheme.  Decision 2026-06-17: precedence 2 (the environment
   fingerprint match, DESIGN 5.6.5) was wired to fire only when a
@@ -1776,7 +1776,7 @@ shipped.
   -nofingerprint, preferred/convention, consumer loen seam).
   DESIGN-CHAIN COMPLETE for C93; only the C94 code remains.  C61's
   negative tests follow the new default-on, never-abort behavior.
-- [ ] C94. Implement the C93 decoupling in code.
+- [x] C94. Implement the C93 decoupling in code.
   makeinput.py: lift the reduce-only gate in
   `_species_query_fingerprint` (today it returns None unless
   `group_reduce` populated `atom_reduce_fingerprint`).  Implement

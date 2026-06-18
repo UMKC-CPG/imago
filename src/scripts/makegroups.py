@@ -480,6 +480,78 @@ def group_by_bispectrum(skeleton_path, sub_spec, similarity_floor=None,
     return species_of
 
 
+def loen_site_descriptors(skeleton_path, sub_spec, work_dir=None,
+                          keep_work_dir=False):
+    """Run the loen sequence and return per-site bispectrum
+    descriptors for the file-dictated potential pick (DESIGN
+    5.6.5 step 2).
+
+    This is the consumer-side counterpart of
+    :func:`group_by_bispectrum`.  Where that routine buckets the
+    descriptors into *new* species and rewrites the skeleton, the
+    potential pick only needs the per-site fingerprint vectors so
+    it can summarize each already-assigned species into a single
+    representative.  Both share one loen seam -- stage the
+    skeleton in a scratch directory, run the ungrouped makeinput
+    with the LOEN block filled, run ``imago -loen -scf no``, then
+    parse the self-describing descriptor table -- so the vectors
+    the pick matches against are byte-for-byte the ones grouping
+    would have produced.
+
+    Unlike grouping, this imposes no P1 requirement.  A crystalline
+    cell keeps its crystallographically assigned species, and the
+    loen run reproduces them deterministically from the same
+    skeleton, so each returned site already carries the
+    ``(element, species)`` the pick filters on.  The skeleton is
+    read only and never rewritten -- the pick does not regroup.
+
+    Parameters
+    ----------
+    skeleton_path : str
+        Path to the ``imago.skl`` to run loen against.
+    sub_spec : dict
+        The bispectrum parameters; see :func:`group_by_bispectrum`
+        for the keys and their descriptor-contract defaults.
+    work_dir : str, optional
+        Scratch directory for the makeinput/loen runs.  Defaults
+        to a ``loen_pick_work`` directory beside the skeleton.
+    keep_work_dir : bool, optional
+        When True the scratch directory is left in place for
+        inspection; by default it is removed once read out.
+
+    Returns
+    -------
+    list[LoenSite]
+        One record per potential site, in site-index order, each
+        carrying its ``(element, species, type)`` identity and its
+        bispectrum vector (see
+        ``BispecMatcher.parse_loen_output``).
+    """
+
+    matcher = MATCHERS["bispectrum"]()
+    skeleton_path = os.path.abspath(skeleton_path)
+
+    if work_dir is None:
+        work_dir = os.path.join(
+            os.path.dirname(skeleton_path), "loen_pick_work")
+    os.makedirs(work_dir, exist_ok=True)
+    shutil.copy(skeleton_path,
+                os.path.join(work_dir, "imago.skl"))
+
+    # Same two-step loen seam group_by_bispectrum uses: ungrouped
+    # makeinput to fill the LOEN block, then the loen pass that
+    # actually computes the per-site fingerprints.
+    _run_makeinput(work_dir, loen_input_values(matcher, sub_spec))
+    _run_loen(work_dir)
+
+    sites = matcher.parse_loen_output(
+        find_loen_descriptor(work_dir), sub_spec)
+
+    if not keep_work_dir:
+        shutil.rmtree(work_dir, ignore_errors=True)
+    return sites
+
+
 # ===========================================================================
 # Command-line interface
 # ===========================================================================

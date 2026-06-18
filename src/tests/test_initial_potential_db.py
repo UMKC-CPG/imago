@@ -59,6 +59,7 @@ from initial_potential_db import (
     baseline,
     default_entry,
     find_fingerprint,
+    find_preferred,
     canonicalize_sub_spec,
     require_provenance,
 )
@@ -166,17 +167,42 @@ def _valid_db(symbol: str = "Au") -> ElementDatabase:
     return db
 
 
-def _bispectrum_fingerprint() -> FingerprintRecord:
+def _bispectrum_fingerprint(
+        preferred: bool = False) -> FingerprintRecord:
     """Return a bispectrum FingerprintRecord for emitter and
     lookup tests.  The payload carries a real-valued ``values``
     vector of length ``2 * twoj2 + 1 = 5`` for the sub-spec
     ``{twoj1 = 6, twoj2 = 2}``.
+
+    ``preferred`` defaults to false so the emitter byte-layout
+    tests exercise the narrower (width-8) non-preferred block.
+    Tests that *load* a database with a single record of this
+    method must pass ``preferred=True`` so the file satisfies
+    rule 10 (exactly one preferred record per present method).
     """
 
     return FingerprintRecord(
-        method   = "bispectrum",
-        sub_spec = {"twoj1": 6, "twoj2": 2},
-        payload  = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]},
+        method    = "bispectrum",
+        sub_spec  = {"twoj1": 6, "twoj2": 2},
+        preferred = preferred,
+        payload   = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]},
+    )
+
+
+def _reduce_fingerprint(
+        preferred: bool = False) -> FingerprintRecord:
+    """Return a reduce FingerprintRecord for the cross-method
+    rule-10 and ``find_preferred`` tests.  The payload carries a
+    minimal element-only ``shell_code`` inline table; the library
+    does not validate payload shape, so this keeps the fixture
+    small while still round-tripping through save/load.
+    """
+
+    return FingerprintRecord(
+        method    = "reduce",
+        sub_spec  = {"level": 2, "thick": 0.5, "cutoff": 5.0},
+        preferred = preferred,
+        payload   = {"shell_code": {"element": "au"}},
     )
 
 
@@ -923,11 +949,14 @@ class TestRule8FingerprintUniqueness:
         path = _path_for(tmp_path, "Au")
         db = _valid_db("Au")
         # Same method, different sub-spec -> both records coexist.
+        # Exactly one is flagged preferred so the pair also
+        # satisfies rule 10 (one preferred per present method).
         db.potentials[1].fingerprints = [
             FingerprintRecord(
-                method   = "bispectrum",
-                sub_spec = {"twoj1": 6, "twoj2": 2},
-                payload  = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]}),
+                method    = "bispectrum",
+                sub_spec  = {"twoj1": 6, "twoj2": 2},
+                preferred = True,
+                payload   = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]}),
             FingerprintRecord(
                 method   = "bispectrum",
                 sub_spec = {"twoj1": 8, "twoj2": 4},
@@ -954,11 +983,15 @@ class TestRule9FingerprintMethodRegistered:
 
     def _db_with_unknown_method(self):
         db = _valid_db("Au")
+        # The record is flagged preferred so the no-registry load
+        # path (rule 9 skipped) reaches a rule-10-clean file and
+        # the test isolates the registry behavior under test.
         db.potentials[1].fingerprints = [
             FingerprintRecord(
-                method   = "nonsense",
-                sub_spec = {"twoj1": 6, "twoj2": 2},
-                payload  = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]}),
+                method    = "nonsense",
+                sub_spec  = {"twoj1": 6, "twoj2": 2},
+                preferred = True,
+                payload   = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]}),
         ]
         return db
 
@@ -986,7 +1019,8 @@ class TestRule9FingerprintMethodRegistered:
             self, tmp_path):
         path = _path_for(tmp_path, "Au")
         db = _valid_db("Au")
-        db.potentials[1].fingerprints = [_bispectrum_fingerprint()]
+        db.potentials[1].fingerprints = [
+            _bispectrum_fingerprint(preferred=True)]
         save(db, path)
         re = load(path, known_methods={"bispectrum", "reduce"})
         entry = lookup(re, "default_solid")
@@ -1154,7 +1188,12 @@ class TestEmitterFingerprintBlock:
 
     def test_round_trip_preserves_fingerprint(self, tmp_path):
         path = _path_for(tmp_path, "Au")
-        save(self._db_with_fingerprint(), path)
+        # A lone record must be preferred to satisfy rule 10 on
+        # the load() round trip below.
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [
+            _bispectrum_fingerprint(preferred=True)]
+        save(db, path)
         re = load(path)
         entry = lookup(re, "default_solid")
         assert len(entry.fingerprints) == 1
@@ -1164,6 +1203,8 @@ class TestEmitterFingerprintBlock:
         # bit-exact through the %.16e round trip.
         assert fp.sub_spec == {"twoj1": 6, "twoj2": 2}
         assert fp.payload["values"] == [0.1, 0.2, 0.3, 0.4, 0.5]
+        # The preferred flag also survives the round trip.
+        assert fp.preferred is True
 
     def test_fingerprint_emit_is_deterministic(self, tmp_path):
         # Two saves of the same fingerprinted database produce
@@ -1175,3 +1216,200 @@ class TestEmitterFingerprintBlock:
         save(self._db_with_fingerprint(), path_b)
         with open(path_a, "rb") as h_a, open(path_b, "rb") as h_b:
             assert h_a.read() == h_b.read()
+
+
+# ============================================================
+#  Rule 10 -- exactly one preferred record per present method
+# ============================================================
+
+class TestRule10PreferredFingerprint:
+    """Rule 10 (DESIGN 5.6.5): for every fingerprint method that
+    appears anywhere in the file, exactly one record must carry
+    ``preferred = true``.  Zero preferred records for a present
+    method, or two or more, is a hard error; a method that is
+    wholly absent from the file is exempt.  The file-dictated
+    selection regime needs one unambiguous representative per
+    method to match crystalline structures against.
+    """
+
+    def test_zero_preferred_for_present_method_raises(
+            self, tmp_path):
+        # A lone bispectrum record that is not flagged preferred
+        # leaves the method present but unrepresented.
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [
+            _bispectrum_fingerprint(preferred=False)]
+        save(db, path)
+        with pytest.raises(ValueError) as excinfo:
+            load(path)
+        msg = str(excinfo.value)
+        assert "bispectrum" in msg
+        assert "preferred" in msg
+
+    def test_two_preferred_same_method_raises(self, tmp_path):
+        # Two bispectrum records, both preferred -> ambiguous.
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [
+            FingerprintRecord(
+                method    = "bispectrum",
+                sub_spec  = {"twoj1": 6, "twoj2": 2},
+                preferred = True,
+                payload   = {"values": [0.1, 0.2, 0.3, 0.4, 0.5]}),
+            FingerprintRecord(
+                method    = "bispectrum",
+                sub_spec  = {"twoj1": 8, "twoj2": 4},
+                preferred = True,
+                payload   = {"values": [0.1, 0.2, 0.3, 0.4, 0.5,
+                                        0.6, 0.7, 0.8, 0.9]}),
+        ]
+        save(db, path)
+        with pytest.raises(ValueError) as excinfo:
+            load(path)
+        msg = str(excinfo.value)
+        assert "bispectrum" in msg
+        assert "preferred" in msg
+
+    def test_one_preferred_per_present_method_ok(self, tmp_path):
+        # Bispectrum has two records (one preferred), reduce has
+        # one preferred record.  Each present method satisfies the
+        # rule, so the file loads cleanly.
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [
+            _bispectrum_fingerprint(preferred=True),
+            FingerprintRecord(
+                method   = "bispectrum",
+                sub_spec = {"twoj1": 8, "twoj2": 4},
+                payload  = {"values": [0.1, 0.2, 0.3, 0.4, 0.5,
+                                       0.6, 0.7, 0.8, 0.9]}),
+            _reduce_fingerprint(preferred=True),
+        ]
+        save(db, path)
+        re = load(path)
+        entry = lookup(re, "default_solid")
+        assert len(entry.fingerprints) == 3
+
+    def test_absent_method_is_exempt(self, tmp_path):
+        # Only reduce is present (one preferred record); bispectrum
+        # is wholly absent and so is not subject to the rule.
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [
+            _reduce_fingerprint(preferred=True)]
+        save(db, path)
+        re = load(path)
+        entry = lookup(re, "default_solid")
+        assert entry.fingerprints[0].method == "reduce"
+
+    def test_preferred_counted_across_entries(self, tmp_path):
+        # Rule 10 counts records across the whole file, not within
+        # one entry: two entries each carrying a preferred
+        # bispectrum record is still two preferred -> a hard error.
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        db.potentials[0].fingerprints = [
+            _bispectrum_fingerprint(preferred=True)]
+        db.potentials[1].fingerprints = [
+            _bispectrum_fingerprint(preferred=True)]
+        save(db, path)
+        with pytest.raises(ValueError, match="preferred"):
+            load(path)
+
+
+# ============================================================
+#  Preferred-flag emission (DESIGN 5.6.5; gold sketch)
+# ============================================================
+
+class TestPreferredEmission:
+    """The emitter writes ``preferred = true`` immediately after
+    ``sub_spec`` and before the payload, but only when the record
+    is preferred.  A non-preferred record omits the line entirely,
+    matching the gold sketch in which the false default is never
+    spelled out.
+    """
+
+    def test_preferred_line_emitted_when_true(self, tmp_path):
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [
+            _bispectrum_fingerprint(preferred=True)]
+        save(db, path)
+        text = open(path).read()
+        # "preferred" (9 chars) is now the widest key, so the
+        # block aligns to width 9 and the line reads exactly this.
+        assert "preferred = true\n" in text
+        assert "method    = \"bispectrum\"\n" in text
+        # The preferred line sits between sub_spec and the payload.
+        sub_pos = text.index("sub_spec")
+        pref_pos = text.index("preferred = true")
+        values_pos = text.index("values")
+        assert sub_pos < pref_pos < values_pos
+
+    def test_no_preferred_line_when_false(self, tmp_path):
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        # Non-preferred record (emit only; never loaded here, so
+        # rule 10 does not apply).
+        db.potentials[1].fingerprints = [
+            _bispectrum_fingerprint(preferred=False)]
+        save(db, path)
+        text = open(path).read()
+        assert "preferred" not in text
+
+
+# ============================================================
+#  find_preferred()
+# ============================================================
+
+class TestFindPreferred:
+    """find_preferred returns the single preferred record for a
+    method across the whole database, or None when the method is
+    absent.  It is the entry point the consumer uses in the
+    file-dictated selection regime (DESIGN 5.6.5 step 2).
+    """
+
+    def test_returns_preferred_record(self):
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [
+            _bispectrum_fingerprint(preferred=True)]
+        fp = find_preferred(db, "bispectrum")
+        assert fp is not None
+        assert fp.method == "bispectrum"
+        assert fp.preferred is True
+
+    def test_none_when_method_absent(self):
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [
+            _bispectrum_fingerprint(preferred=True)]
+        # No reduce record exists -> None, the "family absent"
+        # signal the consumer reads as "fall through".
+        assert find_preferred(db, "reduce") is None
+
+    def test_picks_preferred_among_several(self):
+        # A non-preferred record of the same method must not be
+        # returned; only the preferred one is.
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [
+            FingerprintRecord(
+                method   = "bispectrum",
+                sub_spec = {"twoj1": 8, "twoj2": 4},
+                payload  = {"values": [0.1, 0.2, 0.3, 0.4, 0.5,
+                                       0.6, 0.7, 0.8, 0.9]}),
+            _bispectrum_fingerprint(preferred=True),
+        ]
+        fp = find_preferred(db, "bispectrum")
+        assert fp is not None
+        assert fp.preferred is True
+        assert fp.sub_spec == {"twoj1": 6, "twoj2": 2}
+
+    def test_finds_preferred_in_any_entry(self):
+        # The preferred record may live on any entry; the scan
+        # spans the whole database, not just the default entry.
+        db = _valid_db("Au")
+        db.potentials[0].fingerprints = [
+            _reduce_fingerprint(preferred=True)]
+        fp = find_preferred(db, "reduce")
+        assert fp is not None
+        assert fp.method == "reduce"

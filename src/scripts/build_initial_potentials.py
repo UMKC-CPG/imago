@@ -147,10 +147,21 @@ class ManifestFingerprint:
     :class:`initial_potential_db.FingerprintRecord`, a declaration
     carries *no* payload: the payload is the SCF/loen output the
     producer will harvest, not something the curator writes.
+
+    ``preferred`` marks the one record per matcher family the
+    consumer matches against for a file-dictated (crystalline)
+    structure (DESIGN 5.6.5 step 2).  Exactly one declaration per
+    ``method`` is preferred for each element that carries any
+    fingerprint of that family (manifest rule 10), and every
+    preferred declaration of a family shares one ``sub_spec``
+    across the whole manifest (manifest rule 11).  The flag rides
+    through harvest onto the produced
+    :class:`initial_potential_db.FingerprintRecord`.
     """
 
     method: str
     sub_spec: dict[str, Any]
+    preferred: bool = False
 
 
 @dataclass
@@ -255,7 +266,7 @@ def load_manifest_v2(path: str,
                      ) -> CurationManifest:
     """Read and validate the curation manifest (schema v2).
 
-    Implements ``load_manifest_v2`` of PSEUDOCODE 11.4 and the nine
+    Implements ``load_manifest_v2`` of PSEUDOCODE 11.4 and the
     validation rules of DESIGN 5.7.  Strict refusal throughout: any
     rule violation raises ``ValueError`` naming the rule, the file,
     and the offending reference solid or entry.
@@ -273,7 +284,7 @@ def load_manifest_v2(path: str,
     enforced regardless, using the same canonical sub-spec equality
     as the per-element-database reader.
 
-    The nine rules (DESIGN 5.7):
+    The validation rules (DESIGN 5.7):
 
     1. ``schema_version`` must equal 2.
     2. Every ``[[reference_solid]]`` carries ``reference_id``,
@@ -306,6 +317,15 @@ def load_manifest_v2(path: str,
        ``(method, sub_spec)`` is unique.
     9. Every fingerprint ``method`` is a registered matcher
        (checked only when ``known_methods`` is supplied).
+    10. For every ``(element, method)`` that appears with any
+       fingerprint declaration across the manifest, exactly one
+       declaration carries ``preferred = true``.  Zero or
+       two-or-more is a hard error: the file-dictated consumer
+       (DESIGN 5.6.5) needs one unambiguous record per family.
+    11. All ``preferred = true`` declarations sharing a ``method``
+       carry the identical ``sub_spec`` across the whole manifest,
+       so the consumer queries one sub_spec per family (and a
+       multi-element structure costs a single loen run).
     """
 
     if not os.path.isfile(path):
@@ -331,6 +351,16 @@ def load_manifest_v2(path: str,
     # elem -> count of default=true entries (rule 7, post-loop).
     default_per_element: dict[str, int] = {}
     seen_elements: set[str] = set()
+    # Fingerprint preferred-flag bookkeeping (rules 10 and 11,
+    # post-loop).  (element, method) -> count of declarations and
+    # count of preferred declarations: every present (element,
+    # method) needs exactly one preferred (rule 10).  method ->
+    # the canonical sub_spec of the family's preferred record:
+    # every preferred declaration of one method must agree (rule
+    # 11), so the consumer queries one sub_spec per family.
+    fingerprint_decls_seen: set[tuple[str, str]] = set()
+    preferred_per_elem_method: dict[tuple[str, str], int] = {}
+    preferred_subspec_per_method: dict[str, Any] = {}
 
     reference_solids: list[ReferenceSolid] = []
 
@@ -445,7 +475,8 @@ def load_manifest_v2(path: str,
                 default_per_element[elem] = (
                     default_per_element.get(elem, 0) + 1)
 
-            # ----- Fingerprint declarations (rules 8 and 9).
+            # ----- Fingerprint declarations (rules 8, 9, and the
+            # tallies for rules 10 and 11, checked post-loop).
             fingerprints: list[ManifestFingerprint] = []
             seen_method_subspec: set = set()
             for fp in entry.get("fingerprint", []):
@@ -455,6 +486,7 @@ def load_manifest_v2(path: str,
                          f"sub_spec ({rid}, label={label})")
                 method = fp["method"]
                 sub_spec = fp["sub_spec"]
+                preferred = bool(fp.get("preferred", False))
 
                 # Rule 9: method must be a registered matcher.
                 # Skipped when the caller passed no registry.
@@ -476,8 +508,35 @@ def load_manifest_v2(path: str,
                          f"of {rid}")
                 seen_method_subspec.add(fp_key)
 
+                # Tally for rules 10 and 11 (checked post-loop).
+                # Every (element, method) seen here is "present", so
+                # it must end with exactly one preferred record; the
+                # family's preferred sub_spec must be uniform.
+                elem_method = (elem, method)
+                fingerprint_decls_seen.add(elem_method)
+                if preferred:
+                    preferred_per_elem_method[elem_method] = (
+                        preferred_per_elem_method.get(
+                            elem_method, 0) + 1)
+                    # Rule 11: a preferred record fixes the family's
+                    # database-wide sub_spec; a later preferred
+                    # record of the same method must match it.
+                    prior = preferred_subspec_per_method.get(method)
+                    if prior is None:
+                        preferred_subspec_per_method[method] = canon
+                    else:
+                        _require(canon == prior, path,
+                                 f"manifest rule 11: preferred "
+                                 f"{method!r} sub_spec {sub_spec!r} "
+                                 f"({rid}, label={label}) diverges "
+                                 f"from the database-wide preferred "
+                                 f"sub_spec for {method!r}; all "
+                                 f"preferred records of a family "
+                                 f"must share one sub_spec")
+
                 fingerprints.append(ManifestFingerprint(
-                    method=method, sub_spec=dict(sub_spec)))
+                    method=method, sub_spec=dict(sub_spec),
+                    preferred=preferred))
 
             entries.append(ReferenceEntry(
                 element=elem,
@@ -508,6 +567,20 @@ def load_manifest_v2(path: str,
                  f"manifest rule 7: element {elem} has {count} "
                  f"default-tagged entries across the manifest "
                  f"(need exactly one)")
+
+    # ----- Rule 10 post-loop: every (element, method) present in
+    # any fingerprint declaration carries exactly one preferred
+    # record across the manifest.  Sorting keeps the message
+    # deterministic.  (Rule 11's uniform-sub_spec check ran inline
+    # above, as each preferred record was seen.)
+    for elem, method in sorted(fingerprint_decls_seen):
+        count = preferred_per_elem_method.get((elem, method), 0)
+        _require(count == 1, path,
+                 f"manifest rule 10: element {elem} method "
+                 f"{method!r} has {count} preferred fingerprint "
+                 f"declarations across the manifest (need exactly "
+                 f"one so the file-dictated consumer has an "
+                 f"unambiguous record to match)")
 
     return CurationManifest(
         schema_version=raw["schema_version"],
@@ -1242,6 +1315,7 @@ def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
         records.append(ipdb.FingerprintRecord(
             method=declaration.method,
             sub_spec=declaration.sub_spec,
+            preferred=declaration.preferred,
             payload=payload))
     return records
 

@@ -29,6 +29,7 @@ import os
 import pytest
 
 import makeinput
+from makeinput import ScriptSettings
 import initial_potential_db as ipdb
 from initial_potential_db import PotentialEntry, ElementDatabase
 
@@ -151,23 +152,49 @@ class TestSelectAugmentedPotEntry:
 import types                                            # noqa: E402
 
 from matchers import (ReduceMatcher, ReduceShellCode,    # noqa: E402
-                      ReduceShellLevel)
+                      ReduceShellLevel, LoenSite)
+import makegroups                                         # noqa: E402
 
 # The descriptor sub_spec a reduce scheme stores and an entry records.
 _REDUCE_SUB_SPEC = {"level": 1, "thick": 0.1,
                     "cutoff": 5.0, "tolerance": 0.05}
 
 
-def _reduce_entry(label, default, neighbor, distance):
+def _reduce_entry(label, default, neighbor, distance,
+                  preferred=False):
     """A PotentialEntry carrying one reduce fingerprint: a single shell
-    with the given neighbor element symbol at the given distance."""
+    with the given neighbor element symbol at the given distance.
+
+    ``preferred`` flags the record as the database's preferred reduce
+    representative, which the file-dictated regime (DESIGN 5.6.5)
+    consults to choose the family and sub_spec to match on."""
 
     record = ipdb.FingerprintRecord(
         method="reduce", sub_spec=dict(_REDUCE_SUB_SPEC),
+        preferred=preferred,
         payload={"shell_code": {
             "element": "si",
             "levels": [{"distance": distance,
                         "neighbors": [neighbor]}]}})
+    return PotentialEntry(
+        label=label, default=default, description="d",
+        num_gaussians=1, alpha_min=1.0, alpha_max=1.0,
+        coefficients=[1.0], alphas=[1.0],
+        provenance=_imago_provenance(), fingerprints=[record])
+
+
+# The bispectrum sub_spec a loen run produces and an entry records;
+# twoj2 = 2 fixes the per-vector component count at twoj2 + 1 = 3.
+_BISPEC_SUB_SPEC = {"twoj1": 6, "twoj2": 2}
+
+
+def _bispec_entry(label, default, values, preferred=False):
+    """A PotentialEntry carrying one bispectrum fingerprint whose stored
+    ``values`` vector is the given list (length twoj2 + 1 = 3)."""
+
+    record = ipdb.FingerprintRecord(
+        method="bispectrum", sub_spec=dict(_BISPEC_SUB_SPEC),
+        preferred=preferred, payload={"values": list(values)})
     return PotentialEntry(
         label=label, default=default, description="d",
         num_gaussians=1, alpha_min=1.0, alpha_max=1.0,
@@ -341,3 +368,209 @@ class TestWriteLegacyPotFiles:
             lines = handle.read().splitlines()
         first_term = lines[1].split()
         assert float(first_term[0]) == pytest.approx(1.0)
+
+
+# ============================================================
+#  _summarize_species and _subspec_cache_key
+# ============================================================
+
+class TestSummarizeSpecies:
+    """``_summarize_species`` filters a per-atom descriptor array to
+    one species' atoms and asks the matcher for a representative, or
+    returns None when the species has no usable descriptor."""
+
+    def _settings(self):
+        # Three atoms: atoms 1,2 are element 1 species 1; atom 3 is
+        # element 2 species 1.
+        return types.SimpleNamespace(
+            num_atoms=3,
+            atom_element_id=[None, 1, 1, 2],
+            atom_species_id=[None, 1, 1, 1])
+
+    def test_returns_first_member_for_reduce(self):
+        seed = _si_query("si", 2.35)
+        per_atom = [None, seed, _si_query("si", 2.35),
+                    _si_query("o", 1.6)]
+        result = makeinput._summarize_species(
+            ReduceMatcher(), per_atom, self._settings(), 1, 1)
+        assert result is seed                  # first member, species 1
+
+    def test_returns_none_when_no_member(self):
+        per_atom = [None, None, None, _si_query("o", 1.6)]
+        # Element 1 / species 1 atoms carry no descriptor -> None.
+        result = makeinput._summarize_species(
+            ReduceMatcher(), per_atom, self._settings(), 1, 1)
+        assert result is None
+
+
+class TestSubspecCacheKey:
+    """``_subspec_cache_key`` is hashable and ignores key order so a
+    whole-structure query is computed once per distinct sub_spec."""
+
+    def test_order_independent_and_hashable(self):
+        key_a = makeinput._subspec_cache_key(
+            {"level": 1, "thick": 0.1, "cutoff": 5.0})
+        key_b = makeinput._subspec_cache_key(
+            {"cutoff": 5.0, "level": 1, "thick": 0.1})
+        assert key_a == key_b
+        assert len({key_a, key_b}) == 1        # usable as a dict key
+
+
+# ============================================================
+#  _resolve_species_query -- the two-regime query resolution
+#  (DESIGN 5.6.5; the C93 fingerprint-pick decoupling)
+# ============================================================
+
+def _si_dimer_settings():
+    """A two-atom Si dimer's settings: both atoms element 1 species 1,
+    2.35 Angstrom apart, with the minimum-distance matrix already built
+    so the reduce query can be computed without a real StructureControl.
+    """
+
+    settings = types.SimpleNamespace(
+        num_atoms=2,
+        num_elements=1,
+        atom_element_id=[None, 1, 1],
+        atom_species_id=[None, 1, 1],
+        atom_element_name=[None, "Si", "Si"],
+        _min_dist_made=True)
+    sc = types.SimpleNamespace(min_dist=[
+        None,
+        [None, 0.0, 2.35],
+        [None, 2.35, 0.0]])
+    return settings, sc
+
+
+class TestResolveSpeciesQueryUserScheme:
+    """Regime A: the user grouped with -reduce, so the resolver matches
+    that family at the user's sub_spec, reusing the stored per-atom
+    descriptors (DESIGN 5.6.5)."""
+
+    def test_user_scheme_uses_reduce_and_stored_query(self):
+        stored = _si_query("si", 2.35)
+        settings = types.SimpleNamespace(
+            num_atoms=1, atom_element_id=[None, 1],
+            atom_species_id=[None, 1],
+            atom_reduce_fingerprint=[None, stored])
+        matcher, sub_spec, query = makeinput._resolve_species_query(
+            settings, None, ipdb, _si_fingerprinted_db(),
+            element=1, species=1, elem_name="Si",
+            user_scheme_active=True, reduce_sub_spec=_REDUCE_SUB_SPEC,
+            file_reduce_descriptors={}, loen_site_cache={})
+        assert matcher.name == "reduce"
+        assert sub_spec is _REDUCE_SUB_SPEC
+        assert query is stored                 # the stored per-atom fp
+
+
+class TestResolveSpeciesQueryFileDictated:
+    """Regime B: file-dictated species (no environment flag).  The
+    database's preferred record selects the family and sub_spec, and the
+    resolver computes the one query that family needs (DESIGN 5.6.5)."""
+
+    def _preferred_reduce_db(self):
+        # Two reduce-fingerprinted entries sharing one sub_spec; the
+        # bulk entry is preferred (it sets the family/sub_spec), the
+        # oxide entry is the default-tagged fallback.
+        db = ElementDatabase(
+            schema_version=2, element_symbol="Si", nuclear_z=14.0,
+            nuclear_alpha=10.0, covalent_radius=1.1)
+        db.potentials.append(_reduce_entry(
+            "si-bulk", False, "si", 2.35, preferred=True))
+        db.potentials.append(_reduce_entry(
+            "si-oxide", True, "o", 1.60))
+        return db
+
+    def test_file_dictated_reduce_matches_crystalline_species(self):
+        # The core C59 fix: a crystalline (file-dictated) Si species,
+        # which no -reduce flag ever touched, still computes a reduce
+        # query from geometry and matches the bulk entry instead of
+        # silently taking the default.
+        settings, sc = _si_dimer_settings()
+        descriptor_cache = {}
+        matcher, sub_spec, query = makeinput._resolve_species_query(
+            settings, sc, ipdb, self._preferred_reduce_db(),
+            element=1, species=1, elem_name="Si",
+            user_scheme_active=False, reduce_sub_spec=None,
+            file_reduce_descriptors=descriptor_cache,
+            loen_site_cache={})
+        assert matcher.name == "reduce"
+        assert sub_spec == _REDUCE_SUB_SPEC
+        # The computed query selects the bulk entry over the default.
+        entry = makeinput._select_augmented_pot_entry(
+            ipdb, self._preferred_reduce_db(), None, "Si",
+            query=query, matcher=matcher, sub_spec=sub_spec,
+            species=1)
+        assert entry.label == "si-bulk"
+        # The whole-structure shell codes were cached for reuse.
+        assert len(descriptor_cache) == 1
+
+    def test_no_preferred_record_yields_no_query(self):
+        # An element whose database carries no fingerprints at all
+        # offers no preferred record, so the resolver returns the
+        # empty triple and the pick falls through to the default.
+        settings, sc = _si_dimer_settings()
+        result = makeinput._resolve_species_query(
+            settings, sc, ipdb, _au_db(),
+            element=1, species=1, elem_name="Au",
+            user_scheme_active=False, reduce_sub_spec=None,
+            file_reduce_descriptors={}, loen_site_cache={})
+        assert result == (None, None, None)
+
+    def test_file_dictated_bispectrum_uses_loen_seam(
+            self, monkeypatch):
+        # When the database's preferred record is bispectrum, the
+        # resolver runs the loen seam (here stubbed) and summarizes the
+        # sites of this (element, species) into a mean representative
+        # that matches the bulk bispectrum entry.
+        db = ElementDatabase(
+            schema_version=2, element_symbol="Si", nuclear_z=14.0,
+            nuclear_alpha=10.0, covalent_radius=1.1)
+        db.potentials.append(_bispec_entry(
+            "si-bulk-b", False, [0.1, 0.2, 0.3], preferred=True))
+        db.potentials.append(_bispec_entry(
+            "si-oxide-b", True, [5.0, 5.0, 5.0]))
+
+        def _fake_loen(skeleton_path, sub_spec, **kwargs):
+            return [LoenSite(
+                site=1, element="Si", species=1, type_in_species=1,
+                type_flat=1, vector=[0.1, 0.2, 0.3])]
+        monkeypatch.setattr(
+            makegroups, "loen_site_descriptors", _fake_loen)
+
+        settings = types.SimpleNamespace(
+            num_atoms=1, num_elements=1,
+            atom_element_id=[None, 1], atom_species_id=[None, 1],
+            atom_element_name=[None, "Si"])
+        site_cache = {}
+        matcher, sub_spec, query = makeinput._resolve_species_query(
+            settings, None, ipdb, db, element=1, species=1,
+            elem_name="Si", user_scheme_active=False,
+            reduce_sub_spec=None, file_reduce_descriptors={},
+            loen_site_cache=site_cache)
+        assert matcher.name == "bispectrum"
+        assert sub_spec == _BISPEC_SUB_SPEC
+        assert query == pytest.approx([0.1, 0.2, 0.3])
+        assert len(site_cache) == 1            # loen sites cached
+        entry = makeinput._select_augmented_pot_entry(
+            ipdb, db, None, "Si", query=query, matcher=matcher,
+            sub_spec=sub_spec, species=1)
+        assert entry.label == "si-bulk-b"
+
+
+# ============================================================
+#  -nofingerprint plumbing (DESIGN 5.6.5)
+# ============================================================
+
+class TestNoFingerprintFlag:
+    """The -nofingerprint flag parses to ``no_fingerprint`` and is off
+    by default, so fingerprint matching is enabled unless asked off."""
+
+    def test_default_is_matching_enabled(self):
+        settings = ScriptSettings.__new__(ScriptSettings)
+        args = settings._args_from_options({})
+        assert args.no_fingerprint is False
+
+    def test_flag_sets_no_fingerprint(self):
+        settings = ScriptSettings.__new__(ScriptSettings)
+        args = settings._args_from_options({"no_fingerprint": True})
+        assert args.no_fingerprint is True

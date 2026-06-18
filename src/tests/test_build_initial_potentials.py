@@ -166,11 +166,14 @@ class TestLoadHappyPath:
         assert solid.cod_id is None
 
     def test_fingerprint_declarations_parse(self, tmp_path):
+        # One preferred record (satisfying rule 10) plus a
+        # non-preferred alternate sub_spec of the same family.
         text = _VALID_COD_MANIFEST + (
             "\n"
             "    [[reference_solid.entry.fingerprint]]\n"
             "    method = \"bispectrum\"\n"
-            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n\n"
+            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
+            "    preferred = true\n\n"
             "    [[reference_solid.entry.fingerprint]]\n"
             "    method = \"bispectrum\"\n"
             "    sub_spec = { twoj1 = 6, twoj2 = 4 }\n")
@@ -181,6 +184,9 @@ class TestLoadHappyPath:
         assert all(isinstance(f, ManifestFingerprint) for f in fps)
         assert fps[0].method == "bispectrum"
         assert fps[0].sub_spec == {"twoj1": 8, "twoj2": 8}
+        # The preferred flag parses; the alternate defaults to false.
+        assert fps[0].preferred is True
+        assert fps[1].preferred is False
 
 
 # ============================================================
@@ -475,11 +481,14 @@ class TestRule8FingerprintUniqueness:
             load_manifest_v2(path)
 
     def test_same_method_different_subspec_ok(self, tmp_path):
+        # Same method, two sub_specs, exactly one preferred -> rules
+        # 8 and 10 both satisfied, so the file loads cleanly.
         text = _VALID_COD_MANIFEST + (
             "\n"
             "    [[reference_solid.entry.fingerprint]]\n"
             "    method = \"bispectrum\"\n"
-            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n\n"
+            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
+            "    preferred = true\n\n"
             "    [[reference_solid.entry.fingerprint]]\n"
             "    method = \"bispectrum\"\n"
             "    sub_spec = { twoj1 = 6, twoj2 = 4 }\n")
@@ -499,7 +508,8 @@ class TestRule9MethodRegistered:
         "\n"
         "    [[reference_solid.entry.fingerprint]]\n"
         "    method = \"nonsense\"\n"
-        "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n")
+        "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
+        "    preferred = true\n")
 
     def test_unknown_method_raises_with_registry(self, tmp_path):
         path = _write(tmp_path, self._UNKNOWN)
@@ -519,13 +529,167 @@ class TestRule9MethodRegistered:
             "\n"
             "    [[reference_solid.entry.fingerprint]]\n"
             "    method = \"bispectrum\"\n"
-            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n")
+            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
+            "    preferred = true\n")
         path = _write(tmp_path, text)
         manifest = load_manifest_v2(
             path, known_methods={"bispectrum", "reduce"})
         assert len(
             manifest.reference_solids[0].entries[0].fingerprints
         ) == 1
+
+
+# A second crystalline solid producing a different element (Ag),
+# used to exercise the cross-manifest fingerprint rules.  The
+# caller appends ``[[reference_solid.entry.fingerprint]]`` blocks.
+_SECOND_AG_SOLID = (
+    "\n[[reference_solid]]\n"
+    "reference_id = \"ag_fcc\"\n"
+    "system_type = \"crystalline\"\n"
+    "basis = \"fb\"\n"
+    "functional = \"wigner\"\n"
+    "kpoint_integration = \"linear-tetrahedral\"\n"
+    "cod_id = 9008464\n"
+    "cod_revision = \"2023-04-12\"\n"
+    "kpoint_spec = { density = 60.0, shift = [0.0, 0.0, 0.0] }\n"
+    "scf_threshold = 1.0e-6\n"
+    "\n"
+    "  [[reference_solid.entry]]\n"
+    "  element = \"Ag\"\n"
+    "  atom_site = 1\n"
+    "  label = \"default_solid\"\n"
+    "  default = true\n"
+    "  description = \"Ag fcc.\"\n")
+
+
+def _fp_block(method, sub_spec_toml, preferred=False):
+    """Render one ``[[reference_solid.entry.fingerprint]]`` block."""
+
+    block = ("\n    [[reference_solid.entry.fingerprint]]\n"
+             f"    method = \"{method}\"\n"
+             f"    sub_spec = {sub_spec_toml}\n")
+    if preferred:
+        block += "    preferred = true\n"
+    return block
+
+
+class TestRule10ManifestPreferred:
+    """Manifest rule 10: for every (element, method) appearing in any
+    fingerprint declaration across the manifest, exactly one
+    declaration is preferred (DESIGN 5.7)."""
+
+    def test_zero_preferred_for_present_method_raises(self, tmp_path):
+        # A lone bispectrum declaration that is not preferred leaves
+        # (Au, bispectrum) present but with no representative.
+        text = _VALID_COD_MANIFEST + _fp_block(
+            "bispectrum", "{ twoj1 = 8, twoj2 = 8 }")
+        path = _write(tmp_path, text)
+        with pytest.raises(ValueError, match="manifest rule 10"):
+            load_manifest_v2(path)
+
+    def test_one_preferred_per_present_method_ok(self, tmp_path):
+        # bispectrum (preferred + a non-preferred alternate) and a
+        # preferred reduce record: each present method has exactly one
+        # preferred, so the manifest loads.
+        text = (_VALID_COD_MANIFEST
+                + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
+                            preferred=True)
+                + _fp_block("bispectrum", "{ twoj1 = 6, twoj2 = 4 }")
+                + _fp_block("reduce",
+                            "{ level = 2, thick = 0.5, cutoff = 5.0,"
+                            " tolerance = 0.05 }", preferred=True))
+        path = _write(tmp_path, text)
+        manifest = load_manifest_v2(path)
+        fps = manifest.reference_solids[0].entries[0].fingerprints
+        assert len(fps) == 3
+
+    def test_counts_preferred_across_solids(self, tmp_path):
+        # The count spans the whole manifest, per (element, method).
+        # Two solids each declare a preferred bispectrum for Au, so
+        # (Au, bispectrum) has two preferred -> a hard error.  The
+        # second solid carries a non-default Au entry with a distinct
+        # label so rules 6 and 7 stay satisfied.
+        second_au = (
+            "\n[[reference_solid]]\n"
+            "reference_id = \"au_hcp\"\n"
+            "system_type = \"crystalline\"\n"
+            "basis = \"fb\"\n"
+            "functional = \"wigner\"\n"
+            "kpoint_integration = \"linear-tetrahedral\"\n"
+            "structure_path = \"au_hcp.skel\"\n"
+            "kpoint_spec = { density = 60.0, shift = [0,0,0] }\n"
+            "scf_threshold = 1.0e-6\n"
+            "\n"
+            "  [[reference_solid.entry]]\n"
+            "  element = \"Au\"\n"
+            "  atom_site = 1\n"
+            "  label = \"au-hcp\"\n"
+            "  default = false\n"
+            "  description = \"Au hcp.\"\n"
+            + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
+                        preferred=True))
+        (tmp_path / "au_hcp.skel").write_text("placeholder\n")
+        text = (_VALID_COD_MANIFEST
+                + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
+                            preferred=True)
+                + second_au)
+        path = _write(tmp_path, text)
+        with pytest.raises(ValueError, match="manifest rule 10"):
+            load_manifest_v2(path)
+
+
+class TestRule11ManifestPreferredSubspec:
+    """Manifest rule 11: all preferred declarations of one method
+    carry the identical sub_spec across the whole manifest, so the
+    consumer queries one sub_spec per family (DESIGN 5.7)."""
+
+    def test_divergent_preferred_subspec_raises(self, tmp_path):
+        # Au's preferred bispectrum sub_spec differs from Ag's; the
+        # family's preferred sub_spec must be database-wide uniform.
+        text = (_VALID_COD_MANIFEST
+                + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
+                            preferred=True)
+                + _SECOND_AG_SOLID
+                + _fp_block("bispectrum", "{ twoj1 = 6, twoj2 = 4 }",
+                            preferred=True))
+        path = _write(tmp_path, text)
+        with pytest.raises(ValueError, match="manifest rule 11"):
+            load_manifest_v2(path)
+
+    def test_uniform_preferred_subspec_ok(self, tmp_path):
+        # Both elements' preferred bispectrum records share one
+        # sub_spec, so rule 11 is satisfied and the manifest loads.
+        text = (_VALID_COD_MANIFEST
+                + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
+                            preferred=True)
+                + _SECOND_AG_SOLID
+                + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
+                            preferred=True))
+        path = _write(tmp_path, text)
+        manifest = load_manifest_v2(path)
+        assert len(manifest.reference_solids) == 2
+
+
+def test_harvest_fingerprints_stamps_preferred(tmp_path):
+    """The harvested FingerprintRecord carries the declaration's
+    preferred flag through to the on-disk record (DESIGN 5.6.5)."""
+    dat_skl = tmp_path / "datSkl.map"
+    dat_skl.write_text("DAT SKEL ELEM SPECIES TYPE\n"
+                       "  2    1   Si       1    1\n"
+                       "  1    2   O        1    1\n")
+    result_toml = {"outputs": {"datSkl_map": str(dat_skl)}}
+    sub_spec = {"twoj1": 4, "twoj2": 4, "cutoff": 9.0}
+    flight = _write_loen_descriptor(
+        tmp_path, "au_fcc", sub_spec,
+        "1 O  1 1 1   9 9 9 9 9   0\n"
+        "2 Si 1 1 2   1 2 3 4 5   0\n")
+    spec = ReferenceEntry(
+        element="Si", atom_site=1, label="t", default=True,
+        description="d",
+        fingerprints=[ManifestFingerprint(
+            method="bispectrum", sub_spec=sub_spec, preferred=True)])
+    records = harvest_fingerprints(flight, _ref(), spec, result_toml)
+    assert records[0].preferred is True
 
 
 # ============================================================
