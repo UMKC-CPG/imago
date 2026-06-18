@@ -969,21 +969,45 @@ def materialize_structure(ref: ReferenceSolid, manifest_dir: str,
     keys on this file's bytes.
 
     A ``structure_path`` ref is a plain disk read, resolved under
-    the manifest directory (rule 4 already validated it exists).  A
-    ``cod_id`` ref fetches the pinned revision once into a plain
-    cache location (decoupled from the SCF cache), then reuses it."""
+    the manifest directory (rule 4 already validated it exists); it
+    is expected to be an ``imago.skl``.  A ``cod_id`` ref is fetched
+    once as a CIF and converted to an ``imago.skl`` with its space
+    group preserved (``cif2skl``), because the run consumes a
+    skeleton and a crystal's Brillouin-zone integration samples the
+    irreducible wedge using that space group (ARCHITECTURE 9.5).
+    Both the fetched CIF and the converted skeleton are cached
+    beside the databases; the skeleton is the returned artifact.  A
+    CIF whose space group ``cif2skl`` cannot resolve is a hard error
+    -- the curator then converts it by hand (with ``cif2skl``'s
+    ``--space`` override) and supplies the result as a
+    ``structure_path`` instead."""
 
     if ref.structure_path is not None:
         return os.path.join(manifest_dir, ref.structure_path)
 
+    import cif2skl
+
     data_root = os.path.dirname(pdb_root.rstrip("/"))
-    local = os.path.join(
-        data_root, "atomicBDB", "cache", "structures",
-        ref.reference_id + _cod_extension(ref))
-    if not os.path.exists(local):
-        os.makedirs(os.path.dirname(local), exist_ok=True)
-        _fetch_cod_structure(ref.cod_id, ref.cod_revision, local)
-    return local
+    cache_dir = os.path.join(
+        data_root, "atomicBDB", "cache", "structures")
+    cif_path = os.path.join(
+        cache_dir, ref.reference_id + _cod_extension(ref))
+    skl_path = os.path.join(cache_dir, ref.reference_id + ".skl")
+    if not os.path.exists(skl_path):
+        os.makedirs(cache_dir, exist_ok=True)
+        if not os.path.exists(cif_path):
+            _fetch_cod_structure(ref.cod_id, ref.cod_revision, cif_path)
+        try:
+            cif2skl.convert(cif_path, skl_path, title=ref.reference_id)
+        except cif2skl.CifConversionError as exc:
+            raise RuntimeError(
+                f"COD structure for {ref.reference_id!r} "
+                f"(cod_id={ref.cod_id}) could not be converted to a "
+                f"skeleton with its space group preserved: {exc}.  "
+                f"Resolve it by hand with cif2skl (its --space "
+                f"override) and supply the result as a structure_path "
+                f"entry instead.") from exc
+    return skl_path
 
 
 # ============================================================

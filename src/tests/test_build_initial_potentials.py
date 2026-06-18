@@ -1295,6 +1295,61 @@ def test_materialize_structure_resolves_local_path(tmp_path):
     assert path == os.path.join("/manifests", "sub", "au.skel")
 
 
+def test_materialize_structure_converts_cod_to_skl(
+        tmp_path, monkeypatch):
+    # The cod_id branch fetches the CIF and converts it to a skeleton
+    # via cif2skl, returning the .skl path (fetch + convert are stubbed
+    # so the wiring is tested without network or the ASE/binary stack).
+    import cif2skl
+    calls = {}
+
+    def fake_fetch(cod_id, cod_revision, dest):
+        calls["fetch"] = (cod_id, cod_revision, dest)
+        with open(dest, "w") as handle:
+            handle.write("# fake cif\n")
+
+    def fake_convert(cif_path, skl_path, title=None):
+        calls["convert"] = (cif_path, skl_path, title)
+        with open(skl_path, "w") as handle:
+            handle.write("title\nx\nend\n")
+        return "227_a"
+
+    monkeypatch.setattr(bip, "_fetch_cod_structure", fake_fetch)
+    monkeypatch.setattr(cif2skl, "convert", fake_convert)
+    pdb_root = str(tmp_path / "atomicPDB")
+    ref = _ref(structure_path=None, cod_id=9008463,
+               cod_revision="291735", reference_id="au_fcc")
+    path = materialize_structure(
+        ref, manifest_dir=str(tmp_path), pdb_root=pdb_root)
+    assert path.endswith("au_fcc.skl")
+    assert os.path.exists(path)
+    assert calls["fetch"][0] == 9008463
+    assert calls["convert"][0].endswith("au_fcc.cif")
+    assert calls["convert"][2] == "au_fcc"          # title
+
+
+def test_materialize_cod_conversion_failure_is_fatal(
+        tmp_path, monkeypatch):
+    # An unresolvable space group is a hard error that points the
+    # curator at the structure_path escape hatch.
+    import cif2skl
+
+    monkeypatch.setattr(
+        bip, "_fetch_cod_structure",
+        lambda cod_id, rev, dest: open(dest, "w").write("# cif\n"))
+
+    def boom(cif_path, skl_path, title=None):
+        raise cif2skl.CifConversionError("no variant verified")
+
+    monkeypatch.setattr(cif2skl, "convert", boom)
+    ref = _ref(structure_path=None, cod_id=1, cod_revision="1",
+               reference_id="bad_solid")
+    with pytest.raises(RuntimeError, match="structure_path"):
+        materialize_structure(
+            ref, manifest_dir=str(tmp_path),
+            pdb_root=str(tmp_path / "atomicPDB"))
+
+
 def test_curation_workspace_root_sits_beside_databases():
     root = curation_workspace_root("/data/atomicPDB")
     assert root == os.path.join("/data", "curation", "workspace")
