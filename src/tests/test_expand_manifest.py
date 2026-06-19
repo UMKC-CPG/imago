@@ -120,7 +120,6 @@ def test_mechanical_output_carries_fill_in_template():
 def test_interactive_builds_complete_manifest(tmp_path):
     answers = [
         "fb", "wigner", "gaussian", "1e-6",   # shared defaults
-        "",                                   # structure banner
         "crystalline",                        # system_type
         "y",                                  # add an entry?
         "Si", "1", "y", "Si diamond site 1", "",   # entry fields
@@ -156,7 +155,7 @@ def test_interactive_marks_preferred_only_once_per_family(tmp_path):
     #   for each (element, method), so rule 10 holds.
     answers = [
         "fb", "wigner", "gaussian", "1e-6",
-        "", "crystalline",
+        "crystalline",
         "y", "Si", "1", "y", "site 1", "", "y",   # entry 1 (default)
         "y", "Si", "2", "n", "site 2", "", "y",   # entry 2
         "n",

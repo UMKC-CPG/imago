@@ -200,6 +200,8 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
     manifest satisfies the one-preferred-per-family rule (rule 10)
     without the curator tracking it."""
 
+    print("Shared run settings (press Enter to accept the default):",
+          file=sys.stderr)
     basis = ask(f"basis ({'/'.join(VALID_BASES)})", basis)
     functional = ask(
         f"functional ({'/'.join(VALID_FUNCTIONALS)})", functional)
@@ -209,25 +211,39 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
         kpoint_integration)
     scf_threshold = float(ask("scf_threshold", str(scf_threshold)))
 
-    # (element, method) pairs already marked preferred, so each is
-    #   marked exactly once across the whole manifest (rule 10).
+    # (element, method) pairs already marked preferred, and elements
+    #   that already hold their one default entry -- both tracked
+    #   across the whole manifest so rules 10 and 7 hold by default.
     preferred_seen: set[tuple[str, str]] = set()
+    default_elements: set[str] = set()
     solids: list[ReferenceSolid] = []
 
     for source in sources:
-        ask(f"\n--- structure {source.reference_id} ---", "")
+        # Announce the structure (a printed header, NOT a prompt) so
+        #   the questions that follow are clearly about this solid.
+        print(f"\n--- structure {source.reference_id} ---",
+              file=sys.stderr)
         system_type = ask(
             f"system_type ({'/'.join(VALID_SYSTEM_TYPES)})",
             source.system_type or system_type_default)
 
         entries: list[ReferenceEntry] = []
-        while _ask_yes_no(ask, "add an entry for this structure?",
-                          True):
+        # The first entry defaults to yes; once one is added, "add
+        #   another" defaults to no, so pressing Enter ends this
+        #   structure rather than looping forever.
+        add_entry = _ask_yes_no(
+            ask, f"add an entry for {source.reference_id}?", True)
+        while add_entry:
             element = ask("  element", "")
             atom_site = int(ask("  atom_site", "1"))
+            # Default to yes only until this element has its one
+            #   default entry, so accepting defaults yields exactly
+            #   one default per element (rule 7).
             is_default = _ask_yes_no(
                 ask, "  default entry for this element?",
-                not entries)
+                element not in default_elements)
+            if is_default:
+                default_elements.add(element)
             description = ask("  description", "")
             label = ask("  label (blank to derive at harvest)", "")
 
@@ -250,6 +266,9 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
                 element=element, atom_site=atom_site,
                 default=is_default, description=description,
                 label=label or None, fingerprints=fingerprints))
+            add_entry = _ask_yes_no(
+                ask, f"add another entry for {source.reference_id}?",
+                False)
 
         solids.append(stamp_shared_defaults(
             ReferenceSolid(
