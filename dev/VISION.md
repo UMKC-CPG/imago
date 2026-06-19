@@ -99,6 +99,28 @@ flight instead of an exhaustive grid search.
    optics chains spanning many structures -- become a regular
    need; in that scenario the inner Parsl logic is unchanged
    and Snakemake is additive rather than a replacement.
+   This dispatch must be portable and low-ceremony.  Imago
+   will run on clusters operated by people outside the
+   original group, so a user must never hand-write SLURM
+   batch scripts: they describe their site once -- its
+   queues, account, per-node cores and accelerators, and how
+   a worker brings up the imago environment -- and choose a
+   few per-run knobs, and the flight layer generates the
+   scheduler submission, filling in defaults and surfacing
+   suggestions for the handful of genuinely site- or
+   run-specific decisions.  Two dispatch shapes must both be
+   available, because they suit opposite regimes of the
+   inter-problem axis (Goal 7): a single shared allocation
+   that many small, similar calculations stream through (the
+   convergence sweeps and database seeds), and one scheduler
+   job per calculation for large or heterogeneous runs (the
+   future MPI/GPU solves of differing size).  Neither needs
+   nested batch files -- the nesting is of resources within
+   an allocation, not of submissions -- and the per-
+   calculation resource request (cores, ranks, threads,
+   devices, walltime) is exactly what the resource-and-cost
+   dataspace (Goal 6) predicts, so that sizing too becomes
+   automatic rather than hand-guessed.
 5. **Accumulate historical convergence guidance as a
    chemistry-and-physics dataspace.** Build a curated
    dataspace that records, for each converged calculation

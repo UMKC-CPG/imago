@@ -5380,6 +5380,17 @@ a `HighThroughputExecutor` and a SLURM provider, so the
 same dispatch code serves a laptop, an interactive node,
 and a batch allocation -- only the `Config` changes.
 
+That same `Config` also selects the *cluster topology*,
+and both shapes are supported (VISION Goals 4, 7,
+ARCHITECTURE 9.4): a single shared allocation whose
+workers stream many units (pooled), or one scheduler job
+per unit (for large or heterogeneous runs).  These are
+`Config` shapes, not changes to the dispatch core.  Who
+assembles that `Config` for the producer, and right-sizing
+heterogeneous parallel units, are open (6.2.7,
+ARCHITECTURE 9.8); the per-unit size such sizing needs is
+what section 8 predicts.
+
 The two workload shapes ARCHITECTURE 9.4 calls out are
 both expressed in this one model:
 
@@ -5709,6 +5720,19 @@ changes the contracts above.
   non-Imago wingbeat persists (and how a mixed-wingbeat
   client reads it back) is that wingbeat's contract, set
   when the wingbeat is added, not here.
+- **Producer dispatch `Config` source.**  The producer
+  currently hands dispatch a plain `LocalExecutor`, so it
+  runs locally even on a cluster.  Open: how it (and other
+  clients) obtain a Parsl `Config` -- a per-site
+  resource-control file plus a few per-run choices,
+  assembled by a shared generator -- and whether the
+  per-run choices are CLI flags or a generated file beside
+  the run.  Local stays the default (ARCHITECTURE 9.8).
+- **Right-sizing heterogeneous parallel units.**  Giving
+  each unit a block sized to its own predicted cost
+  (per-size executors keyed on a section-8 hint) versus one
+  uniform worker slice; deferred until imago is parallel
+  and the cost predictor exists.
 
 #### 6.2.8 Flight-builder helper for predict-then-verify
 

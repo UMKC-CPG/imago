@@ -1429,6 +1429,37 @@ acceptable for its scientific purpose.  It is a package
 dispatch, status tracking, harvest hooks, and workspace
 management (9.6).
 
+**Cluster dispatch is configuration, not code.**  The
+mapping onto SLURM lives entirely in the flight's Parsl
+`Config` (DESIGN 6.2.3): the same dispatch core serves a
+laptop, an interactive node, and a batch allocation, and
+only the `Config` changes.  Two cluster topologies are
+both supported because they suit opposite regimes (VISION
+Goals 4 and 7):
+
+- **One shared allocation (pooled).**  Parsl requests one
+  (optionally auto-scaled) block of nodes and streams many
+  units through its workers.  Best for many small, similar
+  units -- the convergence sweeps and the database seed.
+- **One scheduler job per unit.**  Each unit is its own
+  SLURM submission.  Best for large or heterogeneous units
+  -- future MPI/GPU solves of differing size -- where a
+  single uniform worker slice would waste resources.
+
+No client hand-writes a SLURM script.  A `Config` is
+assembled from three layers: a per-site resource-control
+file (queues, account, per-node cores and accelerators,
+and the commands a worker runs to bring up the imago
+environment), a few per-run choices (topology, partition,
+nodes, walltime), and the per-unit resource request that
+the resource-and-cost dataspace (section 11) predicts.  A
+generator fills the defaults and surfaces only the
+decisions that are genuinely the user's.  Right-sizing
+*heterogeneous* parallel units -- routing each to a block
+sized for it -- needs per-size executors keyed on a cost
+hint and is staged with section 11, not built up front.
+The undecided pieces are gathered in 9.8.
+
 ### 9.5 Structure acquisition: cod_fish.py + cif2skl.py
 
 Structure acquisition is a front-end, separate from the
@@ -1682,6 +1713,18 @@ makeinput/harvest interface explicit: the run produces the
 numbers, the producer only consumes them.  The
 producer-side change is tracked as TODO C87.
 
+One seam this leaves open: the producer is the client that
+must *supply* the dispatch `Config` (9.4).  As written it
+hands kaleidoscope a plain in-process executor
+(`curation_executor` returns a `LocalExecutor`), so the
+seed and database builds run locally -- one calculation at
+a time, even on a cluster login node.  Reaching SLURM means
+giving the flight a Parsl `Config` (from the generator
+above) rather than the local executor.  Local stays the
+default -- for tests, a laptop, and the materialize
+pre-flight -- with cluster dispatch opt-in.  The wiring is
+tracked in 9.8 and the section-11 provisioning work.
+
 ### 9.8 Open architectural questions
 
 Most of the early questions are resolved and recorded
@@ -1717,6 +1760,28 @@ What remains open:
   the guidance dataspace (section 10).  The bespoke
   per-solid SCF cache is gone; kaleidoscope's run-reuse
   cache (9.6) subsumes it.  The matching code is TODO C74.
+
+- **Cluster dispatch configuration (9.4) -- OPEN.**  Every
+  client runs locally until a Parsl `Config` is supplied;
+  the topologies (pooled, per-job) and the three config
+  layers are settled (9.4), but several decisions are not:
+  - **Site-config home.**  A dedicated `*rc.py` resource-
+    control file (the established pattern) versus a section
+    of `imagorc`.
+  - **Per-run choices.**  CLI flags (defaulting from the
+    rc) versus a generated, editable config file written
+    beside the run.
+  - **Per-unit right-sizing.**  Build it now (per-size
+    executors keyed on a section-11 cost hint, for
+    heterogeneous parallel jobs) versus defer until imago
+    is parallel and the predictor exists -- the leaning is
+    to defer and ship local + pooled + uniform per-job
+    first.
+  - **Generator sharing.**  Where the `Config` generator
+    lives so the producer and other clients share it.
+
+  Recorded at VISION Goals 4/6/7 and DESIGN 6.2.3 / 6.2.7;
+  the work is TODO C100.
 
 ## 10. Historical Guidance Dataspace
 

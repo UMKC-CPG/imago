@@ -2762,12 +2762,28 @@ on the same data later with no schema change.  Built on P10.
   Observation per run dir, stage censored failed runs as bounds,
   write to staging/<fingerprint>/ (DESIGN 8.7).  Sibling of
   guidance_harvest.py (C72).
+- [ ] C100. Wire the producer (and other clients) onto SLURM
+  dispatch.  Today `curation_executor` returns a `LocalExecutor`,
+  so flights run locally and one-at-a-time even on a cluster login
+  node (ARCH 9.7).  Build the dispatch-config story: a per-site
+  resource-control file (queues, account, per-node cores and
+  accelerators, worker bring-up), a few per-run choices (topology,
+  partition, nodes, walltime), and a generator that assembles a
+  Parsl `Config` for either topology -- one shared pooled
+  allocation, or one scheduler job per unit -- with local kept as
+  the default.  Flip the producer to supply the `Config` (set
+  `flight.parsl_config` / return a `ParslExecutor`) when cluster
+  dispatch is requested.  Several design points are still open
+  (site-config home, per-run UX, whether to defer per-unit
+  right-sizing) -- see ARCH 9.8.  C81 layers predictive sizing on
+  top of this.  CODE + DESIGN (partly open); VISION Goals 4/6/7,
+  ARCH 9.4/9.7/9.8, DESIGN 6.2.3/6.2.7.
 - [ ] C81. Provisioning consumer in the flight layer (the
   kaleidoscope flight-builder helper or a thin sibling): query
   the predictor with a proposed config + size, apply a safety
   margin, annotate the Parsl provider's SLURM resource request;
   cold-start fallback for empty fingerprints (DESIGN 8.6, 8.8).
-  The near-term consumer (VISION Goal 6).
+  The near-term consumer (VISION Goal 6).  Builds on C100.
 - [ ] C82. Seed the resource dataspace on the local cluster: a
   small manual + flight-harvested set of observations spanning
   the size range on each available hardware fingerprint, so the
