@@ -62,7 +62,17 @@ flight instead of an exhaustive grid search.
    disturbing callers. Two payoffs: faster SCF convergence on
    typical systems, and the ability to run useful non-SCF
    (single-pass) calculations whose results remain informative
-   for many purposes.
+   for many purposes.  A further payoff, realized once the seed
+   exists: the database -- converged reference potentials plus the
+   run records behind them -- becomes the substrate for
+   systematically testing exchange-correlation functionals.  Wigner
+   LDA is the most thoroughly tested functional in OLCAO and serves
+   as the trusted baseline; the same flight machinery can later
+   re-run the curated solids under other functionals and weigh
+   their convergence and quality against that baseline.  A future
+   integration of an external exchange-correlation library (libxc /
+   xclib), should it prove feasible, would widen the functional set
+   with higher confidence in each functional's correctness.
 4. **Enable high-throughput Imago calculation flights.**
    Provide shared infrastructure for submitting, tracking, and
    harvesting batches of Imago calculations on an HPC cluster,

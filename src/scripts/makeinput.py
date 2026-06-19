@@ -957,6 +957,23 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             "-converg", dest="converg", type=float, default=None,
             help="SCF convergence limit for this run.  Overrides the "
                  "rc converg_main default when supplied.")
+        # The -thermsmear option pins the thermal (electronic)
+        # smearing sigma for this build.  makeinput normally sources
+        # the sigma from the rc file's therm_smear_main; supplying
+        # -thermsmear overrides that for a single run.  It threads
+        # structurally just like -converg above: a float whose
+        # default is None, taken to mean "fall back to the rc
+        # value", and whose supplied value is written into the
+        # THERMAL_SMEARING_SIGMA field of imago.dat.  The sigma is an
+        # electron-volt broadening applied at the Fermi level during
+        # the SCF; a small width (e.g. 0.1 eV) eases convergence for
+        # metals, while insulators are usually run with no smearing.
+        parser.add_argument(
+            "-thermsmear", dest="thermsmear", type=float,
+            default=None,
+            help="Thermal smearing sigma (eV) for this run.  "
+                 "Overrides the rc therm_smear_main default when "
+                 "supplied.")
 
         # ---- Target / Block / Reduce (repeatable) ----
         # These three options implement the atom-grouping schemes described
@@ -1282,6 +1299,13 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
         # in place (DESIGN 6.2.10, decision 3).
         if args.converg is not None:
             self.converg_main = args.converg
+
+        # A supplied -thermsmear pins the thermal smearing sigma for
+        # this run, overriding the rc-sourced therm_smear_main
+        # default; an absent option leaves the rc value in place
+        # (the same fall-back-to-rc contract as -converg above).
+        if args.thermsmear is not None:
+            self.therm_smear_main = args.thermsmear
 
         # Grouping methods: reduce.
         if args.reduce is not None:

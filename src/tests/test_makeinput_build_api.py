@@ -69,6 +69,19 @@ def test_args_from_options_overlays_known_dest():
     assert args.potdb is None
 
 
+def test_args_from_options_carries_thermsmear():
+    """The -thermsmear dest is a registered argparse option, so the
+    initial-potential producer can pin the thermal smearing sigma in
+    eV for a run by passing it through the options mapping; reconcile
+    later writes it into THERMAL_SMEARING_SIGMA.  An absent key keeps
+    its None default, meaning "fall back to the rc therm_smear_main"."""
+    settings = _bare_settings()
+    args = settings._args_from_options({"thermsmear": 0.1})
+    assert args.thermsmear == 0.1
+    # Not supplied -> None, the fall-back-to-rc sentinel.
+    assert settings._args_from_options({}).thermsmear is None
+
+
 def test_args_from_options_empty_is_all_defaults():
     """An empty options mapping yields exactly the argparse
     defaults -- the same namespace a bare ``makeinput`` sees."""

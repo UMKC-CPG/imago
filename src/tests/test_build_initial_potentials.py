@@ -36,6 +36,7 @@ from build_initial_potentials import (
     _parse_pot_file,
     _parse_coeff_file,
     make_producer_options,
+    _thermsmear_for,
     make_imago_provenance,
     build_loen_units,
     harvest_fingerprints,
@@ -1053,6 +1054,39 @@ def test_make_producer_options_emits_coded_tool_settings():
     for absent in ("basis", "functional", "kpoint_integration",
                    "scf_threshold", "kpoint_shift", "kpd"):
         assert absent not in options
+    # A bare integration token names no smearing width, so no
+    #   thermal-smearing option leaks in: makeinput keeps its rc
+    #   default.
+    assert "thermsmear" not in options
+
+
+def test_thermsmear_for_reads_width_or_none():
+    # Bare tokens name no width -> None (makeinput keeps the rc
+    #   therm_smear_main default).
+    assert _thermsmear_for("gaussian") is None
+    assert _thermsmear_for("linear-tetrahedral") is None
+    # A smeared Gaussian names the sigma (eV) after the dash.
+    assert _thermsmear_for("gaussian-0.1") == pytest.approx(0.1)
+    assert _thermsmear_for("gaussian-0.25") == pytest.approx(0.25)
+
+
+def test_thermsmear_for_rejects_malformed_width():
+    # A dash with no number, or a non-numeric tail, is a manifest
+    #   fault caught here rather than passed to makeinput blindly.
+    with pytest.raises(ValueError, match="smearing width"):
+        _thermsmear_for("gaussian-")
+    with pytest.raises(ValueError, match="smearing width"):
+        _thermsmear_for("gaussian-wide")
+
+
+def test_make_producer_options_forwards_smearing_sigma():
+    # A ``gaussian-<sigma>`` integration token threads the sigma to
+    #   makeinput's ``thermsmear`` option (-> THERMAL_SMEARING_SIGMA)
+    #   while the integration code stays Gaussian (0).
+    options = make_producer_options(
+        _ref(kpoint_integration="gaussian-0.1"), "abc123")
+    assert options["scfkpint"] == 0
+    assert options["thermsmear"] == pytest.approx(0.1)
 
 
 def test_make_imago_provenance_satisfies_schema():

@@ -1205,12 +1205,13 @@ _KPOINT_INTEGRATION_TO_SCFKPINT = {
 def _scfkpint_for(token: str) -> int:
     """Map a k-point integration token to makeinput's ``scfkpint``
     code.  ``linear-tetrahedral`` -> 1; ``gaussian`` -> 0.  A
-    smeared Gaussian may name its smearing factor in the token
-    (e.g. ``gaussian-0.1``); the integration *code* is still 0.
-    That factor is not separately threaded in v1 -- makeinput's
-    default smearing applies and only the integration code is set
-    here.  An unknown token raises at the manifest boundary rather
-    than reaching makeinput as a mystery value."""
+    smeared Gaussian may name its smearing width in the token
+    (e.g. ``gaussian-0.1``); the integration *code* is still 0 --
+    the width is a separate concern read by :func:`_thermsmear_for`
+    and forwarded as makeinput's thermal smearing sigma, so the two
+    travel as distinct options.  An unknown token raises at the
+    manifest boundary rather than reaching makeinput as a mystery
+    value."""
     if token in _KPOINT_INTEGRATION_TO_SCFKPINT:
         return _KPOINT_INTEGRATION_TO_SCFKPINT[token]
     if token.startswith("gaussian-"):
@@ -1219,6 +1220,34 @@ def _scfkpint_for(token: str) -> int:
         f"unknown kpoint_integration {token!r}; the producer "
         f"understands {sorted(_KPOINT_INTEGRATION_TO_SCFKPINT)} "
         f"(or 'gaussian-<smearing>')")
+
+
+def _thermsmear_for(token: str) -> float | None:
+    """Extract the thermal (electronic) smearing sigma named in a
+    smeared Gaussian integration token, or ``None`` when none is
+    named.
+
+    A bare ``gaussian`` (or ``linear-tetrahedral``) names no width,
+    so the producer leaves the smearing unset and makeinput keeps
+    its rc-sourced ``therm_smear_main`` default.  A
+    ``gaussian-<sigma>`` token (e.g. ``gaussian-0.1``) pins that
+    sigma for the run; the producer forwards it as makeinput's
+    ``thermsmear`` option, which becomes the THERMAL_SMEARING_SIGMA
+    field of the SCF input.  The width is an electron-volt
+    broadening applied at the Fermi level, matching the engine's
+    smearing field.  A malformed width -- a ``gaussian-`` with no
+    number, or a non-numeric tail -- raises at the manifest
+    boundary rather than reaching makeinput as a mystery value."""
+    if not token.startswith("gaussian-"):
+        return None
+    width_text = token[len("gaussian-"):]
+    try:
+        return float(width_text)
+    except ValueError:
+        raise ValueError(
+            f"malformed kpoint_integration {token!r}; the smearing "
+            f"width after 'gaussian-' must be a number in eV "
+            f"(e.g. 'gaussian-0.1')")
 
 
 def make_producer_options(ref: ReferenceSolid,
@@ -1241,6 +1270,10 @@ def make_producer_options(ref: ReferenceSolid,
                                   selection; imago codes ``fb -> 2``)
       - ``scf_threshold``      -> ``converg``  (the makeinput SCF
                                   convergence limit)
+      - ``gaussian-<sigma>``   -> ``thermsmear`` (the makeinput
+                                  THERMAL_SMEARING_SIGMA, in eV;
+                                  emitted only when the integration
+                                  token names a smearing width)
       - ``kpoint_spec.shift``  -> ``kpshift``
 
     Also carried: ``imago_commit``, the build identity that (with
@@ -1272,6 +1305,12 @@ def make_producer_options(ref: ReferenceSolid,
     shift = ref.kpoint_spec.get("shift")
     if shift is not None:
         options["kpshift"] = shift
+    # A smeared Gaussian token (``gaussian-<sigma>``) pins the
+    #   thermal smearing for the run; a bare token names no width,
+    #   so the key is omitted and makeinput keeps its rc default.
+    smearing_sigma = _thermsmear_for(ref.kpoint_integration)
+    if smearing_sigma is not None:
+        options["thermsmear"] = smearing_sigma
     return options
 
 
