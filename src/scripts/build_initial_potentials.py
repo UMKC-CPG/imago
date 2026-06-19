@@ -958,8 +958,22 @@ def _fetch_cod_structure(cod_id: int, cod_revision: str,
         handle.write(payload)
 
 
+def structure_cache_dir(pdb_root: str) -> str:
+    """The directory the producer caches fetched and converted
+    reference structures in -- ``<data_root>/atomicBDB/cache/
+    structures``, beside the databases -- keyed by ``reference_id``.
+    A full producer run and a ``--materialize-only`` pre-flight share
+    it by default, so a pre-flight's converted skeletons are reused by
+    the real run with no second fetch.  A pre-flight may redirect to
+    its own location (a cache mirror) with ``--materialize-dir``."""
+
+    data_root = os.path.dirname(pdb_root.rstrip("/"))
+    return os.path.join(data_root, "atomicBDB", "cache", "structures")
+
+
 def materialize_structure(ref: ReferenceSolid, manifest_dir: str,
-                          pdb_root: str) -> str:
+                          pdb_root: str,
+                          cache_dir: str | None = None) -> str:
     """Guarantee the reference solid's structure exists as a local
     file and return its path (Option A; DESIGN 5.7 / PSEUDOCODE
     11.4).  This is the producer's ONLY network access and is
@@ -975,10 +989,11 @@ def materialize_structure(ref: ReferenceSolid, manifest_dir: str,
     group preserved (``cif2skl``), because the run consumes a
     skeleton and a crystal's Brillouin-zone integration samples the
     irreducible wedge using that space group (ARCHITECTURE 9.5).
-    Both the fetched CIF and the converted skeleton are cached
-    beside the databases; the skeleton is the returned artifact.  A
-    CIF whose space group ``cif2skl`` cannot resolve is a hard error
-    -- the curator then converts it by hand (with ``cif2skl``'s
+    Both the fetched CIF and the converted skeleton are cached in
+    ``cache_dir`` (the shared ``structure_cache_dir`` beside the
+    databases when not given); the skeleton is the returned artifact.
+    A CIF whose space group ``cif2skl`` cannot resolve is a hard
+    error -- the curator then converts it by hand (with ``cif2skl``'s
     ``--space`` override) and supplies the result as a
     ``structure_path`` instead."""
 
@@ -987,9 +1002,8 @@ def materialize_structure(ref: ReferenceSolid, manifest_dir: str,
 
     import cif2skl
 
-    data_root = os.path.dirname(pdb_root.rstrip("/"))
-    cache_dir = os.path.join(
-        data_root, "atomicBDB", "cache", "structures")
+    if cache_dir is None:
+        cache_dir = structure_cache_dir(pdb_root)
     cif_path = os.path.join(
         cache_dir, ref.reference_id + _cod_extension(ref))
     skl_path = os.path.join(cache_dir, ref.reference_id + ".skl")
@@ -1008,6 +1022,154 @@ def materialize_structure(ref: ReferenceSolid, manifest_dir: str,
                 f"override) and supply the result as a structure_path "
                 f"entry instead.") from exc
     return skl_path
+
+
+# ============================================================
+#  Structure pre-flight (DESIGN 5.7): fetch + convert only
+# ============================================================
+
+def load_structure_sources(path: str) -> list[ReferenceSolid]:
+    """Parse ONLY the structure sources from a curation manifest --
+    the relaxed read behind ``--materialize-only`` (DESIGN 5.7).
+
+    The full ``load_manifest_v2`` requires every run and harvest
+    field (``kpoint_spec``, ``scf_threshold``, the basis / functional
+    / integration sub-model, the per-site entries and their
+    fingerprint declarations).  A curator who has just pinned a fresh
+    structure set does not have those yet: the natural order of work
+    is to get every structure fetching and converting cleanly FIRST,
+    eyeball the skeletons, and only then fill in the SCF and harvest
+    details.  This reader enforces just enough to materialize each
+    solid -- schema version (rule 1), a label-safe and unique
+    ``reference_id`` (rule 5), and exactly one valid structure source
+    (rule 4).  The run and harvest fields are left at harmless
+    placeholders, because this relaxed view is never dispatched, only
+    materialized; that lets a half-written manifest still be
+    pre-flighted."""
+
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"curation manifest not found: {path} (a manifest "
+            f"is required; create it or pass --manifest)")
+
+    with open(path, "rb") as handle:
+        raw = tomllib.load(handle)
+
+    # ----- Rule 1: schema_version must equal 2 (same gate the full
+    # loader applies, so a v1 file fails identically here).
+    _require(raw.get("schema_version") == 2, path,
+             f"manifest rule 1: schema_version must equal 2 "
+             f"(found {raw.get('schema_version')!r})")
+
+    seen_ref_ids: set[str] = set()
+    sources: list[ReferenceSolid] = []
+
+    for ref in raw.get("reference_solid", []):
+        # reference_id is the one per-solid field the pre-flight
+        #   genuinely needs: it names the cached CIF and skeleton.
+        _require("reference_id" in ref, path,
+                 "manifest rule 2: [[reference_solid]] missing "
+                 "field: reference_id")
+        rid = ref["reference_id"]
+
+        # ----- Rule 5 (charset + uniqueness): the id is embedded in
+        # the cached filenames and, later, in derived labels, so it
+        # must be label-safe and appear at most once.
+        _require(re.fullmatch(r"[a-z0-9_-]+", rid) is not None, path,
+                 f"manifest rule 5: reference_id {rid!r} is not "
+                 f"label-safe (use lowercase letters, digits, '-', "
+                 f"'_'); it is embedded verbatim in derived labels")
+        _require(rid not in seen_ref_ids, path,
+                 f"manifest rule 5: duplicate reference_id: {rid}")
+        seen_ref_ids.add(rid)
+
+        # ----- Rule 4: exactly one structure source, validated the
+        # same way the full loader validates it.
+        has_cod = "cod_id" in ref
+        has_path = "structure_path" in ref
+        _require(has_cod != has_path, path,
+                 f"manifest rule 4: [[reference_solid {rid}]] "
+                 f"must set exactly one of cod_id or "
+                 f"structure_path")
+        cod_id = None
+        cod_revision = None
+        structure_path = None
+        if has_cod:
+            cod_id = ref["cod_id"]
+            _require(isinstance(cod_id, int)
+                     and not isinstance(cod_id, bool)
+                     and cod_id > 0, path,
+                     f"manifest rule 4: cod_id must be a positive "
+                     f"integer ({rid}), got {cod_id!r}")
+            _require("cod_revision" in ref
+                     and isinstance(ref["cod_revision"], str)
+                     and len(ref["cod_revision"]) > 0, path,
+                     f"manifest rule 4: cod_revision required "
+                     f"(non-empty string) when cod_id is set "
+                     f"({rid})")
+            cod_revision = ref["cod_revision"]
+        else:
+            # File existence is verified at materialize time, which
+            #   resolves it against the manifest directory and reports
+            #   the resolved path -- no need to duplicate that here.
+            structure_path = ref["structure_path"]
+
+        sources.append(ReferenceSolid(
+            reference_id=rid, system_type="", basis="",
+            functional="", kpoint_integration="", kpoint_spec={},
+            scf_threshold=0.0, cod_id=cod_id,
+            cod_revision=cod_revision,
+            structure_path=structure_path))
+
+    return sources
+
+
+def materialize_only(manifest_path: str, pdb_root: str,
+                     cache_dir: str | None = None
+                     ) -> list[dict[str, Any]]:
+    """Pre-flight every reference structure in the manifest, then
+    STOP -- no SCF dispatch (DESIGN 5.7).  This is Phase 1's
+    ``materialize_structure`` loop run on its own, over the relaxed
+    ``load_structure_sources`` view, so a curator can validate a
+    freshly pinned structure set -- and catch any space group
+    ``cif2skl`` cannot resolve -- before filling in the run and
+    harvest details.  Because it is the EXACT path a full run uses, a
+    clean pre-flight is a guarantee the run will not trip on
+    acquisition, and the converted skeletons it caches are reused by
+    that run (unless ``cache_dir`` redirects them to a mirror).
+
+    Each solid is attempted independently: a failure is captured and
+    the loop continues, so one bad space group never hides the status
+    of the rest.  Returns one report row per solid (also printed by
+    the CLI), each carrying ``reference_id``, a human-readable
+    ``source``, an ``ok`` flag, the ``skl_path`` on success, and the
+    error ``message`` on failure."""
+
+    sources = load_structure_sources(manifest_path)
+    manifest_dir = os.path.dirname(os.path.abspath(manifest_path))
+    if cache_dir is None:
+        cache_dir = structure_cache_dir(pdb_root)
+
+    report: list[dict[str, Any]] = []
+    for ref in sources:
+        if ref.structure_path is not None:
+            source = f"structure_path {ref.structure_path}"
+        else:
+            source = (f"cod_id {ref.cod_id} "
+                      f"(revision {ref.cod_revision})")
+        row: dict[str, Any] = {
+            "reference_id": ref.reference_id, "source": source}
+        try:
+            skl = materialize_structure(
+                ref, manifest_dir, pdb_root, cache_dir=cache_dir)
+            row.update(ok=True, skl_path=skl, message="")
+        except (RuntimeError, FileNotFoundError, OSError) as exc:
+            # A failed solid is reported, not raised: the curator
+            #   wants every problem in one pass, not the first only.
+            row.update(ok=False, skl_path=None, message=str(exc))
+        report.append(row)
+
+    return report
 
 
 # ============================================================
@@ -1894,11 +2056,29 @@ def _default_pdb_root() -> str:
     return os.path.join(data_dir, "atomicPDB") if data_dir else ""
 
 
+def _print_materialize_report(report: list[dict[str, Any]]) -> None:
+    """Print the per-solid pre-flight result -- one line per solid
+    plus a final tally -- in the style of the producer's summary."""
+
+    for row in report:
+        mark = "ok  " if row["ok"] else "FAIL"
+        print(f"  [{mark}] {row['reference_id']}: {row['source']}")
+        if row["ok"]:
+            print(f"          -> {row['skl_path']}")
+        else:
+            print(f"          {row['message']}")
+    ready = sum(1 for row in report if row["ok"])
+    print(f"materialize: {ready}/{len(report)} reference structures "
+          f"fetched and converted")
+
+
 def main(argv=None) -> int:
     """CLI entry point: run the producer over a curation manifest
     (DESIGN 5.7).  ``--element`` restricts the run to one element's
     database; ``--force`` bypasses kaleidoscope's run-reuse cache so
-    every reference run re-executes."""
+    every reference run re-executes.  ``--materialize-only`` runs just
+    the structure fetch-and-convert pre-flight (no SCF), optionally
+    redirecting the output with ``--materialize-dir``."""
 
     parser = argparse.ArgumentParser(
         description="Build the augmented initial-potential database "
@@ -1918,11 +2098,36 @@ def main(argv=None) -> int:
         "--force", action="store_true",
         help="bypass the run-reuse cache so every reference run "
              "re-executes (default: reuse any cached runs)")
+    parser.add_argument(
+        "--materialize-only", action="store_true",
+        help="fetch and convert every reference structure named in "
+             "the manifest, then stop without running any SCF -- a "
+             "pre-flight to validate a freshly pinned structure set "
+             "(default: run the full build)")
+    parser.add_argument(
+        "--materialize-dir", default=None,
+        help="directory the --materialize-only pre-flight writes "
+             "fetched CIFs and converted skeletons into (default: "
+             "the shared structure cache beside the databases, which "
+             "a later full build reuses)")
     args = parser.parse_args(argv)
 
     if not args.pdb_root:
         parser.error("--pdb-root not given and $IMAGO_DATA is unset")
+    if args.materialize_dir and not args.materialize_only:
+        parser.error("--materialize-dir applies only with "
+                     "--materialize-only")
     data_root = os.path.dirname(args.pdb_root.rstrip("/"))
+
+    # The pre-flight short-circuits before any SCF dispatch: it only
+    #   needs the structure sources, so it never touches the run or
+    #   harvest fields the full build requires.
+    if args.materialize_only:
+        report = materialize_only(
+            args.manifest, args.pdb_root,
+            cache_dir=args.materialize_dir)
+        _print_materialize_report(report)
+        return 0 if all(row["ok"] for row in report) else 1
 
     per_run_log = build_initial_potentials(
         args.manifest, args.pdb_root, data_root,

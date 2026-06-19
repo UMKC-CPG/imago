@@ -40,7 +40,10 @@ from build_initial_potentials import (
     build_loen_units,
     harvest_fingerprints,
     curation_workspace_root,
+    structure_cache_dir,
     materialize_structure,
+    load_structure_sources,
+    materialize_only,
     extract_potential,
     read_site_identity_map,
     assemble_entry_label,
@@ -1353,6 +1356,197 @@ def test_materialize_cod_conversion_failure_is_fatal(
 def test_curation_workspace_root_sits_beside_databases():
     root = curation_workspace_root("/data/atomicPDB")
     assert root == os.path.join("/data", "curation", "workspace")
+
+
+def test_structure_cache_dir_sits_beside_databases():
+    cache = structure_cache_dir("/data/atomicPDB")
+    assert cache == os.path.join(
+        "/data", "atomicBDB", "cache", "structures")
+
+
+# ============================================================
+#  Structure pre-flight: load_structure_sources + materialize_only
+# ============================================================
+
+# A relaxed-load manifest carrying ONLY the structure sources -- no
+#   kpoint_spec / scf_threshold / sub-model / entries.  The full
+#   loader rejects it (rule 2); the pre-flight loader accepts it.
+_SOURCES_ONLY_MANIFEST = """\
+schema_version = 2
+
+[[reference_solid]]
+reference_id = "si_diamond"
+cod_id = 2104737
+cod_revision = "201401"
+
+[[reference_solid]]
+reference_id = "a_si"
+structure_path = "a_si.skl"
+"""
+
+
+class TestLoadStructureSources:
+    """The relaxed reader behind --materialize-only: it parses the
+    structure sources from a manifest that lacks the run and harvest
+    fields the full loader demands."""
+
+    def test_parses_sources_without_run_fields(self, tmp_path):
+        # A bare structure_path file must exist for nothing here --
+        #   the loader defers that check to materialize time.
+        path = _write(tmp_path, _SOURCES_ONLY_MANIFEST)
+        sources = load_structure_sources(path)
+        assert [s.reference_id for s in sources] == [
+            "si_diamond", "a_si"]
+        assert sources[0].cod_id == 2104737
+        assert sources[0].cod_revision == "201401"
+        assert sources[0].structure_path is None
+        assert sources[1].structure_path == "a_si.skl"
+        assert sources[1].cod_id is None
+
+    def test_full_loader_rejects_what_relaxed_accepts(self, tmp_path):
+        # The same source-only manifest the relaxed loader accepts is
+        #   rejected by the full loader (missing rule-2 fields), which
+        #   is exactly why the pre-flight needs its own reader.
+        path = _write(tmp_path, _SOURCES_ONLY_MANIFEST)
+        with pytest.raises(ValueError, match="rule 2"):
+            load_manifest_v2(path)
+
+    def test_missing_reference_id_raises(self, tmp_path):
+        path = _write(tmp_path, 'schema_version = 2\n\n'
+                      '[[reference_solid]]\ncod_id = 1\n'
+                      'cod_revision = "1"\n')
+        with pytest.raises(ValueError, match="reference_id"):
+            load_structure_sources(path)
+
+    def test_both_sources_raises(self, tmp_path):
+        path = _write(tmp_path, 'schema_version = 2\n\n'
+                      '[[reference_solid]]\nreference_id = "x"\n'
+                      'cod_id = 1\ncod_revision = "1"\n'
+                      'structure_path = "x.skl"\n')
+        with pytest.raises(ValueError, match="rule 4"):
+            load_structure_sources(path)
+
+    def test_duplicate_reference_id_raises(self, tmp_path):
+        path = _write(tmp_path, 'schema_version = 2\n\n'
+                      '[[reference_solid]]\nreference_id = "x"\n'
+                      'structure_path = "x.skl"\n\n'
+                      '[[reference_solid]]\nreference_id = "x"\n'
+                      'structure_path = "y.skl"\n')
+        with pytest.raises(ValueError, match="duplicate"):
+            load_structure_sources(path)
+
+    def test_wrong_schema_version_raises(self, tmp_path):
+        path = _write(tmp_path, 'schema_version = 1\n')
+        with pytest.raises(ValueError, match="rule 1"):
+            load_structure_sources(path)
+
+
+class TestMaterializeOnly:
+    """The pre-flight orchestration: it materializes every source and
+    reports per-solid, continuing past failures."""
+
+    def test_converts_each_source_into_cache_dir(
+            self, tmp_path, monkeypatch):
+        # Stub the network fetch + the converter so the wiring (and
+        #   the cache_dir redirect) is tested without ASE or a binary.
+        import cif2skl
+
+        def fake_fetch(cod_id, cod_revision, dest):
+            with open(dest, "w") as handle:
+                handle.write("# fake cif\n")
+
+        def fake_convert(cif_path, skl_path, title=None):
+            with open(skl_path, "w") as handle:
+                handle.write("title\nx\nend\n")
+            return "227_a"
+
+        monkeypatch.setattr(bip, "_fetch_cod_structure", fake_fetch)
+        monkeypatch.setattr(cif2skl, "convert", fake_convert)
+
+        # Give the structure_path solid a real file to resolve.
+        (tmp_path / "a_si.skl").write_text("title\nx\nend\n")
+        manifest = _write(tmp_path, _SOURCES_ONLY_MANIFEST)
+        mirror = tmp_path / "mirror"
+
+        report = materialize_only(
+            manifest, str(tmp_path / "atomicPDB"),
+            cache_dir=str(mirror))
+
+        assert all(row["ok"] for row in report)
+        assert {row["reference_id"] for row in report} == {
+            "si_diamond", "a_si"}
+        # The cod_id solid's CIF + skl land in the redirect mirror.
+        assert (mirror / "si_diamond.cif").exists()
+        assert (mirror / "si_diamond.skl").exists()
+        # The structure_path solid resolves against the manifest dir.
+        diamond = next(r for r in report
+                       if r["reference_id"] == "si_diamond")
+        assert diamond["source"].startswith("cod_id 2104737")
+
+    def test_reports_failure_and_continues(
+            self, tmp_path, monkeypatch):
+        # One unresolvable space group must not hide the rest: the
+        #   loop captures the failure and keeps going.
+        import cif2skl
+
+        monkeypatch.setattr(
+            bip, "_fetch_cod_structure",
+            lambda cod_id, rev, dest: open(dest, "w").write("# c\n"))
+
+        def boom(cif_path, skl_path, title=None):
+            raise cif2skl.CifConversionError("no variant verified")
+
+        monkeypatch.setattr(cif2skl, "convert", boom)
+
+        (tmp_path / "a_si.skl").write_text("title\nx\nend\n")
+        manifest = _write(tmp_path, _SOURCES_ONLY_MANIFEST)
+
+        report = materialize_only(
+            manifest, str(tmp_path / "atomicPDB"),
+            cache_dir=str(tmp_path / "mirror"))
+
+        by_id = {row["reference_id"]: row for row in report}
+        assert by_id["si_diamond"]["ok"] is False
+        assert "structure_path" in by_id["si_diamond"]["message"]
+        # The local structure_path solid still resolves cleanly.
+        assert by_id["a_si"]["ok"] is True
+
+    def test_cli_materialize_only_skips_dispatch(
+            self, tmp_path, monkeypatch):
+        # --materialize-only must short-circuit before any SCF: if it
+        #   reached build_initial_potentials the stub would raise.
+        import cif2skl
+
+        monkeypatch.setattr(
+            bip, "_fetch_cod_structure",
+            lambda cod_id, rev, dest: open(dest, "w").write("# c\n"))
+        monkeypatch.setattr(
+            cif2skl, "convert",
+            lambda c, s, title=None: open(s, "w").write("t\n") or "1")
+
+        def explode(*a, **k):
+            raise AssertionError("full build must not run")
+
+        monkeypatch.setattr(bip, "build_initial_potentials", explode)
+
+        (tmp_path / "a_si.skl").write_text("t\n")
+        manifest = _write(tmp_path, _SOURCES_ONLY_MANIFEST)
+        rc = bip.main([
+            "--manifest", manifest,
+            "--pdb-root", str(tmp_path / "atomicPDB"),
+            "--materialize-only",
+            "--materialize-dir", str(tmp_path / "mirror")])
+        assert rc == 0
+
+    def test_cli_materialize_dir_requires_materialize_only(
+            self, tmp_path):
+        # --materialize-dir without --materialize-only is a usage
+        #   error (argparse exits non-zero via SystemExit).
+        with pytest.raises(SystemExit):
+            bip.main([
+                "--manifest", str(tmp_path / "m.toml"),
+                "--pdb-root", str(tmp_path / "atomicPDB"),
+                "--materialize-dir", str(tmp_path / "mirror")])
 
 
 def _write_scfv(path, body):
