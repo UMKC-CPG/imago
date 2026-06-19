@@ -590,3 +590,191 @@ def load_structure_sources(path: str) -> list[ReferenceSolid]:
             structure_path=structure_path))
 
     return sources
+
+
+# ============================================================
+#  Manifest writer (DESIGN 5.7): serialize a CurationManifest
+# ============================================================
+#
+# The hand-rolled emitter mirrors initial_potential_db.save in
+# spirit -- the project writes its own TOML so the exact layout
+# stays under our control -- but its goals differ.  The database
+# writer's payload floats use a 17-digit form to round-trip
+# binary64 exactly; a manifest is human-authored configuration
+# instead, so floats use Python's shortest round-trippable repr
+# (0.05, 5.0, 1e-06) and inline-table keys keep the order they
+# were given, both so the file reads naturally to a curator.  The
+# output round-trips through load_manifest_v2: writing a manifest
+# and reading it back yields the same reference solids.
+
+
+## TOML 1.0 basic-string escape table.  Backslash and double
+## quote get their literal escapes; the named control characters
+## get their short sequences.  Any other control character (below
+## 0x20 or 0x7F) is emitted as "\uXXXX" by _quote.
+_TOML_ESCAPES = {
+    "\\": "\\\\",
+    "\"": "\\\"",
+    "\b": "\\b",
+    "\t": "\\t",
+    "\n": "\\n",
+    "\f": "\\f",
+    "\r": "\\r",
+}
+
+
+def _quote(text: str) -> str:
+    """Quote a string as a TOML 1.0 basic string.
+
+    Backslash, double quote, and the named control characters get
+    the standard escape sequences; any other control character
+    (code point below 0x20 or equal to 0x7F) gets a ``\\uXXXX``
+    escape.  Every other character passes through unchanged.  This
+    matters mainly for a free-text ``description``; the other
+    string fields (reference_id, element symbols, method names) are
+    already restricted to safe characters.
+    """
+
+    out = ["\""]
+    for ch in text:
+        if ch in _TOML_ESCAPES:
+            out.append(_TOML_ESCAPES[ch])
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    out.append("\"")
+    return "".join(out)
+
+
+def _scalar(value: Any) -> str:
+    """Render a scalar in TOML form for a manifest.
+
+    ``bool`` is tested before ``int`` because Python's ``bool`` is
+    a subclass of ``int``.  Integers print as bare digits; floats
+    use ``repr``, which gives the shortest decimal string that
+    reads back as the same float (so ``0.05`` stays ``0.05`` and
+    ``1e-06`` stays ``1e-06``) rather than a padded scientific
+    form; strings are quoted as TOML basic strings.
+    """
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, str):
+        return _quote(value)
+    raise TypeError(
+        f"curation_manifest writer: unsupported value type "
+        f"{type(value).__name__} (value: {value!r})")
+
+
+def _value(value: Any) -> str:
+    """Render any manifest value: a nested dict becomes an inline
+    table, a list becomes an inline array, and anything else a
+    scalar (:func:`_scalar`).  Inline tables and arrays are used
+    for ``kpoint_spec``, a fingerprint ``sub_spec``, and a
+    ``shift`` triple -- the only non-scalar manifest values."""
+
+    if isinstance(value, dict):
+        return _inline_table(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_value(item) for item in value) + "]"
+    return _scalar(value)
+
+
+def _inline_table(table: dict[str, Any]) -> str:
+    """Render a dict as a TOML inline table, keeping key order.
+
+    Unlike the database writer's alphabetical-sort emitter, key
+    order is preserved here so a curator-authored ``sub_spec`` such
+    as ``{ level = 2, thick = 0.5, cutoff = 5.0, tolerance = 0.05 }``
+    reads in its natural order rather than alphabetised.  An empty
+    table renders as ``{}``.
+    """
+
+    if not table:
+        return "{}"
+    pairs = [f"{key} = {_value(val)}" for key, val in table.items()]
+    return "{ " + ", ".join(pairs) + " }"
+
+
+def _field(key: str, value: Any) -> str:
+    """Render one top-level ``key = value`` manifest line, quoting
+    or formatting the value per its type (:func:`_value`)."""
+
+    return f"{key} = {_value(value)}"
+
+
+def format_manifest(manifest: CurationManifest) -> str:
+    """Serialize a :class:`CurationManifest` to schema-v2 TOML text.
+
+    The emitted file round-trips through :func:`load_manifest_v2`:
+    the reference solids it yields equal the ones written here.
+    Each ``[[reference_solid]]`` emits its scalar fields and inline
+    ``kpoint_spec`` first, then its ``[[reference_solid.entry]]``
+    sub-tables, each followed by its
+    ``[[reference_solid.entry.fingerprint]]`` sub-tables -- the
+    order TOML requires (a table's own keys before any of its
+    sub-tables).  Blank lines separate blocks for readability.
+
+    A ``label`` is emitted only when present (an absent label means
+    "derive it at harvest", DESIGN 5.2.1), and ``preferred`` is
+    emitted only when true (the schema reads an absent flag as
+    false), so the common case stays uncluttered.
+    """
+
+    lines = [_field("schema_version", manifest.schema_version)]
+
+    for solid in manifest.reference_solids:
+        lines.append("")
+        lines.append("[[reference_solid]]")
+        lines.append(_field("reference_id", solid.reference_id))
+        lines.append(_field("system_type", solid.system_type))
+        # Exactly one structure source is set (rule 4); emit
+        #   whichever this solid carries.
+        if solid.cod_id is not None:
+            lines.append(_field("cod_id", solid.cod_id))
+            lines.append(_field("cod_revision", solid.cod_revision))
+        else:
+            lines.append(
+                _field("structure_path", solid.structure_path))
+        lines.append(_field("basis", solid.basis))
+        lines.append(_field("functional", solid.functional))
+        lines.append(
+            _field("kpoint_integration", solid.kpoint_integration))
+        lines.append(_field("kpoint_spec", solid.kpoint_spec))
+        lines.append(_field("scf_threshold", solid.scf_threshold))
+
+        for entry in solid.entries:
+            lines.append("")
+            lines.append("[[reference_solid.entry]]")
+            lines.append(_field("element", entry.element))
+            lines.append(_field("atom_site", entry.atom_site))
+            lines.append(_field("default", entry.default))
+            lines.append(_field("description", entry.description))
+            if entry.label is not None:
+                lines.append(_field("label", entry.label))
+
+            for fingerprint in entry.fingerprints:
+                lines.append("")
+                lines.append(
+                    "[[reference_solid.entry.fingerprint]]")
+                lines.append(_field("method", fingerprint.method))
+                lines.append(
+                    _field("sub_spec", fingerprint.sub_spec))
+                if fingerprint.preferred:
+                    lines.append("preferred = true")
+
+    return "\n".join(lines) + "\n"
+
+
+def write_manifest(manifest: CurationManifest, path: str) -> None:
+    """Write :func:`format_manifest` output to ``path`` (overwriting
+    any existing file), the file-producing counterpart of the
+    pure-text formatter."""
+
+    with open(path, "w") as handle:
+        handle.write(format_manifest(manifest))
