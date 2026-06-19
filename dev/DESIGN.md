@@ -3696,6 +3696,34 @@ analogy explicitly so future students reading the
 source can build the mental model from the file
 itself.
 
+**Where the schema lives, and how a manifest is
+authored.**  The manifest schema -- the dataclasses
+a parsed manifest becomes, the strict reader
+`load_manifest_v2`, the relaxed structure-only
+reader `load_structure_sources`, and the writer
+`format_manifest` -- lives in its own neutral leaf
+library, `curation_manifest.py`, so the producer and
+the authoring tool share one definition: the
+producer imports it to *run* a manifest,
+`expand_manifest.py` imports it to *write* one, and
+the library itself depends only on the lower
+libraries it validates against
+(`initial_potential_db`, `guidance_db`).  A curator
+does not hand-write a complete manifest from
+nothing: `cod_fish.py` discovers and pins structures
+and prints sketch `[[reference_solid]]` stubs;
+`expand_manifest.py` reads that sketch and fills in
+the shared method defaults and the per-structure
+harvest curation, either interactively or by
+stamping the defaults and emitting a fill-in
+template.  `cod_fish.py` stays a pure discovery tool
+and never writes a manifest.  The writer emits
+human-readable TOML -- shortest round-trippable
+floats, inline `sub_spec` tables in their authored
+order, `label` only when present and `preferred`
+only when true -- and its output round-trips through
+`load_manifest_v2`.
+
 **Reproducibility (layered).**
 `build_initial_potentials.py` reproducibility is
 layered, with each layer's guarantee matched to what
@@ -3881,9 +3909,13 @@ kpoint_integration    = "linear-tetrahedral"
   `"linear-tetrahedral"` (the producer's default; makeinput
   `-scfkpint` 1, the linear analytic tetrahedron) is
   parameter-free, while a Gaussian-smeared method carries its
-  smearing factor in the token (e.g. `"gaussian-0.1"`, makeinput
+  smearing width in the token (e.g. `"gaussian-0.1"`, makeinput
   `-scfkpint` 0).  The producer maps this token to makeinput's
-  integer integration code.
+  integer integration code and, when the token names a width,
+  forwards that width as makeinput's thermal smearing sigma (the
+  `-thermsmear` option, written into `THERMAL_SMEARING_SIGMA`, in
+  eV).  A bare `"gaussian"` names no width, so makeinput keeps its
+  rc-sourced default (no smearing).
 
 **Per-entry fields (`[[reference_solid.entry]]`).**
 
@@ -4120,7 +4152,7 @@ The pipeline runs in three phases — *build*, *dispatch*,
 launched as one flat parallel batch (the predict-then-verify
 shape of DESIGN 6.2.1) rather than one solid at a time.
 
-1. Load and validate the manifest (nine rules above).
+1. Load and validate the manifest (the rules above).
 2. For every element with a directory in `share/atomicPDB/`,
    refresh (or create) the `"isolated"` entry of that element's
    `s_gaussian_pot.toml` directly from the current `pot1` and

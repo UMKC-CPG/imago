@@ -1812,6 +1812,38 @@ shipped.
   (element, method); preferred sub_spec uniform database-wide).
   Depends on C93 (design); most meaningful once C91 seeds real
   fingerprints, but the wiring is independent of the seed.
+- [x] C95. `--materialize-only` structure pre-flight in
+  build_initial_potentials.py.  Expose Phase 1 (fetch + cif2skl
+  convert) as a standalone CLI mode so a curator can get every
+  reference structure materializing cleanly before filling in
+  the run and harvest fields.  Adds `structure_cache_dir`, the
+  relaxed reader `load_structure_sources` (only the rule 1/4/5
+  checks materializing needs), `materialize_only` (per-solid
+  report, continues past failures), and the `--materialize-only`
+  / `--materialize-dir` flags.  CODE; PSEUDOCODE 11.4.
+- [x] C96. Wire the `kpoint_integration` Gaussian smearing end
+  to end.  The `gaussian-<sigma>` token's width was parsed but
+  discarded (only the integration code reached makeinput); now
+  the producer's `_thermsmear_for` extracts the sigma (eV) and
+  `make_producer_options` forwards it as the `thermsmear`
+  option, makeinput gains a `-thermsmear` dest that overrides
+  the rc `therm_smear_main` and writes `THERMAL_SMEARING_SIGMA`.
+  A bare `gaussian` keeps the rc default (0.0).  CODE; DESIGN
+  5.7; PSEUDOCODE 11.4.  Also captured in VISION Goal 3: use the
+  database to benchmark non-Wigner functionals (and a possible
+  future libxc/xclib integration).
+- [x] C97. Manifest authoring pipeline ("Approach C").  Extract
+  the manifest schema (the dataclasses, `load_manifest_v2`, and
+  `load_structure_sources`) out of the producer into a leaf
+  library `curation_manifest.py` (which imports only
+  initial_potential_db / guidance_db, nothing in the tool
+  layer); add the manifest writer (`format_manifest` /
+  `write_manifest`, human-readable TOML that round-trips through
+  `load_manifest_v2`); and add `expand_manifest.py`, the
+  sketch-to-manifest authoring tool (interactive `-i` and
+  mechanical modes, with an injected prompt for testability).
+  cod_fish stays a pure discovery tool.  CODE; DESIGN 5.7; ARCH
+  8.5/8.7; PSEUDOCODE 11.4/11.6.
 - [ ] C91. **Side-quest (NEXT TO DEVELOP): populate the
   augmented potential database with real fingerprint
   records.**  Today every

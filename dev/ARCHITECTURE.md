@@ -842,6 +842,23 @@ job is to hand kaleidoscope a local structure file for its
 run-reuse cache to key on.  Fetch failures are strict (named
 error, no silent fallback to another revision).
 
+**Manifest authoring.**  A complete manifest is not
+hand-written from scratch.  `cod_fish.py` (9.5) discovers and
+pins structures and prints sketch `[[reference_solid]]` stubs;
+the curator collects them into a sketch file; `expand_manifest.py`
+reads the sketch and fills in the shared method defaults and the
+per-structure harvest curation, then writes the finished
+manifest.  The producer reads only that finished manifest, and
+`cod_fish.py` never writes one.  The manifest schema -- the
+dataclasses, the strict and relaxed readers, and the writer --
+lives in the shared leaf library `curation_manifest.py`, imported
+by both `expand_manifest.py` (to write a manifest) and the
+producer (to read one), so the two cannot drift.  The relaxed
+reader (`load_structure_sources`) also backs the producer's
+`--materialize-only` pre-flight, which fetches and converts every
+reference structure before the run and harvest fields are filled
+in.
+
 Outputs:
 - Regenerated augmented database file in each affected
   `share/atomicPDB/<element>/` directory.
@@ -918,6 +935,16 @@ helper module (proposed `src/scripts/initial_potential_db.py`)
 so that any future format swap or schema-version bump is a
 one-file change rather than a spread of edits across the
 three scripts above.
+
+The curation-manifest schema -- its dataclasses, the strict
+`load_manifest_v2` and relaxed `load_structure_sources` readers,
+and the `format_manifest` writer -- is likewise encapsulated in a
+small leaf library, `src/scripts/curation_manifest.py`, imported
+by both the producer and the authoring tool; it depends only on
+the lower libraries it validates against (`initial_potential_db`,
+`guidance_db`).  New scripts: `curation_manifest.py` (the schema
+library) and `expand_manifest.py` (the sketch-to-manifest
+authoring tool, 8.5).
 
 Fortran: no changes for the Phase-1 chain or the Phase-2
 base chain.  Imago consumes the same input file format;

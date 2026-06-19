@@ -2161,7 +2161,7 @@ change.
 ### 11.1 TOML Reader (DESIGN 5.2, 5.4)
 
 Parses a per-element `s_gaussian_pot.toml` file and
-applies the nine validation rules from DESIGN 5.2
+applies the validation rules from DESIGN 5.2
 (schema v2).  Returns an `ElementDatabase`; raises a
 clear error on any rule violation, naming the file
 path, label, and field at fault.
@@ -3709,9 +3709,14 @@ contributes the same converged point back to the
 guidance dataspace.
 
 The v2 manifest reader (`load_manifest_v2` below)
-enforces the nine validation rules of DESIGN 5.7 --
-the v1-era three-rule reader has been retired with
-the rest of schema v1.  Producer-side fingerprint
+enforces the validation rules of DESIGN 5.7.
+That reader, the relaxed structure-only reader
+(`load_structure_sources`), and the writer
+(`format_manifest`) live in the shared schema
+library `curation_manifest.py`, imported by both the
+producer and the `expand_manifest.py` authoring tool
+that writes manifests from `cod_fish.py` sketches.
+Producer-side fingerprint
 harvest splits Python-side matchers (in-process,
 descriptor-agnostic) from Fortran-side matchers, which
 read the `fort.21` of the `-loen` unit kaleidoscope
@@ -3780,8 +3785,10 @@ function buildInitialPotentials(manifest_path,
         # into the tools' own coded vocabulary (DESIGN 6.2.10):
         # make_producer_options maps the manifest's
         # human-readable physics -- functional -> xccode,
-        # kpoint_integration -> scfkpint, basis -> the imago
-        # scf_basis, scf_threshold -> converg, shift ->
+        # kpoint_integration -> scfkpint (and, when the token
+        # names a width like "gaussian-0.1", that width ->
+        # thermsmear / THERMAL_SMEARING_SIGMA), basis -> the
+        # imago scf_basis, scf_threshold -> converg, shift ->
         # kpshift -- and adds the imago_commit cache identity.
         # These are tool-facing only; the wingbeat (§13.2)
         # routes each key to the tool that recognises it.
@@ -4127,6 +4134,60 @@ function materialize_structure(ref):
     return local
 
 
+function load_structure_sources(path):
+    # The relaxed read behind --materialize-only (DESIGN
+    # 5.7), and the read expand_manifest (11.6) uses to
+    # complete a sketch.  It enforces only what materializing
+    # a structure needs -- schema version (rule 1), a
+    # label-safe unique reference_id (rule 5), and exactly one
+    # structure source (rule 4) -- and captures system_type
+    # when present.  Run and harvest fields are left at
+    # placeholders; this view is never dispatched, only
+    # materialized, so the full rule set does not apply.
+    raw = toml_load(path)
+    require(raw.schema_version == 2)               # rule 1
+    seen = empty_set
+    sources = []
+    for ref in raw.reference_solid:
+        require("reference_id" in ref)
+        rid = ref.reference_id
+        require(is_label_safe(rid))                # rule 5
+        require(rid not in seen); seen.add(rid)
+        require(has(ref,"cod_id") != has(ref,"structure_path"))
+        # cod_id (positive int + non-empty cod_revision) or a
+        # structure_path; the path's existence is checked at
+        # materialize time, not here.
+        sources.append(ReferenceSolid(
+            reference_id   = rid,
+            system_type    = ref.get("system_type", ""),
+            cod_id         = ref.get("cod_id"),
+            cod_revision   = ref.get("cod_revision"),
+            structure_path = ref.get("structure_path"),
+            <run + harvest fields left at placeholders>))
+    return sources
+
+
+function materialize_only(manifest_path, pdb_root,
+        cache_dir = None):
+    # The --materialize-only pre-flight (DESIGN 5.7): fetch
+    # and convert every reference structure, then STOP -- no
+    # SCF dispatch.  Lets a curator get a freshly pinned set
+    # materializing cleanly before the run and harvest fields
+    # are filled in.  A per-solid failure does NOT abort the
+    # batch: it is recorded and the next solid is tried.
+    sources = load_structure_sources(manifest_path)
+    if cache_dir is None:
+        cache_dir = structure_cache_dir(pdb_root)
+    report = []
+    for ref in sources:
+        try:
+            skl = materialize_structure(ref)   # fetch + convert
+            report.append(ok_row(ref, skl))
+        except materialize_error as e:
+            report.append(fail_row(ref, e))
+    return report          # the CLI prints it plus a tally
+
+
 function harvestFingerprints(flight, ref, spec,
         result_toml):
     # Build one FingerprintRecord per declared
@@ -4370,6 +4431,116 @@ function benchInitialPotential(benchmark_path):
         verdict           = verdict)
 
     exit(0 if verdict == "PASS" else 1)
+```
+
+### 11.6 Manifest authoring (DESIGN 5.7)
+
+The *write* side of the schema library
+(`curation_manifest.py`); `load_manifest_v2` (11.4) is the
+*read* side.  `cod_fish` prints sketch `[[reference_solid]]`
+stubs, the curator collects them, and `expand_manifest`
+completes them into a manifest the writer serializes.  The
+writer emits human-readable TOML -- shortest round-trippable
+floats, inline `sub_spec` tables in their authored order,
+`label` only when present and `preferred` only when true --
+and its output round-trips through `load_manifest_v2`.
+
+```
+function format_manifest(manifest):
+    lines = ["schema_version = " + manifest.schema_version]
+    for solid in manifest.reference_solids:
+        emit "[[reference_solid]]"
+        emit reference_id, system_type
+        if solid.cod_id is not None:
+            emit cod_id, cod_revision
+        else:
+            emit structure_path
+        # A table's scalars (and the inline kpoint_spec)
+        # precede its sub-tables, as TOML requires.
+        emit basis, functional, kpoint_integration,
+             kpoint_spec (inline table), scf_threshold
+        for entry in solid.entries:
+            emit "[[reference_solid.entry]]"
+            emit element, atom_site, default, description
+            if entry.label is not None: emit label
+            for fp in entry.fingerprints:
+                emit "[[reference_solid.entry.fingerprint]]"
+                emit method, sub_spec (inline table)
+                if fp.preferred: emit "preferred = true"
+    return join(lines, "\n") + "\n"   # floats via shortest repr
+
+function write_manifest(manifest, path):
+    write_file(path, format_manifest(manifest))
+```
+
+`expand_manifest.py` -- the sketch-to-manifest authoring
+tool -- has two modes that share one stamping step.
+
+```
+function stamp_shared_defaults(source, basis, functional,
+        kpoint_integration, scf_threshold,
+        system_type_default):
+    # Copy the sketch stub's identity + structure source,
+    # add the shared method defaults, leave kpoint_spec empty
+    # (density -> predict-then-verify) and entries to the
+    # caller.  system_type is the sketch's when set, else the
+    # supplied default.
+    return ReferenceSolid(
+        reference_id   = source.reference_id,
+        system_type    = source.system_type
+                         or system_type_default,
+        basis = basis, functional = functional,
+        kpoint_integration = kpoint_integration,
+        kpoint_spec = {}, scf_threshold = scf_threshold,
+        cod_id = source.cod_id,
+        cod_revision = source.cod_revision,
+        structure_path = source.structure_path,
+        entries = copy(source.entries))
+
+function build_mechanical(sources, **shared):
+    # Stamp defaults onto every sketched structure, leaving
+    # entries empty.  The CLI appends a commented fill-in
+    # template; the output is loadable (it just harvests
+    # nothing until entries are added by hand).
+    return CurationManifest(schema_version = 2,
+        reference_solids =
+            [stamp_shared_defaults(s, **shared)
+             for s in sources])
+
+function build_interactive(sources, ask, **shared):
+    # Walk the curator through completing each structure.
+    # ask(prompt, default) returns the reply or the default;
+    # injecting it (rather than calling input) keeps the flow
+    # testable with scripted answers.
+    confirm the shared defaults once via ask
+    preferred_seen = empty_set       # (element, method) pairs
+    solids = []
+    for source in sources:
+        system_type = ask(..., source.system_type or default)
+        entries = []
+        while ask_yes_no("add an entry?", default = true):
+            element, atom_site, is_default, description,
+                label  <- ask(...)        # blank label -> None
+            fingerprints = []
+            if ask_yes_no("attach reduce + bispectrum?", true):
+                for (method, sub_spec) in
+                        [("reduce",     DEFAULT_REDUCE_SUB_SPEC),
+                         ("bispectrum", DEFAULT_BISPECTRUM_SUB_SPEC)]:
+                    # Mark preferred the FIRST time each
+                    # (element, method) appears, so rule 10
+                    # (one preferred per family) holds without
+                    # the curator tracking it.
+                    key = (element, method)
+                    preferred = key not in preferred_seen
+                    if preferred: preferred_seen.add(key)
+                    fingerprints.append(ManifestFingerprint(
+                        method, copy(sub_spec), preferred))
+            entries.append(ReferenceEntry(element, atom_site,
+                is_default, description, label, fingerprints))
+        solids.append(stamp_shared_defaults(
+            source with system_type and entries, **shared))
+    return CurationManifest(schema_version = 2,
+        reference_solids = solids)
 ```
 
 ## 12. imago.py Callable API (DESIGN 6.1)
