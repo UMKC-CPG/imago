@@ -118,6 +118,26 @@ class TestRefusalsAndOverride:
         with pytest.raises(CifConversionError, match="occupancy"):
             cif_to_skeleton(str(cif))
 
+    def test_near_full_occupancy_accepted(self, tmp_path):
+        # A refinement rounding like 0.9999 is a physically full site
+        #   (e.g. BC8 silicon, COD 4350826); it must convert, not be
+        #   refused as partial occupancy.
+        cif = tmp_path / "near_full.cif"
+        cif.write_text(
+            "data_test\n"
+            "_cell_length_a 5.0\n_cell_length_b 5.0\n"
+            "_cell_length_c 5.0\n"
+            "_cell_angle_alpha 90\n_cell_angle_beta 90\n"
+            "_cell_angle_gamma 90\n"
+            "_space_group_IT_number 1\n"
+            "loop_\n"
+            "_atom_site_label\n_atom_site_fract_x\n"
+            "_atom_site_fract_y\n_atom_site_fract_z\n"
+            "_atom_site_occupancy\n"
+            "Si1 0.0 0.0 0.0 0.9999\n")
+        lines, token = cif_to_skeleton(str(cif))
+        assert lines   # converted, not refused on occupancy
+
     def test_wrong_forced_setting_errors(self, tmp_path):
         # Forcing P1 on a structure that needs Fm-3m cannot reproduce the
         # four-atom expansion, so the verified override fails loudly.

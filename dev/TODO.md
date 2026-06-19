@@ -1860,6 +1860,13 @@ shipped.
   into each entry's element and description, so the curator invents
   neither (they are not schema fields; the producer ignores them and
   the finished manifest omits them). CODE; DESIGN 5.7; ARCH 9.5.
+- [x] C99. cif2skl tolerates near-full site occupancy. Experimental
+  CIFs report a fully-occupied site as a refined value just below 1
+  (e.g. BC8 silicon, COD 4350826, lists `Si 0.9999`); the old check
+  refused anything below `1 - 1e-6`, spuriously rejecting it. Now a
+  new `_FULL_OCCUPANCY_TOLERANCE` (1e-2) treats occupancy within 1%
+  of full as full, while genuine partial occupancy (disorder /
+  vacancies, well below the band) is still refused. CODE; ARCH 9.5.
 - [ ] C91. **Side-quest (NEXT TO DEVELOP): populate the
   augmented potential database with real fingerprint
   records.**  Today every

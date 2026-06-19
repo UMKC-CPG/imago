@@ -1522,8 +1522,10 @@ discarding it:
    cell.  This is the only step that touches `ase`, and it
    spares us a hand-written CIF parser (CIF's `loop_`
    blocks and symmetry expansion are exactly what ASE
-   already handles).  Partial/mixed occupancy is refused
-   for now.
+   already handles).  Genuine partial/mixed occupancy is
+   refused for now; a refined occupancy within a small
+   tolerance of 1 (e.g. 0.9999, a rounding on a physically
+   full site) counts as full.
 2. The space group is resolved by **verification, not by
    parsing operation tables**.  The `spaceDB` entries for
    the CIF's IT number are the candidate settings (the

@@ -73,6 +73,14 @@ from structure_control import StructureControl
 #   CIF coordinates, tight enough to separate distinct origin settings.
 _MATCH_TOLERANCE = 1.0e-3
 
+# How far below 1.0 a refined site occupancy may sit and still count as
+#   fully occupied.  Experimental CIFs report a full site as a value
+#   very close to -- but not exactly -- 1 (e.g. 0.9999 is a rounding;
+#   the site is physically full).  Anything more than this far below 1
+#   is treated as genuine partial occupancy (disorder or vacancies),
+#   which the skeleton format cannot express and so is refused.
+_FULL_OCCUPANCY_TOLERANCE = 1.0e-2
+
 
 class CifConversionError(Exception):
     """A CIF could not be converted -- unreadable, unsupported (partial
@@ -130,9 +138,14 @@ def _read_cif(cif_path):
             f"{cif_path}: no data block found in the CIF")
     block = blocks[0]
 
+    # A refined occupancy within _FULL_OCCUPANCY_TOLERANCE of 1 (e.g.
+    #   0.9999) is a fully-occupied site reported with rounding; only
+    #   occupancy genuinely below that band is partial (disorder or
+    #   vacancies), which the skeleton format cannot represent.
     occupancy = block.get("_atom_site_occupancy")
     if occupancy is not None and any(
-            float(value) < 1.0 - 1.0e-6 for value in occupancy):
+            float(value) < 1.0 - _FULL_OCCUPANCY_TOLERANCE
+            for value in occupancy):
         raise CifConversionError(
             f"{cif_path}: partial site occupancy is not supported yet; "
             f"convert a fully-occupied structure or edit the CIF")
