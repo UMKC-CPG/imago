@@ -30,6 +30,7 @@ import argparse as ap
 import os
 import sys
 import re
+from datetime import datetime
 import osrecurintglib as lib
 
 
@@ -885,9 +886,27 @@ def main():
         string = apply_seperable_substitutions(string)
         lib.print_cont_string(string, 80, 3, f, True)
 
+def record_command():
+    """Append the issued command line to a file named "command" in
+    the current directory, so the exact invocation can be recovered
+    later.  This is a standing project convention: each run appends
+    a dated block, so the file builds up a history of how the script
+    was called."""
+
+    with open("command", "a") as cmd:
+        now = datetime.now()
+        stamp = now.strftime("%b. %d, %Y: %H:%M:%S")
+        cmd.write(f"Date: {stamp}\n")
+        cmd.write("Cmnd:")
+        for argument in sys.argv:
+            cmd.write(f" {argument}")
+        cmd.write("\n\n")
+
+
 if __name__ == '__main__':
     # Everything before this point was a subroutine definition or a request
     #   to import information from external modules. Only now do we actually
     #   start running the program. In this case, there is no program. This
     #   should only be imported as a module.
+    record_command()
     main()

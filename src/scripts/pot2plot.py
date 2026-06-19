@@ -4,6 +4,7 @@ import argparse as ap
 import os
 import sys
 import math as m
+from datetime import datetime
 import numpy as np
 
 def print_help():
@@ -330,10 +331,28 @@ def main():
     pot_data.evaluate_pot()
 
 
+def record_command():
+    """Append the issued command line to a file named "command" in
+    the current directory, so the exact invocation can be recovered
+    later.  This is a standing project convention: each run appends
+    a dated block, so the file builds up a history of how the script
+    was called."""
+
+    with open("command", "a") as cmd:
+        now = datetime.now()
+        stamp = now.strftime("%b. %d, %Y: %H:%M:%S")
+        cmd.write(f"Date: {stamp}\n")
+        cmd.write("Cmnd:")
+        for argument in sys.argv:
+            cmd.write(f" {argument}")
+        cmd.write("\n\n")
+
+
 if __name__ == '__main__':
     # Everything before this point was a subroutine definition or a request
     #   to import information from external modules. Only now do we actually
     #   start running the program. The purpose of this is to allow another
     #   python program to import *this* script and call its functions
     #   internally.
+    record_command()
     main()

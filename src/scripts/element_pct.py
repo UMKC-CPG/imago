@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import sys
+from datetime import datetime
+
 
 def calculate_element_percentage(filename, target_element):
     """
@@ -63,7 +65,25 @@ def calculate_element_percentage(filename, target_element):
     return percentage
 
 # Command line usage
+def record_command():
+    """Append the issued command line to a file named "command" in
+    the current directory, so the exact invocation can be recovered
+    later.  This is a standing project convention: each run appends
+    a dated block, so the file builds up a history of how the script
+    was called."""
+
+    with open("command", "a") as cmd:
+        now = datetime.now()
+        stamp = now.strftime("%b. %d, %Y: %H:%M:%S")
+        cmd.write(f"Date: {stamp}\n")
+        cmd.write("Cmnd:")
+        for argument in sys.argv:
+            cmd.write(f" {argument}")
+        cmd.write("\n\n")
+
+
 if __name__ == "__main__":
+    record_command()
     if len(sys.argv) != 3:
         print("Usage: get_element_percent.py <filename> <element>")
         sys.exit(1)

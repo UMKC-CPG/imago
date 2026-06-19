@@ -232,6 +232,18 @@ skl/                  Example skeleton input files
 - Shared modules in `src/` are compiled once and used across
   subprograms
 - Scripts are standalone tools
+- **Runnable scripts log their invocation.** Every user-invokable
+  script appends the issued command line to a file named `command`
+  in the current directory -- a dated `Date:` / `Cmnd: <argv>`
+  block per run -- so the exact invocation is recoverable later.
+  The standard helper is a module-level `record_command()` (copied
+  per script, matching the existing convention) called from the
+  `if __name__ == "__main__":` block, NOT from inside `main()`:
+  placing it at the real entry point logs the actual `sys.argv` and
+  keeps it from firing (and writing stray `command` files) when the
+  test suite calls `main(argv)` directly. This applies to scripts
+  that take a command to run; the `*rc.py` resource-control files
+  and imported library modules (no `__main__`) are exempt.
 
 ## Documentation Policy
 

@@ -131,6 +131,7 @@ within the file does not matter.
 
 import os
 import sys
+from datetime import datetime
 import numpy as np
 import random
 import subprocess
@@ -1422,5 +1423,23 @@ def main():
         gen_count += 1
 
         
+def record_command():
+    """Append the issued command line to a file named "command" in
+    the current directory, so the exact invocation can be recovered
+    later.  This is a standing project convention: each run appends
+    a dated block, so the file builds up a history of how the script
+    was called."""
+
+    with open("command", "a") as cmd:
+        now = datetime.now()
+        stamp = now.strftime("%b. %d, %Y: %H:%M:%S")
+        cmd.write(f"Date: {stamp}\n")
+        cmd.write("Cmnd:")
+        for argument in sys.argv:
+            cmd.write(f" {argument}")
+        cmd.write("\n\n")
+
+
 if __name__ == "__main__":
+        record_command()
         main()
