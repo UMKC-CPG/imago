@@ -3720,8 +3720,15 @@ from the CIF metadata
 the shared method defaults and the per-structure
 harvest curation, either interactively or by
 stamping the defaults and emitting a fill-in
-template.  `cod_fish.py` stays a pure discovery tool
-and never writes a manifest.  The writer emits
+template.  Each sketch stub also carries two
+discovery hints cod_fish read from the CIF -- the
+composition (``elements``) and a
+``source_description`` -- which the interactive flow
+offers as the element and description defaults, so
+the curator invents neither; they are not schema
+fields (the producer ignores them and the finished
+manifest omits them).  `cod_fish.py` stays a pure
+discovery tool and never writes a manifest.  The writer emits
 human-readable TOML -- shortest round-trippable
 floats, inline `sub_spec` tables in their authored
 order, `label` only when present and `preferred`

@@ -1475,11 +1475,18 @@ local database and writes no SQL of its own:
   separates phases that share a space group (4H and hcp
   silicon are both P 6_3/m m c); a residual name clash gets
   a trailing counter so every id stays unique (manifest rule
-  5).  So `cod_fish.py pin <ids> > sketch.toml` writes a
-  sketch the authoring tool reads directly.  This is the
-  bridge from browsing to a reproducible pull; indices come
-  from the saved search, so a student never retypes long ids,
-  and the auto-named id makes a wrong pick obvious.
+  5).  Each stub also carries two discovery hints read from
+  the same CIF -- the composition (`elements`) and a
+  `source_description` (chemical name + space group + year) --
+  which the authoring tool uses to auto-fill each entry's
+  element and description so the curator invents neither.  They
+  are not manifest-schema fields (the producer ignores them,
+  and the finished manifest omits them).  So `cod_fish.py pin
+  <ids> > sketch.toml` writes a sketch the authoring tool reads
+  directly.  This is the bridge from browsing to a reproducible
+  pull; indices come from the saved search, so a student never
+  retypes long ids, and the auto-named id makes a wrong pick
+  obvious.
 - `rank` (or `search --rank`) is **advisory triage**, not
   validation: when a composition has many COD entries it
   annotates and orders them by interpretable signals

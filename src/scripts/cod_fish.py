@@ -520,13 +520,48 @@ def _auto_reference_id(cif_bytes):
     return "_".join(parts)
 
 
-def pin(tokens, session_rows=None):
-    """Resolve the chosen rows to their current revisions and names.
+def _composition(cif_bytes):
+    """The element symbols present in the CIF's chemical formula,
+    sorted -- recorded in the sketch so the authoring tool can
+    auto-fill each entry's element without re-reading the CIF."""
 
-    Returns a list of ``{id, revision, reference_id}`` dicts.  Only
-    the chosen few are fetched -- to read each one's revision and
-    derive its reference_id from the CIF metadata; a broad search is
-    never downloaded wholesale."""
+    text = cif_bytes.decode("utf-8", "replace")
+    return sorted(_formula_counts(
+        _cif_value(text, "_chemical_formula_sum")))
+
+
+def _source_description(cif_bytes):
+    """A human description of the pinned structure from its CIF
+    metadata -- a name (the common, mineral, or systematic chemical
+    name, else the formula) plus the space-group H-M symbol, its
+    International Tables number, and the publication year, e.g.
+    "hexagonal 4H Si-IV, P 63/m m c (194), 2018".  Recorded in the
+    sketch as the authoring tool's default entry description, so the
+    curator does not invent one."""
+
+    text = cif_bytes.decode("utf-8", "replace")
+    name = (_cif_value(text, "_chemical_name_common",
+                       "_chemical_name_mineral",
+                       "_chemical_name_systematic")
+            or _cif_value(text, "_chemical_formula_sum"))
+    hm = _cif_value(text, "_symmetry_space_group_name_H-M",
+                    "_space_group_name_H-M_alt").split(":")[0].strip()
+    it = _cif_value(text, "_space_group_IT_number",
+                    "_symmetry_Int_Tables_number")
+    year = _cif_value(text, "_journal_year")
+    space_group = f"{hm} ({it})" if hm and it else hm
+    return ", ".join(p for p in (name, space_group, year) if p)
+
+
+def pin(tokens, session_rows=None):
+    """Resolve the chosen rows to their current revisions, names, and
+    discovery hints.
+
+    Returns a list of ``{id, revision, reference_id, elements,
+    description}`` dicts.  Only the chosen few are fetched -- to read
+    each one's revision and derive, from the CIF metadata, its
+    reference_id, its composition, and a human description; a broad
+    search is never downloaded wholesale."""
 
     pinned = []
     for cod_id in resolve_ids(tokens, session_rows):
@@ -534,7 +569,9 @@ def pin(tokens, session_rows=None):
         pinned.append({
             "id": cod_id,
             "revision": cif_revision(data),
-            "reference_id": _auto_reference_id(data)})
+            "reference_id": _auto_reference_id(data),
+            "elements": _composition(data),
+            "description": _source_description(data)})
     return pinned
 
 
@@ -580,6 +617,18 @@ def _manifest_fragment(pinned):
         lines.append('system_type = "crystalline"')
         lines.append(f'cod_id = {entry["id"]}')
         lines.append(f'cod_revision = "{entry["revision"]}"')
+        # Discovery hints the authoring tool reads to auto-fill each
+        #   entry's element and description.  They are not part of the
+        #   manifest schema -- the producer ignores them, and the
+        #   finished manifest the authoring tool writes omits them.
+        if entry.get("elements"):
+            joined = ", ".join(f'"{symbol}"'
+                               for symbol in entry["elements"])
+            lines.append(f"elements = [{joined}]")
+        if entry.get("description"):
+            escaped = entry["description"].replace(
+                "\\", "\\\\").replace('"', '\\"')
+            lines.append(f'source_description = "{escaped}"')
         lines.append("# fill in: kpoint_spec, scf_threshold, basis, "
                      "functional, kpoint_integration, and entries")
         lines.append("")

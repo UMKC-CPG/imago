@@ -154,6 +154,33 @@ class TestAutoReferenceId:
         assert cod_fish._auto_reference_id(cif) is None
 
 
+class TestCompositionAndDescription:
+    """The discovery hints cod_fish writes into a sketch: the
+    composition and a human description from the CIF metadata."""
+
+    _DIAMOND = (b"_chemical_formula_sum 'Si'\n"
+                b"_chemical_name_common 'Silicon'\n"
+                b"_symmetry_space_group_name_H-M 'F d -3 m :1'\n"
+                b"_space_group_IT_number 227\n_journal_year 2010\n")
+
+    def test_composition_lists_elements_sorted(self):
+        assert cod_fish._composition(self._DIAMOND) == ["Si"]
+        assert cod_fish._composition(
+            b"_chemical_formula_sum 'Fe2 O3'\n") == ["Fe", "O"]
+
+    def test_description_uses_name_spacegroup_year(self):
+        # The setting suffix (":1") is dropped from the H-M symbol.
+        assert cod_fish._source_description(self._DIAMOND) == \
+            "Silicon, F d -3 m (227), 2010"
+
+    def test_description_falls_back_to_formula(self):
+        cif = (b"_chemical_formula_sum 'Si'\n"
+               b"_symmetry_space_group_name_H-M 'I m m a'\n"
+               b"_space_group_IT_number 74\n_journal_year 1993\n")
+        assert cod_fish._source_description(cif) == \
+            "Si, I m m a (74), 1993"
+
+
 class TestManifestFragment:
     def test_fragment_carries_id_and_revision(self):
         fragment = cod_fish._manifest_fragment(
@@ -192,6 +219,16 @@ class TestManifestFragment:
         fragment = cod_fish._manifest_fragment(
             [{"id": "9008463", "revision": "1"}])
         assert 'reference_id = "cod_9008463"' in fragment
+
+    def test_emits_elements_and_description_hints(self):
+        fragment = cod_fish._manifest_fragment([{
+            "id": "9011656", "revision": "291877",
+            "reference_id": "si_imma_74_1993",
+            "elements": ["Si"],
+            "description": "Silicon, I m m a (74), 1993"}])
+        assert 'elements = ["Si"]' in fragment
+        assert ('source_description = '
+                '"Silicon, I m m a (74), 1993"') in fragment
 
 
 class TestStoichiometry:

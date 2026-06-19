@@ -42,11 +42,15 @@ def _write_sketch(tmp_path, text=_SKETCH):
 
 def _scripted(answers):
     """An ``ask`` callable that returns successive scripted answers,
-    ignoring the prompt and default -- the test supplies exact text."""
+    ignoring the prompt.  An answer of ``None`` means "press Enter",
+    so the call returns the ``default`` -- matching the real prompt's
+    accept-the-default behaviour, which lets a test exercise the
+    hint-supplied element and description defaults."""
     answer_iter = iter(answers)
 
     def ask(prompt, default):
-        return next(answer_iter)
+        answer = next(answer_iter)
+        return default if answer is None else answer
 
     return ask
 
@@ -171,6 +175,62 @@ def test_interactive_marks_preferred_only_once_per_family(tmp_path):
     out = tmp_path / "manifest.toml"
     write_manifest(manifest, str(out))
     load_manifest_v2(str(out))   # would raise on a rule-10 violation
+
+
+# ==============================================================
+#  Discovery hints (cod_fish-written) auto-fill element + desc
+# ==============================================================
+
+_HINTED_SKETCH = """\
+schema_version = 2
+
+[[reference_solid]]
+reference_id = "si_imma_74_1993"
+system_type = "crystalline"
+cod_id = 9011656
+cod_revision = "291877"
+elements = ["Si"]
+source_description = "Silicon, I m m a (74), 1993"
+"""
+
+
+def test_load_sketch_hints_reads_elements_and_description(tmp_path):
+    path = _write_sketch(tmp_path, _HINTED_SKETCH)
+    hints = em.load_sketch_hints(path)
+    assert hints["si_imma_74_1993"]["elements"] == ["Si"]
+    assert hints["si_imma_74_1993"]["description"] == \
+        "Silicon, I m m a (74), 1993"
+
+
+def test_load_sketch_hints_empty_without_fields(tmp_path):
+    # A hand-written sketch lacking the hint fields yields empties,
+    #   so the interactive flow just prompts with blank defaults.
+    path = _write_sketch(tmp_path)            # the plain _SKETCH
+    hints = em.load_sketch_hints(path)
+    assert hints["si_diamond"] == {"elements": [], "description": ""}
+
+
+def test_interactive_accepts_hinted_element_and_description(tmp_path):
+    # None means "press Enter": element and description are left to
+    #   their hint-supplied defaults.
+    answers = [
+        None, None, None, None,   # shared defaults
+        None,                     # system_type
+        "y",                      # add an entry?
+        None, None, "y", None, None,   # element, atom_site, default,
+                                       #   description, label (all Enter)
+        "y",                      # attach fingerprints?
+        "n",                      # add another?
+    ]
+    sources = load_structure_sources(_write_sketch(tmp_path))
+    hints = {"si_diamond": {
+        "elements": ["Si"],
+        "description": "Silicon, F d -3 m (227), 2010"}}
+    manifest = build_interactive(
+        sources, _scripted(answers), hints=hints, **_SHARED)
+    entry = manifest.reference_solids[0].entries[0]
+    assert entry.element == "Si"
+    assert entry.description == "Silicon, F d -3 m (227), 2010"
 
 
 # ==============================================================

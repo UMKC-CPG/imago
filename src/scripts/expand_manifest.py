@@ -39,6 +39,7 @@ override that.
 
 import argparse
 import sys
+import tomllib
 from datetime import datetime
 
 from curation_manifest import (
@@ -113,6 +114,27 @@ ENTRY_TEMPLATE = """\
 """
 
 
+def load_sketch_hints(path: str) -> dict[str, dict]:
+    """Read the optional discovery hints cod_fish writes into a sketch
+    -- per reference_id, the composition (``elements``) and a
+    ``source_description`` -- so the interactive flow can offer them
+    as the element and description defaults.  These are not manifest
+    schema fields (the producer ignores them); a sketch without them
+    just yields empty hints, so a hand-written sketch still works."""
+
+    with open(path, "rb") as handle:
+        raw = tomllib.load(handle)
+    hints: dict[str, dict] = {}
+    for ref in raw.get("reference_solid", []):
+        reference_id = ref.get("reference_id")
+        if reference_id is None:
+            continue
+        hints[reference_id] = {
+            "elements": ref.get("elements") or [],
+            "description": ref.get("source_description", "")}
+    return hints
+
+
 def stamp_shared_defaults(source: ReferenceSolid, *, basis: str,
                           functional: str, kpoint_integration: str,
                           scf_threshold: float,
@@ -184,7 +206,9 @@ def _ask_yes_no(ask, prompt: str, default: bool) -> bool:
 def build_interactive(sources: list[ReferenceSolid], ask, *,
                       basis: str, functional: str,
                       kpoint_integration: str, scf_threshold: float,
-                      system_type_default: str) -> CurationManifest:
+                      system_type_default: str,
+                      hints: dict[str, dict] | None = None
+                      ) -> CurationManifest:
     """Walk the curator through completing each sketched structure.
 
     ``ask(prompt, default)`` returns the curator's answer, or
@@ -211,6 +235,12 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
         kpoint_integration)
     scf_threshold = float(ask("scf_threshold", str(scf_threshold)))
 
+    # cod_fish's per-structure discovery hints (composition +
+    #   description), keyed by reference_id; empty for a hand-written
+    #   sketch, in which case the element and description just prompt
+    #   with blank defaults.
+    hints = hints or {}
+
     # (element, method) pairs already marked preferred, and elements
     #   that already hold their one default entry -- both tracked
     #   across the whole manifest so rules 10 and 7 hold by default.
@@ -223,6 +253,9 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
         #   the questions that follow are clearly about this solid.
         print(f"\n--- structure {source.reference_id} ---",
               file=sys.stderr)
+        hint = hints.get(source.reference_id, {})
+        hint_elements = hint.get("elements") or []
+        hint_description = hint.get("description", "")
         system_type = ask(
             f"system_type ({'/'.join(VALID_SYSTEM_TYPES)})",
             source.system_type or system_type_default)
@@ -234,7 +267,15 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
         add_entry = _ask_yes_no(
             ask, f"add an entry for {source.reference_id}?", True)
         while add_entry:
-            element = ask("  element", "")
+            # Default the element to the structure's composition (the
+            #   next not-yet-entered element, so a single-element
+            #   solid auto-fills it) and the description to the
+            #   CIF-derived hint -- both from cod_fish (DESIGN 5.7).
+            element_default = (
+                hint_elements[len(entries)]
+                if len(entries) < len(hint_elements)
+                else (hint_elements[0] if hint_elements else ""))
+            element = ask("  element", element_default)
             atom_site = int(ask("  atom_site", "1"))
             # Default to yes only until this element has its one
             #   default entry, so accepting defaults yields exactly
@@ -244,7 +285,7 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
                 element not in default_elements)
             if is_default:
                 default_elements.add(element)
-            description = ask("  description", "")
+            description = ask("  description", hint_description)
             label = ask("  label (blank to derive at harvest)", "")
 
             fingerprints: list[ManifestFingerprint] = []
@@ -368,7 +409,9 @@ def main(argv=None) -> int:
             _build_parser().error(
                 "--interactive requires -o/--output (its prompts "
                 "use standard output)")
-        manifest = build_interactive(sources, _input_ask, **shared)
+        hints = load_sketch_hints(args.sketch)
+        manifest = build_interactive(
+            sources, _input_ask, hints=hints, **shared)
         write_manifest(manifest, args.output)
         print(f"expand_manifest: wrote {len(sources)} reference "
               f"solids to {args.output}", file=sys.stderr)

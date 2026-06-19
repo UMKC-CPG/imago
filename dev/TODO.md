@@ -1854,7 +1854,12 @@ shipped.
   residual clash gets a trailing counter (rule 5). Removes the
   hand-prepend of schema_version and the per-entry rename from the
   seeding workflow, so `cod_fish.py pin <ids> > sketch.toml` is a
-  ready sketch. CODE; DESIGN 5.7; ARCH 9.5.
+  ready sketch. Each stub also carries two CIF-read discovery hints
+  -- `elements` (composition) and `source_description` (chemical
+  name + space group + year) -- which `expand_manifest` auto-fills
+  into each entry's element and description, so the curator invents
+  neither (they are not schema fields; the producer ignores them and
+  the finished manifest omits them). CODE; DESIGN 5.7; ARCH 9.5.
 - [ ] C91. **Side-quest (NEXT TO DEVELOP): populate the
   augmented potential database with real fingerprint
   records.**  Today every
