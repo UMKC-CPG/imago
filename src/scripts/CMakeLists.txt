@@ -7,7 +7,7 @@ set (SCRIPTS
    ab2pf.py angle_utils.py
    bond_analysis.py build_initial_potentials.py
    cif2skl.py cod_fish.py
-   collectSYBD.py condense.py
+   collectSYBD.py condense.py curation_manifest.py
    deadmd.py dump2skl.py
    element_data.py element_pct.py
    graspElems.py

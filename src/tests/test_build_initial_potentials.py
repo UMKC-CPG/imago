@@ -21,12 +21,15 @@ import types
 
 import pytest
 
-from build_initial_potentials import (
+from curation_manifest import (
     load_manifest_v2,
     CurationManifest,
     ReferenceSolid,
     ReferenceEntry,
     ManifestFingerprint,
+    load_structure_sources,
+)
+from build_initial_potentials import (
     element_path,
     is_isolated_default_for,
     build_isolated_entry,
@@ -43,7 +46,6 @@ from build_initial_potentials import (
     curation_workspace_root,
     structure_cache_dir,
     materialize_structure,
-    load_structure_sources,
     materialize_only,
     extract_potential,
     read_site_identity_map,
