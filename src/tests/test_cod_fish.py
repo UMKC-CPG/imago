@@ -124,3 +124,59 @@ class TestManifestFragment:
         assert "cod_id = 9008463" in fragment
         assert 'cod_revision = "291735"' in fragment
         assert "reference_id" in fragment
+
+
+class TestStoichiometry:
+    """Element specs carry optional counts (2Fe / Fe2); by default a
+    count selects the exact reduced formula unit, while --fuzzy hands
+    the count to COD's own broader match."""
+
+    # file 2 (Fe4 O6, Z=2) reduces to Fe2O3; file 4 (Fe25 O32) and
+    # file 5 (non-stoichiometric) do not -- the exact filter keeps 1,2.
+    _CSV = ("# header comment\n"
+            "file,formula,sgNumber\n"
+            "1,- Fe2 O3 -,167\n"
+            "2,- Fe4 O6 -,167\n"
+            "3,- Fe3 O4 -,227\n"
+            "4,- Fe25 O32 -,1\n"
+            "5,- Fe0.911 O -,225\n")
+
+    def _stub(self, monkeypatch):
+        monkeypatch.setattr(
+            cod_fish, "_http_get",
+            lambda url, timeout=120: self._CSV.encode())
+
+    def test_spec_count_either_side(self):
+        assert cod_fish._parse_element_spec("2Fe") == (2, "Fe")
+        assert cod_fish._parse_element_spec("Fe2") == (2, "Fe")
+        assert cod_fish._parse_element_spec("Fe") == (None, "Fe")
+        assert cod_fish._parse_element_spec("o") == (None, "O")
+
+    def test_spec_rejects_double_count(self):
+        with pytest.raises(CodFishError):
+            cod_fish._parse_element_spec("2Fe2")
+
+    def test_spec_rejects_garbage(self):
+        with pytest.raises(CodFishError):
+            cod_fish._parse_element_spec("42")
+
+    def test_count_box_leading_space_for_one_letter(self):
+        assert cod_fish._cod_count_box("Fe", 2) == "Fe 2"
+        assert cod_fish._cod_count_box("O", 3) == " O 3"
+
+    def test_reduced_formula_gcd_and_nonstoich(self):
+        assert cod_fish._reduced_formula(
+            {"Fe": 4.0, "O": 6.0}) == {"Fe": 2, "O": 3}
+        assert cod_fish._reduced_formula(
+            {"Fe": 0.911, "O": 1.0}) is None
+
+    def test_default_keeps_exact_formula_unit(self, monkeypatch):
+        self._stub(monkeypatch)
+        ids = [r["id"] for r in cod_fish.search(["2Fe", "3O"])]
+        assert ids == ["1", "2"]      # Fe2O3 and Fe4O6 (->Fe2O3)
+
+    def test_fuzzy_skips_client_filter(self, monkeypatch):
+        self._stub(monkeypatch)
+        ids = [r["id"] for r in cod_fish.search(["2Fe", "3O"],
+                                                fuzzy=True)]
+        assert ids == ["1", "2", "3", "4", "5"]

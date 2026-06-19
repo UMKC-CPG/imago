@@ -319,28 +319,41 @@ def _default_skl_path(cif_path):
 def _build_parser():
     """Build the command-line argument parser."""
 
+    description_text = (
+        "Convert a CIF crystal structure into an imago.skl "
+        "skeleton, preserving the space group.\n\n"
+        "The skeleton stores the asymmetric unit plus a space-group "
+        "token (not a flattened P1 cell), and the spaceDB setting is "
+        "resolved by expanding each candidate and matching the CIF -- "
+        "so an unresolvable space group is a hard error you can "
+        "override with --space.")
+    epilog_text = (
+        "Examples:\n"
+        "  cif2skl.py au_fcc.cif\n"
+        "  cif2skl.py si.cif si_diamond.skl\n"
+        "  cif2skl.py si.cif --space 227_b\n")
+
     parser = argparse.ArgumentParser(
-        description="Convert a CIF crystal structure into an imago.skl "
-                    "skeleton, preserving the space group (the skeleton "
-                    "stores the asymmetric unit plus a space-group "
-                    "token, not a flattened P1 cell).")
+        prog="cif2skl.py",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=description_text, epilog=epilog_text)
     parser.add_argument(
         "cif", metavar="INPUT.cif",
-        help="Path to the input CIF file.")
+        help="Path to the input CIF file.  Required.")
     parser.add_argument(
         "skl", metavar="OUTPUT.skl", nargs="?", default=None,
-        help="Path for the output skeleton.  Optional; defaults to the "
-             "input path with its extension changed to '.skl'.")
+        help="Path for the output skeleton.  Default: the input "
+             "path with its extension changed to '.skl'.")
     parser.add_argument(
         "-s", "--space", default=None, metavar="TOKEN",
         help="Force a specific spaceDB setting token (e.g. '227_b') "
-             "instead of resolving it automatically.  The forced "
+             "instead of resolving it automatically; the forced "
              "setting is still verified against the CIF's expansion.  "
-             "Optional; defaults to automatic resolution.")
+             "Default: automatic resolution.")
     parser.add_argument(
-        "-t", "--title", default=None,
-        help="Title recorded in the skeleton's title block.  Optional; "
-             "defaults to a note naming the source CIF.")
+        "-t", "--title", default=None, metavar="STR",
+        help="Title recorded in the skeleton's title block.  "
+             "Default: a note naming the source CIF.")
     return parser
 
 
