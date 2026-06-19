@@ -3711,7 +3711,11 @@ libraries it validates against
 (`initial_potential_db`, `guidance_db`).  A curator
 does not hand-write a complete manifest from
 nothing: `cod_fish.py` discovers and pins structures
-and prints sketch `[[reference_solid]]` stubs;
+and prints a complete sketch -- a `schema_version`
+header plus one `[[reference_solid]]` stub per
+structure, each with a `reference_id` auto-derived
+from the CIF metadata
+(`<formula>_<symbol>_<number>_<year>`);
 `expand_manifest.py` reads that sketch and fills in
 the shared method defaults and the per-structure
 harvest curation, either interactively or by

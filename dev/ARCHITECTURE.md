@@ -844,8 +844,10 @@ error, no silent fallback to another revision).
 
 **Manifest authoring.**  A complete manifest is not
 hand-written from scratch.  `cod_fish.py` (9.5) discovers and
-pins structures and prints sketch `[[reference_solid]]` stubs;
-the curator collects them into a sketch file; `expand_manifest.py`
+pins structures and prints a complete sketch -- a `schema_version`
+header plus `[[reference_solid]]` stubs whose `reference_id` is
+auto-derived from each CIF's metadata -- so `cod_fish.py pin <ids>
+> sketch.toml` writes it in one step; `expand_manifest.py`
 reads the sketch and fills in the shared method defaults and the
 per-structure harvest curation, then writes the finished
 manifest.  The producer reads only that finished manifest, and
@@ -1463,13 +1465,21 @@ local database and writes no SQL of its own:
   the working directory so later verbs can refer to rows
   by their **index** rather than their eight-digit id.
 - `pin <index|id> [...]` resolves the chosen rows'
-  revisions (fetching only those few) and prints a pinned
-  list -- a human summary plus a paste-ready manifest
-  fragment with `cod_id`/`cod_revision` filled in.  This
-  is the bridge from browsing to a reproducible pull;
-  indices come from the saved search, so a student never
-  retypes long ids, and the echoed formula/spacegroup per
-  row makes a wrong pick obvious.
+  revisions (fetching only those few) and prints a complete,
+  ready-to-read sketch manifest: a `schema_version` header
+  plus one `[[reference_solid]]` stub per structure, each
+  with `cod_id`/`cod_revision` filled in and a `reference_id`
+  derived from that CIF's own metadata --
+  `<formula>_<H-M symbol>_<IT number>_<year>`, e.g.
+  `si_fd-3m_227_2010`.  The year both dates the entry and
+  separates phases that share a space group (4H and hcp
+  silicon are both P 6_3/m m c); a residual name clash gets
+  a trailing counter so every id stays unique (manifest rule
+  5).  So `cod_fish.py pin <ids> > sketch.toml` writes a
+  sketch the authoring tool reads directly.  This is the
+  bridge from browsing to a reproducible pull; indices come
+  from the saved search, so a student never retypes long ids,
+  and the auto-named id makes a wrong pick obvious.
 - `rank` (or `search --rank`) is **advisory triage**, not
   validation: when a composition has many COD entries it
   annotates and orders them by interpretable signals

@@ -1844,6 +1844,17 @@ shipped.
   mechanical modes, with an injected prompt for testability).
   cod_fish stays a pure discovery tool.  CODE; DESIGN 5.7; ARCH
   8.5/8.7; PSEUDOCODE 11.4/11.6.
+- [x] C98. `cod_fish pin` emits a ready-to-use sketch. It now
+  prints a complete sketch -- a `schema_version = 2` header plus
+  one `[[reference_solid]]` stub per pinned structure -- and
+  auto-derives each `reference_id` from the CIF metadata it already
+  downloads: `<formula>_<H-M symbol>_<IT number>_<year>` (e.g.
+  `si_fd-3m_227_2010`). The year dates the entry and separates
+  phases sharing a space group (4H vs hcp Si, both P6_3/mmc); a
+  residual clash gets a trailing counter (rule 5). Removes the
+  hand-prepend of schema_version and the per-entry rename from the
+  seeding workflow, so `cod_fish.py pin <ids> > sketch.toml` is a
+  ready sketch. CODE; DESIGN 5.7; ARCH 9.5.
 - [ ] C91. **Side-quest (NEXT TO DEVELOP): populate the
   augmented potential database with real fingerprint
   records.**  Today every

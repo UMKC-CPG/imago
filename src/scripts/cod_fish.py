@@ -434,17 +434,107 @@ def resolve_ids(tokens, session_rows):
     return ids
 
 
-def pin(tokens, session_rows=None):
-    """Resolve the chosen rows to their current revisions.
+# ============================================================
+#  CIF metadata -> reference_id (DESIGN 5.7)
+# ============================================================
+#
+# pin already downloads each chosen CIF (to read its revision), so it
+# also derives a human-meaningful, label-safe reference_id from the
+# CIF's own metadata: the reduced chemical formula, the space-group
+# Hermann-Mauguin symbol and International Tables number, and the
+# publication year -- e.g. "si_fd-3m_227_2010".  This frees the
+# curator from inventing an id for every pinned structure.  The year
+# also separates two phases that share a space group (4H and hcp
+# silicon are both P 63/m m c); any residual collision is broken with
+# a trailing counter by the fragment emitter.
 
-    Returns a list of ``{id, revision}`` dicts.  Only the chosen few are
-    fetched (to read their revisions); a broad search is never downloaded
-    wholesale."""
+
+def _cif_value(text, *tags):
+    """Return the value of the first CIF data item matching any of
+    ``tags`` (a single-line tag/value pair), stripped of quotes, or
+    "" when none is present.  The exact first-token match avoids
+    picking up a longer tag that merely starts with the same text."""
+
+    for tag in tags:
+        for line in text.splitlines():
+            parts = line.strip().split(None, 1)
+            if parts and parts[0] == tag:
+                return parts[1].strip().strip("'\"") \
+                    if len(parts) > 1 else ""
+    return ""
+
+
+def _sanitize_token(text):
+    """Reduce a string to the label-safe charset (lowercase letters,
+    digits, hyphen) a reference_id is restricted to (DESIGN 5.2.1)."""
+
+    return re.sub(r"[^a-z0-9-]", "", text.lower())
+
+
+def _formula_token(text):
+    """Build the composition part of a reference_id from the CIF's
+    ``_chemical_formula_sum`` -- the reduced formula unit, elements in
+    alphabetical order, counts above one kept (Si -> "si", Fe2 O3 ->
+    "fe2o3").  Returns "" when no integer formula unit is available."""
+
+    counts = _reduced_formula(
+        _formula_counts(_cif_value(text, "_chemical_formula_sum")))
+    if not counts:
+        return ""
+    return "".join(
+        symbol.lower() + (str(counts[symbol]) if counts[symbol] > 1
+                          else "")
+        for symbol in sorted(counts))
+
+
+def _space_group_token(text):
+    """Return the (Hermann-Mauguin symbol, International Tables number)
+    tokens for a reference_id.  The H-M symbol is reduced to the
+    label-safe charset with the origin/setting suffix dropped (so
+    "F d -3 m :1" -> "fd-3m" and "P 63/m m c" -> "p63mmc")."""
+
+    hm = _cif_value(text, "_symmetry_space_group_name_H-M",
+                    "_space_group_name_H-M_alt")
+    it = _cif_value(text, "_space_group_IT_number",
+                    "_symmetry_Int_Tables_number")
+    return _sanitize_token(hm.split(":")[0]), _sanitize_token(it)
+
+
+def _auto_reference_id(cif_bytes):
+    """Derive a label-safe reference_id from a CIF's metadata --
+    ``<formula>_<H-M symbol>_<IT number>_<year>``, e.g.
+    "si_fd-3m_227_2010".  The publication year (always present and
+    numeric) both dates the entry and separates two phases that share
+    a space group.  Returns None when the formula or space group
+    cannot be read, so the caller falls back to a cod-id-based name."""
+
+    text = cif_bytes.decode("utf-8", "replace")
+    formula = _formula_token(text)
+    hm, it = _space_group_token(text)
+    if not (formula and hm and it):
+        return None
+    parts = [formula, hm, it]
+    year = _sanitize_token(_cif_value(text, "_journal_year"))
+    if year:
+        parts.append(year)
+    return "_".join(parts)
+
+
+def pin(tokens, session_rows=None):
+    """Resolve the chosen rows to their current revisions and names.
+
+    Returns a list of ``{id, revision, reference_id}`` dicts.  Only
+    the chosen few are fetched -- to read each one's revision and
+    derive its reference_id from the CIF metadata; a broad search is
+    never downloaded wholesale."""
 
     pinned = []
     for cod_id in resolve_ids(tokens, session_rows):
         data = fetch_cif(cod_id)
-        pinned.append({"id": cod_id, "revision": cif_revision(data)})
+        pinned.append({
+            "id": cod_id,
+            "revision": cif_revision(data),
+            "reference_id": _auto_reference_id(data)})
     return pinned
 
 
@@ -467,12 +557,26 @@ def _print_table(candidates):
 
 
 def _manifest_fragment(pinned):
-    """Render pinned entries as a paste-ready manifest fragment."""
+    """Render pinned entries as a ready-to-use sketch manifest.
 
-    lines = []
+    The output is a complete sketch -- a ``schema_version`` header plus
+    one ``[[reference_solid]]`` stub per pinned structure -- so
+    ``cod_fish.py pin <ids> > sketch.toml`` writes a file the authoring
+    tool (expand_manifest) reads directly.  Each stub's
+    ``reference_id`` is the metadata-derived name from
+    :func:`_auto_reference_id`, falling back to ``cod_<id>`` when the
+    CIF lacked the needed fields; should two stubs reduce to the same
+    name, the later ones get a trailing counter so every reference_id
+    stays unique (manifest rule 5)."""
+
+    lines = ["schema_version = 2", ""]
+    used = {}
     for entry in pinned:
+        base = entry.get("reference_id") or f"cod_{entry['id']}"
+        used[base] = used.get(base, 0) + 1
+        name = base if used[base] == 1 else f"{base}_{used[base]}"
         lines.append("[[reference_solid]]")
-        lines.append(f'reference_id = "cod_{entry["id"]}"')
+        lines.append(f'reference_id = "{name}"')
         lines.append('system_type = "crystalline"')
         lines.append(f'cod_id = {entry["id"]}')
         lines.append(f'cod_revision = "{entry["revision"]}"')

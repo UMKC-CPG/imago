@@ -117,6 +117,43 @@ class TestRevisionGuard:
         assert cod_fish.fetch_cif("123") == b"#$Revision: 42 $\ndata_x\n"
 
 
+class TestAutoReferenceId:
+    """reference_id derived from CIF metadata: formula + H-M symbol +
+    IT number + publication year (DESIGN 5.7)."""
+
+    _DIAMOND = (b"#$Revision: 100 $\n"
+                b"_chemical_formula_sum 'Si'\n"
+                b"_symmetry_space_group_name_H-M 'F d -3 m :1'\n"
+                b"_space_group_IT_number 227\n"
+                b"_journal_year 2010\n")
+
+    def test_builds_formula_symbol_number_year(self):
+        assert cod_fish._auto_reference_id(self._DIAMOND) == \
+            "si_fd-3m_227_2010"
+
+    def test_drops_setting_and_slash_from_symbol(self):
+        cif = (b"_chemical_formula_sum 'Si'\n"
+               b"_symmetry_space_group_name_H-M 'P 63/m m c'\n"
+               b"_space_group_IT_number 194\n_journal_year 1984\n")
+        assert cod_fish._auto_reference_id(cif) == "si_p63mmc_194_1984"
+
+    def test_reduces_formula_unit(self):
+        cif = (b"_chemical_formula_sum 'Fe4 O6'\n"
+               b"_symmetry_space_group_name_H-M 'R -3 c'\n"
+               b"_space_group_IT_number 167\n_journal_year 1990\n")
+        assert cod_fish._auto_reference_id(cif) == "fe2o3_r-3c_167_1990"
+
+    def test_omits_year_when_absent(self):
+        cif = (b"_chemical_formula_sum 'Si'\n"
+               b"_symmetry_space_group_name_H-M 'I m m a'\n"
+               b"_space_group_IT_number 74\n")
+        assert cod_fish._auto_reference_id(cif) == "si_imma_74"
+
+    def test_none_when_space_group_missing(self):
+        cif = b"_chemical_formula_sum 'Si'\n_journal_year 2010\n"
+        assert cod_fish._auto_reference_id(cif) is None
+
+
 class TestManifestFragment:
     def test_fragment_carries_id_and_revision(self):
         fragment = cod_fish._manifest_fragment(
@@ -124,6 +161,37 @@ class TestManifestFragment:
         assert "cod_id = 9008463" in fragment
         assert 'cod_revision = "291735"' in fragment
         assert "reference_id" in fragment
+
+    def test_emits_schema_version_header(self):
+        # A pin's output is a complete, ready-to-read sketch.
+        fragment = cod_fish._manifest_fragment(
+            [{"id": "1", "revision": "1",
+              "reference_id": "si_imma_74_1993"}])
+        assert fragment.startswith("schema_version = 2")
+        assert 'reference_id = "si_imma_74_1993"' in fragment
+
+    def test_uses_auto_reference_id_when_present(self):
+        fragment = cod_fish._manifest_fragment(
+            [{"id": "2104737", "revision": "201401",
+              "reference_id": "si_fd-3m_227_2010"}])
+        assert 'reference_id = "si_fd-3m_227_2010"' in fragment
+        assert "cod_2104737" not in fragment
+
+    def test_disambiguates_colliding_reference_ids(self):
+        # Two stubs reducing to the same name: the second gets a
+        #   trailing counter so reference_id stays unique (rule 5).
+        fragment = cod_fish._manifest_fragment([
+            {"id": "1", "revision": "1",
+             "reference_id": "si_p63mmc_194"},
+            {"id": "2", "revision": "2",
+             "reference_id": "si_p63mmc_194"}])
+        assert 'reference_id = "si_p63mmc_194"' in fragment
+        assert 'reference_id = "si_p63mmc_194_2"' in fragment
+
+    def test_falls_back_to_cod_id_without_reference_id(self):
+        fragment = cod_fish._manifest_fragment(
+            [{"id": "9008463", "revision": "1"}])
+        assert 'reference_id = "cod_9008463"' in fragment
 
 
 class TestStoichiometry:
