@@ -510,10 +510,13 @@ def load_structure_sources(path: str) -> list[ReferenceSolid]:
     details.  This reader enforces just enough to materialize each
     solid -- schema version (rule 1), a label-safe and unique
     ``reference_id`` (rule 5), and exactly one valid structure source
-    (rule 4).  The run and harvest fields are left at harmless
-    placeholders, because this relaxed view is never dispatched, only
-    materialized; that lets a half-written manifest still be
-    pre-flighted."""
+    (rule 4).  ``system_type`` is captured when present (it is an
+    intrinsic structure property a sketch already carries) but is not
+    domain-checked here; the run and harvest fields are left at
+    harmless placeholders, because this relaxed view is never
+    dispatched, only materialized.  That lets a half-written manifest
+    still be pre-flighted, and lets the authoring tool
+    (``expand_manifest``) read the same sketch back to complete it."""
 
     if not os.path.isfile(path):
         raise FileNotFoundError(
@@ -583,7 +586,8 @@ def load_structure_sources(path: str) -> list[ReferenceSolid]:
             structure_path = ref["structure_path"]
 
         sources.append(ReferenceSolid(
-            reference_id=rid, system_type="", basis="",
+            reference_id=rid,
+            system_type=ref.get("system_type", ""), basis="",
             functional="", kpoint_integration="", kpoint_spec={},
             scf_threshold=0.0, cod_id=cod_id,
             cod_revision=cod_revision,

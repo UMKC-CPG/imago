@@ -9,7 +9,7 @@ set (SCRIPTS
    cif2skl.py cod_fish.py
    collectSYBD.py condense.py curation_manifest.py
    deadmd.py dump2skl.py
-   element_data.py element_pct.py
+   element_data.py element_pct.py expand_manifest.py
    graspElems.py
    guidance_db.py guidance_harvest.py guidance_promote.py
    hdf5Comp.py
