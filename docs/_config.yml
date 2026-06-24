@@ -49,4 +49,4 @@ gh_edit_source: docs
 gh_edit_view_mode: "tree"
 
 # Color scheme for the rendered site: "light" (default) or "dark".
-color_scheme: light
+color_scheme: dark
