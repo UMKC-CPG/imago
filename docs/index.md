@@ -1,8 +1,11 @@
 ---
-# Empty front matter on purpose: its mere presence is what tells
-# Jekyll to render this page through the active theme's layout.  The
-# theme supplies the title/description banner from _config.yml, so the
-# body below starts straight into prose rather than repeating the name.
+# Front matter drives where Just the Docs places this page.  `title`
+# is the label shown in the left-hand navigation sidebar, and
+# `nav_order: 1` pins this landing page to the very top of that list.
+# Its presence is also what tells Jekyll to render the page through the
+# active theme's layout.
+title: Home
+nav_order: 1
 ---
 
 Imago is the successor to the long-running OLCAO codebase. The method

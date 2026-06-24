@@ -1,16 +1,52 @@
 # GitHub Pages / Jekyll configuration for the Imago project site.
 #
-# `theme:` selects one of the Jekyll themes that GitHub Pages ships
-# out of the box.  jekyll-theme-tactile renders `title` and
-# `description` in a header banner and then drops each page's body
-# content below it.  Switching themes later is a one-line change here
-# (e.g. jekyll-theme-cayman, jekyll-theme-slate, jekyll-theme-minimal).
+# The site is published through GitHub Pages' built-in "Deploy from a
+# branch" build (repo Settings -> Pages -> Branch: main, Folder: /docs).
+# GitHub runs the Jekyll build server-side, so there is no GitHub
+# Actions workflow and no .github/ directory involved in publishing.
 #
-# Note: a `.nojekyll` file must NOT be present for any of this to take
-# effect -- that file disables the Jekyll build a theme depends on.
+# Theme: "Just the Docs" is NOT one of GitHub's built-in themes, so it
+# cannot be named under `theme:`.  Instead it is pulled in with
+# `remote_theme:` via the jekyll-remote-theme plugin, which IS on the
+# GitHub Pages allowlist.  The theme is pinned to an exact release tag
+# so that a new upstream release can never silently change how the site
+# looks; bump the @vX.Y.Z suffix below to upgrade the theme on purpose.
+#
+# Note: a `.nojekyll` file must NOT be present anywhere in /docs -- that
+# file disables the Jekyll build the whole theme depends on.
 
 title: Imago
 description: >-
   An all-electron electronic-structure code implementing the OLCAO
   (Orthogonalized Linear Combination of Atomic Orbitals) method.
-theme: jekyll-theme-tactile
+
+remote_theme: just-the-docs/just-the-docs@v0.12.0
+
+plugins:
+  - jekyll-remote-theme
+
+# --- Just the Docs options -------------------------------------------
+
+# Enable the client-side search box.  Just the Docs builds a search
+# index from every page at build time and searches it in the browser.
+search_enabled: true
+
+# Link shown in the top-right corner of every page, pointing readers
+# back to the source repository.
+aux_links:
+  "Imago on GitHub":
+    - "https://github.com/umkc-cpg/imago"
+aux_links_new_tab: false
+
+# Show an "edit this page on GitHub" link in each page's footer.  The
+# source lives in the /docs subfolder of the main branch, so the edit
+# URL is assembled from these four pieces.
+gh_edit_link: true
+gh_edit_link_text: "View this page on GitHub"
+gh_edit_repository: "https://github.com/umkc-cpg/imago"
+gh_edit_branch: "main"
+gh_edit_source: docs
+gh_edit_view_mode: "tree"
+
+# Color scheme for the rendered site: "light" (default) or "dark".
+color_scheme: light
