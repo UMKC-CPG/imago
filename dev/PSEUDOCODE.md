@@ -5748,12 +5748,14 @@ function probe_site():
     return facts
 
 function render_starter_clusterrc(facts):
-    # Mirror the LIVE schema so the starter cannot drift: iterate
-    #   clusterrc.parameters_and_defaults(), overlay the discovered
-    #   hardware facts, and leave the required core (worker_init,
-    #   and partitions when none were found) as None with a FILL IN
-    #   comment.  topology/accounts ride along as guiding comments.
-    settings = clusterrc.parameters_and_defaults()
+    # Self-contained: _starter_schema() is THIS tool's own copy of the
+    #   settings dict (NOT imported from clusterrc -- a test keeps the
+    #   two identical), so the tool writes a full starter without
+    #   reading any clusterrc.py.  Overlay the discovered hardware
+    #   facts; leave the required core (worker_init, and partitions
+    #   when none were found) as None with a FILL IN comment.
+    #   topology/accounts ride along as guiding comments.
+    settings = _starter_schema()
     for key in ["partitions", "cores_per_node",
                 "memory_per_node", "gpus_per_node"]:
         if key in facts: settings[key] = facts[key]

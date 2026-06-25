@@ -22,9 +22,15 @@ missing tool or an unparseable line drops that one fact rather than
 aborting, and its output is a draft the user reviews and edits, never
 an authority.
 
-The starter mirrors the schema in ``clusterrc.py`` itself, read at run
-time, so the two can never drift: whatever keys the real settings file
-defines are exactly the keys the starter offers.
+This tool is *self-contained*: it carries its own copy of the schema
+(:func:`_starter_schema`) and only ever *writes* a ``clusterrc.py`` --
+it never reads one.  That keeps the division of labour clean
+(``cluster_config`` reads the settings file, ``cluster_probe`` creates
+it) and means the tool needs no ``clusterrc.py`` to exist and no
+directory lookup at all.  The cost is that the key list lives in two
+files; a test (``test_cluster_probe``) asserts this schema stays
+identical to ``clusterrc.parameters_and_defaults()`` so they cannot
+drift apart.
 """
 
 import argparse
@@ -35,44 +41,43 @@ import sys
 from datetime import datetime
 
 
-def _load_clusterrc():
-    """Import the ``clusterrc`` settings module and return it.
+def _starter_schema():
+    """Return the cluster-settings schema this tool writes out.
 
-    ``cluster_probe.py`` reads the canonical schema from ``clusterrc``
-    so the starter it writes offers exactly the keys the real settings
-    file defines.  Finding that module is the one subtlety: when this
-    script is run from ``bin/`` its own directory -- not the working
-    directory or ``$IMAGO_RC`` -- is on ``sys.path``, so a bare import
-    misses the installed ``clusterrc.py``.
-
-    The lookup therefore tries the normal path first (covers a source
-    checkout and the test suite, where ``src/scripts`` is already on
-    the path), then falls back to the standard rc-file search -- the
-    current directory and ``$IMAGO_RC`` -- exactly as the other Imago
-    scripts locate their rc files.  A genuinely missing ``clusterrc.py``
-    (Imago not installed, ``$IMAGO_RC`` unset) is reported as a clear
-    instruction rather than a bare ``ModuleNotFoundError``.
+    A self-contained copy of ``clusterrc.parameters_and_defaults()`` --
+    the same keys in the same order with the same defaults -- so the
+    tool can generate a complete starter file without importing (or even
+    needing the existence of) a ``clusterrc.py``.  Kept identical to the
+    real settings file by ``test_cluster_probe.test_schema_matches_*``;
+    when a key is added to ``clusterrc.py`` it is added here too.
     """
-    try:
-        import clusterrc
-        return clusterrc
-    except ModuleNotFoundError:
-        pass
-    # Same precedence as cluster_config: a local clusterrc.py wins, with
-    #   $IMAGO_RC as the fallback default.  Earlier sys.path entries
-    #   win, so insert in reverse precedence ($IMAGO_RC first, then the
-    #   working directory) to leave the working directory at index 0.
-    for candidate in (os.getenv("IMAGO_RC"), os.getcwd()):
-        if candidate and candidate not in sys.path:
-            sys.path.insert(0, candidate)
-    try:
-        import clusterrc
-        return clusterrc
-    except ModuleNotFoundError:
-        raise SystemExit(
-            "cluster_probe: cannot find clusterrc.py.  Install Imago "
-            "(it ships a template to $IMAGO_RC) or set $IMAGO_RC to a "
-            "directory containing clusterrc.py.")
+    return {
+        # Required core -- shipped as None, left for the user to fill.
+        "partitions":        None,
+        "worker_init":       None,
+        "account":           None,
+        # Performance tuning.
+        "cores_per_node":    None,
+        "workers_per_node":  None,
+        "cores_per_worker":  1,
+        "nodes":             1,
+        "walltime":          "01:00:00",
+        "default_topology":  "slurm-per-job",
+        "max_blocks":        1,
+        "memory_per_node":   None,
+        "memory_per_worker": None,
+        # Advanced / forward-looking.
+        "launcher":          "single",
+        "ranks_per_worker":  1,
+        "threads_per_rank":  1,
+        "binding":           None,
+        "omp_places":        None,
+        "omp_proc_bind":     None,
+        "gpus_per_node":     0,
+        "queue_overrides":   {},
+        "profiles":          {},
+        "extra_scheduler_options": [],
+    }
 
 
 # ================================================================
@@ -323,10 +328,10 @@ _REQUIRED_KEYS = ("partitions", "worker_init")
 def render_starter_clusterrc(discovered_facts):
     """Render a starter ``clusterrc.py`` source file as text.
 
-    The starter mirrors the live schema -- it iterates
-    ``clusterrc.parameters_and_defaults()`` so it offers exactly the
-    keys the real settings file defines and can never drift from them.
-    The discoverable hardware facts overlay their defaults; the
+    The starter offers every key in :func:`_starter_schema` (this
+    tool's own copy of the settings, kept identical to the real file by
+    a test), so the user sees and can tune the whole surface in one
+    file.  The discoverable hardware facts overlay their defaults; the
     required-core fields the machine cannot know (``worker_init``, and
     ``partitions`` when no queue was found) are left as ``None`` with a
     ``FILL IN`` comment, so the dispatch generator's required-field
@@ -347,10 +352,10 @@ def render_starter_clusterrc(discovered_facts):
     """
     facts = discovered_facts or {}
 
-    # Start from the canonical schema, then overlay the hardware facts
-    #   the probe can fill directly.  Reading the schema here is what
-    #   keeps the starter in lock-step with the real settings file.
-    settings = _load_clusterrc().parameters_and_defaults()
+    # Start from this tool's own schema, then overlay the hardware facts
+    #   the probe can fill directly.  No clusterrc.py is read -- the test
+    #   suite keeps _starter_schema() identical to the real settings.
+    settings = _starter_schema()
     for key in _DISCOVERABLE_KEYS:
         if key in facts:
             settings[key] = facts[key]

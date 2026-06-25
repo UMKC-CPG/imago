@@ -6425,9 +6425,15 @@ settings file can be read straight off the machine, which makes
 first-cluster bring-up far less daunting: `cluster_probe.py`
 queries the scheduler and the node hardware and writes a
 *starter* copy of the settings file with everything it can
-learn already filled in.  The starter mirrors the live schema
-(it reads `clusterrc.parameters_and_defaults()` at run time),
-so the two can never drift.  What it reads:
+learn already filled in.  The tool is *self-contained*: it
+carries its own copy of the schema and only ever *writes* a
+`clusterrc.py`, never reads one, so it needs no settings file
+to exist and does no directory lookup at all -- a clean split
+where `cluster_config` reads the file and `cluster_probe`
+creates it.  The cost is that the key list lives in two
+places; a test keeps the tool's copy identical to
+`clusterrc.parameters_and_defaults()` so they cannot drift.
+What it reads off the machine:
 
 - *Scheduler queries* -- `sinfo` and `scontrol show partition`
   enumerate the queues, the nodes per queue, the cores and
@@ -6472,20 +6478,20 @@ setup step for any user running on a cluster, exactly
 analogous to `unpackImagoDB.py` for the databases.  A
 local-only user never touches it: `--dispatch local`
 (decision 2) short-circuits before any settings file is read.
-Because `cluster_probe.py` is the bootstrap tool, it must not
-hard-depend on a populated file: it locates the shipped
-template through the standard rc-file search (the working
-directory, then `$IMAGO_RC`) and reports a clear instruction
-if none is found.
+Because `cluster_probe.py` only *writes* a `clusterrc.py` and
+never reads one, it has no bootstrap dependency at all: it runs
+before any settings file exists and needs neither `$IMAGO_RC`
+nor a working-directory copy.
 
-*Resolution precedence.*  Both the bootstrap tool and the
-dispatch read resolve `clusterrc.py` the same way, and the
-order is deliberate: the working directory is searched first,
-then `$IMAGO_RC`.  So the convenient default is the global
-copy in `$IMAGO_RC` -- populated once, picked up by every run --
-while a `clusterrc.py` dropped beside a particular campaign
-overrides it for that run only, letting a sweep pin different
-queues or walltime without disturbing the global settings.
+*Resolution precedence (the dispatch read).*  Only
+`cluster_config` -- the dispatch read -- locates an existing
+`clusterrc.py`, and the search order is deliberate: the working
+directory first, then `$IMAGO_RC`.  So the convenient default
+is the global copy in `$IMAGO_RC` -- populated once, picked up
+by every run -- while a `clusterrc.py` dropped beside a
+particular campaign overrides it for that run only, letting a
+sweep pin different queues or walltime without disturbing the
+global settings.
 
 **Decision 2 -- per-run choices are command-line options,
 optionally saved.**  The client exposes options --

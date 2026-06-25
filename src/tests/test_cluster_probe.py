@@ -121,13 +121,23 @@ def _starter_settings(text):
     return namespace["parameters_and_defaults"]()
 
 
-def test_render_starter_mirrors_the_full_schema(monkeypatch):
-    """The starter offers exactly the keys the real settings file
-    defines (read from clusterrc at run time, so they cannot drift),
-    fills the discovered facts, and leaves the required blanks as
-    None with a FILL IN marker."""
+def test_starter_schema_matches_clusterrc():
+    """cluster_probe is self-contained -- it carries its own copy of the
+    schema and never reads clusterrc.py -- so this test is the guard
+    that keeps the two from drifting: same keys, same order, same
+    defaults."""
     import clusterrc
-    schema_keys = set(clusterrc.parameters_and_defaults())
+    canonical = clusterrc.parameters_and_defaults()
+    schema = cluster_probe._starter_schema()
+    assert schema == canonical
+    assert list(schema) == list(canonical)   # same insertion order too
+
+
+def test_render_starter_offers_the_full_schema():
+    """The starter offers every key the tool's own schema defines,
+    fills the discovered facts, and leaves the required blanks as None
+    with a FILL IN marker."""
+    schema_keys = set(cluster_probe._starter_schema())
 
     facts = {"partitions": ["general", "gpu"], "cores_per_node": 32,
              "memory_per_node": 192000, "gpus_per_node": 4,
@@ -135,7 +145,7 @@ def test_render_starter_mirrors_the_full_schema(monkeypatch):
              "accounts": ["rulisp-lab"]}
     text = cluster_probe.render_starter_clusterrc(facts)
     settings = _starter_settings(text)
-    # Full key parity with the canonical schema.
+    # Full key parity with the tool's schema.
     assert set(settings) == schema_keys
     # Discovered facts filled.
     assert settings["partitions"] == ["general", "gpu"]
