@@ -34,7 +34,41 @@ import subprocess
 import sys
 from datetime import datetime
 
-import clusterrc
+
+def _load_clusterrc():
+    """Import the ``clusterrc`` settings module and return it.
+
+    ``cluster_probe.py`` reads the canonical schema from ``clusterrc``
+    so the starter it writes offers exactly the keys the real settings
+    file defines.  Finding that module is the one subtlety: when this
+    script is run from ``bin/`` its own directory -- not the working
+    directory or ``$IMAGO_RC`` -- is on ``sys.path``, so a bare import
+    misses the installed ``clusterrc.py``.
+
+    The lookup therefore tries the normal path first (covers a source
+    checkout and the test suite, where ``src/scripts`` is already on
+    the path), then falls back to the standard rc-file search -- the
+    current directory and ``$IMAGO_RC`` -- exactly as the other Imago
+    scripts locate their rc files.  A genuinely missing ``clusterrc.py``
+    (Imago not installed, ``$IMAGO_RC`` unset) is reported as a clear
+    instruction rather than a bare ``ModuleNotFoundError``.
+    """
+    try:
+        import clusterrc
+        return clusterrc
+    except ModuleNotFoundError:
+        pass
+    for candidate in (os.getcwd(), os.getenv("IMAGO_RC")):
+        if candidate and candidate not in sys.path:
+            sys.path.insert(0, candidate)
+    try:
+        import clusterrc
+        return clusterrc
+    except ModuleNotFoundError:
+        raise SystemExit(
+            "cluster_probe: cannot find clusterrc.py.  Install Imago "
+            "(it ships a template to $IMAGO_RC) or set $IMAGO_RC to a "
+            "directory containing clusterrc.py.")
 
 
 # ================================================================
@@ -312,7 +346,7 @@ def render_starter_clusterrc(discovered_facts):
     # Start from the canonical schema, then overlay the hardware facts
     #   the probe can fill directly.  Reading the schema here is what
     #   keeps the starter in lock-step with the real settings file.
-    settings = clusterrc.parameters_and_defaults()
+    settings = _load_clusterrc().parameters_and_defaults()
     for key in _DISCOVERABLE_KEYS:
         if key in facts:
             settings[key] = facts[key]

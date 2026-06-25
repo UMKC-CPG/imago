@@ -6460,6 +6460,24 @@ The tool is best-effort and scheduler-specific (SLURM
 today); its output is a draft the user reviews and edits,
 never an authority.
 
+*Install relationship.*  The settings file ships as a
+*template*: the install places `clusterrc.py` in `$IMAGO_RC`
+(non-clobbering, so later edits survive reinstalls) with the
+required core left as `None`.  It is deliberately *not* a
+working configuration -- there are no universal defaults for a
+site's queues, account, or worker bring-up -- so it fails loud
+until populated.  Populating it (run `cluster_probe.py`, then
+complete `worker_init` and `account`) is therefore a required
+setup step for any user running on a cluster, exactly
+analogous to `unpackImagoDB.py` for the databases.  A
+local-only user never touches it: `--dispatch local`
+(decision 2) short-circuits before any settings file is read.
+Because `cluster_probe.py` is the bootstrap tool, it must not
+hard-depend on a populated file: it locates the shipped
+template through the standard rc-file search (the working
+directory, then `$IMAGO_RC`) and reports a clear instruction
+if none is found.
+
 **Decision 2 -- per-run choices are command-line options,
 optionally saved.**  The client exposes options --
 `--dispatch local|slurm-pooled|slurm-per-job`, `--partition`,
