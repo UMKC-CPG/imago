@@ -1458,7 +1458,9 @@ decisions that are genuinely the user's.  Right-sizing
 *heterogeneous* parallel units -- routing each to a block
 sized for it -- needs per-size executors keyed on a cost
 hint and is staged with section 11, not built up front.
-The undecided pieces are gathered in 9.8.
+How those layers are settled -- the rc-file home, the CLI choices,
+the right-sizing deferral, and the generator's home -- is recorded
+in DESIGN 6.2.11, resolving the questions once gathered in 9.8.
 
 ### 9.5 Structure acquisition: cod_fish.py + cif2skl.py
 
@@ -1722,8 +1724,11 @@ a time, even on a cluster login node.  Reaching SLURM means
 giving the flight a Parsl `Config` (from the generator
 above) rather than the local executor.  Local stays the
 default -- for tests, a laptop, and the materialize
-pre-flight -- with cluster dispatch opt-in.  The wiring is
-tracked in 9.8 and the section-11 provisioning work.
+pre-flight -- with cluster dispatch opt-in.  How this gets wired
+is settled in DESIGN 6.2.11 -- the tiered site rc file, the per-run
+CLI choices, the `Config` generator's home in kaleidoscope, and the
+uniform-slice deferral of right-sizing -- and the producer
+change-over is the code, tracked as TODO C100.
 
 ### 9.8 Open architectural questions
 
@@ -1761,27 +1766,28 @@ What remains open:
   per-solid SCF cache is gone; kaleidoscope's run-reuse
   cache (9.6) subsumes it.  The matching code is TODO C74.
 
-- **Cluster dispatch configuration (9.4) -- OPEN.**  Every
-  client runs locally until a Parsl `Config` is supplied;
-  the topologies (pooled, per-job) and the three config
-  layers are settled (9.4), but several decisions are not:
-  - **Site-config home.**  A dedicated `*rc.py` resource-
-    control file (the established pattern) versus a section
-    of `imagorc`.
-  - **Per-run choices.**  CLI flags (defaulting from the
-    rc) versus a generated, editable config file written
-    beside the run.
-  - **Per-unit right-sizing.**  Build it now (per-size
-    executors keyed on a section-11 cost hint, for
-    heterogeneous parallel jobs) versus defer until imago
-    is parallel and the predictor exists -- the leaning is
-    to defer and ship local + pooled + uniform per-job
-    first.
-  - **Generator sharing.**  Where the `Config` generator
-    lives so the producer and other clients share it.
+- **Cluster dispatch configuration (9.4) -- RESOLVED
+  (DESIGN 6.2.11).**  The four decisions are settled:
+  - **Site-config home.**  A dedicated, tiered `*rc.py`
+    resource-control file -- a tiny required core (queues,
+    `worker_init`, and account where the cluster demands
+    one) with every performance and advanced knob optional
+    and defaulted -- rather than a section of `imagorc`.
+  - **Per-run choices.**  CLI flags (`--dispatch`,
+    `--partition`, `--nodes`, `--walltime`) defaulting from
+    the rc file, with an optional resolved-config file
+    written beside the run for a reproducible record.
+  - **Per-unit right-sizing.**  Deferred: both shapes give
+    every unit a uniform slice now; right-sizing waits for
+    a parallel imago and the section-11 cost predictor that
+    would feed it.
+  - **Generator sharing.**  The `Config` generator lives in
+    `kaleidoscope`, the dispatcher every flight already
+    imports, so the producer and future clients share one
+    copy.
 
-  Recorded at VISION Goals 4/6/7 and DESIGN 6.2.3 / 6.2.7;
-  the work is TODO C100.
+  Recorded at VISION Goals 4/6/7 and DESIGN 6.2.11; the
+  producer change-over and the generator are TODO C100.
 
 ## 10. Historical Guidance Dataspace
 

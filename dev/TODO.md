@@ -2771,13 +2771,16 @@ on the same data later with no schema change.  Built on P10.
   partition, nodes, walltime), and a generator that assembles a
   Parsl `Config` for either topology -- one shared pooled
   allocation, or one scheduler job per unit -- with local kept as
-  the default.  Flip the producer to supply the `Config` (set
-  `flight.parsl_config` / return a `ParslExecutor`) when cluster
-  dispatch is requested.  Several design points are still open
-  (site-config home, per-run UX, whether to defer per-unit
-  right-sizing) -- see ARCH 9.8.  C81 layers predictive sizing on
-  top of this.  CODE + DESIGN (partly open); VISION Goals 4/6/7,
-  ARCH 9.4/9.7/9.8, DESIGN 6.2.3/6.2.7.
+  the default.  Change every client (not just the producer): set
+  `flight.parsl_config` from the generator and let `dispatch`
+  auto-select Local vs Parsl -- no client builds its own
+  executor.  The re-run/cache-bypass switch moves to a
+  `dispatch` argument (DESIGN 6.2.5).  The design points
+  (site-config home, per-run UX, deferral of per-unit
+  right-sizing, generator home) are now settled in
+  DESIGN 6.2.11; ARCH 9.8 RESOLVED.  C81 layers predictive sizing
+  on top of this.  CODE; VISION Goals 4/6/7, ARCH 9.4/9.7/9.8,
+  DESIGN 6.2.11.
 - [ ] C81. Provisioning consumer in the flight layer (the
   kaleidoscope flight-builder helper or a thin sibling): query
   the predictor with a proposed config + size, apply a safety

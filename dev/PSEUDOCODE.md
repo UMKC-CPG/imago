@@ -5232,22 +5232,47 @@ function write_cache_key(wingbeat_dir, unit):
 
 ### 13.5 Dispatch driver (DESIGN 6.2.3)
 
-One Parsl app per unit; per-future exception capture so a
-single failure never aborts the flight (Principle 10).
-Resuming a flight is just re-running it: the hit-test
-skips the `done` units and re-dispatches the rest.
+One task per unit; per-future exception capture so a single
+failure never aborts the flight (Principle 10).  Resuming a
+flight is just re-running it: the hit-test skips the `done`
+units and re-dispatches the rest -- unless the re-run switch
+(`force`) is set, which bypasses the cache so every unit
+re-launches (DESIGN 6.2.5).
+
+The driver runs each unit through an *executor* -- the seam
+that hides where the work actually lands.  A `LocalExecutor`
+runs units in the current process (tests, a laptop, the
+materialize pre-flight); a `ParslExecutor` dispatches them as
+Parsl tasks onto whatever its `Config` describes (a laptop
+thread pool, or a cluster).  When the caller pins no
+executor, the driver picks one from the flight: a
+`ParslExecutor` if the flight carries a `parsl_config` (13.7),
+else a `LocalExecutor`.  Both kinds of future share one
+`result()`/exception contract, so the gather logic below is
+identical across them.
 
 ```
-function dispatch(flight):
+function dispatch(flight, executor=None, force=False):
     validate_flight(flight)            # 13.3
     makedirs(flight.root, exist_ok=True)
     serialize_flight(flight)           # 13.1
 
-    with parsl_loaded(flight.parsl_config):
+    # Choose the executor unless the caller pinned one.  We
+    # tear it down at the end only if we built it here (a
+    # caller-supplied executor is the caller's to close).
+    owns_executor = (executor is None)
+    if executor is None:
+        if flight.parsl_config is not None:
+            executor = ParslExecutor(flight.parsl_config)  # 13.7
+        else:
+            executor = LocalExecutor()
+
+    try:
         pending = []                  # list of (unit, future)
         for unit in flight.units:
             pending.append(
-                (unit, dispatch_unit(flight, unit)))
+                (unit, dispatch_unit(flight, unit,
+                                     executor, force)))
 
         # Gather.  Catch PER future; never let one failure
         # propagate out of the loop.
@@ -5257,38 +5282,48 @@ function dispatch(flight):
             entries.append(entry)
             if flight.on_outcome is not None:
                 flight.on_outcome(entry)    # stream hook
+    finally:
+        if owns_executor:
+            executor.close()      # tear down Parsl if we built it
 
     return FlightReport(entries = entries)
 ```
 
 ```
-function dispatch_unit(flight, unit):
+function dispatch_unit(flight, unit, executor, force):
     wingbeat_dir = unit_run_dir(flight, unit)
-    if is_cache_hit(unit, wingbeat_dir):         # 13.4
-        # Hit: no Parsl app; resolve immediately from the
+    # The re-run switch bypasses the run-reuse cache: with force
+    # set, even a still-valid `done` unit re-launches.  force is
+    # a driver-level instruction about the cache (DESIGN 6.2.5),
+    # independent of which executor runs the unit -- so it rides
+    # here, not on a worker.
+    if not force and is_cache_hit(unit, wingbeat_dir):   # 13.4
+        # Hit: no task submitted; resolve immediately from the
         # existing status.toml.
         return completed_future(
             report_entry_from_status(unit, wingbeat_dir))
     # Miss: prepare the dir, snapshot the key, mark queued,
-    # and submit the wingbeat as a python_app.
+    # and hand the unit to the executor.
     makedirs(wingbeat_dir, exist_ok=True)
     write_cache_key(wingbeat_dir, unit)          # 13.4
     write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status="queued",
         wingbeat=(unit.wingbeat or flight.default_wingbeat),
         submitted_at=now())
-    return submit_app(execute_wingbeat_task, flight, unit, wingbeat_dir)
+    return executor.submit_unit(
+        unit, wingbeat_dir, flight.default_wingbeat)
 ```
 
 ```
-@parsl_python_app
-function execute_wingbeat_task(flight, unit, wingbeat_dir):
-    # Runs on a worker.  Returns the WingbeatOutcome; raising
-    # here surfaces to collect_future as a worker-side
-    # failure.
+function execute_wingbeat_task(unit, wingbeat_dir, default_wingbeat):
+    # The unit of work both executors run: LocalExecutor calls it
+    # in process, ParslExecutor wraps it as a Parsl task.  It
+    # takes default_wingbeat (not the whole flight, which need not
+    # travel to a worker).  Returns the WingbeatOutcome; raising
+    # here surfaces to collect_future as a worker-side failure.
     write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status="running", started_at=now())
-    wingbeat  = resolve_wingbeat(flight, unit)   # name->Wingbeat
+    wingbeat = resolve_wingbeat(unit, default_wingbeat)  # ->Wingbeat
     outcome = wingbeat.run(unit, wingbeat_dir)         # 13.2
     write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status=("done" if outcome.ok else "failed"),
@@ -5377,6 +5412,235 @@ flight runs and tracks the batch and owns the cache;
 the client declares the units and the key, then harvests
 converged potentials from the run directories the report
 points at.
+
+### 13.7 Cluster dispatch configuration (DESIGN 6.2.11)
+
+The generator turns (site facts + per-run choices) into the
+`flight.parsl_config` the driver (13.5) loads.  It lives in
+kaleidoscope so every client shares one copy.  `local` is
+the default and returns None, which the driver (13.5) runs
+under a `LocalExecutor` -- in process -- so the test suite, a
+laptop, and the materialize pre-flight are unchanged unless
+cluster dispatch is asked for.
+
+Three layers feed it: the per-site resource-control file
+(stable facts), the per-run choices (CLI flags), and -- the
+deferred third -- the per-unit size, which is one uniform
+slice for now (DESIGN 6.2.11, decision 3).  TODO C81 layers
+predictive per-unit sizing on top later without disturbing
+this code.
+
+```
+# Layer 1: the tiered per-site resource-control file.  A tiny
+# required core; every other key is optional and falls back to
+# the default shown.  Same *rc.py convention as the other
+# resource-control files: a module returning one dict.
+function clusterrc.parameters_and_defaults():
+    return {
+        # --- Required core (enough to dispatch at all) ---
+        "partitions"        : REQUIRED,  # list; [0] = default
+        "worker_init"       : REQUIRED,  # shell bring-up lines
+        "account"           : None,      # set where required
+        # --- Performance tuning (optional) ---
+        "cores_per_node"    : None,      # None -> 1 worker/node
+        "workers_per_node"  : None,      # None -> derive below
+        "cores_per_worker"  : 1,         # serial imago today
+        "nodes"             : 1,
+        "walltime"          : "01:00:00",
+        "default_topology"  : "slurm-pooled",
+        "max_blocks"        : 1,         # pooled growth cap
+        "memory_per_node"   : None,
+        "memory_per_worker" : None,
+        # --- Advanced / forward-looking (power users) ---
+        "launcher"          : "single",  # MPI/GPU seam later
+        "ranks_per_worker"  : 1,         # OpenMP/MPI balance:
+        "threads_per_rank"  : 1,         #   product = cores held
+        "binding"           : None,      # core/socket/NUMA pin
+        "omp_places"        : None,      # finer thread placement
+        "omp_proc_bind"     : None,
+        "gpus_per_node"     : 0,
+        "queue_overrides"   : {},        # per-queue key tweaks
+        "profiles"          : {},        # named site profiles
+        "extra_scheduler_options" : [],  # raw passthrough
+    }
+```
+
+```
+function load_site_config(profile=None):
+    site = clusterrc.parameters_and_defaults()
+    # A named profile (advanced tier) overlays the base dict,
+    # so a user with several clusters selects one by name.
+    if profile is not None:
+        site = merge(site, site["profiles"][profile])
+    # The required core must be present; everything else has a
+    # default.  A gap here is a config error raised up front,
+    # never a crash mid-flight (the strict-contract discipline
+    # the producer already follows, DESIGN 6.3.1).
+    for name in ("partitions", "worker_init"):
+        if site[name] is REQUIRED or is_empty(site[name]):
+            raise ConfigError("cluster rc missing " + name)
+    return site
+```
+
+```
+# Layer 2: per-run choices.  Each CLI flag defaults from the
+# site file, so a fully configured site needs only --dispatch.
+# The flag surface is --dispatch {local, slurm-pooled,
+# slurm-per-job}, --partition, --nodes, --walltime.
+function resolve_choices(site, cli):
+    return {
+        "dispatch"  : cli.dispatch  or site["default_topology"],
+        "partition" : cli.partition or site["partitions"][0],
+        "nodes"     : cli.nodes     or site["nodes"],
+        "walltime"  : cli.walltime  or site["walltime"],
+    }
+```
+
+```
+function build_dispatch_config(site, choices):
+    # Local: no Parsl Config at all.  The driver runs the flight
+    # in process (13.5), one unit at a time, exactly as before.
+    if choices["dispatch"] == "local":
+        return None
+    if choices["dispatch"] == "slurm-pooled":
+        return build_pooled_config(site, choices)
+    if choices["dispatch"] == "slurm-per-job":
+        return build_per_job_config(site, choices)
+    raise ConfigError("unknown dispatch " + choices["dispatch"])
+```
+
+Both cluster shapes are the *same* SlurmProvider wiring with
+different block geometry, so one helper turns site facts plus
+per-run choices into the provider and the two builders only
+differ in how blocks map to units.
+
+```
+function slurm_provider(site, choices, nodes_per_block,
+                        init_blocks, min_blocks, max_blocks):
+    # worker_init is the site's bring-up script, so a worker can
+    # find imago; account/partition/walltime come from the
+    # resolved choices; the memory, GPU, and CPU-binding knobs
+    # ride along as raw scheduler directives (scheduler_options).
+    return SlurmProvider(
+        partition         = choices["partition"],
+        account           = site["account"],
+        walltime          = choices["walltime"],
+        nodes_per_block   = nodes_per_block,
+        init_blocks       = init_blocks,
+        min_blocks        = min_blocks,
+        max_blocks        = max_blocks,
+        worker_init       = join_lines(site["worker_init"]),
+        launcher          = make_launcher(site),
+        scheduler_options = scheduler_options(site, choices))
+```
+
+```
+function build_pooled_config(site, choices):
+    # One (optionally auto-scaled) allocation; many units stream
+    # through its workers.  Size the block by the per-run nodes
+    # and the site's per-node worker packing.  max_blocks lets
+    # the pool grow when work backs up.
+    provider = slurm_provider(site, choices,
+        nodes_per_block = choices["nodes"],
+        init_blocks = 1, min_blocks = 1,
+        max_blocks  = site["max_blocks"])
+    executor = HighThroughputExecutor(
+        label                = "imago-pooled",
+        provider             = provider,
+        cores_per_worker     = site["cores_per_worker"],
+        max_workers_per_node = workers_per_node(site))
+    return Config(executors = [executor])
+```
+
+```
+function build_per_job_config(site, choices):
+    # One scheduler submission per unit: each unit maps to its
+    # own one-node, one-worker block, so calculations queue and
+    # run independently.  max_blocks bounds how many run at once.
+    provider = slurm_provider(site, choices,
+        nodes_per_block = 1,
+        init_blocks = 0, min_blocks = 0,
+        max_blocks  = site["max_blocks"])
+    executor = HighThroughputExecutor(
+        label                = "imago-per-job",
+        provider             = provider,
+        max_workers_per_node = 1)   # exactly one unit per block
+    return Config(executors = [executor])
+```
+
+```
+function workers_per_node(site):
+    # Explicit override wins; else derive from the node's cores
+    # and the per-worker core count; else fall back to one worker
+    # per node (the no-cores_per_node default).
+    if site["workers_per_node"] is not None:
+        return site["workers_per_node"]
+    if site["cores_per_node"] is not None:
+        return max(1, site["cores_per_node"] //
+                      site["cores_per_worker"])
+    return 1
+```
+
+```
+function make_launcher(site):
+    # Serial today: one process per worker.  The OpenMP/MPI split
+    # (ranks_per_worker x threads_per_rank) and the binding /
+    # omp_* knobs become a real MPI launcher (srun with rank and
+    # thread placement) here once imago runs in parallel -- the
+    # deferred seam, not built now.
+    if site["launcher"] == "single":
+        return SingleNodeLauncher()
+    return mpi_launcher(site)        # ranks/threads/binding
+```
+
+```
+function scheduler_options(site, choices):
+    # Assemble the raw scheduler directives the per-run and
+    # advanced knobs imply -- memory guards, GPU requests, CPU
+    # binding -- then append extra_scheduler_options verbatim so
+    # a power user is never blocked by the schema.
+    lines = []
+    if site["memory_per_node"]:   lines.append(mem_line(site))
+    if site["gpus_per_node"] > 0: lines.append(gres_line(site))
+    if site["binding"]:           lines.append(bind_line(site))
+    lines.extend(site["extra_scheduler_options"])
+    return lines
+```
+
+The producer change-over (DESIGN 6.2.11; TODO C100) needs no
+client-specific worker-builder.  Because the generator lives
+in kaleidoscope and the driver auto-selects the executor
+(13.5), every client -- the producer, the validation harness,
+future flights -- uses the SAME two steps: attach the
+generated config, then call dispatch.  The producer's old
+`curation_executor` (which always returned a `LocalExecutor`
+and carried the re-run switch) goes away; the re-run switch
+becomes a `dispatch` argument, where the run-reuse cache it
+governs already lives.
+
+```
+# CLIENT side -- the SAME shape for every flight, because the
+#   generator and the executor choice both live in kaleidoscope.
+function run_flight(flight, cli):
+    site    = load_site_config(cli.profile)
+    choices = resolve_choices(site, cli)
+    # local -> None -> the driver runs the flight in process;
+    # a cluster shape -> a real Config the driver loads (13.5).
+    flight.parsl_config = build_dispatch_config(site, choices)
+    # Optional reproducible record beside the manifest: the fully
+    # resolved site + choices, as a human-readable file.
+    if cli.save_config:
+        write_resolved_config(flight.root, site, choices)
+    # No explicit executor: the driver picks Local or Parsl from
+    # flight.parsl_config.  The re-run switch rides as a driver
+    # argument, not bundled into a worker (DESIGN 6.2.5).
+    return dispatch(flight, force=cli.force)
+```
+
+The run-reuse cache (13.4) is untouched: a worker executes
+each unit in its own run directory on the shared filesystem
+exactly as the in-process local path does, so a cluster run
+and a local run share one cache.
 
 ## 14. makeinput Callable Build API (DESIGN 6.3)
 

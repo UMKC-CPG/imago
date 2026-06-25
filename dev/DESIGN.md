@@ -6316,6 +6316,173 @@ partition into `ImagoWingbeat.run` and retire the single-shared-
 options call to `run_structure`; (e) update `_KEY_SCALAR_NAMES`;
 (f) harden `pick_converged_unit` against a missing `result.toml`.
 
+#### 6.2.11 Cluster dispatch configuration
+
+Section 6.2.3 establishes that a flight reaches SLURM purely
+through its Parsl `Config`, and that *only the `Config`
+changes* between a laptop, an interactive node, and a batch
+allocation.  This subsection settles how a client -- the
+producer first, other flights later -- actually obtains that
+`Config`, so the hardcoded local executor of ARCHITECTURE 9.7
+becomes an opt-in cluster path.  It resolves the four
+questions ARCHITECTURE 9.8 left open.
+
+**The three configuration layers.**  A cluster submission is
+assembled from three sources, each owned by whoever knows it
+best (ARCHITECTURE 9.4):
+
+1. *Site facts* -- the cluster and account, which do not
+   change between runs and differ between users: queue names,
+   the account string, cores (and accelerators) per node, and
+   the commands a worker runs to bring up the imago
+   environment.  These live in a dedicated settings file
+   (decision 1).
+2. *Per-run choices* -- what this particular flight wants: the
+   dispatch shape, which queue, how many nodes, the time
+   limit (decision 2).
+3. *Per-unit size* -- how much one calculation needs.  For now
+   a single uniform value; predicting it per calculation is
+   deferred (decision 3).
+
+**Decision 1 -- site facts live in a dedicated, tiered
+settings file.**  Following the established `*rc.py`
+convention (a module returning a `parameters_and_defaults()`
+dictionary), cluster facts live in their own file rather than
+mixed into `imagorc`.  The file is *tiered*: a newcomer fills
+a small core and everything else takes a built-in default,
+while a power user may supply as much detail as they wish.
+Only the core is required; any omitted key uses its default.
+
+*Getting-started core (enough to dispatch at all).*
+
+- `partitions` -- the queue(s) available; the first is the
+  default queue.
+- `worker_init` -- the shell commands a worker runs before
+  imago (activate the environment, load modules, set paths),
+  so a worker can find imago.
+- `account` -- the scheduler account string; required only
+  where the cluster demands one, omitted otherwise.
+
+*Performance tuning (optional; improves throughput).*
+
+- `cores_per_node` -- lets the generator pack workers onto a
+  node; defaults to one worker per node when absent.
+- `workers_per_node` / `cores_per_worker` -- how many
+  calculations run at once on a node and how many cores each
+  gets (today, with serial imago, one core each and as many
+  workers as cores).
+- default `nodes`, `walltime`, and `default_topology`, so a
+  common run needs no per-run options at all.
+- `max_blocks` -- how many allocations the pooled shape may
+  grow to when work backs up.
+- `memory_per_node` / `memory_per_worker` -- guards so a run
+  neither overflows memory nor under-requests it.
+
+*Advanced and forward-looking (power users; future imago).*
+
+- `launcher` -- how a single calculation is started across
+  cores or ranks; trivial today (serial), the seam for MPI /
+  GPU runs later.
+- `ranks_per_worker` / `threads_per_rank` -- the hybrid
+  parallel split once imago runs in parallel: how many MPI
+  ranks one calculation spawns and how many OpenMP threads
+  each rank drives.  Their product is the cores the
+  calculation occupies, so the two together let a user trade
+  message-passing breadth against shared-memory threading to
+  match the machine and the problem.
+- `binding` -- how ranks and threads are pinned to the
+  hardware: to cores, to sockets, or to NUMA memory domains.
+  Pinning keeps a rank's threads on cores that share a cache
+  and a memory controller, which on a multi-socket node is
+  often the difference between scaling and stalling on remote
+  memory traffic.  Defaults to the scheduler's own placement
+  when absent.
+- `omp_places` / `omp_proc_bind` -- the finer OpenMP thread-
+  placement controls (spread across sockets versus packed
+  onto neighbouring cores), for a user who wants to tune
+  thread locality beyond the coarse `binding` choice.
+- accelerator facts (`gpus_per_node` and how to request them)
+  for the future GPU path.
+- per-queue overrides, so a setting may differ by queue.
+- named profiles, so a user with access to several clusters
+  selects one by name.
+- `extra_scheduler_options` -- a raw passthrough of arbitrary
+  scheduler directives, and a final escape hatch for settings
+  the schema does not name, so a power user is never blocked.
+
+The principle is that the *core is tiny and the rest is
+invited*: approachable for someone bringing up their first
+cluster, rewarding for someone who wants to tune it.
+
+**Decision 2 -- per-run choices are command-line options,
+optionally saved.**  The client exposes options --
+`--dispatch local|slurm-pooled|slurm-per-job`, `--partition`,
+`--nodes`, `--walltime` -- each defaulting from the site file,
+so a fully configured site needs only `--dispatch`.  The
+everyday path is a single command (captured in the `command`
+log the scripts already keep); for a reproducible record, the
+client may also write the resolved configuration as a
+human-readable file in the run directory, beside the manifest.
+`local` is the default, so existing local runs, the test
+suite, and the materialize pre-flight are unchanged unless
+cluster dispatch is asked for.
+
+**Decision 3 -- one uniform per-unit size for now;
+right-sizing deferred.**  Both cluster shapes (below) give
+every calculation the *same* resource slice in this round.
+Giving each calculation a slice matched to its own size
+(right-sizing) needs both a parallel imago and a predictor of
+per-calculation cost, neither of which exists yet, so it is
+deferred.  The hook is already named: the per-unit size is
+exactly what the resource-and-cost dataspace (section 8,
+VISION Goal 6) predicts, and the provisioning consumer that
+fills it in is TODO C81 -- a later layer that drops onto this
+one without disturbing it.
+
+**The two cluster shapes are two `Config` shapes.**  Both are
+expressed entirely in the `Config` the generator builds; the
+dispatch core (6.2.3) is unchanged.
+
+- *Pooled* -- one allocation (optionally allowed to grow to
+  `max_blocks`) whose workers stream many units.  The
+  generator builds a high-throughput executor over a SLURM
+  provider sized by the per-run nodes/walltime and the site's
+  per-node packing.  Best for many small, similar units --
+  the convergence sweeps and the database seed.
+- *Per-job* -- one scheduler submission per unit.  The
+  generator builds an executor in which each unit maps to its
+  own one-worker block, so each calculation queues and runs
+  independently.  Best for large or heterogeneous units.
+
+**Decision 4 -- the generator lives in the dispatcher
+package.**  The helper that turns (site facts + per-run
+choices) into a `Config` belongs in `kaleidoscope`, which
+already owns dispatch and is imported by every flight client,
+so the producer and future flights share one copy.  It reads
+the site settings file and the per-run choices and returns
+either a Parsl `Config` (for a cluster shape) or nothing (for
+`local`).
+
+**Changing the producer over.**  With the generator in place, the
+producer stops forcing a local executor.  When cluster
+dispatch is requested it attaches the generated `Config` to
+the flight (`flight.parsl_config`) and lets `dispatch` select
+the Parsl path (6.2.3); when `local` (the default) it
+attaches nothing and dispatch runs in process.  This removes
+the only reason the seed and database builds run on the login
+node, and is the code tracked as TODO C100.  Because the
+generator lives in kaleidoscope and `dispatch` makes the
+local-versus-cluster choice itself, every client uses this
+same change -- no client writes its own executor builder.  The
+run-reuse cache-bypass the producer's executor helper used to
+carry moves with it: it becomes a `dispatch` argument, since
+it governs the cache the driver owns (6.2.5), not where a
+unit runs.  The run-reuse cache (6.2.5) is unaffected:
+workers execute each unit in its
+own run directory on the shared filesystem exactly as the
+local executor does, so a cluster run and a local run share
+one cache.
+
 ### 6.3 makeinput callable build API
 
 This subsection designs the makeinput counterpart of the
