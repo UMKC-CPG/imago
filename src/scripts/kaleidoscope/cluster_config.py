@@ -65,10 +65,10 @@ def _load_clusterrc_module():
 
     Follows the same override search the other Imago scripts use: a
     customized ``clusterrc.py`` in the current directory or in
-    ``$IMAGO_RC`` takes precedence over the shipped default.  The whole
-    module is returned (not just the dictionary) so the caller can use
-    the *same* module's :data:`REQUIRED` sentinel for the required-field
-    check -- identity only holds within one module object.
+    ``$IMAGO_RC`` takes precedence over the shipped default.  The module
+    is pure data -- a single ``parameters_and_defaults()`` -- so only
+    that dictionary is read; the starter generator lives separately in
+    ``cluster_probe.py``.
     """
     for candidate in (os.getcwd(), os.getenv("IMAGO_RC")):
         if candidate and candidate not in sys.path:
@@ -120,17 +120,15 @@ def load_site_config(profile=None):
             raise ConfigError(f"unknown cluster profile {profile!r}")
         site = {**site, **profiles[profile]}
 
-    # The required core must be present.  A field still holding the
-    #   REQUIRED sentinel (the shipped default) or left empty (a probe
-    #   starter awaiting the user) is a configuration error.
-    required_sentinel = clusterrc.REQUIRED
+    # The required core must be present.  A field shipped as None (the
+    #   unfilled default) or left empty -- including a probe starter the
+    #   user has not completed -- is a configuration error raised here.
     for name in ("partitions", "worker_init"):
-        value = site.get(name, required_sentinel)
-        if value is required_sentinel or _is_empty(value):
+        if _is_empty(site.get(name)):
             raise ConfigError(
                 f"cluster settings file is missing required field "
                 f"{name!r}; fill it in clusterrc.py "
-                f"(see 'python clusterrc.py --probe').")
+                f"(generate a starter with cluster_probe.py).")
     return site
 
 

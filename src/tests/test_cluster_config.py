@@ -56,9 +56,8 @@ def _filled_site(**overrides):
 # ----------------------------------------------------------------
 
 def test_load_site_config_reads_shipped_defaults_and_rejects_them():
-    """The shipped clusterrc leaves the required core as the REQUIRED
-    sentinel, so a bare load is a ConfigError -- the user must fill the
-    file first."""
+    """The shipped clusterrc leaves the required core as None, so a
+    bare load is a ConfigError -- the user must fill the file first."""
     with pytest.raises(cc.ConfigError) as excinfo:
         cc.load_site_config()
     assert "partitions" in str(excinfo.value) or \
@@ -70,8 +69,7 @@ def test_load_site_config_accepts_a_filled_file(monkeypatch):
     settings come straight through."""
     filled = _filled_site()
     fake_rc = SimpleNamespace(
-        parameters_and_defaults=lambda: dict(filled),
-        REQUIRED=object())
+        parameters_and_defaults=lambda: dict(filled))
     monkeypatch.setattr(cc, "_load_clusterrc_module", lambda: fake_rc)
     site = cc.load_site_config()
     assert site["partitions"] == ["general", "gpu"]
@@ -79,12 +77,11 @@ def test_load_site_config_accepts_a_filled_file(monkeypatch):
 
 
 def test_load_site_config_rejects_empty_required_field(monkeypatch):
-    """An empty (not just sentinel) required field is also rejected --
-    the case of a probe starter the user has not completed."""
+    """An empty required field is rejected -- the case of a probe
+    starter the user has not completed (worker_init still blank)."""
     broken = _filled_site(worker_init=[])
     fake_rc = SimpleNamespace(
-        parameters_and_defaults=lambda: dict(broken),
-        REQUIRED=object())
+        parameters_and_defaults=lambda: dict(broken))
     monkeypatch.setattr(cc, "_load_clusterrc_module", lambda: fake_rc)
     with pytest.raises(cc.ConfigError):
         cc.load_site_config()
@@ -96,8 +93,7 @@ def test_load_site_config_applies_named_profile(monkeypatch):
     base = _filled_site(profiles={"hpc2": {"account": "other-acct",
                                            "partitions": ["batch"]}})
     fake_rc = SimpleNamespace(
-        parameters_and_defaults=lambda: dict(base),
-        REQUIRED=object())
+        parameters_and_defaults=lambda: dict(base))
     monkeypatch.setattr(cc, "_load_clusterrc_module", lambda: fake_rc)
     site = cc.load_site_config(profile="hpc2")
     assert site["account"] == "other-acct"

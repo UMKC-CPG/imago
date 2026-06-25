@@ -5448,12 +5448,15 @@ this code.
 # Layer 1: the tiered per-site resource-control file.  A tiny
 # required core; every other key is optional and falls back to
 # the default shown.  Same *rc.py convention as the other
-# resource-control files: a module returning one dict.
+# resource-control files -- PURE DATA: a module returning one
+# dict, nothing more.  The two required fields ship as None (a
+# REQUIRED comment marks them); load_site_config refuses an
+# unfilled one.  cluster_probe.py generates a filled starter.
 function clusterrc.parameters_and_defaults():
     return {
         # --- Required core (enough to dispatch at all) ---
-        "partitions"        : REQUIRED,  # list; [0] = default
-        "worker_init"       : REQUIRED,  # shell bring-up lines
+        "partitions"        : None,      # REQUIRED list; [0]=default
+        "worker_init"       : None,      # REQUIRED shell bring-up
         "account"           : None,      # set where required
         # --- Performance tuning (optional) ---
         "cores_per_node"    : None,      # None -> 1 worker/node
@@ -5491,7 +5494,7 @@ function load_site_config(profile=None):
     # never a crash mid-flight (the strict-contract discipline
     # the producer already follows, DESIGN 6.3.1).
     for name in ("partitions", "worker_init"):
-        if site[name] is REQUIRED or is_empty(site[name]):
+        if is_empty(site[name]):     # None or empty -> unfilled
             raise ConfigError("cluster rc missing " + name)
     return site
 ```
@@ -5713,19 +5716,21 @@ each unit in its own run directory on the shared filesystem
 exactly as the in-process local path does, so a cluster run
 and a local run share one cache.
 
-The discovery helper (`--probe`, DESIGN 6.2.11) reads what the
-machine can report and writes a *starter* settings file, so a
-newcomer does not hand-assemble the performance and advanced
+The discovery tool `cluster_probe.py` (a SEPARATE program, not
+part of the pure-data clusterrc.py; DESIGN 6.2.11) reads what
+the machine can report and writes a *starter* settings file, so
+a newcomer does not hand-assemble the performance and advanced
 tiers.  It is best-effort and scheduler-specific: every query
 is wrapped so a missing tool or an unparseable line drops that
 fact rather than aborting, and the result is a draft the user
 reviews -- never an authority.
 
 ```
+# In cluster_probe.py (a top-level script), NOT in clusterrc.py.
 function probe_site():
     # The discoverable tiers, read straight off the machine.
     # Each probe is guarded: on any failure the fact is simply
-    #   omitted, so the helper degrades to "filled what I could".
+    #   omitted, so the tool degrades to "filled what I could".
     facts = {}
     try: facts["partitions"]     = sinfo_partitions()      # sinfo
     try: facts["cores_per_node"] = node_cores()            # lscpu
@@ -5736,20 +5741,21 @@ function probe_site():
     try: facts["topology"]       = node_topology()
     # What this user is actually permitted to use (sacctmgr): a
     #   hint for the account / partition choice, not the answer.
-    try: facts["allowed_assoc"]  = user_associations()
+    try: facts["accounts"]       = user_associations()
     return facts
 
-function emit_starter_clusterrc(path):
-    facts = probe_site()
-    # Fill the discoverable tiers from the probe; leave the
-    #   required core (worker_init, account, preferred partition)
-    #   as clearly marked REQUIRED blanks the user completes from
-    #   local documentation -- the machine cannot report these.
-    write_clusterrc_template(path,
-        discovered = facts,
-        blanks     = ["worker_init", "account"],
-        note       = "Complete worker_init/account; review the "
-                     "partition order -- the first is the default.")
+function render_starter_clusterrc(facts):
+    # Mirror the LIVE schema so the starter cannot drift: iterate
+    #   clusterrc.parameters_and_defaults(), overlay the discovered
+    #   hardware facts, and leave the required core (worker_init,
+    #   and partitions when none were found) as None with a FILL IN
+    #   comment.  topology/accounts ride along as guiding comments.
+    settings = clusterrc.parameters_and_defaults()
+    for key in ["partitions", "cores_per_node",
+                "memory_per_node", "gpus_per_node"]:
+        if key in facts: settings[key] = facts[key]
+    return render_full_dict(settings, hints = facts,
+                            blanks = ["partitions", "worker_init"])
 ```
 
 ## 14. makeinput Callable Build API (DESIGN 6.3)

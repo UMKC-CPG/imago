@@ -1772,11 +1772,12 @@ What remains open:
 - **Cluster dispatch configuration (9.4) -- RESOLVED
   (DESIGN 6.2.11).**  The four decisions are settled:
   - **Site-config home.**  A dedicated, tiered `*rc.py`
-    resource-control file -- a tiny required core (queues,
-    `worker_init`, and account where the cluster demands
-    one) with every performance and advanced knob optional
-    and defaulted -- rather than a section of `imagorc`.  A
-    `--probe` helper reads the discoverable tiers off the
+    resource-control file (pure data, like every other
+    `*rc.py`) -- a tiny required core (queues, `worker_init`,
+    and account where the cluster demands one) with every
+    performance and advanced knob optional and defaulted --
+    rather than a section of `imagorc`.  A separate tool,
+    `cluster_probe.py`, reads the discoverable tiers off the
     scheduler and node hardware (`sinfo`, `scontrol`,
     `lscpu`) and emits a starter file, leaving the
     non-discoverable required core as blanks to complete.

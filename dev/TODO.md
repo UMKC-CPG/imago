@@ -2780,13 +2780,15 @@ on the same data later with no schema change.  Built on P10.
   settings file is a config error, not a quiet local
   fall-back); `local` is the explicit opt-out the tests and
   laptops request, and the library entry point defaults to
-  `local`.  Ship a `--probe` helper that reads the discoverable
-  tiers off the scheduler/node (`sinfo`, `scontrol`, `lscpu`)
-  and writes a starter `clusterrc.py` with the required core
-  left blank.  The design points (site-config home, per-run UX,
-  deferral of per-unit right-sizing, generator home, per-job
-  default, discovery helper) are settled in DESIGN 6.2.11; ARCH
-  9.8 RESOLVED.  C81 layers predictive sizing on top of this.
+  `local`.  Ship `cluster_probe.py` (a separate tool; the
+  `clusterrc.py` settings file stays pure data) that reads the
+  discoverable tiers off the scheduler/node (`sinfo`,
+  `scontrol`, `lscpu`) and writes a starter `clusterrc.py`
+  with the required core left blank.  The design points
+  (site-config home, per-run UX, deferral of per-unit
+  right-sizing, generator home, per-job default, discovery
+  tool) are settled in DESIGN 6.2.11; ARCH 9.8 RESOLVED.  C81
+  layers predictive sizing on top of this.
   CODE; VISION Goals 4/6/7, ARCH 9.4/9.7/9.8, DESIGN 6.2.11.
 - [ ] C81. Provisioning consumer in the flight layer (the
   kaleidoscope flight-builder helper or a thin sibling): query

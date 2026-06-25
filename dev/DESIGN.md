@@ -6414,12 +6414,20 @@ The principle is that the *core is tiny and the rest is
 invited*: approachable for someone bringing up their first
 cluster, rewarding for someone who wants to tune it.
 
-**Discovering site facts -- the `--probe` helper.**  Much of
-the settings file can be read straight off the machine, which
-makes first-cluster bring-up far less daunting.  A discovery
-helper queries the scheduler and the node hardware and writes
-a *starter* settings file with everything it can learn already
-filled in:
+**Discovering site facts -- the `cluster_probe.py` tool.**
+The settings file itself stays *pure data* -- like every other
+`*rc.py`, it is just `parameters_and_defaults()`, with the two
+required fields shipped as `None` and a `REQUIRED` comment.
+The discovery logic is a *separate* program, `cluster_probe.py`,
+because reading the machine is real work (subprocess queries,
+parsing) that does not belong in a data file.  Much of the
+settings file can be read straight off the machine, which makes
+first-cluster bring-up far less daunting: `cluster_probe.py`
+queries the scheduler and the node hardware and writes a
+*starter* copy of the settings file with everything it can
+learn already filled in.  The starter mirrors the live schema
+(it reads `clusterrc.parameters_and_defaults()` at run time),
+so the two can never drift.  What it reads:
 
 - *Scheduler queries* -- `sinfo` and `scontrol show partition`
   enumerate the queues, the nodes per queue, the cores and
@@ -6439,7 +6447,7 @@ query *cannot* supply is convention and policy: `worker_init`
 -- the module loads and environment setup that let a worker
 find imago -- is pure site convention, while the *correct*
 `account` to charge and *which* of the listed queues to prefer
-are policy.  So the helper writes every fact it can read --
+are policy.  So the tool writes every fact it can read --
 the optional tiers and the partition list -- and leaves the
 convention-and-policy fields (`worker_init`, `account`, and
 which queue should sit first as the default) as clearly marked
@@ -6448,7 +6456,7 @@ dividing line is fact versus policy; it runs close to the
 required/optional tier split but not exactly along it, since
 the partition *list* is a discoverable required field while
 choosing a default among those queues is a human decision.
-The helper is best-effort and scheduler-specific (SLURM
+The tool is best-effort and scheduler-specific (SLURM
 today); its output is a draft the user reviews and edits,
 never an authority.
 
