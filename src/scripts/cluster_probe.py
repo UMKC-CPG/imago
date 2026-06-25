@@ -4,31 +4,32 @@
 
 This is the companion *tool* to the ``clusterrc.py`` settings file.
 ``clusterrc.py`` is pure data -- the parameters the dispatch generator
-reads; this script *generates a starter copy* of that file by reading
-what the machine can report.  It queries the scheduler (``sinfo``,
-``scontrol``) and the node hardware (``lscpu``, ``numactl``) and writes
-a ``clusterrc.py`` with every fact it could learn already filled in --
-the performance and advanced tiers plus the partition list -- leaving
-only the convention-and-policy fields (``worker_init`` and
-``account``) as clearly marked blanks for the user to complete from
-local documentation.
+reads; this script *creates a starter copy* of that file by asking the
+scheduler what it knows.  It runs ``sinfo`` (the queues and the size of
+their nodes) and ``sacctmgr`` (the accounts you may charge), and writes
+a ``clusterrc.py`` with what it could learn already filled in and a
+brief plain-language note on every setting.
 
-The fact-versus-policy split is deliberate (DESIGN 6.2.11): counts and
-topology are machine-knowable, but how a worker brings up the imago
-environment and which account to charge are site convention and
-policy, which no query can report.  The tool is therefore best-effort
-and scheduler-specific (SLURM today); every query is wrapped so a
-missing tool or an unparseable line drops that one fact rather than
-aborting, and its output is a draft the user reviews and edits, never
-an authority.
+What the scheduler cannot report is convention and policy: how a worker
+brings up the Imago environment (``worker_init``) and which account to
+charge are site-specific and human-chosen, so those are left as clearly
+marked ``FILL IN`` blanks.
+
+Two honesty rules matter here (DESIGN 6.2.11):
+
+  * **Only the scheduler is trusted, not the login node.**  ``sinfo``
+    reports the *compute* nodes' core and memory counts; this tool does
+    NOT read the login node's own CPU layout, which would describe the
+    wrong machine -- so no login-node facts ever reach the file.
+
+  * **A heterogeneous cluster is not guessed at.**  When the cluster's
+    nodes differ in core count or memory, the tool does not silently
+    pick one value; it leaves that setting blank and lists the values
+    it saw in a comment, so the user chooses deliberately.
 
 This tool is *self-contained*: it carries its own copy of the schema
 (:func:`_starter_schema`) and only ever *writes* a ``clusterrc.py`` --
-it never reads one.  That keeps the division of labour clean
-(``cluster_config`` reads the settings file, ``cluster_probe`` creates
-it) and means the tool needs no ``clusterrc.py`` to exist and no
-directory lookup at all.  The cost is that the key list lives in two
-files; a test (``test_cluster_probe``) asserts this schema stays
+it never reads one.  A test (``test_cluster_probe``) keeps this schema
 identical to ``clusterrc.parameters_and_defaults()`` so they cannot
 drift apart.
 """
@@ -38,56 +39,93 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 from datetime import datetime
 
 
-def _starter_schema():
-    """Return the cluster-settings schema this tool writes out.
+# The cluster-settings schema this tool writes, as (key, default,
+#   one-line plain-language note) triples.  The keys, order, and
+#   defaults match clusterrc.parameters_and_defaults() (a test enforces
+#   it); the note is shown beside each setting in the generated file so
+#   a newcomer can read the file without cross-referencing anything.
+_SETTINGS = [
+    ("partitions", None,
+     "The scheduler queues you can submit to (first is default)."),
+    ("worker_init", None,
+     "Shell commands that set up Imago before a job runs."),
+    ("account", None,
+     "The account charged for compute time, if one is required."),
+    ("cores_per_node", None,
+     "How many CPU cores one node has."),
+    ("workers_per_node", None,
+     "Calculations to run at once on a node (blank = auto)."),
+    ("cores_per_worker", 1,
+     "How many cores each calculation uses (one for now)."),
+    ("nodes", 1,
+     "How many nodes to request per job."),
+    ("walltime", "01:00:00",
+     "The most time one job may run, as HH:MM:SS."),
+    ("default_topology", "slurm-per-job",
+     "Default work spread: one job per calc, or one allocation."),
+    ("max_blocks", 1,
+     "Most allocations to grow to at once when work piles up."),
+    ("memory_per_node", None,
+     "How much memory one node has, in megabytes."),
+    ("memory_per_worker", None,
+     "How much memory each calculation needs, in megabytes."),
+    ("launcher", "single",
+     "How one calculation starts ('single' = a serial run)."),
+    ("ranks_per_worker", 1,
+     "Parallel pieces per calculation (one for now)."),
+    ("threads_per_rank", 1,
+     "Threads per parallel piece (one for now)."),
+    ("binding", None,
+     "How to pin a calculation to particular cores (off for now)."),
+    ("omp_places", None,
+     "Fine control over where threads run (off for now)."),
+    ("omp_proc_bind", None,
+     "Fine control over how threads are pinned (off for now)."),
+    ("gpus_per_node", 0,
+     "How many GPUs per node to request (zero = none)."),
+    ("queue_overrides", {},
+     "Settings that should differ for one particular queue."),
+    ("profiles", {},
+     "Named setting groups, one per cluster you use."),
+    ("extra_scheduler_options", [],
+     "Extra raw scheduler directives to add."),
+]
 
-    A self-contained copy of ``clusterrc.parameters_and_defaults()`` --
-    the same keys in the same order with the same defaults -- so the
-    tool can generate a complete starter file without importing (or even
-    needing the existence of) a ``clusterrc.py``.  Kept identical to the
-    real settings file by ``test_cluster_probe.test_schema_matches_*``;
-    when a key is added to ``clusterrc.py`` it is added here too.
-    """
-    return {
-        # Required core -- shipped as None, left for the user to fill.
-        "partitions":        None,
-        "worker_init":       None,
-        "account":           None,
-        # Performance tuning.
-        "cores_per_node":    None,
-        "workers_per_node":  None,
-        "cores_per_worker":  1,
-        "nodes":             1,
-        "walltime":          "01:00:00",
-        "default_topology":  "slurm-per-job",
-        "max_blocks":        1,
-        "memory_per_node":   None,
-        "memory_per_worker": None,
-        # Advanced / forward-looking.
-        "launcher":          "single",
-        "ranks_per_worker":  1,
-        "threads_per_rank":  1,
-        "binding":           None,
-        "omp_places":        None,
-        "omp_proc_bind":     None,
-        "gpus_per_node":     0,
-        "queue_overrides":   {},
-        "profiles":          {},
-        "extra_scheduler_options": [],
-    }
+# The required-core keys: shipped blank, because no scheduler query can
+#   supply them -- the user must.
+_REQUIRED_KEYS = ("partitions", "worker_init")
+
+# Per-node numbers the scheduler can fill, each mapped to the fact key
+#   that holds the distinct values seen when the cluster's nodes
+#   disagree, plus the column in a parsed sinfo row and a label for the
+#   "nodes vary" note.
+_PER_NODE = {
+    "cores_per_node":  ("core_options", "cores", "core counts"),
+    "memory_per_node": ("mem_options", "memory_mb",
+                        "memory sizes (MB)"),
+    "gpus_per_node":   ("gpu_options", "gpus", "GPU counts"),
+}
+
+
+def _starter_schema():
+    """Return this tool's copy of the settings as a ``{key: default}``
+    dict.  Derived from :data:`_SETTINGS`; a test keeps it identical to
+    ``clusterrc.parameters_and_defaults()`` so the two cannot drift."""
+    return {key: default for key, default, _ in _SETTINGS}
 
 
 # ================================================================
-#  Machine queries and their parsers
+#  Scheduler queries and their parsers
 #
-#  The command runners are kept separate from the pure text parsers
-#  so the parsers can be unit-tested on captured output without any
+#  The command runner is kept separate from the pure text parsers so
+#  the parsers can be unit-tested on captured output without any
 #  scheduler present.  Each query is guarded so a missing tool or an
-#  unparseable line drops that one fact rather than aborting the
-#  probe -- "fill what I could" behaviour.
+#  unparseable line drops that one fact rather than aborting the probe
+#  -- "fill what I could" behaviour.
 # ================================================================
 
 def run_query(command_words):
@@ -148,10 +186,11 @@ def parse_sinfo_rows(sinfo_text):
 
     The probe runs ``sinfo -h -o "%R %c %m %G"`` so each row carries the
     partition name, the cores per node, the memory per node in
-    megabytes, and the GRES (accelerator) field.  SLURM appends ``+`` to
-    a value that is a lower bound (mixed node sizes); the ``+`` is
-    stripped before the integer is read.  A row that cannot be parsed is
-    skipped rather than aborting the parse.
+    megabytes, and the GRES (accelerator) field.  A heterogeneous
+    cluster yields several rows -- one per distinct node configuration.
+    SLURM appends ``+`` to a value that is a lower bound (mixed node
+    sizes); the ``+`` is stripped before the integer is read.  A row
+    that cannot be parsed is skipped rather than aborting the parse.
 
     Parameters
     ----------
@@ -180,48 +219,6 @@ def parse_sinfo_rows(sinfo_text):
                      "memory_mb": memory_mb,
                      "gpus": parse_gres_gpu_count(gres_field)})
     return rows
-
-
-def parse_lscpu_topology(lscpu_text):
-    """Parse ``lscpu`` output into the node's CPU topology.
-
-    The socket / core / thread / NUMA layout reported here is exactly
-    what the ``binding`` and ``omp_*`` knobs describe, so the probe
-    records it to guide a power user even though the serial launcher
-    does not use it yet.  Only the keys ``lscpu`` actually prints are
-    returned; anything missing is simply absent.
-
-    Parameters
-    ----------
-    lscpu_text : str
-        The captured stdout of ``lscpu``.
-
-    Returns
-    -------
-    dict
-        Any of ``cpus``, ``sockets``, ``cores_per_socket``,
-        ``threads_per_core``, ``numa_nodes`` that could be read.
-    """
-    label_to_key = {
-        "CPU(s)":           "cpus",
-        "Socket(s)":        "sockets",
-        "Core(s) per socket": "cores_per_socket",
-        "Thread(s) per core": "threads_per_core",
-        "NUMA node(s)":     "numa_nodes",
-    }
-    topology = {}
-    for line in lscpu_text.splitlines():
-        if ":" not in line:
-            continue
-        label, _, value = line.partition(":")
-        key = label_to_key.get(label.strip())
-        if key is None:
-            continue
-        try:
-            topology[key] = int(value.strip())
-        except ValueError:
-            continue
-    return topology
 
 
 def parse_sacctmgr_accounts(sacctmgr_text):
@@ -253,25 +250,27 @@ def parse_sacctmgr_accounts(sacctmgr_text):
 
 
 def probe_site():
-    """Read every cluster fact the machine can report.
+    """Ask the scheduler what it knows about this site.
 
-    Orchestrates the individual queries, each guarded by
-    :func:`run_query` so a missing tool drops one fact rather than
-    failing the probe.  The returned dictionary holds only the facts
-    that were actually discovered; :func:`render_starter_clusterrc`
-    turns it into a starter settings file.
+    Runs only scheduler queries -- never the login node's own hardware,
+    which would describe the wrong machine.  For each per-node number
+    (cores, memory, GPUs): if every node agrees, the value is filled in;
+    if the nodes disagree (a heterogeneous cluster), the value is *not*
+    guessed -- the distinct values seen are returned under an
+    ``*_options`` key for the starter to list, and the setting is left
+    for the user.
 
     Returns
     -------
     dict
-        Discovered facts.  Possible keys: ``partitions`` (list of queue
-        names), ``cores_per_node``, ``memory_per_node``,
-        ``gpus_per_node``, ``topology`` (the lscpu layout), and
-        ``accounts`` (the sacctmgr hint).
+        Some of: ``partitions``; ``cores_per_node`` /
+        ``memory_per_node`` / ``gpus_per_node`` (only when the nodes
+        agree); ``core_options`` / ``mem_options`` / ``gpu_options``
+        (the distinct values seen, when they do not); and ``accounts``.
     """
     facts = {}
 
-    # Scheduler queues and per-node size, from sinfo.
+    # Queues and per-node sizes, from sinfo (the compute nodes).
     sinfo_text = run_query(["sinfo", "-h", "-o", "%R %c %m %G"])
     if sinfo_text:
         rows = parse_sinfo_rows(sinfo_text)
@@ -283,19 +282,14 @@ def probe_site():
                 if row["partition"] not in partitions:
                     partitions.append(row["partition"])
             facts["partitions"] = partitions
-            # Per-node facts representative of the first row; flagged in
-            #   the starter file so the user reviews mixed-node queues.
-            facts["cores_per_node"] = rows[0]["cores"]
-            facts["memory_per_node"] = rows[0]["memory_mb"]
-            # Advertise GPUs if any queue has them.
-            facts["gpus_per_node"] = max(row["gpus"] for row in rows)
-
-    # CPU topology (sockets / cores / threads / NUMA), from lscpu.
-    lscpu_text = run_query(["lscpu"])
-    if lscpu_text:
-        topology = parse_lscpu_topology(lscpu_text)
-        if topology:
-            facts["topology"] = topology
+            # Each per-node number: fill it in when the nodes agree;
+            #   otherwise record the distinct values and leave it blank.
+            for setting, (opt_key, row_key, _) in _PER_NODE.items():
+                values = sorted({row[row_key] for row in rows})
+                if len(values) == 1:
+                    facts[setting] = values[0]
+                else:
+                    facts[opt_key] = values
 
     # Accounts the user may charge, from sacctmgr -- a hint only.
     user_name = os.getenv("USER", "")
@@ -315,30 +309,40 @@ def probe_site():
 #  Rendering and writing the starter clusterrc.py
 # ================================================================
 
-# Discovered facts that map directly onto a settings key (the rest --
-#   topology, accounts -- are hints surfaced as comments only).
-_DISCOVERABLE_KEYS = ("partitions", "cores_per_node",
-                      "memory_per_node", "gpus_per_node")
+def _comment_lines(text):
+    """Wrap a comment into ``        # ...`` lines, each within the
+    80-character convention, so even a long "nodes vary" note stays
+    readable in the generated file."""
+    body_width = 78 - len("        # ")
+    pieces = textwrap.wrap(text, width=body_width) or [""]
+    return [f"        # {piece}" for piece in pieces]
 
-# The required-core keys: shipped as None, left as marked blanks until
-#   the user supplies them (no machine query can).
-_REQUIRED_KEYS = ("partitions", "worker_init")
+
+def _value_lines(key, value, suffix):
+    """Render a ``'key': value,`` line, wrapping a long list value
+    across several indented lines so nothing exceeds the line-length
+    convention (a scalar that is still too long is left as one line)."""
+    single = f"        {key!r}: {value!r},{suffix}"
+    if len(single) <= 78 or not isinstance(value, (list, tuple)):
+        return [single]
+    lines = [f"        {key!r}: ["]
+    elements = ", ".join(repr(item) for item in value)
+    for piece in textwrap.wrap(elements, width=66):
+        lines.append(f"            {piece}")
+    lines.append(f"        ],{suffix}")
+    return lines
 
 
 def render_starter_clusterrc(discovered_facts):
     """Render a starter ``clusterrc.py`` source file as text.
 
-    The starter offers every key in :func:`_starter_schema` (this
-    tool's own copy of the settings, kept identical to the real file by
-    a test), so the user sees and can tune the whole surface in one
-    file.  The discoverable hardware facts overlay their defaults; the
-    required-core fields the machine cannot know (``worker_init``, and
-    ``partitions`` when no queue was found) are left as ``None`` with a
-    ``FILL IN`` comment, so the dispatch generator's required-field
-    check refuses an unfinished starter rather than dispatching it.  The
-    discovered CPU topology and account hints ride along as comments,
-    since they inform human choices (binding, which account) rather than
-    dictate them.
+    Emits every setting in :data:`_SETTINGS`, each preceded by its
+    plain-language note, with the discovered value where the scheduler
+    could supply one.  A ``FILL IN`` marker is added to anything the
+    user must still decide -- the required core, plus any per-node
+    number the cluster disagreed on (a "nodes vary" note then lists the
+    values seen).  The account hint from ``sacctmgr`` rides along on the
+    ``account`` line.  No login-node facts are written.
 
     Parameters
     ----------
@@ -351,61 +355,43 @@ def render_starter_clusterrc(discovered_facts):
         The full text of a starter ``clusterrc.py``.
     """
     facts = discovered_facts or {}
-
-    # Start from this tool's own schema, then overlay the hardware facts
-    #   the probe can fill directly.  No clusterrc.py is read -- the test
-    #   suite keeps _starter_schema() identical to the real settings.
-    settings = _starter_schema()
-    for key in _DISCOVERABLE_KEYS:
-        if key in facts:
-            settings[key] = facts[key]
-
     lines = [
         "#!/usr/bin/env python3",
         "",
         '"""clusterrc.py -- starter written by cluster_probe.py.',
         "",
-        "Review every value below.  The discoverable fields were read",
-        "off the machine; the FILL IN fields could not be -- complete",
-        "them from your site's documentation before dispatching.  See",
-        "the shipped clusterrc.py for the full meaning of each key.",
+        "Review every value below.  A FILL IN setting could not be",
+        "discovered -- complete it from your site's documentation.",
         '"""',
         "",
-    ]
-
-    # Surface the topology and account hints as comments.
-    topology = facts.get("topology")
-    if topology:
-        layout = ", ".join(f"{key}={value}"
-                           for key, value in topology.items())
-        lines.append(f"# Discovered CPU topology: {layout}")
-        lines.append("#   (informs the binding / omp_* knobs below.)")
-    accounts = facts.get("accounts")
-    if accounts:
-        lines.append("# Accounts you may charge (sacctmgr): "
-                     + ", ".join(accounts))
-        lines.append("#   Set 'account' to one if the cluster "
-                     "requires it.")
-    if topology or accounts:
-        lines.append("")
-
-    # Emit the full parameter list -- every key the schema defines, so
-    #   the user sees and can tune the whole surface in one file.
-    lines.extend([
         "",
         "def parameters_and_defaults():",
         '    """Return this site\'s cluster dispatch settings."""',
         "    return {",
-    ])
-    for key, value in settings.items():
-        blank = key in _REQUIRED_KEYS and not value
-        suffix = "  # FILL IN" if blank else ""
-        lines.append(f"        {key!r}: {value!r},{suffix}")
-    lines.extend([
-        "    }",
-        "",
-    ])
-
+    ]
+    for key, default, note in _SETTINGS:
+        value = facts.get(key, default)
+        comments = [note]
+        # A per-node number the nodes disagreed on is left blank, with
+        #   the values seen listed so the user picks deliberately.
+        options = None
+        if key in _PER_NODE:
+            options = facts.get(_PER_NODE[key][0])
+        if options is not None:
+            label = _PER_NODE[key][2]
+            seen = ", ".join(str(value_seen) for value_seen in options)
+            comments.append(f"Nodes vary -- {label} seen: {seen}. "
+                            "Choose one.")
+        # The discovered accounts are a hint for the account choice.
+        if key == "account" and facts.get("accounts"):
+            comments.append("You may use: "
+                            + ", ".join(facts["accounts"]) + ".")
+        blank_required = key in _REQUIRED_KEYS and not value
+        for comment in comments:
+            lines.extend(_comment_lines(comment))
+        suffix = "  # FILL IN" if (blank_required or options) else ""
+        lines.extend(_value_lines(key, value, suffix))
+    lines.extend(["    }", ""])
     return "\n".join(lines) + "\n"
 
 
@@ -448,8 +434,8 @@ def write_starter_clusterrc(output_path, discovered_facts=None, *,
 def build_arg_parser():
     """Build the command-line parser for the cluster-probe tool."""
     parser = argparse.ArgumentParser(
-        description="Probe the scheduler and node hardware and write a "
-                    "starter clusterrc.py settings file.")
+        description="Probe the scheduler and write a starter "
+                    "clusterrc.py settings file.")
     parser.add_argument(
         "-o", "--output", default="clusterrc.py",
         help="path for the starter file "

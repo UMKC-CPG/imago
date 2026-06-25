@@ -5730,36 +5730,40 @@ reviews -- never an authority.
 
 ```
 # In cluster_probe.py (a top-level script), NOT in clusterrc.py.
+# ONLY the scheduler is queried -- never the login node's own
+#   hardware (lscpu/numactl), which would describe the wrong machine.
 function probe_site():
-    # The discoverable tiers, read straight off the machine.
-    # Each probe is guarded: on any failure the fact is simply
-    #   omitted, so the tool degrades to "filled what I could".
     facts = {}
-    try: facts["partitions"]     = sinfo_partitions()      # sinfo
-    try: facts["cores_per_node"] = node_cores()            # lscpu
-    try: facts["memory_per_node"]= node_memory()           # scontrol
-    try: facts["gpus_per_node"]  = node_gpus()             # GRES
-    # Socket / core / NUMA topology -- the basis for the binding
-    #   and omp_* knobs (lscpu, numactl --hardware).
-    try: facts["topology"]       = node_topology()
-    # What this user is actually permitted to use (sacctmgr): a
-    #   hint for the account / partition choice, not the answer.
-    try: facts["accounts"]       = user_associations()
+    rows = parse_sinfo_rows(run_query("sinfo ... %R %c %m %G"))
+    if rows:
+        facts["partitions"] = distinct_partitions(rows)   # queue list
+        # Each per-node number: fill it in only when every node AGREES;
+        #   if the nodes disagree (a heterogeneous cluster) do NOT
+        #   guess -- record the distinct values under *_options and
+        #   leave the setting itself unset for the user.
+        for setting in [cores, memory, gpus]:
+            values = sorted(distinct values across rows)
+            if len(values) == 1: facts[setting]       = values[0]
+            else:                facts[setting+"_options"] = values
+    # Accounts the user may charge (sacctmgr) -- a hint, not the answer.
+    facts["accounts"] = user_associations()      # guarded; may be absent
     return facts
 
 function render_starter_clusterrc(facts):
     # Self-contained: _starter_schema() is THIS tool's own copy of the
-    #   settings dict (NOT imported from clusterrc -- a test keeps the
-    #   two identical), so the tool writes a full starter without
-    #   reading any clusterrc.py.  Overlay the discovered hardware
-    #   facts; leave the required core (worker_init, and partitions
-    #   when none were found) as None with a FILL IN comment.
-    #   topology/accounts ride along as guiding comments.
+    #   settings (NOT imported from clusterrc -- a test keeps the two
+    #   identical), so the tool writes a full starter without reading
+    #   any clusterrc.py.  Each setting gets a one-line plain-language
+    #   note.  Overlay the discovered values; leave blank + FILL IN
+    #   both the required core (worker_init, partitions-if-none) AND
+    #   any per-node number the nodes disagreed on, listing the values
+    #   seen in a "nodes vary" note.  No login-node facts are written.
     settings = _starter_schema()
     for key in ["partitions", "cores_per_node",
                 "memory_per_node", "gpus_per_node"]:
         if key in facts: settings[key] = facts[key]
-    return render_full_dict(settings, hints = facts,
+    return render_full_dict(settings, notes = _SETTINGS,
+                            options = facts, account_hint = facts,
                             blanks = ["partitions", "worker_init"])
 ```
 

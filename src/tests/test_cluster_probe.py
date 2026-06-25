@@ -47,21 +47,6 @@ def test_parse_sinfo_rows_strips_plus_and_reads_gpus():
     assert rows[0]["gpus"] == 0
 
 
-def test_parse_lscpu_topology_reads_layout():
-    """The socket / core / thread / NUMA layout is read; a missing
-    label is simply absent from the result."""
-    lscpu_text = ("Architecture:            x86_64\n"
-                  "CPU(s):                  64\n"
-                  "Socket(s):               2\n"
-                  "Core(s) per socket:      16\n"
-                  "Thread(s) per core:      2\n"
-                  "NUMA node(s):            2\n")
-    topology = cluster_probe.parse_lscpu_topology(lscpu_text)
-    assert topology == {"cpus": 64, "sockets": 2,
-                        "cores_per_socket": 16,
-                        "threads_per_core": 2, "numa_nodes": 2}
-
-
 def test_parse_sacctmgr_accounts_dedupes_in_order():
     """The account hint lists distinct accounts in first-seen order."""
     text = ("rulisp-lab|general\n"
@@ -83,17 +68,15 @@ def test_probe_site_degrades_when_no_tools(monkeypatch):
     assert cluster_probe.probe_site() == {}
 
 
-def test_probe_site_assembles_discovered_facts(monkeypatch):
-    """A working scheduler/host yields the partition list, the
-    representative per-node facts, the topology, and the account
+def test_probe_site_homogeneous_fills_per_node_values(monkeypatch):
+    """When every node agrees on cores/memory/GPUs, the per-node values
+    are filled in directly, alongside the queue list and account
     hint."""
     def fake_query(command):
         tool = command[0]
         if tool == "sinfo":
-            return ("general 32 192000 (null)\n"
-                    "gpu 40 384000 gpu:a100:4\n")
-        if tool == "lscpu":
-            return "Socket(s):  2\nNUMA node(s):  2\n"
+            return ("general 64 384000 (null)\n"
+                    "debug 64 384000 (null)\n")
         if tool == "sacctmgr":
             return "rulisp-lab|general\n"
         return None
@@ -101,12 +84,55 @@ def test_probe_site_assembles_discovered_facts(monkeypatch):
     monkeypatch.setattr(cluster_probe, "run_query", fake_query)
     monkeypatch.setenv("USER", "rulisp")
     facts = cluster_probe.probe_site()
-    assert facts["partitions"] == ["general", "gpu"]
-    assert facts["cores_per_node"] == 32      # first row, representative
-    assert facts["memory_per_node"] == 192000
-    assert facts["gpus_per_node"] == 4         # max across queues
-    assert facts["topology"]["sockets"] == 2
+    assert facts["partitions"] == ["general", "debug"]
+    assert facts["cores_per_node"] == 64
+    assert facts["memory_per_node"] == 384000
+    assert facts["gpus_per_node"] == 0
     assert facts["accounts"] == ["rulisp-lab"]
+    # No "options" keys when the nodes agree.
+    assert "core_options" not in facts
+
+
+def test_probe_site_heterogeneous_records_options_not_a_guess(
+        monkeypatch):
+    """When the nodes disagree, the per-node value is NOT guessed: the
+    distinct values seen are recorded under *_options and the setting
+    itself is left unset for the user."""
+    def fake_query(command):
+        if command[0] == "sinfo":
+            return ("general 32 192000 (null)\n"
+                    "bigmem 64 1536000 (null)\n")
+        return None
+
+    monkeypatch.setattr(cluster_probe, "run_query", fake_query)
+    facts = cluster_probe.probe_site()
+    assert facts["partitions"] == ["general", "bigmem"]
+    # Cores and memory disagree -> options recorded, value left unset.
+    assert "cores_per_node" not in facts
+    assert facts["core_options"] == [32, 64]
+    assert "memory_per_node" not in facts
+    assert facts["mem_options"] == [192000, 1536000]
+    # GPUs agree (both zero) -> filled, no options.
+    assert facts["gpus_per_node"] == 0
+
+
+def test_probe_site_reads_only_the_scheduler_never_the_login_node(
+        monkeypatch):
+    """The probe runs only scheduler queries (sinfo, sacctmgr) -- never
+    lscpu/numactl, which would describe the login node, the wrong
+    machine."""
+    seen_tools = []
+
+    def fake_query(command):
+        seen_tools.append(command[0])
+        return None
+
+    monkeypatch.setattr(cluster_probe, "run_query", fake_query)
+    monkeypatch.setenv("USER", "rulisp")
+    cluster_probe.probe_site()
+    assert "lscpu" not in seen_tools
+    assert "numactl" not in seen_tools
+    assert set(seen_tools) <= {"sinfo", "sacctmgr"}
 
 
 # ----------------------------------------------------------------
@@ -135,13 +161,12 @@ def test_starter_schema_matches_clusterrc():
 
 def test_render_starter_offers_the_full_schema():
     """The starter offers every key the tool's own schema defines,
-    fills the discovered facts, and leaves the required blanks as None
-    with a FILL IN marker."""
+    fills the discovered facts, carries a plain-language note on each
+    setting, and leaves the required blanks flagged FILL IN."""
     schema_keys = set(cluster_probe._starter_schema())
 
     facts = {"partitions": ["general", "gpu"], "cores_per_node": 32,
              "memory_per_node": 192000, "gpus_per_node": 4,
-             "topology": {"sockets": 2, "numa_nodes": 2},
              "accounts": ["rulisp-lab"]}
     text = cluster_probe.render_starter_clusterrc(facts)
     settings = _starter_settings(text)
@@ -154,9 +179,42 @@ def test_render_starter_offers_the_full_schema():
     # The non-discoverable required field stays blank and is flagged.
     assert settings["worker_init"] is None
     assert "# FILL IN" in text
-    # Hints ride along as comments.
-    assert "Discovered CPU topology" in text
+    # Every setting carries a plain-language note (spot-check two).
+    assert "# How many CPU cores one node has." in text
+    assert "scheduler queues you can submit to" in text
+    # The account hint rides along on the account line.
     assert "rulisp-lab" in text
+
+
+def test_render_starter_writes_no_login_node_facts():
+    """No login-node CPU topology (or any 'discovered topology' note)
+    is ever written into the file."""
+    text = cluster_probe.render_starter_clusterrc(
+        {"partitions": ["general"], "cores_per_node": 64})
+    lowered = text.lower()
+    # The login-node hardware markers must be absent.  ("topology" by
+    #   itself is not checked -- it legitimately appears in the
+    #   'default_topology' setting key.)
+    assert "cpu topology" not in lowered
+    assert "lscpu" not in lowered
+    assert "socket" not in lowered
+    assert "numa" not in lowered
+
+
+def test_render_starter_lists_heterogeneous_options_not_a_guess():
+    """A per-node value the cluster disagreed on is left blank, flagged
+    FILL IN, with the values seen listed -- never silently guessed."""
+    facts = {"partitions": ["general", "bigmem"],
+             "core_options": [32, 64],
+             "mem_options": [192000, 1536000]}
+    text = cluster_probe.render_starter_clusterrc(facts)
+    settings = _starter_settings(text)
+    # The disagreed-on settings are left unset (their schema default).
+    assert settings["cores_per_node"] is None
+    assert settings["memory_per_node"] is None
+    # ...and the file tells the user what was seen.
+    assert "Nodes vary -- core counts seen: 32, 64." in text
+    assert "memory sizes (MB) seen: 192000, 1536000." in text
 
 
 def test_render_starter_with_no_facts_blanks_partitions(monkeypatch):

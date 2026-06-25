@@ -6423,48 +6423,46 @@ because reading the machine is real work (subprocess queries,
 parsing) that does not belong in a data file.  Much of the
 settings file can be read straight off the machine, which makes
 first-cluster bring-up far less daunting: `cluster_probe.py`
-queries the scheduler and the node hardware and writes a
-*starter* copy of the settings file with everything it can
-learn already filled in.  The tool is *self-contained*: it
-carries its own copy of the schema and only ever *writes* a
-`clusterrc.py`, never reads one, so it needs no settings file
-to exist and does no directory lookup at all -- a clean split
-where `cluster_config` reads the file and `cluster_probe`
-creates it.  The cost is that the key list lives in two
-places; a test keeps the tool's copy identical to
+queries the scheduler and writes a *starter* copy of the
+settings file with everything it can learn already filled in
+and a brief plain-language note on every setting.  The tool is
+*self-contained*: it carries its own copy of the schema and
+only ever *writes* a `clusterrc.py`, never reads one, so it
+needs no settings file to exist and does no directory lookup at
+all -- a clean split where `cluster_config` reads the file and
+`cluster_probe` creates it.  The cost is that the key list
+lives in two places; a test keeps the tool's copy identical to
 `clusterrc.parameters_and_defaults()` so they cannot drift.
-What it reads off the machine:
 
-- *Scheduler queries* -- `sinfo` and `scontrol show partition`
-  enumerate the queues, the nodes per queue, the cores and
-  memory per node, the time limits, and any accelerators
-  (generic resources).  `scontrol show node` and `lscpu` /
-  `numactl --hardware` read a node's sockets, cores per
-  socket, threads per core, NUMA memory domains, and cache
-  layout -- exactly the topology the `binding` and `omp_*`
-  knobs describe.  `sacctmgr show assoc` lists the accounts
-  and partitions the user is permitted to use.
+Two honesty rules govern what it writes:
 
-These cover the whole performance and advanced tiers
-(`cores_per_node`, `memory_per_node`, `gpus_per_node`, the
-socket / NUMA facts) with real numbers rather than guesses,
-and `sinfo` enumerates the `partitions` list as well.  What a
-query *cannot* supply is convention and policy: `worker_init`
--- the module loads and environment setup that let a worker
-find imago -- is pure site convention, while the *correct*
-`account` to charge and *which* of the listed queues to prefer
-are policy.  So the tool writes every fact it can read --
-the optional tiers and the partition list -- and leaves the
-convention-and-policy fields (`worker_init`, `account`, and
-which queue should sit first as the default) as clearly marked
-blanks the user completes from local documentation.  The
-dividing line is fact versus policy; it runs close to the
-required/optional tier split but not exactly along it, since
-the partition *list* is a discoverable required field while
-choosing a default among those queues is a human decision.
-The tool is best-effort and scheduler-specific (SLURM
-today); its output is a draft the user reviews and edits,
-never an authority.
+- *Only the scheduler is trusted, never the login node.*
+  `sinfo` reports the *compute* nodes' queues, cores, memory,
+  and accelerators (generic resources), and `sacctmgr` lists
+  the accounts the user may charge.  The tool does **not** read
+  the login node's own CPU layout (`lscpu` / `numactl`): that
+  would describe the wrong machine, so no login-node fact --
+  no socket/NUMA topology -- ever reaches the file.  (The
+  `binding` / `omp_*` knobs those facts would inform are the
+  deferred parallel seam anyway.)
+- *A heterogeneous cluster is not guessed at.*  When the nodes
+  disagree on a per-node number -- cores, memory, or GPUs --
+  the tool does not silently pick one.  It leaves that setting
+  blank, flags it `FILL IN`, and lists the distinct values it
+  saw ("nodes vary -- core counts seen: 36, 48, 64, ...") so
+  the user chooses deliberately.  Only when every node agrees
+  is the value filled in.
+
+What a query *cannot* supply is convention and policy:
+`worker_init` -- the module loads and environment setup that
+let a worker find imago -- is pure site convention, while the
+*correct* `account` to charge and *which* of the listed queues
+to prefer are policy.  Those stay blank.  The dividing line is
+fact versus policy: the scheduler-known facts are filled (or,
+when nodes disagree, offered as options), and the human
+choices are left marked.  The tool is best-effort and
+scheduler-specific (SLURM today); its output is a draft the
+user reviews and edits, never an authority.
 
 *Install relationship.*  The settings file ships as a
 *template*: the install places `clusterrc.py` in `$IMAGO_RC`
