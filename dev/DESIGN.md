@@ -5720,14 +5720,13 @@ changes the contracts above.
   non-Imago wingbeat persists (and how a mixed-wingbeat
   client reads it back) is that wingbeat's contract, set
   when the wingbeat is added, not here.
-- **Producer dispatch `Config` source.**  The producer
-  currently hands dispatch a plain `LocalExecutor`, so it
-  runs locally even on a cluster.  Open: how it (and other
-  clients) obtain a Parsl `Config` -- a per-site
-  resource-control file plus a few per-run choices,
-  assembled by a shared generator -- and whether the
-  per-run choices are CLI flags or a generated file beside
-  the run.  Local stays the default (ARCHITECTURE 9.8).
+- **Producer dispatch `Config` source -- RESOLVED
+  (6.2.11).**  How the producer (and other clients) obtain
+  a Parsl `Config` -- a tiered per-site resource-control
+  file plus a few per-run CLI choices, assembled by a
+  shared generator in kaleidoscope -- is settled in 6.2.11.
+  Scheduler dispatch is the default; an in-process local
+  run is the explicit opt-out.  The code is TODO C100.
 - **Right-sizing heterogeneous parallel units.**  Giving
   each unit a block sized to its own predicted cost
   (per-size executors keyed on a section-8 hint) versus one
@@ -6324,7 +6323,8 @@ changes* between a laptop, an interactive node, and a batch
 allocation.  This subsection settles how a client -- the
 producer first, other flights later -- actually obtains that
 `Config`, so the hardcoded local executor of ARCHITECTURE 9.7
-becomes an opt-in cluster path.  It resolves the four
+gives way to scheduler dispatch by default, with an in-process
+local run kept as a deliberate opt-out.  It resolves the four
 questions ARCHITECTURE 9.8 left open.
 
 **The three configuration layers.**  A cluster submission is
@@ -6414,18 +6414,73 @@ The principle is that the *core is tiny and the rest is
 invited*: approachable for someone bringing up their first
 cluster, rewarding for someone who wants to tune it.
 
+**Discovering site facts -- the `--probe` helper.**  Much of
+the settings file can be read straight off the machine, which
+makes first-cluster bring-up far less daunting.  A discovery
+helper queries the scheduler and the node hardware and writes
+a *starter* settings file with everything it can learn already
+filled in:
+
+- *Scheduler queries* -- `sinfo` and `scontrol show partition`
+  enumerate the queues, the nodes per queue, the cores and
+  memory per node, the time limits, and any accelerators
+  (generic resources).  `scontrol show node` and `lscpu` /
+  `numactl --hardware` read a node's sockets, cores per
+  socket, threads per core, NUMA memory domains, and cache
+  layout -- exactly the topology the `binding` and `omp_*`
+  knobs describe.  `sacctmgr show assoc` lists the accounts
+  and partitions the user is permitted to use.
+
+These cover the whole performance and advanced tiers
+(`cores_per_node`, `memory_per_node`, `gpus_per_node`, the
+socket / NUMA facts) with real numbers rather than guesses,
+and `sinfo` enumerates the `partitions` list as well.  What a
+query *cannot* supply is convention and policy: `worker_init`
+-- the module loads and environment setup that let a worker
+find imago -- is pure site convention, while the *correct*
+`account` to charge and *which* of the listed queues to prefer
+are policy.  So the helper writes every fact it can read --
+the optional tiers and the partition list -- and leaves the
+convention-and-policy fields (`worker_init`, `account`, and
+which queue should sit first as the default) as clearly marked
+blanks the user completes from local documentation.  The
+dividing line is fact versus policy; it runs close to the
+required/optional tier split but not exactly along it, since
+the partition *list* is a discoverable required field while
+choosing a default among those queues is a human decision.
+The helper is best-effort and scheduler-specific (SLURM
+today); its output is a draft the user reviews and edits,
+never an authority.
+
 **Decision 2 -- per-run choices are command-line options,
 optionally saved.**  The client exposes options --
 `--dispatch local|slurm-pooled|slurm-per-job`, `--partition`,
-`--nodes`, `--walltime` -- each defaulting from the site file,
-so a fully configured site needs only `--dispatch`.  The
-everyday path is a single command (captured in the `command`
-log the scripts already keep); for a reproducible record, the
-client may also write the resolved configuration as a
-human-readable file in the run directory, beside the manifest.
-`local` is the default, so existing local runs, the test
-suite, and the materialize pre-flight are unchanged unless
-cluster dispatch is asked for.
+`--nodes`, `--walltime` -- each defaulting from the site file
+(the dispatch shape from `default_topology`, covered just
+below), so a fully configured site needs no per-run options at
+all.  The everyday path is a single command (captured in the
+`command` log the scripts already keep); for a reproducible
+record, the client may also write the resolved configuration
+as a human-readable file in the run directory, beside the
+manifest.
+
+The command-line default is `slurm-per-job`, because the whole
+point of this work is that the producer and the database seed
+*should* reach the scheduler rather than run on a login node
+(ARCHITECTURE 9.7): on a cluster, dispatching one scheduler
+job per unit is the right thing to do with no flags at all.
+A run launched where no site settings file is present is
+therefore a configuration error, surfaced up front, rather
+than a quiet fall-back to a serial local run -- the cluster
+behaviour is the default, and a local run is the deliberate
+opt-out.  That opt-out is `--dispatch local`, which needs no
+site facts and builds no `Config` at all; the test suite, a
+laptop session, and the materialize pre-flight all request it
+explicitly, so they neither read a settings file nor touch the
+scheduler.  The library entry point mirrors this: its
+programmatic default is `local`, so in-process callers (tests
+above all) opt *in* to a cluster, never out of one by
+accident.
 
 **Decision 3 -- one uniform per-unit size for now;
 right-sizing deferred.**  Both cluster shapes (below) give
@@ -6464,11 +6519,11 @@ either a Parsl `Config` (for a cluster shape) or nothing (for
 `local`).
 
 **Changing the producer over.**  With the generator in place, the
-producer stops forcing a local executor.  When cluster
-dispatch is requested it attaches the generated `Config` to
-the flight (`flight.parsl_config`) and lets `dispatch` select
-the Parsl path (6.2.3); when `local` (the default) it
-attaches nothing and dispatch runs in process.  This removes
+producer stops forcing a local executor.  For a cluster shape
+(now the default) it attaches the generated `Config` to the
+flight (`flight.parsl_config`) and lets `dispatch` select the
+Parsl path (6.2.3); for the `local` opt-out it attaches
+nothing and dispatch runs in process.  This removes
 the only reason the seed and database builds run on the login
 node, and is the code tracked as TODO C100.  Because the
 generator lives in kaleidoscope and `dispatch` makes the

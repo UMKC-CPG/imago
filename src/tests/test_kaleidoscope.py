@@ -509,6 +509,29 @@ def test_resume_skips_done_units(tmp_path):
     assert wingbeat.calls == 1               # hit: not re-run
 
 
+def test_force_bypasses_cache_and_reruns(tmp_path):
+    """``force=True`` bypasses the run-reuse cache (DESIGN 6.2.5):
+    a unit already ``done`` with a still-matching key is NOT
+    treated as a hit, so the wingbeat runs again.  The switch
+    lives on the driver because the cache it governs does."""
+    wingbeat = CountingRunner()
+    register_wingbeat("fake_force", wingbeat)
+    unit = CalcUnit(id="u1", structure="s.skl",
+                    wingbeat="fake_force",
+                    key_fields=KeyFields(scalars={"v": 1}))
+    flight = Flight(root=str(tmp_path), units=[unit])
+
+    first = dispatch(flight)
+    assert first.entries[0].status == "done"
+    assert wingbeat.calls == 1
+
+    # Without force this second run would be a cache hit (the
+    #   resume test above); force makes it re-run regardless.
+    second = dispatch(flight, force=True)
+    assert second.entries[0].status == "done"
+    assert wingbeat.calls == 2               # forced: re-run
+
+
 def test_on_outcome_callback_fires_per_unit(tmp_path):
     """The optional streaming hook is invoked once per unit with
     its terminal ReportEntry."""

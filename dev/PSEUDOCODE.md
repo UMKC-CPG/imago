@@ -3726,7 +3726,9 @@ it).
 
 ```
 function buildInitialPotentials(manifest_path,
-        force, single_element):
+        force, single_element, dispatch_shape,
+        partition, nodes, walltime, profile,
+        save_config):
     manifest     = load_manifest_v2(manifest_path)
     dataspace    = guidance_db.load(
         "share/historicalGuidanceDB/")
@@ -3849,12 +3851,18 @@ function buildInitialPotentials(manifest_path,
         metadata = {"predictions": predictions})
 
     # ===== Phase 2: dispatch ==========================
-    # Kaleidoscope runs and tracks every unit through the
-    # wingbeat seam and its run-reuse cache (DESIGN
-    # 6.2.5).  `force` bypasses cached runs so they
-    # re-run; fresh results still repopulate the cache.
-    dispatch(flight,
-        executor = curation_executor(force))
+    # Turn the dispatch choice into the flight's Config via
+    # the shared resolve_dispatch (13.7): local -> None, so
+    # the driver runs in process; a cluster shape -> a real
+    # Config.  Kaleidoscope then tracks every unit through
+    # the wingbeat seam and its run-reuse cache (DESIGN
+    # 6.2.5); `force` bypasses cached runs so they re-run,
+    # and fresh results still repopulate the cache.
+    flight.parsl_config, choices = resolve_dispatch(
+        dispatch_shape, partition, nodes, walltime, profile)
+    if save_config and choices is not None:
+        write_resolved_dispatch(workspace, choices, profile)
+    dispatch(flight, force = force)
 
     # ===== Phase 3: harvest ===========================
     log = []
@@ -5417,11 +5425,17 @@ points at.
 
 The generator turns (site facts + per-run choices) into the
 `flight.parsl_config` the driver (13.5) loads.  It lives in
-kaleidoscope so every client shares one copy.  `local` is
-the default and returns None, which the driver (13.5) runs
-under a `LocalExecutor` -- in process -- so the test suite, a
-laptop, and the materialize pre-flight are unchanged unless
-cluster dispatch is asked for.
+kaleidoscope so every client shares one copy.  The
+command-line default is `slurm-per-job`: the producer and the
+seed are *meant* to reach the scheduler, so on a cluster they
+do so with no flags, and a run with no settings file present
+is a configuration error rather than a quiet local fall-back
+(DESIGN 6.2.11, decision 2).  `local` is the deliberate
+opt-out -- it builds no `Config` (returns None), needs no
+settings file, and the driver (13.5) runs it under a
+`LocalExecutor` in process.  The test suite, a laptop, and the
+materialize pre-flight all request `local` explicitly, so they
+neither read a settings file nor touch the scheduler.
 
 Three layers feed it: the per-site resource-control file
 (stable facts), the per-run choices (CLI flags), and -- the
@@ -5447,7 +5461,7 @@ function clusterrc.parameters_and_defaults():
         "cores_per_worker"  : 1,         # serial imago today
         "nodes"             : 1,
         "walltime"          : "01:00:00",
-        "default_topology"  : "slurm-pooled",
+        "default_topology"  : "slurm-per-job",
         "max_blocks"        : 1,         # pooled growth cap
         "memory_per_node"   : None,
         "memory_per_worker" : None,
@@ -5484,9 +5498,12 @@ function load_site_config(profile=None):
 
 ```
 # Layer 2: per-run choices.  Each CLI flag defaults from the
-# site file, so a fully configured site needs only --dispatch.
-# The flag surface is --dispatch {local, slurm-pooled,
-# slurm-per-job}, --partition, --nodes, --walltime.
+# site file -- the dispatch shape from default_topology
+# (slurm-per-job) -- so a fully configured site needs no flags
+# at all.  The flag surface is --dispatch {local, slurm-pooled,
+# slurm-per-job}, --partition, --nodes, --walltime.  This runs
+# only for a cluster shape; the local opt-out skips it (13.7
+# run_flight short-circuits before load_site_config).
 function resolve_choices(site, cli):
     return {
         "dispatch"  : cli.dispatch  or site["default_topology"],
@@ -5517,10 +5534,13 @@ differ in how blocks map to units.
 ```
 function slurm_provider(site, choices, nodes_per_block,
                         init_blocks, min_blocks, max_blocks):
+    # Guard the deferred parallel seam first: refuse any parallel
+    # knob set away from its serial default (see _require_serial_only).
+    _require_serial_only(site)
     # worker_init is the site's bring-up script, so a worker can
-    # find imago; account/partition/walltime come from the
-    # resolved choices; the memory, GPU, and CPU-binding knobs
-    # ride along as raw scheduler directives (scheduler_options).
+    # find imago; account/partition/walltime come from the resolved
+    # choices; the memory and GPU knobs ride along as raw scheduler
+    # directives (scheduler_options).
     return SlurmProvider(
         partition         = choices["partition"],
         account           = site["account"],
@@ -5531,7 +5551,7 @@ function slurm_provider(site, choices, nodes_per_block,
         max_blocks        = max_blocks,
         worker_init       = join_lines(site["worker_init"]),
         launcher          = make_launcher(site),
-        scheduler_options = scheduler_options(site, choices))
+        scheduler_options = scheduler_options(site))
 ```
 
 ```
@@ -5582,29 +5602,51 @@ function workers_per_node(site):
 ```
 
 ```
-function make_launcher(site):
-    # Serial today: one process per worker.  The OpenMP/MPI split
-    # (ranks_per_worker x threads_per_rank) and the binding /
-    # omp_* knobs become a real MPI launcher (srun with rank and
-    # thread placement) here once imago runs in parallel -- the
-    # deferred seam, not built now.
-    if site["launcher"] == "single":
-        return SingleNodeLauncher()
-    return mpi_launcher(site)        # ranks/threads/binding
+function _require_serial_only(site):
+    # The deferred parallel seam.  Today imago is serial: one
+    # calculation on one core through the single-node launcher.  The
+    # knobs that describe a parallel calculation -- a non-serial
+    # launcher, the ranks_per_worker x threads_per_rank split, and the
+    # binding / omp_* placement -- cannot be realized yet, so any of
+    # them set away from its serial default is a clear error rather
+    # than a silently dropped setting.  A real MPI launcher (TODO C100
+    # / C81) replaces this guard and consumes those knobs at launch.
+    serial_defaults = {launcher: "single", ranks_per_worker: 1,
+        threads_per_rank: 1, binding: None, omp_places: None,
+        omp_proc_bind: None}
+    for knob, default in serial_defaults:
+        if site[knob] != default:
+            raise NotImplementedError(knob + " is the deferred "
+                "parallel-imago seam; leave it at its serial default")
 ```
 
 ```
-function scheduler_options(site, choices):
-    # Assemble the raw scheduler directives the per-run and
-    # advanced knobs imply -- memory guards, GPU requests, CPU
-    # binding -- then append extra_scheduler_options verbatim so
-    # a power user is never blocked by the schema.
+function make_launcher(site):
+    # Serial today: one process per worker.  The MPI launcher that
+    # would honour the ranks_per_worker x threads_per_rank split and
+    # the binding / omp_* placement is the deferred seam (already
+    # refused by _require_serial_only), so a non-serial launcher
+    # raises rather than returning a launcher that does not exist yet.
+    if site["launcher"] == "single":
+        return SingleNodeLauncher()
+    raise NotImplementedError("MPI launcher is the deferred seam")
+```
+
+```
+function scheduler_options(site):
+    # Assemble the raw scheduler directives the site facts imply --
+    # the memory guard and the GPU request, which are allocation-time
+    # requests and so belong in #SBATCH -- then append
+    # extra_scheduler_options verbatim so a power user is never
+    # blocked by the schema.  CPU/NUMA binding is NOT here: pinning is
+    # a launch-time concern (srun --cpu-bind, OMP_PLACES), applied by
+    # the launcher in the deferred parallel path, not a batch
+    # directive.  Returns the directives joined into one string.
     lines = []
     if site["memory_per_node"]:   lines.append(mem_line(site))
     if site["gpus_per_node"] > 0: lines.append(gres_line(site))
-    if site["binding"]:           lines.append(bind_line(site))
     lines.extend(site["extra_scheduler_options"])
-    return lines
+    return join_lines(lines)
 ```
 
 The producer change-over (DESIGN 6.2.11; TODO C100) needs no
@@ -5618,22 +5660,51 @@ and carried the re-run switch) goes away; the re-run switch
 becomes a `dispatch` argument, where the run-reuse cache it
 governs already lives.
 
+Those two steps are themselves shared, in kaleidoscope, so no
+client copies them.  `resolve_dispatch` turns a dispatch choice
+into `(parsl_config, choices)`, and `write_resolved_dispatch`
+records the resolved choices beside the run; a client wires
+them around its own dispatch call:
+
 ```
-# CLIENT side -- the SAME shape for every flight, because the
-#   generator and the executor choice both live in kaleidoscope.
+# SHARED in kaleidoscope -- the run_flight steps every client uses.
+function resolve_dispatch(dispatch, partition, nodes, walltime,
+                          profile):
+    if dispatch == "local":
+        # The deliberate opt-out: no settings file is read and no
+        #   Config is built, so a laptop or the test suite runs in
+        #   process without a clusterrc present at all.
+        return (None, None)
+    # A cluster shape: the settings file IS required here, and a gap
+    #   in its required core is a config error raised up front
+    #   (load_site_config), never a quiet local fall-back.
+    site    = load_site_config(profile)
+    choices = resolve_choices(site, {dispatch, partition, nodes,
+                                     walltime})
+    return (build_dispatch_config(site, choices), choices)
+
+function write_resolved_dispatch(run_dir, choices, profile):
+    # A small human-readable record for reproducibility: the dispatch
+    #   shape, queue, nodes, and walltime actually used, plus the
+    #   profile when one was selected.  The stable site facts are NOT
+    #   duplicated -- they live in clusterrc.py, and the profile name
+    #   pins which overlay fed this run.
+    write_lines(run_dir + "/resolved_dispatch.toml",
+                ["profile" if profile, dispatch, partition,
+                 nodes, walltime])
+```
+
+```
+# CLIENT side -- the SAME shape for every flight; the client adds
+#   only its own build (before) and harvest (after) around this.
 function run_flight(flight, cli):
-    site    = load_site_config(cli.profile)
-    choices = resolve_choices(site, cli)
-    # local -> None -> the driver runs the flight in process;
-    # a cluster shape -> a real Config the driver loads (13.5).
-    flight.parsl_config = build_dispatch_config(site, choices)
-    # Optional reproducible record beside the manifest: the fully
-    # resolved site + choices, as a human-readable file.
-    if cli.save_config:
-        write_resolved_config(flight.root, site, choices)
+    flight.parsl_config, choices = resolve_dispatch(cli.dispatch,
+        cli.partition, cli.nodes, cli.walltime, cli.profile)
+    if cli.save_config and choices is not None:
+        write_resolved_dispatch(flight.root, choices, cli.profile)
     # No explicit executor: the driver picks Local or Parsl from
-    # flight.parsl_config.  The re-run switch rides as a driver
-    # argument, not bundled into a worker (DESIGN 6.2.5).
+    #   flight.parsl_config.  The re-run switch rides as a driver
+    #   argument, not bundled into a worker (DESIGN 6.2.5).
     return dispatch(flight, force=cli.force)
 ```
 
@@ -5641,6 +5712,45 @@ The run-reuse cache (13.4) is untouched: a worker executes
 each unit in its own run directory on the shared filesystem
 exactly as the in-process local path does, so a cluster run
 and a local run share one cache.
+
+The discovery helper (`--probe`, DESIGN 6.2.11) reads what the
+machine can report and writes a *starter* settings file, so a
+newcomer does not hand-assemble the performance and advanced
+tiers.  It is best-effort and scheduler-specific: every query
+is wrapped so a missing tool or an unparseable line drops that
+fact rather than aborting, and the result is a draft the user
+reviews -- never an authority.
+
+```
+function probe_site():
+    # The discoverable tiers, read straight off the machine.
+    # Each probe is guarded: on any failure the fact is simply
+    #   omitted, so the helper degrades to "filled what I could".
+    facts = {}
+    try: facts["partitions"]     = sinfo_partitions()      # sinfo
+    try: facts["cores_per_node"] = node_cores()            # lscpu
+    try: facts["memory_per_node"]= node_memory()           # scontrol
+    try: facts["gpus_per_node"]  = node_gpus()             # GRES
+    # Socket / core / NUMA topology -- the basis for the binding
+    #   and omp_* knobs (lscpu, numactl --hardware).
+    try: facts["topology"]       = node_topology()
+    # What this user is actually permitted to use (sacctmgr): a
+    #   hint for the account / partition choice, not the answer.
+    try: facts["allowed_assoc"]  = user_associations()
+    return facts
+
+function emit_starter_clusterrc(path):
+    facts = probe_site()
+    # Fill the discoverable tiers from the probe; leave the
+    #   required core (worker_init, account, preferred partition)
+    #   as clearly marked REQUIRED blanks the user completes from
+    #   local documentation -- the machine cannot report these.
+    write_clusterrc_template(path,
+        discovered = facts,
+        blanks     = ["worker_init", "account"],
+        note       = "Complete worker_init/account; review the "
+                     "partition order -- the first is the default.")
+```
 
 ## 14. makeinput Callable Build API (DESIGN 6.3)
 

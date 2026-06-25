@@ -1844,7 +1844,7 @@ def test_build_initial_potentials_harvests_curated_entry(
 
     # Mock dispatch: write a flat-energy result.toml per unit so
     #   pick_converged_unit lands on kpt-density-100.
-    def fake_dispatch(flight, executor=None):
+    def fake_dispatch(flight, force=False):
         # Flat energies so the two-sided rule converges at the
         #   interior point (kpt-density-100) under the 1e-6
         #   manifest threshold.
@@ -1923,7 +1923,7 @@ def test_build_initial_potentials_derives_label_at_harvest(
     monkeypatch.setattr(bip, "build_kpoint_convergence",
                         fake_builder)
 
-    def fake_dispatch(flight, executor=None):
+    def fake_dispatch(flight, force=False):
         for unit in flight.units:
             _write_result(flight.root, unit.id, unit.calc,
                           energy=0.5)
@@ -1946,3 +1946,43 @@ def test_build_initial_potentials_derives_label_at_harvest(
     assert entry.default is True
     assert entry.coefficients == [0.5, 0.3]
     assert entry.provenance["reference_id"] == "au_fcc"
+
+
+# ================================================================
+#  Dispatch wiring (DESIGN 6.2.11; PSEUDOCODE 13.7) -- the producer
+#  change-over from the deleted curation_executor to attaching a
+#  flight Parsl Config and letting the driver auto-select.  (The
+#  shared resolve_dispatch / write_resolved_dispatch helpers are
+#  exercised in test_cluster_config.py, where they now live.)
+# ================================================================
+
+def test_producer_local_default_attaches_no_config(monkeypatch,
+                                                   tmp_path):
+    """build_initial_potentials defaults to local: it attaches no
+    Parsl Config to the flight and calls the driver with force, never
+    an executor (the curation_executor seam is gone)."""
+    seen = {}
+
+    def fake_dispatch(flight, force=False):
+        seen["parsl_config"] = flight.parsl_config
+        seen["force"] = force
+
+    # A manifest with no reference solids exercises the build/dispatch
+    #   path without needing structures or a converged harvest.
+    monkeypatch.setattr(bip, "load_manifest_v2", lambda path,
+                        known_methods=None: types.SimpleNamespace(
+                            manifest_path=str(tmp_path / "m.toml"),
+                            reference_solids=[]))
+    monkeypatch.setattr(bip, "refresh_isolated_entries",
+                        lambda *a, **k: {})
+    monkeypatch.setattr(bip.guidance_db, "load", lambda root: None)
+    monkeypatch.setattr(bip.guidance_harvest, "harvest_flight",
+                        lambda *a, **k: None)
+    monkeypatch.setattr(bip, "save_databases", lambda *a, **k: None)
+    monkeypatch.setattr(bip, "write_run_log", lambda *a, **k: None)
+
+    bip.build_initial_potentials(
+        str(tmp_path / "m.toml"), str(tmp_path / "atomicPDB"),
+        str(tmp_path), dispatch_fn=fake_dispatch, force=True)
+    assert seen["parsl_config"] is None
+    assert seen["force"] is True

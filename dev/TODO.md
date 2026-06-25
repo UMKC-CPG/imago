@@ -2762,7 +2762,7 @@ on the same data later with no schema change.  Built on P10.
   Observation per run dir, stage censored failed runs as bounds,
   write to staging/<fingerprint>/ (DESIGN 8.7).  Sibling of
   guidance_harvest.py (C72).
-- [ ] C100. Wire the producer (and other clients) onto SLURM
+- [x] C100. Wire the producer (and other clients) onto SLURM
   dispatch.  Today `curation_executor` returns a `LocalExecutor`,
   so flights run locally and one-at-a-time even on a cluster login
   node (ARCH 9.7).  Build the dispatch-config story: a per-site
@@ -2775,12 +2775,19 @@ on the same data later with no schema change.  Built on P10.
   `flight.parsl_config` from the generator and let `dispatch`
   auto-select Local vs Parsl -- no client builds its own
   executor.  The re-run/cache-bypass switch moves to a
-  `dispatch` argument (DESIGN 6.2.5).  The design points
-  (site-config home, per-run UX, deferral of per-unit
-  right-sizing, generator home) are now settled in
-  DESIGN 6.2.11; ARCH 9.8 RESOLVED.  C81 layers predictive sizing
-  on top of this.  CODE; VISION Goals 4/6/7, ARCH 9.4/9.7/9.8,
-  DESIGN 6.2.11.
+  `dispatch` argument (DESIGN 6.2.5) -- DONE in `dispatch.py`.
+  The command-line default is `slurm-per-job` (a missing
+  settings file is a config error, not a quiet local
+  fall-back); `local` is the explicit opt-out the tests and
+  laptops request, and the library entry point defaults to
+  `local`.  Ship a `--probe` helper that reads the discoverable
+  tiers off the scheduler/node (`sinfo`, `scontrol`, `lscpu`)
+  and writes a starter `clusterrc.py` with the required core
+  left blank.  The design points (site-config home, per-run UX,
+  deferral of per-unit right-sizing, generator home, per-job
+  default, discovery helper) are settled in DESIGN 6.2.11; ARCH
+  9.8 RESOLVED.  C81 layers predictive sizing on top of this.
+  CODE; VISION Goals 4/6/7, ARCH 9.4/9.7/9.8, DESIGN 6.2.11.
 - [ ] C81. Provisioning consumer in the flight layer (the
   kaleidoscope flight-builder helper or a thin sibling): query
   the predictor with a proposed config + size, apply a safety

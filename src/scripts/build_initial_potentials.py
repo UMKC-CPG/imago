@@ -118,10 +118,11 @@ import guidance_harvest
 from curation_manifest import (
     ReferenceEntry, ReferenceSolid, CurationManifest,
     load_manifest_v2, load_structure_sources)
-from kaleidoscope import CalcUnit, Flight, LocalExecutor, SweepRecord, \
-    dispatch
+from kaleidoscope import CalcUnit, Flight, SweepRecord, dispatch
 from kaleidoscope.builders.kpoint_convergence import (
     build_kpoint_convergence, standard_key_fields)
+from kaleidoscope.cluster_config import (
+    resolve_dispatch, write_resolved_dispatch)
 from kaleidoscope.workspace import read_status, toml_line
 # The Phase-2 matcher registry (ARCHITECTURE 8.9) lives in the neutral
 #   matchers module; the fingerprint harvest dispatches reduce
@@ -1364,20 +1365,6 @@ def write_run_log(path: str, imago_commit: str, timestamp: str,
                     handle.write(toml_line(key, value))
 
 
-def curation_executor(force: bool = False):
-    """Build the executor kaleidoscope dispatches the producer's
-    combined flight on (PSEUDOCODE 11.4).  v1 uses the in-process
-    ``LocalExecutor``; ``force`` is threaded for the planned
-    cache-bypass wiring (DESIGN 6.2.5) -- when set, cached runs
-    should re-run rather than dedupe.
-
-    NOTE (C74 end-to-end): a cluster producer swaps in a
-    ``ParslExecutor``; the force-driven cache bypass is wired
-    against the live run-reuse cache only on the cluster."""
-
-    return LocalExecutor()
-
-
 # ============================================================
 #  The producer pipeline (DESIGN 5.7; PSEUDOCODE 11.4)
 # ============================================================
@@ -1385,6 +1372,12 @@ def curation_executor(force: bool = False):
 def build_initial_potentials(manifest_path: str, pdb_root: str,
                              data_root: str, *, force: bool = False,
                              single_element: str | None = None,
+                             dispatch_shape: str = "local",
+                             partition: str | None = None,
+                             nodes: int | None = None,
+                             walltime: str | None = None,
+                             profile: str | None = None,
+                             save_config: bool = False,
                              dispatch_fn=dispatch,
                              extract_fn=extract_potential,
                              identity_fn=read_site_identity_map
@@ -1394,6 +1387,15 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     kaleidoscope, then *harvest* each solid's converged potential
     and contribute the same converged point back to the guidance
     dataspace.  Returns the per-run log (also written to disk).
+
+    ``dispatch_shape`` selects where the flight runs (DESIGN 6.2.11):
+    ``local`` (the default here, so tests and in-process callers stay
+    serial without any cluster settings file) runs every unit in
+    process; ``slurm-pooled`` and ``slurm-per-job`` build a Parsl
+    ``Config`` from the per-site settings file and the per-run
+    ``partition`` / ``nodes`` / ``walltime`` / ``profile`` choices.
+    ``save_config`` records the resolved cluster choices beside the
+    run.  ``force`` bypasses the run-reuse cache (DESIGN 6.2.5).
 
     ``dispatch_fn``, ``extract_fn``, and ``identity_fn`` are
     injected (defaulting to the real kaleidoscope dispatch, the real
@@ -1456,8 +1458,15 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         metadata={"predictions": predictions})
 
     # ----- Phase 2: dispatch.  Kaleidoscope runs and tracks every
-    # unit through the wingbeat seam and its run-reuse cache.
-    dispatch_fn(flight, executor=curation_executor(force))
+    # unit through the wingbeat seam and its run-reuse cache.  The
+    # dispatch shape becomes the flight's Parsl Config (None for the
+    # local opt-out); the driver then auto-selects Local vs Parsl and
+    # honours the force cache-bypass (DESIGN 6.2.11; PSEUDOCODE 13.5).
+    flight.parsl_config, dispatch_choices = resolve_dispatch(
+        dispatch_shape, partition, nodes, walltime, profile)
+    if save_config and dispatch_choices is not None:
+        write_resolved_dispatch(workspace, dispatch_choices, profile)
+    dispatch_fn(flight, force=force)
 
     # ----- Phase 3: harvest.  Per solid, pick the converged grid
     # point, extract the potential at each named site, and record
@@ -1569,9 +1578,14 @@ def main(argv=None) -> int:
     """CLI entry point: run the producer over a curation manifest
     (DESIGN 5.7).  ``--element`` restricts the run to one element's
     database; ``--force`` bypasses kaleidoscope's run-reuse cache so
-    every reference run re-executes.  ``--materialize-only`` runs just
-    the structure fetch-and-convert pre-flight (no SCF), optionally
-    redirecting the output with ``--materialize-dir``."""
+    every reference run re-executes.  ``--dispatch`` chooses where the
+    flight runs -- one scheduler job per unit by default, ``local``
+    to run in process without a cluster settings file -- with
+    ``--partition`` / ``--nodes`` / ``--walltime`` / ``--profile``
+    tuning a cluster dispatch and ``--save-config`` recording the
+    resolved choices (DESIGN 6.2.11).  ``--materialize-only`` runs
+    just the structure fetch-and-convert pre-flight (no SCF),
+    optionally redirecting the output with ``--materialize-dir``."""
 
     parser = argparse.ArgumentParser(
         description="Build the augmented initial-potential database "
@@ -1591,6 +1605,35 @@ def main(argv=None) -> int:
         "--force", action="store_true",
         help="bypass the run-reuse cache so every reference run "
              "re-executes (default: reuse any cached runs)")
+    parser.add_argument(
+        "--dispatch", default="slurm-per-job",
+        choices=["local", "slurm-pooled", "slurm-per-job"],
+        help="where to run the flight: 'local' runs every unit in "
+             "process and needs no cluster settings file; "
+             "'slurm-pooled' streams units through one shared "
+             "allocation; 'slurm-per-job' submits one scheduler job "
+             "per unit (default: slurm-per-job)")
+    parser.add_argument(
+        "--partition", default=None,
+        help="scheduler queue for a cluster dispatch (default: the "
+             "first partition in the cluster settings file)")
+    parser.add_argument(
+        "--nodes", type=int, default=None,
+        help="nodes per allocation for a cluster dispatch (default: "
+             "the cluster settings file's nodes value)")
+    parser.add_argument(
+        "--walltime", default=None,
+        help="time limit for a cluster dispatch, e.g. 02:00:00 "
+             "(default: the cluster settings file's walltime value)")
+    parser.add_argument(
+        "--profile", default=None,
+        help="named cluster profile to select from the settings "
+             "file (default: the file's base settings)")
+    parser.add_argument(
+        "--save-config", action="store_true",
+        help="write the resolved cluster dispatch choices beside the "
+             "run for a reproducible record (default: do not write "
+             "the record)")
     parser.add_argument(
         "--materialize-only", action="store_true",
         help="fetch and convert every reference structure named in "
@@ -1624,7 +1667,10 @@ def main(argv=None) -> int:
 
     per_run_log = build_initial_potentials(
         args.manifest, args.pdb_root, data_root,
-        force=args.force, single_element=args.element)
+        force=args.force, single_element=args.element,
+        dispatch_shape=args.dispatch, partition=args.partition,
+        nodes=args.nodes, walltime=args.walltime,
+        profile=args.profile, save_config=args.save_config)
     converged = sum(1 for row in per_run_log if row["converged"])
     print(f"producer: {converged}/{len(per_run_log)} reference "
           f"solids converged and harvested")

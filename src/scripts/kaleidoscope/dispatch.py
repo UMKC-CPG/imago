@@ -227,7 +227,7 @@ def _fire(flight, entry):
 #  The flight driver
 # ------------------------------------------------------------------
 
-def dispatch(flight, executor=None):
+def dispatch(flight, executor=None, force=False):
     """Run every unit in the flight and return a FlightReport
     (DESIGN 6.2.3).  Cache hits are reported straight from their
     existing ``status.toml``; misses are prepared, dispatched
@@ -238,7 +238,14 @@ def dispatch(flight, executor=None):
     When ``executor`` is None one is chosen from the flight:
     a ``ParslExecutor`` if it carries a ``parsl_config``, else a
     ``LocalExecutor``.  A caller may pass an executor explicitly
-    (tests do, to pin the path)."""
+    (tests do, to pin the path).
+
+    ``force`` bypasses the run-reuse cache (DESIGN 6.2.5): when
+    set, every unit is re-prepared and re-dispatched even if a
+    completed ``status.toml`` already exists, so a caller can
+    force a fresh run.  The switch lives here, on the driver,
+    because the cache it governs is owned by the driver -- not
+    by the executor and not by any one client."""
     validate_flight(flight)
     os.makedirs(flight.root, exist_ok=True)
     serialize_flight(flight)
@@ -256,7 +263,9 @@ def dispatch(flight, executor=None):
         pending = []                  # (index, unit, future)
         for index, unit in enumerate(flight.units):
             wingbeat_dir = unit_run_dir(flight, unit)
-            if is_cache_hit(unit, wingbeat_dir):
+            # ``force`` skips the cache check so the unit always
+            #   re-runs, even when a completed status.toml exists.
+            if not force and is_cache_hit(unit, wingbeat_dir):
                 entry = report_entry_from_status(unit, wingbeat_dir)
                 results[index] = entry
                 _fire(flight, entry)

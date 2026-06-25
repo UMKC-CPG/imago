@@ -1715,20 +1715,23 @@ makeinput/harvest interface explicit: the run produces the
 numbers, the producer only consumes them.  The
 producer-side change is tracked as TODO C87.
 
-One seam this leaves open: the producer is the client that
-must *supply* the dispatch `Config` (9.4).  As written it
-hands kaleidoscope a plain in-process executor
-(`curation_executor` returns a `LocalExecutor`), so the
-seed and database builds run locally -- one calculation at
-a time, even on a cluster login node.  Reaching SLURM means
-giving the flight a Parsl `Config` (from the generator
-above) rather than the local executor.  Local stays the
-default -- for tests, a laptop, and the materialize
-pre-flight -- with cluster dispatch opt-in.  How this gets wired
-is settled in DESIGN 6.2.11 -- the tiered site rc file, the per-run
-CLI choices, the `Config` generator's home in kaleidoscope, and the
-uniform-slice deferral of right-sizing -- and the producer
-change-over is the code, tracked as TODO C100.
+One seam this section once left open -- how the producer
+*supplies* the dispatch `Config` (9.4) -- is now closed by
+C100.  The producer no longer forces a local executor: it
+turns its dispatch choice into a flight `Config` through
+kaleidoscope's shared generator and lets the driver
+auto-select Local versus Parsl (9.4; DESIGN 6.2.11), so the
+seed and database builds reach the scheduler rather than
+running one calculation at a time on a login node.
+Scheduler dispatch is the default -- a run with no site rc
+file present is a configuration error, not a quiet local
+fall-back -- and an in-process local run is the deliberate
+opt-out that tests, a laptop, and the materialize pre-flight
+request explicitly (DESIGN 6.2.11, decision 2).  The wiring is
+settled in DESIGN 6.2.11 -- the tiered site rc file, the
+per-run CLI choices, the `Config` generator's home in
+kaleidoscope, and the uniform-slice deferral of right-sizing --
+and the code is C100 (done).
 
 ### 9.8 Open architectural questions
 
@@ -1772,11 +1775,21 @@ What remains open:
     resource-control file -- a tiny required core (queues,
     `worker_init`, and account where the cluster demands
     one) with every performance and advanced knob optional
-    and defaulted -- rather than a section of `imagorc`.
+    and defaulted -- rather than a section of `imagorc`.  A
+    `--probe` helper reads the discoverable tiers off the
+    scheduler and node hardware (`sinfo`, `scontrol`,
+    `lscpu`) and emits a starter file, leaving the
+    non-discoverable required core as blanks to complete.
   - **Per-run choices.**  CLI flags (`--dispatch`,
     `--partition`, `--nodes`, `--walltime`) defaulting from
     the rc file, with an optional resolved-config file
-    written beside the run for a reproducible record.
+    written beside the run for a reproducible record.  The
+    command-line default is `slurm-per-job`: on a cluster the
+    producer and seed reach the scheduler with no flags, and
+    a run with no settings file is a configuration error
+    rather than a quiet local fall-back.  `local` is the
+    deliberate opt-out (no settings file, no `Config`), which
+    the test suite and laptop sessions request explicitly.
   - **Per-unit right-sizing.**  Deferred: both shapes give
     every unit a uniform slice now; right-sizing waits for
     a parallel imago and the section-11 cost predictor that
