@@ -10,6 +10,9 @@ tests skip cleanly if Parsl is not installed.  The import works because
 conftest.py inserts ``src/scripts`` on ``sys.path``.
 """
 
+import os
+import subprocess
+import sys
 import tomllib
 from types import SimpleNamespace
 
@@ -18,6 +21,27 @@ import pytest
 from kaleidoscope import cluster_config as cc
 
 pytestmark = pytest.mark.unit
+
+
+# Where clusterrc.py / kaleidoscope live, for the subprocess that
+#   exercises the real import-precedence (cc lives in
+#   src/scripts/kaleidoscope/, so two dirnames up is src/scripts).
+_SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(
+    cc.__file__)))
+
+
+def _write_clusterrc(directory, marker):
+    """Write a minimal valid clusterrc.py whose account names ``marker``,
+    so a loader can report which file it resolved."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "clusterrc.py").write_text(
+        "def parameters_and_defaults():\n"
+        "    return {\n"
+        '        "partitions": ["q"],\n'
+        '        "worker_init": ["bring up imago"],\n'
+        f'        "account": "{marker}",\n'
+        '        "profiles": {},\n'
+        "    }\n")
 
 # Parsl is only needed by the two Config-building shapes; skip those
 #   tests gracefully where it is absent.
@@ -100,6 +124,53 @@ def test_load_site_config_applies_named_profile(monkeypatch):
     assert site["partitions"] == ["batch"]
     with pytest.raises(cc.ConfigError):
         cc.load_site_config(profile="nope")
+
+
+# ----------------------------------------------------------------
+#  clusterrc.py resolution precedence: CWD wins, $IMAGO_RC default
+# ----------------------------------------------------------------
+
+def test_search_dirs_put_cwd_before_imago_rc(monkeypatch):
+    """The current directory is searched before $IMAGO_RC, so a local
+    clusterrc.py overrides the global default; without $IMAGO_RC only
+    the current directory is searched."""
+    monkeypatch.setenv("IMAGO_RC", "/some/global/dir")
+    assert cc._clusterrc_search_dirs() == [os.getcwd(), "/some/global/dir"]
+    monkeypatch.delenv("IMAGO_RC")
+    assert cc._clusterrc_search_dirs() == [os.getcwd()]
+
+
+def _resolved_account(cwd, imago_rc):
+    """Load site config in a fresh process (import caching makes this
+    untestable in-process) and return the resolved account, so the test
+    sees which clusterrc.py actually won."""
+    code = ("from kaleidoscope.cluster_config import load_site_config\n"
+            "print(load_site_config()['account'])\n")
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=str(cwd), text=True,
+        capture_output=True,
+        env={**os.environ, "PYTHONPATH": _SCRIPTS_DIR,
+             "IMAGO_RC": str(imago_rc)})
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_local_clusterrc_wins_over_global(tmp_path):
+    """A clusterrc.py in the working directory takes precedence over the
+    one in $IMAGO_RC -- the per-run override."""
+    _write_clusterrc(tmp_path / "global", "GLOBAL-ACCT")
+    _write_clusterrc(tmp_path / "local", "LOCAL-ACCT")
+    assert _resolved_account(tmp_path / "local",
+                             tmp_path / "global") == "LOCAL-ACCT"
+
+
+def test_global_clusterrc_is_the_default_when_no_local(tmp_path):
+    """With no local clusterrc.py, the $IMAGO_RC copy is used as the
+    convenient global default."""
+    _write_clusterrc(tmp_path / "global", "GLOBAL-ACCT")
+    (tmp_path / "empty").mkdir()
+    assert _resolved_account(tmp_path / "empty",
+                             tmp_path / "global") == "GLOBAL-ACCT"
 
 
 # ----------------------------------------------------------------

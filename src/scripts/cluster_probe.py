@@ -58,7 +58,11 @@ def _load_clusterrc():
         return clusterrc
     except ModuleNotFoundError:
         pass
-    for candidate in (os.getcwd(), os.getenv("IMAGO_RC")):
+    # Same precedence as cluster_config: a local clusterrc.py wins, with
+    #   $IMAGO_RC as the fallback default.  Earlier sys.path entries
+    #   win, so insert in reverse precedence ($IMAGO_RC first, then the
+    #   working directory) to leave the working directory at index 0.
+    for candidate in (os.getenv("IMAGO_RC"), os.getcwd()):
         if candidate and candidate not in sys.path:
             sys.path.insert(0, candidate)
     try:

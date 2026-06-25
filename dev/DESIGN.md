@@ -6478,6 +6478,15 @@ template through the standard rc-file search (the working
 directory, then `$IMAGO_RC`) and reports a clear instruction
 if none is found.
 
+*Resolution precedence.*  Both the bootstrap tool and the
+dispatch read resolve `clusterrc.py` the same way, and the
+order is deliberate: the working directory is searched first,
+then `$IMAGO_RC`.  So the convenient default is the global
+copy in `$IMAGO_RC` -- populated once, picked up by every run --
+while a `clusterrc.py` dropped beside a particular campaign
+overrides it for that run only, letting a sweep pin different
+queues or walltime without disturbing the global settings.
+
 **Decision 2 -- per-run choices are command-line options,
 optionally saved.**  The client exposes options --
 `--dispatch local|slurm-pooled|slurm-per-job`, `--partition`,

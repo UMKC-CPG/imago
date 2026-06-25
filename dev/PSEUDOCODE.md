@@ -5484,6 +5484,9 @@ function clusterrc.parameters_and_defaults():
 
 ```
 function load_site_config(profile=None):
+    # Resolve clusterrc.py by precedence: the working directory
+    #   first (a per-run override), then $IMAGO_RC (the global
+    #   default).  cluster_probe.py uses the same order.
     site = clusterrc.parameters_and_defaults()
     # A named profile (advanced tier) overlays the base dict,
     # so a user with several clusters selects one by name.

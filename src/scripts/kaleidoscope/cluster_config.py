@@ -60,17 +60,37 @@ class ConfigError(Exception):
 #  Layer 1: the per-site settings file
 # ----------------------------------------------------------------
 
+def _clusterrc_search_dirs():
+    """The directories searched for ``clusterrc.py``, highest
+    precedence first.
+
+    A ``clusterrc.py`` in the current working directory -- a per-run
+    override placed beside a particular campaign -- wins; otherwise the
+    one installed to ``$IMAGO_RC`` is used as the convenient global
+    default.  So a routine user populates the global file once and every
+    run picks it up, while a campaign that needs different queues or
+    walltime drops a local copy that takes precedence for that run only.
+    """
+    search_dirs = [os.getcwd()]
+    imago_rc = os.getenv("IMAGO_RC")
+    if imago_rc:
+        search_dirs.append(imago_rc)
+    return search_dirs
+
+
 def _load_clusterrc_module():
     """Import the active ``clusterrc`` module and return it.
 
-    Follows the same override search the other Imago scripts use: a
-    customized ``clusterrc.py`` in the current directory or in
-    ``$IMAGO_RC`` takes precedence over the shipped default.  The module
-    is pure data -- a single ``parameters_and_defaults()`` -- so only
-    that dictionary is read; the starter generator lives separately in
-    ``cluster_probe.py``.
+    Resolves the settings file by the precedence of
+    :func:`_clusterrc_search_dirs` -- current directory first, then
+    ``$IMAGO_RC``.  The module is pure data -- a single
+    ``parameters_and_defaults()`` -- so only that dictionary is read;
+    the starter generator lives separately in ``cluster_probe.py``.
     """
-    for candidate in (os.getcwd(), os.getenv("IMAGO_RC")):
+    # Earlier entries on sys.path win, so insert the search directories
+    #   in reverse precedence -- the highest-precedence one ends up
+    #   first (at index 0).
+    for candidate in reversed(_clusterrc_search_dirs()):
         if candidate and candidate not in sys.path:
             sys.path.insert(0, candidate)
     import clusterrc
