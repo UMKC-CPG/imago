@@ -26,12 +26,16 @@ the normal way, with the DEBUG entry left as a pointer.
 ## Status
 
 - Date opened: 2026-06-25
-- Current phase: Phase 0 (build harness). **Step 0a COMPLETE**
-  (2026-06-26): the opt-in gfortran instrumentation options are
-  wired into the top-level `CMakeLists.txt` and verified -- the
-  default build is byte-for-byte unchanged, and the options inject
-  correctly when enabled. Next: 0b (presets), 0d (harness
-  validation), 0e (docs). 0c (ifort) deferrable.
+- Current phase: Phase 0 (build harness). **Steps 0a and 0d
+  COMPLETE** (2026-06-26). 0a: the opt-in gfortran instrumentation
+  options are wired into the top-level `CMakeLists.txt` and
+  verified -- the default build is byte-for-byte unchanged, and the
+  options inject correctly when enabled. 0d: an instrumented
+  `imagoG` (`Debug + IMAGO_CHECKS + IMAGO_SANITIZE=address`) built,
+  linked, and ran a full all-electron Gamma SCF on a real deck to
+  completion with zero AddressSanitizer errors -- the harness is
+  usable and Phase 3 is unblocked. Next: 0b (presets), 0e (docs).
+  0c (ifort) deferrable.
 - Phase 2 audit mechanism: multi-agent workflow (decided)
 - Findings recorded so far: 0
 
@@ -53,6 +57,30 @@ replicated as `cpg` + venv + `imagorc`, `FC=h5fc`:
   a duplicated `-fcheck=all` / `-fbacktrace` already present in the
   Debug build type. Neither affects the default build or compiler
   behavior.)
+
+### Phase 0d validation record (2026-06-26)
+
+The instrumented binary was exercised end-to-end without touching
+the installed `bin/` (which stays the stock build):
+
+- **Build:** `cmake -DCMAKE_BUILD_TYPE=Debug -DIMAGO_CHECKS=ON
+  -DIMAGO_SANITIZE=address` in a throwaway tree (`build/_0d_asan`);
+  `make imagoG` and `make imago` both linked cleanly. The
+  instrumented `imagoG` carries 638 `asan` symbols (vs 0 in the
+  stock install) and is ~13 MB (vs 3.5 MB).
+- **Run:** a plain Gamma SCF on `jobs/knbo3/cubic/debug` (true
+  Gamma, `-kp 0 0 0`). imago.py was pointed at the instrumented
+  binary through a scratch *overlay bin* -- symlinks to the real
+  `bin/` with only `imagoG` replaced -- so the install was never
+  modified. `IMAGO_BIN` set to the overlay for the run only.
+- **Result:** ran the full 50-iteration SCF to its natural cap
+  (`not_converged`, expected for a single Gamma point on this
+  perovskite) with **zero AddressSanitizer errors** and no spurious
+  traps. Leak detection was disabled for this pass
+  (`ASAN_OPTIONS=detect_leaks=0`); the leak hunt itself is Phase 3.
+
+This confirms the Phase-0 harness produces a usable instrumented
+binary, so the runtime phase (Phase 3) is unblocked.
 
 ## Phase 0a baseline (ground truth, captured 2026-06-26)
 
