@@ -1,15 +1,15 @@
-None    none
-.       circle-open
-o       circle
-v       triangle-down
-s       square
-*       star
-+       cross
-x       x-thin
-X       x
-d       diamond-tall
-^       triangle-up
-<       triangle-left
->       triangle-right
-D       diamond
-p       pentagon
+None    none           none
+.       circle-open    dot
+o       circle         circle
+v       triangle-down  triangledown
+s       square         square
+*       star           star
++       cross          plus
+x       x-thin         crossnarrow
+X       x              cross
+d       diamond-tall   lozengevert
+^       triangle-up    triangle
+<       triangle-left  triangleleft
+>       triangle-right triangleright
+D       diamond        diamond
+p       pentagon       pentagon

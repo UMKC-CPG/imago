@@ -51,6 +51,10 @@ class ScriptSettings():
         # Graphic display method.
         self.display = default_rc["display"]
 
+        # Whether to launch the veusz GUI on the generated .vsz file.
+        #   Only meaningful when the veusz display backend is selected.
+        self.veusz_launch = default_rc["veusz_launch"]
+
         # Filenames
         self.infile = default_rc["infile"]
         self.outfile = default_rc["outfile"]
@@ -136,6 +140,20 @@ class ScriptSettings():
                             choices=['mpl', 'veusz', 'plotly'],
                             default=self.display, help='Display library to ' +
                             f'use. Default: {self.display}.')
+
+        # Define the flag to launch the veusz GUI on the generated file.
+        #   Normal veusz use just writes the .vsz document; this flag
+        #   additionally opens it in veusz. It is only meaningful with
+        #   the veusz backend and is ignored by the other backends.
+        if (self.veusz_launch == False):
+            store_action = "store_true"
+        else:
+            store_action = "store_false"
+        parser.add_argument('-vl', '--veuszlaunch', action=store_action,
+                            dest='veusz_launch', default=self.veusz_launch,
+                            help='Flag to launch the veusz GUI on the ' +
+                            'generated .vsz file (only meaningful with ' +
+                            f'-d veusz). Default: {self.veusz_launch}.')
 
         # Define the input file and output file arguments.
         parser.add_argument('-i', '--infile', dest='infile', type=ascii,
@@ -448,6 +466,7 @@ class ScriptSettings():
         #   or the default value pulled from the RC file. Thus, we just copy
         #   the args into the self variables.
         self.display = args.display.strip("'")
+        self.veusz_launch = args.veusz_launch
         self.infile = args.infile.strip("'")
         self.outfile = args.outfile.strip("'")
         self.title = args.title.strip("'")
@@ -519,18 +538,23 @@ class ScriptSettings():
         IMAGO_DATA = os.getenv('IMAGO_DATA')
 
         # The curve styles must pull data from curve_styles.dat. Each
-        #   line of that file carries two whitespace-separated columns:
-        #   a matplotlib style token (column one) followed by its plotly
-        #   line-dash equivalent (column two). We keep only the column
-        #   that matches the active display backend, so that the
-        #   self.curve_style list ends up holding tokens the chosen
-        #   backend understands directly with no later translation.
+        #   line of that file carries three whitespace-separated
+        #   columns: a matplotlib style token (column one), its plotly
+        #   line-dash equivalent (column two), and its veusz named style
+        #   (column three). We keep only the column that matches the
+        #   active display backend, so that the self.curve_style list
+        #   ends up holding tokens the chosen backend understands
+        #   directly with no later translation.
         with open(f"{IMAGO_DATA}/curve_styles.dat", "r") as dat:
             style_lines = dat.read().splitlines()
         if (self.display == "plotly"):
             # The plotly column is a plain dash string such as "solid"
             #   or the on/off pixel pattern "10px,1px"; take it verbatim.
             styles = [line.split()[1] for line in style_lines]
+        elif (self.display == "veusz"):
+            # The veusz column is a named line style such as "solid",
+            #   "dashed", or "dash-dot"; take it verbatim as a string.
+            styles = [line.split()[2] for line in style_lines]
         else:
             # The matplotlib column is a Python literal -- either a dash
             #   tuple like (0,(10,1)) or a quoted style name -- so it
@@ -554,8 +578,9 @@ class ScriptSettings():
         #   directly. We therefore select the appropriate field up front.
         with open(f"{IMAGO_DATA}/curve_colors.dat", "r") as dat:
             color_lines = dat.read().splitlines()
-        if (self.display == "plotly"):
-            # The #hex code is the second tab-delimited field.
+        if (self.display == "plotly" or self.display == "veusz"):
+            # Both the web (plotly) and GUI (veusz) backends accept the
+            #   #hex code directly; it is the second tab-delimited field.
             colors = [line.split('\t')[1] for line in color_lines]
         else:
             # The color name is the text up to the first tab; matplotlib
@@ -572,15 +597,18 @@ class ScriptSettings():
                     % len(colors)])
 
         # The curve marks must pull data from curve_marks.dat. Each line
-        #   has two whitespace-separated columns: a matplotlib marker
-        #   token (column one) and its plotly marker-symbol equivalent
-        #   (column two). Pick the column for the active backend. The
-        #   plotly sentinel "none" denotes a curve drawn as a line with
-        #   no point markers, and the plotly emitter handles that case.
+        #   has three whitespace-separated columns: a matplotlib marker
+        #   token (column one), its plotly marker-symbol equivalent
+        #   (column two), and its veusz marker name (column three). Pick
+        #   the column for the active backend. The sentinel "none"
+        #   denotes a curve drawn as a line with no point markers; the
+        #   plotly and veusz emitters each handle that case.
         with open(f"{IMAGO_DATA}/curve_marks.dat", "r") as dat:
             mark_lines = dat.read().splitlines()
         if (self.display == "plotly"):
             marks = [line.split()[1] for line in mark_lines]
+        elif (self.display == "veusz"):
+            marks = [line.split()[2] for line in mark_lines]
         else:
             marks = [line.split()[0] for line in mark_lines]
 
@@ -746,10 +774,55 @@ def read_data_headers(settings):
     return (x_col_headers, y_col_headers)
 
 
+def veusz_document_name(settings):
+    """Return the filename of the veusz document to write.
+
+    Unlike the matplotlib and plotly backends -- whose generated
+    artifact is a Python script that is then run -- the veusz backend
+    writes a veusz document (.vsz) that is opened directly in the
+    veusz application. So the output is named for the input data file
+    with a .vsz extension (PDOS.plot -> PDOS.vsz), mirroring how the
+    plotly backend names its HTML output. If the user explicitly asked
+    for an output name ending in .vsz via -o, that name is honored
+    instead."""
+
+    if (settings.outfile.endswith(".vsz")):
+        return settings.outfile
+    return os.path.splitext(os.path.basename(settings.infile))[0] + ".vsz"
+
+
 def print_veusz_header(settings):
-    with open(settings.outfile, "w") as s:
-        s.write("""#!/usr/bin/env python3
-""")
+    """Write the opening of the generated veusz document.
+
+    A .vsz file is a script of veusz commands rather than a Python
+    program, so there is no shebang or import block here. The header
+    is just an explanatory comment and the single ImportFile command
+    that reads the data. The import descriptor names every column in
+    the data file (read from its header line) so that veusz loads them
+    all as datasets the curves can then reference by name. The import
+    is linked, so veusz re-reads the data file each time the document
+    is opened, and ignoretext skips the text header line."""
+
+    vsz_name = veusz_document_name(settings)
+
+    # Read the data file's header line to recover the full list of
+    #   column names for the import descriptor. In a veusz descriptor
+    #   the column names are separated by spaces (a comma there would
+    #   instead mark error-bar columns), so a space join is correct.
+    with open(settings.infile, "r") as data_file:
+        all_headers = data_file.readline().split()
+    descriptor = " ".join(all_headers)
+
+    with open(vsz_name, "w") as s:
+        s.write("# Veusz document generated by plotgraph.py. Open this "
+                "file\n")
+        s.write("#   in the veusz application for point-and-click "
+                "editing.\n")
+        s.write("#   The import below is linked, so veusz re-reads the "
+                "data\n")
+        s.write("#   file every time this document is opened.\n\n")
+        s.write(f"ImportFile('{settings.infile}', '{descriptor}', "
+                "linked=True, ignoretext=True)\n\n")
 
 
 def print_mpl_header(settings):
@@ -1551,6 +1624,252 @@ def print_plotly_figs_subplots_curves(settings, x_col_headers,
     subprocess.run([f"./{settings.outfile}"])
 
 
+def build_veusz_layout(settings):
+    """Walk the requested curves and group them into pages and
+    subplots, returning a nested list that describes the layout.
+
+    The veusz document is a declarative tree (page -> graph -> xy),
+    so it is cleanest to first decide the whole arrangement and then
+    emit it with simple nested loops. This function reproduces the
+    very same wrapping walk used by the matplotlib and plotly emitters
+    -- cycling through curves_per_subplot and subplots_per_fig -- but
+    instead of writing anything it just records which curves land in
+    which subplot of which page.
+
+    The return value is a list of pages; each page is a list of
+    subplots; each subplot is a list of global curve indices (indices
+    into settings.y_col and the header lists). The number of subplots
+    on a page is simply the length of that page's list."""
+
+    # The same tracking variables as the other emitters; see
+    #   print_figs_subplots_curves for the full description of each.
+    curr_subplot_curve = 1
+    curr_subplot = 1
+    wrap_subplot = 0
+    wrap_fig = 0
+
+    num_curves = len(settings.y_col)
+    num_subplots_reset = len(settings.curves_per_subplot)
+    num_figs_reset = len(settings.subplots_per_fig)
+
+    # The accumulating structure, plus handles to the page and subplot
+    #   currently being filled.
+    pages = []
+    current_page = None
+    current_subplot = None
+
+    for curve in range(num_curves):
+
+        # Decide whether this curve opens a new subplot and/or page,
+        #   exactly as the matplotlib and plotly walks decide.
+        if (curve == 0):
+            make_new_fig = True
+            make_new_subplot = True
+            curr_subplot_curve = 1
+            curr_subplot = 1
+            wrap_subplot = 0
+            wrap_fig = 0
+        else:
+            make_new_fig = False
+            make_new_subplot = False
+
+            if (curr_subplot_curve ==
+                    settings.curves_per_subplot[wrap_subplot]):
+                make_new_subplot = True
+                curr_subplot_curve = 1
+                curr_subplot += 1
+                wrap_subplot += 1
+                if (wrap_subplot == num_subplots_reset):
+                    wrap_subplot = 0
+                if (curr_subplot > settings.subplots_per_fig[wrap_fig]):
+                    make_new_fig = True
+                    curr_subplot = 1
+                    wrap_fig += 1
+                    if (wrap_fig == num_figs_reset):
+                        wrap_fig = 0
+            else:
+                curr_subplot_curve += 1
+
+        # Open a new page and/or subplot in the structure as needed,
+        #   then drop this curve into the current subplot.
+        if (make_new_subplot == True):
+            if (make_new_fig == True):
+                current_page = []
+                pages.append(current_page)
+            current_subplot = []
+            current_page.append(current_subplot)
+        current_subplot.append(curve)
+
+    return pages
+
+
+def print_veusz_figs_subplots_curves(settings, x_col_headers,
+                                     y_col_headers):
+    """Emit the body of the generated veusz document: the pages, their
+    subplots, and their curves; then either launch veusz or report.
+
+    This is the veusz twin of the matplotlib and plotly body emitters.
+    It first asks build_veusz_layout to group the curves into pages
+    and subplots, then writes the veusz commands that build that tree:
+
+      * each page becomes a 'page' widget; when it holds more than one
+        subplot they are wrapped in a 'grid' widget (one column, one
+        row per subplot) so they stack vertically,
+      * each subplot becomes a 'graph' widget with its own x and y
+        axes,
+      * each curve becomes an 'xy' widget naming the data columns and
+        carrying the color, line style, marker, and legend key.
+
+    Axis ranges are left on veusz's automatic scaling unless the user
+    fixed a bound on the command line, in which case that bound is
+    written as a literal. (A .vsz cannot compute data ranges itself
+    the way the Python-script backends do, and automatic scaling suits
+    the hand-finishing workflow veusz is meant for.) After the tree is
+    written, the document is opened in veusz only if the -vl launch
+    flag was given; otherwise the path is simply reported."""
+
+    # Decide the page/subplot/curve arrangement up front.
+    pages = build_veusz_layout(settings)
+
+    # The document the header already started; reopen to append the
+    #   widget-building commands.
+    vsz_name = veusz_document_name(settings)
+    s = open(vsz_name, "a")
+
+    # Counters give every widget a unique name within the document.
+    page_counter = 0
+    graph_counter = 0
+    curve_counter = 0
+
+    for page in pages:
+        page_counter += 1
+        num_rows = len(page)
+
+        # Open the page. A single-subplot page needs no grid; a
+        #   multi-subplot page uses a one-column grid so the subplots
+        #   stack vertically, one row each.
+        s.write(f"Add('page', name='page{page_counter}', "
+                "autoadd=False)\n")
+        s.write(f"To('page{page_counter}')\n")
+        use_grid = num_rows > 1
+        if (use_grid):
+            s.write(f"Add('grid', name='grid{page_counter}', "
+                    "autoadd=False)\n")
+            s.write(f"To('grid{page_counter}')\n")
+            s.write(f"Set('rows', {num_rows})\n")
+            s.write("Set('columns', 1)\n")
+
+        for subplot in page:
+            graph_counter += 1
+
+            # Open the graph that holds this subplot's curves.
+            s.write(f"Add('graph', name='graph{graph_counter}', "
+                    "autoadd=False)\n")
+            s.write(f"To('graph{graph_counter}')\n")
+
+            # The horizontal axis. Its label is the x-column header of
+            #   the subplot's first curve (every curve in a subplot
+            #   shares the same x in single-x mode). A user-fixed bound
+            #   is written as a literal; otherwise veusz autoscales.
+            first_curve = subplot[0]
+            s.write("Add('axis', name='x', autoadd=False)\n")
+            s.write("To('x')\n")
+            s.write(f"Set('label', '{x_col_headers[first_curve]}')\n")
+            if (settings.x_min_exists == True):
+                s.write(f"Set('min', {settings.x_min})\n")
+            if (settings.x_max_exists == True):
+                s.write(f"Set('max', {settings.x_max})\n")
+            s.write("To('..')\n")
+
+            # The vertical axis. An axis is horizontal unless its
+            #   direction is set to vertical, so the y axis declares
+            #   that. Its label is left blank because a subplot may hold
+            #   several differently named curves.
+            s.write("Add('axis', name='y', autoadd=False)\n")
+            s.write("To('y')\n")
+            s.write("Set('direction', 'vertical')\n")
+            if (settings.y_min_exists == True):
+                s.write(f"Set('min', {settings.y_min})\n")
+            if (settings.y_max_exists == True):
+                s.write(f"Set('max', {settings.y_max})\n")
+            s.write("To('..')\n")
+
+            # Each curve in this subplot becomes an xy widget. The
+            #   color, style, marker, and width are selected by the
+            #   curve's position within the subplot, cycling through
+            #   the lists exactly as the other backends do.
+            for position, curve in enumerate(subplot):
+                curve_counter += 1
+                color_index = position % len(settings.curve_color)
+                mark_index = position % len(settings.curve_mark)
+                style_index = position % len(settings.curve_style)
+                width_index = position % len(settings.curve_width)
+
+                curve_color = settings.curve_color[color_index]
+                curve_style = settings.curve_style[style_index]
+                curve_width = settings.curve_width[width_index]
+                curve_mark = settings.curve_mark[mark_index]
+                x_header = x_col_headers[curve]
+                y_header = y_col_headers[curve]
+
+                s.write(f"Add('xy', name='curve{curve_counter}', "
+                        "autoadd=False)\n")
+                s.write(f"To('curve{curve_counter}')\n")
+                s.write(f"Set('xData', '{x_header}')\n")
+                s.write(f"Set('yData', '{y_header}')\n")
+                s.write(f"Set('marker', '{curve_mark}')\n")
+                # The key is the legend label for this curve, matching
+                #   the matplotlib label and plotly trace name.
+                s.write(f"Set('key', '{y_header}')\n")
+                s.write(f"Set('PlotLine/color', '{curve_color}')\n")
+                s.write(f"Set('PlotLine/style', '{curve_style}')\n")
+                s.write(f"Set('PlotLine/width', '{curve_width}pt')\n")
+                # When a real marker is drawn, give it the curve color
+                #   too so the point symbols match the line.
+                if (curve_mark != "none"):
+                    s.write("Set('MarkerLine/color', "
+                            f"'{curve_color}')\n")
+                    s.write("Set('MarkerFill/color', "
+                            f"'{curve_color}')\n")
+                s.write("To('..')\n")
+
+            # Add a key (legend) to this graph if requested. It lists
+            #   every curve that carries a key label, the veusz
+            #   equivalent of plt.legend().
+            if (settings.print_legend == True):
+                s.write(f"Add('key', name='key{graph_counter}', "
+                        "autoadd=False)\n")
+                s.write(f"To('key{graph_counter}')\n")
+                s.write("Set('Border/hide', False)\n")
+                s.write("To('..')\n")
+
+            # Climb back out of this graph to the grid (or page).
+            s.write("To('..')\n")
+
+        # Climb out of the grid (if one was opened) and then the page,
+        #   leaving the document root ready for the next page.
+        if (use_grid):
+            s.write("To('..')\n")
+        s.write("To('..')\n")
+
+    s.close()
+
+    # Normal veusz use just writes the document. Only when the -vl
+    #   launch flag is set do we additionally open it in veusz, and
+    #   even then we tolerate veusz not being installed on this host
+    #   (the common case on a compute cluster) by reporting instead.
+    if (settings.veusz_launch == True):
+        try:
+            subprocess.run(["veusz", vsz_name])
+        except FileNotFoundError:
+            print(f"Wrote veusz document: {vsz_name}")
+            print("(Could not launch veusz: no 'veusz' executable on "
+                    "PATH. Open the file manually.)")
+    else:
+        print(f"Wrote veusz document: {vsz_name}")
+        print("Open it in veusz for point-and-click editing.")
+
+
 def record_command():
     """Append the issued command line to a file named "command" in
     the current directory, so the exact invocation can be recovered
@@ -1608,7 +1927,15 @@ def main():
         print_plotly_figs_subplots_curves(settings, x_col_headers,
                 y_col_headers)
     elif (settings.display == "veusz"):
+        # As with plotly, the symmetric band structure decorations are
+        #   matplotlib-specific, so refuse that one combination clearly.
+        if (settings.fig_type == "sybd"):
+            print("The veusz backend does not yet support the sybd "
+                    "figure type. Use -d mpl for sybd plots.")
+            exit()
         print_veusz_header(settings)
+        print_veusz_figs_subplots_curves(settings, x_col_headers,
+                y_col_headers)
     else:
         print ("Unknown display style. Should not get here.")
         exit()

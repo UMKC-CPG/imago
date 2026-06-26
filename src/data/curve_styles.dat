@@ -1,5 +1,5 @@
-"'solid'"     solid
-(0,(10,1))    10px,1px
-(0,(7,1))     7px,1px
-(0,(4,1))     4px,1px
-(0,(1,1))     1px,1px
+"'solid'"     solid       solid
+(0,(10,1))    10px,1px    dashed
+(0,(7,1))     7px,1px     dash-dot
+(0,(4,1))     4px,1px     dash-dot-dot
+(0,(1,1))     1px,1px     dotted

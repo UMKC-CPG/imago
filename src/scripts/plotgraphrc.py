@@ -8,6 +8,7 @@ import os
 def parameters_and_defaults():
     param_dict = {
             "display" : "mpl",  # -d mpl; veusz, plotly, ...
+            "veusz_launch" : False,  # -vl; launch veusz on the .vsz
             "infile" : "gs_dos-fb.t.plot",  # -i
             "outfile" : "Xscript.py",  # -o; If not given, X=display
             "title" : "Plotted by " + os.getenv('USER'),  # -t
