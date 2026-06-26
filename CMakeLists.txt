@@ -73,5 +73,79 @@ message("CMAKE_Fortran_FLAGS_RELEASE= ${CMAKE_Fortran_FLAGS_RELEASE}")
 message("CMAKE_Fortran_FLAGS_DEBUG= ${CMAKE_Fortran_FLAGS_DEBUG}")
 message("CMAKE_EXE_LINKER_FLAGS= ${CMAKE_EXE_LINKER_FLAGS}")
 
+# ----------------------------------------------------------------------
+# Phase 0a -- opt-in debug instrumentation (default OFF).
+#
+# These options ADD instrumentation on top of the normal build-type
+#   flags set above.  They exist to support the bug-squashing campaign
+#   documented in dev/DEBUG.md: they produce instrumented binaries for
+#   runtime leak / uninitialized-value / floating-point hunting without
+#   disturbing the known-good default build.
+#
+# Crucially, with every option left at its default (OFF / "none") the
+#   compile and link flags are byte-for-byte identical to the historical
+#   build.  The instrumentation is only ever appended, never substituted,
+#   and the append itself is skipped when nothing is enabled.  Turn the
+#   options on only for a throwaway / instrumented build tree, e.g.:
+#     cmake -DCMAKE_BUILD_TYPE=Debug -DIMAGO_SANITIZE=address ../..
+#
+# Each option maps to one debugging capability:
+#   IMAGO_CHECKS     runtime checks: array bounds, etc.
+#   IMAGO_FPE_TRAP   trap floating-point exceptions (invalid, divide-by-
+#                      zero, overflow) so a bad value halts at its origin
+#   IMAGO_INIT_SNAN  initialize reals to a signaling NaN so that any use
+#                      of an uninitialized value traps instead of silently
+#                      producing a wrong answer
+#   IMAGO_WARN_EXTRA the extra, audit-grade compiler warning set
+#   IMAGO_SANITIZE   select a sanitizer: none, address, undefined, leak
+# ----------------------------------------------------------------------
+option (IMAGO_CHECKS     "Runtime checks (array bounds, etc.)"     OFF)
+option (IMAGO_FPE_TRAP   "Trap FP exceptions (inv/zero/overflow)"  OFF)
+option (IMAGO_INIT_SNAN  "Init reals to signaling NaN"             OFF)
+option (IMAGO_WARN_EXTRA "Extra audit-grade warning set"           OFF)
+set (IMAGO_SANITIZE "none" CACHE STRING
+   "Sanitizer: none, address, undefined, or leak")
+
+# Accumulate the requested instrumentation for the detected compiler
+#   into a single string, then append it once so that it composes with
+#   whatever build type (Release / Debug) was chosen.  Every fragment
+#   carries its own leading space, and the final append is guarded so
+#   that an empty set leaves CMAKE_Fortran_FLAGS exactly as it was.
+set (IMAGO_INSTRUMENT_FLAGS "")
+if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
+   if (IMAGO_CHECKS)
+      set (IMAGO_INSTRUMENT_FLAGS "${IMAGO_INSTRUMENT_FLAGS} -fcheck=all")
+   endif ()
+   if (IMAGO_FPE_TRAP)
+      set (IMAGO_INSTRUMENT_FLAGS
+         "${IMAGO_INSTRUMENT_FLAGS} -ffpe-trap=invalid,zero,overflow")
+      set (IMAGO_INSTRUMENT_FLAGS "${IMAGO_INSTRUMENT_FLAGS} -fbacktrace")
+   endif ()
+   if (IMAGO_INIT_SNAN)
+      set (IMAGO_INSTRUMENT_FLAGS
+         "${IMAGO_INSTRUMENT_FLAGS} -finit-real=snan -finit-integer=-99999")
+   endif ()
+   if (IMAGO_WARN_EXTRA)
+      set (IMAGO_INSTRUMENT_FLAGS
+         "${IMAGO_INSTRUMENT_FLAGS} -Wextra -Wuninitialized")
+      set (IMAGO_INSTRUMENT_FLAGS
+         "${IMAGO_INSTRUMENT_FLAGS} -Wrealloc-lhs-all -Warray-temporaries")
+      set (IMAGO_INSTRUMENT_FLAGS
+         "${IMAGO_INSTRUMENT_FLAGS} -Wimplicit-interface")
+   endif ()
+   if (NOT IMAGO_SANITIZE STREQUAL "none")
+      set (IMAGO_INSTRUMENT_FLAGS
+         "${IMAGO_INSTRUMENT_FLAGS} -fsanitize=${IMAGO_SANITIZE}")
+      set (CMAKE_EXE_LINKER_FLAGS
+         "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=${IMAGO_SANITIZE}")
+   endif ()
+endif (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
+# Intel-compiler equivalents are added in Phase 0c.
+
+if (NOT IMAGO_INSTRUMENT_FLAGS STREQUAL "")
+   set (CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS}${IMAGO_INSTRUMENT_FLAGS}")
+endif ()
+message("IMAGO_INSTRUMENT_FLAGS=${IMAGO_INSTRUMENT_FLAGS}")
+
 # Proceed to the source directory and its subdirectories.
 add_subdirectory(src)
