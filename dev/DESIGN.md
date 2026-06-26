@@ -1276,6 +1276,53 @@ inside `imago`). Two consequences:
   density mode is active and print the density value instead
   of the count and mesh array.
 
+### 3.6 Gamma-Point Requests and the Single-K-Point Shift Rule
+
+A k-point shift is meaningful only on an axis sampled by more
+than one k-point. On an axis with a single point, the "shift"
+becomes that lone point's absolute coordinate, so a nonzero
+shift silently moves the sample off the origin (Gamma). The
+rule is therefore:
+
+**A shift is applied only when more than one k-point is used.
+The Gamma point -- a single k-point at the origin (0,0,0) with
+no shift -- is requested with an explicit `0` sentinel, not
+inferred from a `1 1 1` mesh.**
+
+The sentinels, per group (SCF / post-SCF), are:
+
+- Mesh mode: `-kp 0 0 0`, `-scfkp 0 0 0`, `-pscfkp 0 0 0`.
+- Density mode: `-kpd 0`, `-scfkpd 0`, `-pscfkpd 0`.
+
+Any of these marks that group as Gamma. A Gamma group is
+written *canonically* -- always a single 1x1x1 style-code-1
+mesh with shift `0 0 0`, regardless of which flag requested it
+-- so there is exactly one on-disk representation of Gamma.
+`imago.py`'s `check_gamma_kp` recognizes that form (1x1x1
+mesh, zero shift) and selects the gamma-specialized real
+executable `imagoG`, whose integral matrices are real (faster,
+roughly half the memory). No change to `check_gamma_kp` is
+needed: its existing style-code-1 detection already covers the
+canonical Gamma file.
+
+By contrast, a `1 1 1` mesh is *not* Gamma: it is one k-point
+with the usual (auto or `-kpshift`) shift applied -- a single
+shifted, mean-value sample -- and runs on the general complex
+executable `imago`. The no-option default is likewise a single
+shifted point, so prior behavior is unchanged; only the
+explicit `0` sentinel is new. A density of 1.0 stays a genuine
+density request, distinct from the `0` Gamma sentinel.
+
+A zero mixed with positive mesh counts (e.g. `0 0 1`) is
+rejected as a fatal typo for the all-zero sentinel.
+
+The rule lives in `makeinput.reconcile` (per-group resolution
+of `kp_gamma` and the display `kp_note`) and `_make_kp` (the
+canonical Gamma write). It supersedes an earlier behavior in
+which a `1 1 1` mesh was labeled `(Gamma)` while a nonzero
+auto-shift was still written -- a mismatch that routed the job
+to the complex executable despite the label.
+
 ---
 
 ## 4. UFF Bond Parameter Database

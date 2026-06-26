@@ -358,6 +358,17 @@ class ScriptSettings:
         self.use_kp_density = False
         self.kp_density = [0.0, 0.0, 0.0]  # [0]=unused
 
+        # Per-group Gamma flag (1=SCF, 2=PSCF; [0] unused).  Set
+        # when the user requests the explicit Gamma sentinel
+        # (-kp 0 0 0 / -kpd 0, or a per-group variant).  A Gamma
+        # group is always written as a single 1x1x1 k-point at the
+        # origin with no shift, so that imago.py's check_gamma_kp
+        # selects the gamma-specialized executable (imagoG).  This
+        # is distinct from a "1 1 1" mesh, which is a single
+        # *shifted* point that runs on the general executable.  See
+        # DESIGN 3.6.
+        self.kp_gamma = [False, False, False]
+
         # K-point integration method code per group.
         # 0 = Gaussian/histogram (default), 1 = LAT
         # (linear analytic tetrahedron).  Future methods
@@ -505,12 +516,14 @@ OPTIONS EXPLANATIONS
             dos or bond).  Please note that most of the time things like dos
             or bond are automatically run in the post-SCF stage where a
             larger number of kpoints are typically used.  One further
-            important note:  If the kpoint scheme given is 1 1 1 then it is
-            assumed that the one point is at the gamma site.  If no kpoint
-            definition is given then 1 general kpoint is used.  This is
-            important since the program will run differently (faster) if the
-            gamma kpoint is used since all the integral matrices will be real
-            with no imaginary component.
+            important note about the gamma point:  to request the single
+            k-point at the origin (gamma, 0 0 0), give a mesh of 0 0 0.
+            The program then runs faster because all integral matrices are
+            real with no imaginary component.  A mesh of 1 1 1 is NOT the
+            gamma point -- it is one k-point with the usual shift applied
+            (a single shifted, mean-value sample) and runs with the
+            general complex matrices.  If no kpoint definition is given
+            then 1 general (shifted) kpoint is used.
 
 -pscfkp     Same as -scfkp except that it applies to the post-SCF
             calculations (band, bond, dos, optc).  NOTE that sybd will
@@ -539,7 +552,11 @@ OPTIONS EXPLANATIONS
             group defaults to density 1).  Density options
             are mutually exclusive with explicit mesh options
             (-kp, -scfkp, -pscfkp); if both are given,
-            density mode wins and a warning is printed.
+            density mode wins and a warning is printed.  A
+            density of 0 is the gamma sentinel: it requests
+            the single k-point at the origin (0 0 0) with no
+            shift, exactly like a mesh of -kp 0 0 0, and runs
+            on the faster real (gamma) executable.
 
 -scfkpint   Select the k-point integration method for the SCF
             calculation.  M is an integer: 0 = Gaussian/histogram
@@ -557,7 +574,8 @@ OPTIONS EXPLANATIONS
             override this if also given.
 
 -kpshift    Force a specific shift to the kpoint mesh by the given fractional
-            a, b, c amounts.
+            a, b, c amounts.  A gamma group (-kp 0 0 0 / -kpd 0) ignores
+            this shift, since its single k-point is fixed at the origin.
 
 -printbz    Create an additional file as part of the input containing a
             description of the Brillouin zone suitable for importing in a
@@ -823,12 +841,15 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
         # ---- K-points ----
         # The -scfkp option specifies the k-point mesh for SCF calculations.
         # A B C are the mesh dimensions along the a, b, c lattice directions.
-        # If all three are 1, the gamma point is assumed (faster: real-only
-        # integral matrices).  If not given, 1 general kpoint is used.
+        # A mesh of 0 0 0 is the gamma sentinel: a single k-point at the
+        # origin with no shift, which runs faster (real-only integral
+        # matrices).  A mesh of 1 1 1 is a single *shifted* point, not gamma.
+        # If not given, 1 general (shifted) kpoint is used.
         parser.add_argument("-scfkp", dest="scfkp", nargs=3, type=int,
                             metavar=("A", "B", "C"), default=None,
-                            help="SCF k-point mesh dimensions.  1 1 1 = "
-                                 "gamma point (faster, real matrices).")
+                            help="SCF k-point mesh dimensions.  0 0 0 = "
+                                 "gamma point (faster, real matrices); "
+                                 "1 1 1 = one shifted point, not gamma.")
         # The -pscfkp option is the same as -scfkp but applies to post-SCF
         # calculations (band, bond, dos, optc).  SYBD uses its own path.
         parser.add_argument("-pscfkp", dest="pscfkp", nargs=3, type=int,
@@ -861,14 +882,15 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
                  "band/bond/dos/optc.")
         # The -kpd option sets the same density for both
         # SCF and post-SCF.  Density options are mutually
-        # exclusive with explicit mesh options.
+        # exclusive with explicit mesh options.  A density
+        # of 0 is the gamma sentinel (same as -kp 0 0 0).
         parser.add_argument(
             "-kpd", dest="kpd", type=float,
             metavar="D", default=None,
             help="K-point volume density for both "
                  "SCF and post-SCF (kpoints/Bohr^-3)."
-                 "  Mutually exclusive with "
-                 "-kp/-scfkp/-pscfkp.")
+                 "  0 = gamma point.  Mutually "
+                 "exclusive with -kp/-scfkp/-pscfkp.")
         # The -scfkpint option selects the k-point
         # integration method for the SCF calculation.
         # 0 = Gaussian/histogram (default), 1 = LAT
@@ -1223,9 +1245,17 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             if args.pscfkpd is not None:
                 self.kp_density[2] = args.pscfkpd
 
-            # Update kp_note to reflect density mode.
-            self.kp_note[1] = "(Density)"
-            self.kp_note[2] = "(Density)"
+            # Resolve each group's note.  A density of 0 is the
+            # explicit Gamma sentinel for that group: it is not a
+            # real density but a request for the single k-point at
+            # the origin (0,0,0) with no shift.  Any positive
+            # density is genuine density mode.  See DESIGN 3.6.
+            for group in (1, 2):
+                if self.kp_density[group] == 0:
+                    self.kp_gamma[group] = True
+                    self.kp_note[group] = "(Gamma)"
+                else:
+                    self.kp_note[group] = "(Density)"
 
             # Warn if -printbz was requested; it requires
             # the legacy makeKPoints executable which is
@@ -1244,17 +1274,30 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             if args.kp is not None:
                 self.kp_mesh_scf = [None] + list(args.kp)
                 self.kp_mesh_pscf = [None] + list(args.kp)
-                if list(args.kp) == [1, 1, 1]:
-                    self.kp_note[1] = "(Gamma)"
-                    self.kp_note[2] = "(Gamma)"
             if args.scfkp is not None:
                 self.kp_mesh_scf = [None] + list(args.scfkp)
-                if list(args.scfkp) == [1, 1, 1]:
-                    self.kp_note[1] = "(Gamma)"
             if args.pscfkp is not None:
                 self.kp_mesh_pscf = [None] + list(args.pscfkp)
-                if list(args.pscfkp) == [1, 1, 1]:
-                    self.kp_note[2] = "(Gamma)"
+
+            # Resolve each group's Gamma status.  A mesh of "0 0 0"
+            # is the explicit Gamma sentinel: the single k-point at
+            # the origin (0,0,0) with no shift.  Every other mesh
+            # keeps its shift, so "1 1 1" is a single *shifted*
+            # point (a mean-value sample) on the general executable,
+            # NOT Gamma.  Zeros may not be mixed with positive
+            # counts -- a single zero is almost certainly a typo for
+            # the all-zero sentinel.  See DESIGN 3.6.
+            for group, mesh in ((1, self.kp_mesh_scf),
+                                (2, self.kp_mesh_pscf)):
+                counts = mesh[1:4]
+                if all(count == 0 for count in counts):
+                    self.kp_gamma[group] = True
+                    self.kp_note[group] = "(Gamma)"
+                elif any(count == 0 for count in counts):
+                    sys.exit(
+                        "A k-point count of 0 is the Gamma sentinel "
+                        "and must be given as '0 0 0'; it cannot be "
+                        "mixed with positive counts.")
             if args.printbz is not None:
                 print(
                     "NOTE: -printbz is being skipped."
@@ -3780,67 +3823,61 @@ def _make_kp(settings, sc):
     cell_mode = "full" if sc.do_full_cell else "prim"
     conv_lattice = sc.full_cell_real_lattice
 
+    # Every k-point file -- mesh, density, or Gamma -- embeds the
+    # point group operations so imago can perform IBZ symmetry
+    # reduction at runtime, so extract them once here.  They are
+    # taken straight from the space group database in their native
+    # conventional-cell-abc fractional form and written verbatim
+    # (byte-identical to share/spaceDB/<sg>) along with the
+    # conventional lattice and the cell-mode flag; imago rebases
+    # them at runtime via the change-of-basis matrix
+    # C = invRealVectors^T * convLattice.  See DESIGN 2.7 for the
+    # diagnostic background that motivated moving the conjugation
+    # onto the consumer side.
+    point_ops, frac_trans = _extract_point_ops(settings)
+
     if settings.use_kp_density:
-        # Density mode: write style-code-2 files directly.
         print("      Generating KPoints (density mode).")
-
-        # Extract the point group operations straight from
-        # the space group database in their native
-        # conventional-cell-abc fractional form.  The kp
-        # file carries them verbatim along with the
-        # conventional lattice and the cell-mode flag;
-        # imago rebases them at runtime via the
-        # change-of-basis matrix C = invRealVectors^T
-        # * convLattice.  See DESIGN 2.7 for the
-        # diagnostic background that motivated moving the
-        # conjugation onto the consumer side.
-        point_ops, frac_trans = _extract_point_ops(settings)
-
-        for kp_group in range(1, 3):
-            dest = os.path.join(
-                INPUT_TEMP, kp_group_file[kp_group])
-            _write_density_kp_file(
-                dest,
-                settings.kp_density[kp_group],
-                settings.kp_shift,
-                point_ops, frac_trans,
-                conv_lattice, cell_mode,
-                settings.kp_intg_code[kp_group])
-        # No kpSpecs.dat is produced in density mode.
     else:
-        # Mesh mode: write style-code-1 k-point files
-        # directly.  Imago builds the full mesh internally
-        # from the axial counts and performs IBZ reduction
-        # using the embedded point group operations.  This
-        # replaces the legacy workflow that called the
-        # external makeKPoints program.
+        # Mesh mode writes style-code-1 files; imago builds the full
+        # mesh internally from the axial counts and performs IBZ
+        # reduction.  This replaces the legacy workflow that called
+        # the external makeKPoints program.
         print("      Generating KPoints (mesh mode).")
 
-        # Extract point group operations (same as density
-        # mode -- both need them for IBZ reduction inside
-        # imago) in their native conv-abc fractional form.
-        # See the matching block in the density branch
-        # above for the rationale; the values written into
-        # the kp file are byte-identical to
-        # share/spaceDB/<sg>.
-        point_ops, frac_trans = _extract_point_ops(settings)
+    kp_mesh = [None, settings.kp_mesh_scf, settings.kp_mesh_pscf]
 
-        kp_mesh = [
-            None,
-            settings.kp_mesh_scf,
-            settings.kp_mesh_pscf]
-
-        for kp_group in range(1, 3):
-            dest = os.path.join(
-                INPUT_TEMP,
-                kp_group_file[kp_group])
+    for kp_group in range(1, 3):
+        dest = os.path.join(INPUT_TEMP, kp_group_file[kp_group])
+        if settings.kp_gamma[kp_group]:
+            # Canonical Gamma point (requested via the "0" sentinel,
+            # -kp 0 0 0 / -kpd 0 or a per-group variant).  It is
+            # always written as a single 1x1x1 style-1 mesh with a
+            # zero shift, regardless of which flag requested it, so
+            # there is exactly one Gamma representation.  imago.py's
+            # check_gamma_kp recognizes this form and selects the
+            # gamma-specialized executable (imagoG).  See DESIGN 3.6.
             _write_mesh_kp_file(
-                dest,
-                kp_mesh[kp_group],
-                settings.kp_shift,
-                point_ops, frac_trans,
-                conv_lattice, cell_mode,
+                dest, [None, 1, 1, 1], "0 0 0",
+                point_ops, frac_trans, conv_lattice, cell_mode,
                 settings.kp_intg_code[kp_group])
+        elif settings.use_kp_density:
+            # Style-code-2: a volume density; imago derives the axial
+            # counts at runtime from the reciprocal cell geometry.
+            _write_density_kp_file(
+                dest, settings.kp_density[kp_group], settings.kp_shift,
+                point_ops, frac_trans, conv_lattice, cell_mode,
+                settings.kp_intg_code[kp_group])
+        else:
+            # Style-code-1: explicit axial counts plus the shift.  A
+            # "1 1 1" mesh here is a single *shifted* point (a mean-
+            # value sample), not Gamma -- use the "0" sentinel for
+            # true Gamma.
+            _write_mesh_kp_file(
+                dest, kp_mesh[kp_group], settings.kp_shift,
+                point_ops, frac_trans, conv_lattice, cell_mode,
+                settings.kp_intg_code[kp_group])
+    # No kpSpecs.dat is produced (the legacy makeKPoints path is gone).
 
 
 def _extract_point_ops(settings):
