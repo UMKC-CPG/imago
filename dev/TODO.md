@@ -1736,6 +1736,13 @@ shipped.
   -> re-materialize) before harvest; not wired, since the
   current manifest references are crystalline.  C55 + C58
   + C89 all DONE; loen seam live-validated via makegroups.
+  NOTE (2026-06-26): the DESIGN 5.7 harvest model is now
+  *auto-discover one representative per distinct environment*,
+  with manifest entries as optional customizations and the
+  fingerprint recipe lifted to a `[characterization]` block
+  (C101).  The per-entry witness path above is the interim
+  crystalline-only implementation; it is superseded by C101
+  plus the C88 bispectrum-keyed insert-or-merge.
 - [x] C93. Revise the design chain to DECOUPLE the
   fingerprint-based initial-potential pick from the grouping
   scheme.  Decision 2026-06-17: precedence 2 (the environment
@@ -1959,29 +1966,62 @@ shipped.
   (already in 5.2's table) and derive each
   fingerprint's native/witness role from it
   (`M == type_assignment`); the producer must record
-  the run's grouping scheme.  (b) Symmetric dual
+  the run's grouping scheme.  Reduce is always a
+  witness, never the assigning method (5.2.2), so it
+  stays a droppable column.  (b) Symmetric dual
   harvest: compute *both* registered methods (native +
-  witness) for every harvested atom -- reduce is free
-  given the structure, a bispectrum loen pass is cheap
-  next to the SCF.  (c) Add a per-entry `multiplicity`
-  integer (default 1) and thread it through the field
+  witness) for every harvested environment -- reduce
+  is free given the structure, a bispectrum loen pass
+  is cheap next to the SCF.  (c) Add the per-entry
+  dedup fields -- `multiplicity` (atoms), `model_count`
+  (distinct solids), and a per-coefficient
+  `coefficient_std`, with `coefficients` becoming a
+  running mean -- and thread them through the field
   list + validation (5.2), the `PotentialEntry`
   dataclass (5.4), the emitter (5.5), and the harvest
-  (5.7).  (d) Make the harvest an *insert-or-merge*:
-  dedup on insert at a tolerance (the producer-side
-  mirror of C61's similarity floor), incrementing
-  `multiplicity` on a duplicate.  The dedup rule must
-  be *conservative* -- keep an environment if it is
-  novel under *any* method, merge only when it is a
-  duplicate under *all* methods -- so no per-method
-  coverage is lost and the later bundled->normalized
-  migration stays lossless (5.2.4).  Optional: carry
-  the origin label onto records so the per-atom
-  cross-method pairing survives normalization.  Lands
-  after the Phase-2 base chain (C53-C61); the
+  (5.7).  (d) Make the harvest an *insert-or-merge*
+  keyed on the **bispectrum** descriptor at the
+  preferred sub_spec (the transferable one every entry
+  carries -- NOT a conservative all-methods union and
+  NOT symmetry, which cannot compare across structures;
+  5.2.3): a duplicate folds in by averaging the
+  coefficients (asserting equal alpha SETS first),
+  updating `coefficient_std` via a running Welford
+  step, and advancing `multiplicity` and `model_count`;
+  a novel environment appends.  The dedup tolerance is
+  the producer-side mirror of C61's similarity floor.
+  Optional: carry the origin label onto records so the
+  per-atom cross-method pairing survives normalization.
+  Lands after the Phase-2 base chain (C53-C61); the
   bundled->normalized (potential pool + per-method
   index) migration and the learned-predictor training
   pipeline are separate, later items this sets up.
+- [ ] C101. Manifest characterization + customization model +
+  auto-harvest (DESIGN 5.2.1/5.2.2/5.7).  Recast the
+  manifest and harvest from "one entry per declared atom
+  site" to "auto-discover one representative per distinct
+  environment; entries are optional customizations."  Work:
+  (a) curation_manifest.py: add the top-level
+  `[characterization]` block (the database-wide preferred
+  fingerprint recipe, one sub_spec per method; makes rule
+  11 structural), add a persisted per-solid
+  `source_description` field, and relax `ReferenceEntry`
+  so `atom_site`, `element`, `default`, and `description`
+  are all optional customizations (label already optional via
+  C87).  Update validation rules 2/3/6/7/8/10/11 to the
+  revised DESIGN 5.7.  (b) build_initial_potentials.py:
+  harvest one order-independent representative per
+  distinct environment (the assigning method's partition;
+  5.6.5), compute the `[characterization]` fingerprints
+  for every environment (preferred), apply per-entry
+  overrides (rare, non-preferred), and auto-compose each
+  environment's description from `source_description` +
+  species/site when no customization supplies one.
+  (c) expand_manifest.py: emit the `[characterization]`
+  block and per-solid settings; entry customizations optional.
+  Pairs with C88 (the insert-or-merge the auto-harvest
+  feeds) and reframes the C60 per-entry witness path.
+  CODE; DESIGN 5.2.1/5.2.2/5.7; PSEUDOCODE 11.4; ARCH 8.5.
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 

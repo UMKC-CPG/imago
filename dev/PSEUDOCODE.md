@@ -2231,17 +2231,34 @@ function load(path, known_methods = None):
         for f in ("default", "description",
                   "num_gaussians", "alpha_min",
                   "alpha_max", "coefficients",
-                  "alphas", "provenance"):
+                  "coefficient_std", "alphas",
+                  "provenance"):
             require(f in entry_dict, path, lbl,
                 "missing field: " + f)
 
-        # Length consistency (rule 4)
+        # Length consistency (rule 4).  coefficient_std
+        # is a required per-coefficient array, so it is
+        # length-checked alongside coefficients and alphas.
         n = entry_dict["num_gaussians"]
         require(len(entry_dict["coefficients"]) == n
-                and len(entry_dict["alphas"]) == n,
+                and len(entry_dict["alphas"]) == n
+                and len(entry_dict["coefficient_std"])
+                    == n,
             path, lbl,
-            "coefficients/alphas length"
-            + " != num_gaussians")
+            "coefficients/alphas/coefficient_std"
+            + " length != num_gaussians")
+
+        # multiplicity and model_count are OPTIONAL and
+        # default to 1 (DESIGN 5.2 rule 4): a freshly
+        # harvested entry, or a hand-trimmed file, need
+        # not spell them out.  The emitter always writes
+        # them, so a regenerated file is self-describing.
+        # When present each must be a positive integer.
+        multiplicity = entry_dict.get("multiplicity", 1)
+        model_count  = entry_dict.get("model_count", 1)
+        require(multiplicity >= 1 and model_count >= 1,
+            path, lbl,
+            "multiplicity and model_count must be >= 1")
 
         # Label uniqueness (rule 5)
         require(lbl not in seen_labels, path,
@@ -2317,6 +2334,10 @@ function load(path, known_methods = None):
             alpha_min     = entry_dict["alpha_min"],
             alpha_max     = entry_dict["alpha_max"],
             coefficients  = entry_dict["coefficients"],
+            coefficient_std =
+                entry_dict["coefficient_std"],
+            multiplicity  = multiplicity,
+            model_count   = model_count,
             alphas        = entry_dict["alphas"],
             provenance    = entry_dict["provenance"],
             fingerprints  = fingerprints))
@@ -2443,10 +2464,13 @@ function save(db, path):
         # `description` (matches DESIGN 5.3 sketch).
         body_keys = ["label", "default", "description",
                      "num_gaussians", "alpha_min",
-                     "alpha_max"]
+                     "alpha_max", "multiplicity",
+                     "model_count"]
         # Width spans body keys plus the array keys
         # so the array openers align with the rest.
+        # coefficient_std rides with the other arrays.
         align_keys = body_keys + ["coefficients",
+                                  "coefficient_std",
                                   "alphas"]
         width = max(len(k) for k in align_keys)
 
@@ -2456,6 +2480,11 @@ function save(db, path):
         out.append(format_array_open(
             "coefficients", width))
         for x in entry.coefficients:
+            out.append("   " + fmt_float(x) + ",")
+        out.append("]")
+        out.append(format_array_open(
+            "coefficient_std", width))
+        for x in entry.coefficient_std:
             out.append("   " + fmt_float(x) + ",")
         out.append("]")
         out.append(format_array_open(
@@ -3702,11 +3731,13 @@ per k-density grid point plus one structure-only
 `imago.py -loen -scf no` unit per Fortran-side
 fingerprint.  The dispatch phase hands every collected
 unit to kaleidoscope as one flat batch.  The harvest
-phase picks each solid's converged grid point, extracts
-the potential, harvests one `FingerprintRecord` per
-declared `[[reference_solid.entry.fingerprint]]`, and
-contributes the same converged point back to the
-guidance dataspace.
+phase picks each solid's converged grid point, then for
+each distinct environment the run discovered takes one
+representative, extracts its potential, computes the
+database-wide `[characterization]` fingerprints (plus any
+rare per-entry override), and insert-or-merges the result
+into the per-element database (DESIGN 5.2.3), contributing
+the same converged point back to the guidance dataspace.
 
 The v2 manifest reader (`load_manifest_v2` below)
 enforces the validation rules of DESIGN 5.7.
@@ -3881,47 +3912,68 @@ function buildInitialPotentials(manifest_path,
             continue
         log.append(make_run_log_entry(ref, converged))
 
-        for spec in ref.entries:
-            elem = spec.element
+        # Harvest one representative per DISTINCT
+        # ENVIRONMENT the converged run discovered (DESIGN
+        # 5.7).  The grouping pass gave every atom a
+        # species; the assigning method's partition
+        # (symmetry for an ordered solid, bispectrum for a
+        # disordered one) defines the environments.  When a
+        # curator customization addresses an environment it pins
+        # the representative atom_site and supplies label /
+        # default / description; otherwise the
+        # representative is the order-independent one (DESIGN
+        # 5.6.5) and label / description are derived /
+        # auto-composed from ref.source_description.
+        #
+        # INTERIM (C88): environment auto-discovery and the
+        # insert_or_merge dedup are the C88 storage model
+        # and are not built yet.  The present build is the
+        # C60 witness path: discover_environments returns
+        # exactly the solid's customization-pinned entries and
+        # insert_or_merge degrades to append-or-replace-by-
+        # label.  The loop is written in its target shape.
+        for env in discover_environments(converged, ref):
+            elem = env.element
             if elem not in databases:
                 continue   # filtered out by --element
-            # extract_potential reads the site's TYPE block
-            # from the converged scfV (NUM_TYPES + per-type;
-            # the type number comes from datSkl.map, 9.7).
+            # extract_potential reads the representative
+            # site's TYPE block from the converged scfV
+            # (NUM_TYPES + per-type; the type number comes
+            # from datSkl.map, 9.7).
             coeffs, alphas = extract_potential(
-                converged, spec.atom_site)
-            # One FingerprintRecord per declared
-            # [[reference_solid.entry.fingerprint]].
-            # Python-side matchers compute in-process
-            # from `struct`; Fortran-side matchers read
-            # the loen unit kaleidoscope already ran.
+                converged, env.atom_site)
+            # Every environment computes the database-wide
+            # [characterization] preferred fingerprints; a
+            # rare per-entry override adds extra non-
+            # preferred sub_specs.  The record at a
+            # [characterization] sub_spec is preferred=true.
             fingerprints = harvestFingerprints(flight,
-                ref, spec, struct)
+                ref, env, struct,
+                manifest.characterization)
             new = PotentialEntry(
-                label         = spec.label,
-                default       = spec.default,
-                description   = spec.description,
+                label         = env.label,
+                default       = env.default,
+                description   = env.description,
                 num_gaussians = len(coeffs),
                 alpha_min     = min(alphas),
                 alpha_max     = max(alphas),
-                coefficients  = coeffs,
-                alphas        = alphas,
+                # First insert seeds the running mean with
+                # this potential, a zero standard deviation,
+                # and unit counts; insert_or_merge updates
+                # all four on a duplicate (DESIGN 5.2.3).
+                coefficients    = coeffs,
+                coefficient_std = zeros(len(coeffs)),
+                multiplicity    = 1,
+                model_count     = 1,
+                alphas          = alphas,
                 # Provenance records ref.system_type for
                 # forensics (DESIGN 5.7 rule 2).
                 provenance    = make_imago_provenance(
                     imago_commit, timestamp,
-                    ref, spec.atom_site,
+                    ref, env.atom_site,
                     converged.iterations),
                 fingerprints  = fingerprints)
-            db = databases[elem]
-            # Replace any prior entry with the same
-            # label.  Manifest rule 6 enforces
-            # cross-solid (element, label) uniqueness,
-            # so the only possible prior is the same
-            # entry from a previous run.
-            db.potentials = [e for e in db.potentials
-                             if e.label != spec.label]
-            db.potentials.append(new)
+            insert_or_merge(databases[elem], new, ref)
 
     # Step 3b: guidance contribution.  The same
     # converged grid points feed the historical guidance
@@ -3951,9 +4003,76 @@ function buildInitialPotentials(manifest_path,
         per_run_log       = log)
 
 
+function discover_environments(converged, ref):
+    # DESIGN 5.7 target: yield one record per DISTINCT
+    # ENVIRONMENT in the converged run.  Each carries the
+    # representative atom_site, its element, and the label /
+    # default / description a customization supplied -- else a
+    # derived label, default=false, and a description
+    # auto-composed from ref.source_description qualified by
+    # the site's species and type (DESIGN 5.2.1).
+    #
+    # INTERIM (C88): auto-discovery is not built.  The
+    # present build yields exactly ref.entries -- the
+    # customization-pinned sites of the C60 witness path -- so a
+    # solid with no entries harvests nothing yet.  When C88
+    # lands this reads the run's species partition, takes
+    # one order-independent representative per environment
+    # (DESIGN 5.6.5), then layers any matching customization on
+    # top, keyed by the customization's representative atom_site.
+    envs = []
+    for spec in ref.entries:
+        envs.append(Environment(
+            element     = spec.element,
+            atom_site   = spec.atom_site,
+            label       = spec.label,       # may be None
+            default     = spec.default,
+            description = spec.description,
+            overrides   = spec.fingerprints))
+    return envs
+
+
+function insert_or_merge(db, new, ref):
+    # DESIGN 5.2.3: the per-element database stores DISTINCT
+    # ENVIRONMENTS, not atoms.  An explicit customization label
+    # replaces by label first; otherwise dedup keys on the
+    # BISPECTRUM descriptor at the preferred sub_spec -- the
+    # transferable one every entry carries (native or
+    # witness, 5.2.2).  Symmetry has no meaning across
+    # structures and reduce is the disposable witness, so
+    # neither gates the merge.
+    if new.label is not None:
+        existing = find_by_label(db, new.label)
+        if existing is not None:
+            replace(db, existing, new)
+            return
+    # INTERIM (C88): the fingerprint dedup-merge is not
+    # built.  The present build appends (the C60 witness
+    # path); duplicates are not yet folded.
+    dup = find_bispectrum_duplicate(db, new)        # C88
+    if dup is None:
+        db.potentials.append(new)
+        return
+    # Fold in (C88): require equal alpha SETS -- coefficient-
+    # wise averaging is meaningful only on one shared set of
+    # alphas (5.2.3) -- then advance the running mean and
+    # per-coefficient standard deviation (Welford) and the
+    # counts.  model_count rises only for a solid not yet
+    # represented in this entry.
+    require(alpha_sets_equal(dup.alphas, new.alphas), db,
+        "insert_or_merge: alpha sets differ; cannot"
+        + " average coefficients (label "
+        + str(new.label) + ")")
+    welford_update(dup, new.coefficients)    # mean + std
+    dup.multiplicity = dup.multiplicity + 1
+    if ref.reference_id not in dup.contributing_solids:
+        dup.contributing_solids.add(ref.reference_id)
+        dup.model_count = dup.model_count + 1
+
+
 function load_manifest_v2(path):
     # Strict-refusal validator implementing manifest
-    # rules 1-9 of DESIGN 5.7.  Every failure names
+    # rules 1-11 of DESIGN 5.7.  Every failure names
     # the failing rule and the offending entry; no
     # warning-and-continue path exists.
     raw = tomllib.load(path)
@@ -3964,14 +4083,34 @@ function load_manifest_v2(path):
         + " 2 (found "
         + str(raw.get("schema_version")) + ")")
 
+    # Rule 10: the [characterization] block declares the
+    # database-wide preferred recipe -- at most one
+    # fingerprint per method, each a known matcher (rule 9).
+    # That single declaration per method IS the family's
+    # preferred record; per-entry declarations may not be
+    # preferred (checked in the entry loop below).
+    char_methods = set()
+    for fp in raw.get("characterization", {}).get(
+            "fingerprint", []):
+        require("method" in fp and "sub_spec" in fp, path,
+            "manifest rule 10: [characterization]"
+            + " fingerprint needs method and sub_spec")
+        require(fp["method"] in MATCHERS, path,
+            "manifest rule 9: unknown matcher method '"
+            + fp["method"] + "' in [characterization]")
+        require(fp["method"] not in char_methods, path,
+            "manifest rule 10: method '" + fp["method"]
+            + "' declared twice in [characterization]"
+            + " (the preferred recipe has one home)")
+        char_methods.add(fp["method"])
+
     solids               = raw.get("reference_solid",
                                    [])
     seen_ref_ids         = set()
     seen_element_label   = set()
     default_per_element  = {}    # elem -> count of
                                  #   default=true
-                                 #   entries
-    seen_elements        = set()
+                                 #   customizations
 
     for ref in solids:
         # Rule 2: required per-solid fields.  basis,
@@ -4032,81 +4171,84 @@ function load_manifest_v2(path):
             + " reference_id: " + rid)
         seen_ref_ids.add(rid)
 
-        # Per-entry checks (rules 3, 6, 7, 8, 9).
+        # Per-entry checks (rules 3, 6, 7, 8, 9, 10).
+        # Entries are OPTIONAL customizations (rule 3); a
+        # solid may carry none, and every customization
+        # field is optional.  atom_site, when given, is the
+        # representative-atom handle; element is cross-
+        # checked at harvest; label / default / description
+        # override the derived / auto-composed values.
         for entry in ref.get("entry", []):
-            # Rule 3: required entry fields.
-            for f in ("element", "atom_site",
-                      "label", "default",
-                      "description"):
-                require(f in entry, path,
-                    "manifest rule 3:"
-                    + " [[reference_solid.entry]] in"
-                    + " " + rid + " missing field: "
-                    + f)
+            elem  = entry.get("element")
+            label = entry.get("label")
 
-            elem  = entry["element"]
-            label = entry["label"]
-            seen_elements.add(elem)
+            # Rule 6: only an EXPLICIT customization label needs
+            # the cross-manifest (element, label) check;
+            # derived labels are unique by construction per
+            # environment (DESIGN 5.7).
+            if label is not None and elem is not None:
+                key = (elem, label)
+                require(key not in seen_element_label,
+                    path,
+                    "manifest rule 6: duplicate"
+                    + " (element, label): " + str(key))
+                seen_element_label.add(key)
 
-            # Rule 6: (element, label) uniqueness
-            # across the entire manifest.
-            key = (elem, label)
-            require(key not in seen_element_label,
-                path,
-                "manifest rule 6: duplicate"
-                + " (element, label): "
-                + str(key))
-            seen_element_label.add(key)
-
-            # Rule 7 tally: count default=true
-            # entries per element.  Final check
-            # happens after the loop.
-            if entry["default"]:
+            # Rule 7 (load half): no element may carry two
+            # default=true customizations.  The "exactly one
+            # harvested element" half is checked at harvest,
+            # once the run reveals which elements exist.
+            if entry.get("default", False) and (
+                    elem is not None):
                 default_per_element[elem] = (
-                    default_per_element.get(elem, 0)
-                    + 1)
+                    default_per_element.get(elem, 0) + 1)
 
-            # Rule 8 / 9 on fingerprint declarations.
+            # Per-entry fingerprints are RARE overrides
+            # (extra NON-preferred sub_specs); the preferred
+            # recipe lives in [characterization] (rule 10).
             seen_fp = set()
             for fp in entry.get("fingerprint", []):
                 require("method" in fp
                         and "sub_spec" in fp, path,
                     "manifest rule 8: fingerprint"
                     + " declaration must carry both"
-                    + " method and sub_spec ("
-                    + rid + ", label=" + label
-                    + ")")
-                # Rule 9: method must be a known
-                # matcher.
-                require(fp["method"] in MATCHERS,
+                    + " method and sub_spec (" + rid + ")")
+                # Rule 10: a per-entry declaration may not
+                # be preferred -- the preferred record is
+                # the [characterization] one.
+                require(not fp.get("preferred", False),
                     path,
-                    "manifest rule 9: unknown"
-                    + " matcher method '"
-                    + fp["method"] + "' (" + rid
-                    + ", label=" + label + ")")
-                # Rule 8: (method, sub_spec) unique
-                # within this entry.  Use the same
-                # canonicalization the per-element-
-                # database reader uses (rule 8 in
-                # 11.1).
+                    "manifest rule 10: per-entry"
+                    + " fingerprint may not be preferred ("
+                    + rid + "); set it in"
+                    + " [characterization]")
+                # Rule 9: method must be a known matcher.
+                require(fp["method"] in MATCHERS, path,
+                    "manifest rule 9: unknown matcher"
+                    + " method '" + fp["method"] + "' ("
+                    + rid + ")")
+                # Rule 8: (method, sub_spec) unique within
+                # this entry.  Same canonicalization the
+                # per-element-database reader uses (11.1).
                 canon = canonicalize_sub_spec(
                     fp["sub_spec"])
                 k2 = (fp["method"], canon)
                 require(k2 not in seen_fp, path,
                     "manifest rule 8: duplicate"
-                    + " (method, sub_spec) in entry "
-                    + label + " of " + rid)
+                    + " (method, sub_spec) in " + rid)
                 seen_fp.add(k2)
 
-    # Rule 7 post-loop: exactly one default-tagged
-    # entry per element that appears in the manifest.
-    for elem in seen_elements:
-        count = default_per_element.get(elem, 0)
-        require(count == 1, path,
+    # Rule 7 (load half): no element may carry more than
+    # one default=true customization.  Zero is allowed here --
+    # element may take its default at harvest, or the
+    # isolated baseline is the default when the manifest
+    # adds nothing for it.  The "exactly one per HARVESTED
+    # element" check runs at harvest time (DESIGN 5.7).
+    for elem, count in default_per_element.items():
+        require(count <= 1, path,
             "manifest rule 7: element " + elem
             + " has " + str(count)
-            + " default-tagged entries across the"
-            + " manifest (need exactly one)")
+            + " default=true customizations (at most one)")
 
     return parse_manifest_object(raw)
 
@@ -4196,24 +4338,34 @@ function materialize_only(manifest_path, pdb_root,
     return report          # the CLI prints it plus a tally
 
 
-function harvestFingerprints(flight, ref, spec,
-        result_toml):
-    # Build one FingerprintRecord per declared
-    # [[reference_solid.entry.fingerprint]].  An entry
-    # with no declarations harvests nothing and never
-    # touches the structure -- the common case so far.
-    if spec.fingerprints is empty:
+function harvestFingerprints(flight, ref, env,
+        result_toml, characterization):
+    # Every environment harvests the database-wide
+    # [characterization] preferred recipe (one sub_spec per
+    # method, marked preferred=true), plus any rare per-
+    # entry override the customization added (extra NON-preferred
+    # sub_specs).  DESIGN 5.7.
+    decls = []
+    for fp in characterization:
+        decls.append({"method": fp["method"],
+                      "sub_spec": fp["sub_spec"],
+                      "preferred": true})
+    for fp in env.overrides:
+        decls.append({"method": fp["method"],
+                      "sub_spec": fp["sub_spec"],
+                      "preferred": false})
+    if decls is empty:
         return []
 
     # INTERIM (until C55/C58): the Fortran-side bispectrum
     # harvest is not built yet, so refuse any loen-side
     # declaration up front rather than silently dropping a
-    # fingerprint the curator asked for.  When C55/C58 land,
+    # fingerprint the recipe asked for.  When C55/C58 land,
     # this guard is replaced by a per-declaration dispatch to
-    # harvestLoenFingerprint (specified below) for every
-    # matcher whose needs_loen_run is true.
-    for fp_decl in spec.fingerprints:
-        if MATCHERS[fp_decl["method"]]().needs_loen_run:
+    # harvestLoenFingerprint (below) for every matcher whose
+    # needs_loen_run is true.
+    for d in decls:
+        if MATCHERS[d["method"]]().needs_loen_run:
             raise NotImplementedError(
                 "method needs a loen run; the Fortran-side "
                 "harvest is C55/C58 and is not built yet")
@@ -4233,11 +4385,12 @@ function harvestFingerprints(flight, ref, spec,
     # compute_query independently trims neighbors to each
     # declaration's own sub_spec cutoff, so a smaller request
     # ignores the matrix's extra reach (periodic boundary
-    # conditions enter only here).  Today only one declaration
-    # ever appears, so "max" is just that cutoff; the build-
-    # once form matters only once differing cutoffs coexist.
-    max_cutoff = max(fp_decl["sub_spec"]["cutoff"]
-                     for fp_decl in spec.fingerprints)
+    # conditions enter only here).  The [characterization]
+    # recipe plus any override can contribute several reduce
+    # sub_specs, so building once to the max cutoff genuinely
+    # applies.
+    max_cutoff = max(d["sub_spec"]["cutoff"]
+                     for d in decls)
     structure = read_structure(
         result_toml.outputs["structure"])
     build_min_dist_matrix(structure, max_cutoff)
@@ -4248,7 +4401,7 @@ function harvestFingerprints(flight, ref, spec,
     # map step i reads); the map yields both the row and that
     # row's element symbol.
     (dat_index, map_element) = skeleton_to_dat(
-        result_toml.outputs["datSkl_map"])[spec.atom_site]
+        result_toml.outputs["datSkl_map"])[env.atom_site]
     # Guard the numbering assumption: the structure row and
     # the map must name the same element, or the expansion and
     # the map have desynced and the fingerprint would describe
@@ -4256,15 +4409,15 @@ function harvestFingerprints(flight, ref, spec,
     if lower(structure.atom_element_name[dat_index])
             != lower(map_element):
         raise ValueError(
-            f"site {spec.atom_site}: datSkl.map names "
+            f"site {env.atom_site}: datSkl.map names "
             f"{map_element} but the expanded structure row "
             f"{dat_index} is a different element; "
             f"numbering desync")
 
     fingerprints = []
-    for fp_decl in spec.fingerprints:
-        method   = fp_decl["method"]
-        sub_spec = fp_decl["sub_spec"]
+    for d in decls:
+        method   = d["method"]
+        sub_spec = d["sub_spec"]
         matcher  = MATCHERS[method]()
         # In-process compute against the shared structure;
         # compute_query trims to this declaration's own
@@ -4276,9 +4429,10 @@ function harvestFingerprints(flight, ref, spec,
         vectors = matcher.compute_query(structure, sub_spec)
         payload = matcher.build_payload(vectors[dat_index])
         fingerprints.append(FingerprintRecord(
-            method   = method,
-            sub_spec = sub_spec,
-            payload  = payload))
+            method    = method,
+            sub_spec  = sub_spec,
+            preferred = d["preferred"],
+            payload   = payload))
     return fingerprints
 
 
@@ -4340,10 +4494,13 @@ function build_isolated_entry(elem, commit, ts,
         manifest):
     # The isolated entry is rebuilt from current
     # atomSCF output every run.  Its `default` flag
-    # is set to true iff the manifest contributes
-    # no other entry for `elem` -- so the per-
+    # is true iff no customization designates a default
+    # environment for `elem`, so the isolated
+    # baseline is the FALLBACK default and the per-
     # element database always has exactly one
-    # default-tagged entry (rule 7 of 5.2).
+    # default-tagged entry (rule 7 of 5.2).  As a
+    # single observed potential it seeds the running
+    # mean with a zero spread and unit counts.
     pot1   = read_pot1(elem)
     coeff1 = read_coeff1(elem)
     return PotentialEntry(
@@ -4355,8 +4512,11 @@ function build_isolated_entry(elem, commit, ts,
         num_gaussians = pot1.num_gaussians,
         alpha_min     = pot1.alpha_min,
         alpha_max     = pot1.alpha_max,
-        coefficients  = coeff1.coefficients,
-        alphas        = coeff1.alphas,
+        coefficients    = coeff1.coefficients,
+        coefficient_std = zeros(pot1.num_gaussians),
+        multiplicity    = 1,
+        model_count     = 1,
+        alphas          = coeff1.alphas,
         provenance    = {
             "source"       : "atomSCF",
             "commit"       : commit,
@@ -4365,15 +4525,17 @@ function build_isolated_entry(elem, commit, ts,
 
 
 function is_isolated_default_for(elem, manifest):
-    # True iff the manifest declares no other
-    # default-tagged entry for `elem`.  Manifest
-    # rule 7 forbids zero defaults for any element
-    # that *does* appear in the manifest, so a
-    # manifest entry with default=true always wins
-    # over the isolated baseline.  For elements
-    # with no manifest entry at all, the isolated
-    # baseline is the database file's only entry
-    # and must therefore carry the default tag.
+    # True iff no customization designates a default
+    # environment for `elem`.  The default tag goes
+    # to the customized environment when one
+    # exists; otherwise the isolated baseline is the
+    # fallback default, so the per-element file always
+    # carries exactly one default (rule 7 of 5.2) with
+    # no missing-default error.  This also covers the
+    # common case of an element with no manifest
+    # contribution, whose only entry is the isolated
+    # baseline.  `default` is an optional customization
+    # field, false when absent.
     for ref in manifest.reference_solids:
         for entry in ref.entries:
             if (entry.element == elem

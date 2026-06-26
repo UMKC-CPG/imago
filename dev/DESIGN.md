@@ -2396,10 +2396,39 @@ declares.
   alpha_max        float   Largest alpha in the original
                            geometric series.
                            Informational.
-  coefficients     array   Length = num_gaussians.
-                           Gaussian expansion
-                           coefficients (col 1 of the
-                           legacy coeff1 file).
+  coefficients     array   Length = num_gaussians.  The
+                           entry's potential, as the
+                           per-coefficient *mean* over
+                           every atom that deduped into
+                           this environment (5.2.3).  For
+                           a multiplicity-1 entry, just
+                           that atom's harvested
+                           potential.  All merged atoms
+                           share one set of alphas, so
+                           the mean is taken
+                           coefficient-by-coefficient.
+  coefficient_std  array   Length = num_gaussians.  Per-
+                           coefficient standard deviation
+                           across the merged atoms -- the
+                           spread of potentials that
+                           mapped to this one environment
+                           (5.2.3).  Zero at multiplicity
+                           1.  Records how faithfully the
+                           assigning fingerprint predicts
+                           the potential.
+  multiplicity     int     Atoms, across all reference
+                           models, that deduped into this
+                           environment (5.2.3).  Default
+                           1.  A frequency / sample
+                           weight, not a correctness
+                           field.
+  model_count      int     Distinct reference solids that
+                           contributed an atom here.
+                           Default 1.  Independent
+                           corroboration: an environment
+                           seen in many models is more
+                           transferable than one seen many
+                           times in a single model.
   alphas           array   Length = num_gaussians.
                            Authoritative explicit alpha
                            values per basis function
@@ -2408,7 +2437,13 @@ declares.
                            series implied by alpha_min
                            and alpha_max if a future
                            entry uses a non-geometric
-                           layout.
+                           layout.  In the present regime
+                           every atom of an element shares
+                           one set of alphas, so all
+                           entries in a file carry
+                           identical alphas; the merge
+                           (5.2.3) asserts this equality
+                           before averaging coefficients.
 
 **Per-entry fingerprint records, under
 `[[potential.fingerprint]]` (optional, may repeat):**
@@ -2547,7 +2582,9 @@ fingerprint.
    error with the file path, the entry label (when
    the missing field is per-entry), and the field
    name in the message.
-4. `len(coefficients) == len(alphas) == num_gaussians`.
+4. `len(coefficients) == len(alphas) ==
+   len(coefficient_std) == num_gaussians`.  `multiplicity`
+   and `model_count` are each `>= 1` (default 1).
 5. Labels must be unique within the file.
 6. At least one entry with `label = "isolated"` is
    required.  The legacy baseline must always be
@@ -2557,8 +2594,12 @@ fingerprint.
    entry need not be the default entry.
 7. Exactly one entry per file must carry
    `default = true`.  Zero or multiple defaults is a
-   hard error.  No implicit fallback to `"isolated"`:
-   the curator must declare the selection explicitly.
+   hard error.  The producer guarantees this: it
+   tags the customized environment when the
+   manifest declares one, otherwise it falls back to
+   the `"isolated"` baseline (5.7 rule 7), so a
+   hand-free element still loads with exactly one
+   default.
 8. Within any one `[[potential]]` entry's fingerprint
    array, the pair `(method, sub_spec)` must be unique.
    Two fingerprint records with the same `method` and
@@ -2758,6 +2799,24 @@ the shared potential genuinely belongs to each.  The
 witness coarseness above appears only in the disordered,
 cross-method case.
 
+**Producer convention: reduce is never the assigner.**
+The native/witness machinery above is symmetric in
+principle -- either method can assign -- but the producer
+that populates this database (5.7) uses only two assigning
+methods: crystallographic symmetry for ordered references,
+bispectrum for disordered ones.  Reduce is always
+harvested as a witness, never as the method that draws
+species boundaries.  Two consequences follow.  The
+bispectrum index is always complete: every environment
+bispectrum can distinguish becomes its own entry.  And
+reduce never shapes the *entry set*, so it is a pure
+add-on column -- were the reduce scheme ever retired,
+removing it is a clean deletion of the reduce fingerprint
+records, with no entry to re-derive and no reference run
+to repeat.  A database populated with reduce as an
+assigner would not collapse so cleanly, which is why the
+convention is fixed here rather than left to each run.
+
 #### 5.2.3 Environment storage model: dedup and weights
 
 The database stores **distinct environments, not atoms.**
@@ -2785,11 +2844,19 @@ material contributes almost no new environments.
 **Dedup on insert, weight by multiplicity.**  Harvesting
 is therefore an *insert-or-merge*.  When a harvested
 environment duplicates one already stored, the producer
-does not append a new entry; it increments a
-**multiplicity** weight on the existing one (how many
-atoms, across how many models, have collapsed into it).
-The database grows with environment *diversity*, which is
-sub-linear in atoms and plateaus as the space fills in.
+does not append a new entry; it folds the new atom into
+the existing one and advances two counts: a
+**multiplicity** of atoms (how many, across all models,
+have collapsed into this environment) and a **model
+count** (how many *distinct* reference solids
+contributed).  The two answer different questions -- atom
+multiplicity is the natural frequency a learned predictor
+(5.2.4) wants as a sample weight; model count measures
+independent corroboration, an environment seen in five
+models being more transferable than one seen
+five-thousand times in one.  The database grows with
+environment *diversity*, which is sub-linear in atoms and
+plateaus as the space fills in.
 The dedup tolerance is the producer-side mirror of the
 consumer-side similarity floor (5.6.5, TODO C61): the
 consumer asks "is this query close enough to a stored
@@ -2808,17 +2875,66 @@ environments exist, generally far fewer than the atom
 count.  The crystalline case is just the degenerate
 collapse of the same rule.
 
-**Dedup must be conservative -- the union of per-method
-distinctness.**  An environment is a duplicate only when
-it is close under *every* method at once; if it is novel
-under *any* method it must be kept.  This matters because,
-within a reduce-assigned type, all atoms share one reduce
-fingerprint but carry *different* bispectrum witnesses:
-deduping by the reduce metric alone would collapse the
-type and discard that bispectrum coverage irrecoverably.
-Merging only on an all-methods duplicate keeps every
-method's index complete, and the multiplicity counts only
-true all-methods duplicates.
+**Dedup keys on bispectrum, not all methods.**  Merging
+happens at two scales.  *Within* one reference run the
+assigning method -- symmetry for an ordered reference,
+bispectrum for a disordered one -- defines the distinct
+environments, so symmetry-equivalent or bispectrum-
+equivalent atoms already collapse to one representative.
+*Across* runs, where the per-element database actually
+accumulates, the merge keys on the **bispectrum**
+descriptor at the preferred `sub_spec`: it is the
+transferable one every entry carries (native for a
+disordered reference, witness for an ordered one, 5.2.2),
+whereas symmetry equivalence has no meaning between two
+different structures.  Bispectrum subsumes the within-run
+symmetry collapse too, since symmetry-equivalent atoms
+carry identical bispectrum fingerprints.  Reduce never
+gates the merge -- it rides along only as a tolerated-
+imprecise witness; keying on all methods would let reduce
+split entries bispectrum considers identical, constraining
+the entry count, the opposite of treating reduce as a
+droppable column.  So the merge asks one question, "are
+these the same environment under bispectrum?", and the
+surviving entry's reduce witness is one representative's,
+accepted as approximate (5.2.2).
+
+**Merging potentials: mean and spread.**  Two atoms that
+dedup into one environment still carry *different*
+harvested coefficients -- the fingerprint characterizes
+geometry, but the converged potential can differ in
+detail.  The merge stores the order-independent
+**mean**: the per-coefficient average over every atom
+folded into the entry.  Order independence is the
+principle the consumer's representative already obeys
+(5.6.5) -- singling out one atom would make the stored
+potential depend on harvest order -- and the mean
+averages out fit noise across corroborating atoms.
+Averaging coefficient-by-coefficient is well-defined only
+because all atoms of an element share one set of alphas;
+the merge **asserts the two entries' alpha sets are
+equal** before averaging and treats a mismatch as
+non-mergeable.  (It cannot arise in the present regime,
+where the alpha set is a per-element constant, but the
+assertion guards a future where alphas vary per
+environment.)
+
+Alongside the mean, the merge tracks the per-coefficient
+**standard deviation** -- the spread of potentials that
+collapsed into this environment.  It is maintained online,
+one atom at a time, by a running mean-and-variance update,
+so no raw potentials are retained and the cost is a fixed
+handful of numbers per entry regardless of multiplicity.
+The spread is the empirical test of the database's
+founding premise, that near-identical fingerprints carry
+near-identical potentials: a small spread says the
+assigning fingerprint is a faithful proxy for the
+potential and the mean is trustworthy; a large spread
+says the descriptor, or its tolerance, is collapsing
+potentials that genuinely differ, and is the signal to
+tighten the tolerance or distrust the entry.  The same
+number gives the consumer a per-entry confidence and the
+learned predictor (5.2.4) a variance to weight by.
 
 **Search cost.**  Controlling the entry count via dedup is
 the first-order fix.  Beyond it, the search is already
@@ -2916,18 +3032,22 @@ recorded here as the dataspace's intended trajectory.
 **Schema implications (deferred to implementation).**  The
 native/witness model adds the `type_assignment` provenance
 field (already listed in 5.2's provenance table), and the
-dedup model adds a per-entry `multiplicity` integer
-(default 1, still to be threaded through 5.2, 5.4, 5.5,
-and 5.7).  The per-atom-pairing safeguard costs nothing
+dedup model adds four per-entry fields -- a
+`multiplicity` of atoms and a `model_count` (5.2.3), both
+default 1, and a per-coefficient `coefficient_std`
+companion to the mean coefficients -- threaded through
+5.2, 5.4, 5.5, and 5.7.  The per-atom-pairing safeguard costs nothing
 until normalization, when the origin label is carried onto
 split records.  As an implementation status: the present
-producer -- the C60 harvest -- emits neither
-`type_assignment` nor `multiplicity` and writes one entry
-per declared site, so the loader does not yet enforce
-them; the schema above specifies the target.  The
-insert-or-merge harvest, the conservative dedup rule, and
-the validation that enforces both fields are scheduled
-work (TODO C88), not part of the current bispectrum half.
+producer -- the C60 harvest -- emits none of
+`type_assignment`, `multiplicity`, `model_count`, or
+`coefficient_std` and writes one entry per declared site,
+so the loader does not yet enforce them; the schema above
+specifies the target.  The insert-or-merge harvest with
+mean/spread accumulation, the assigning-method dedup rule,
+and the validation that enforces the new fields are
+scheduled work (TODO C88), not part of the current
+bispectrum half.
 
 ### 5.3 Sketch (gold, two entries with fingerprints)
 
@@ -3689,10 +3809,13 @@ settings*.  Its job is threefold:
    manifest entry; removing one means removing
    an entry; reviewing the curation set means
    reading the manifest.
-2. **Tell the pipeline what to harvest.**  For
-   each reference solid, which atom sites'
-   converged potentials go into the database,
-   and under what labels.
+2. **Tell the pipeline what to harvest.**  The
+   harvest is automatic -- one representative per
+   distinct environment (5.2.2, 5.2.3) -- so the
+   manifest need not enumerate atom sites.  An
+   entry, when present, only *annotates* an
+   auto-discovered environment (its default tag,
+   its description, or a pinned representative).
 3. **Record the SCF settings used.**  k-points,
    convergence threshold, etc., recorded into
    the provenance fields of 5.2 so every
@@ -3713,13 +3836,17 @@ function of (manifest, structure files, Imago
 build).
 
 **What it contains** (per the schema sketched
-below): per-solid fields the SCF run needs
+below): a database-wide `[characterization]`
+recipe (the fingerprint sub_specs, 5.2 rule 11);
+per-solid fields the SCF run needs
 (`structure_path`, `kpoint_spec`,
-`scf_threshold`) plus a stable
-`reference_id`; per-entry harvest declarations
-(`atom_site`, expected `element`, `description`,
-and an optional `label` override -- absent labels
-are derived at harvest per 5.2.1).
+`scf_threshold`) plus a stable `reference_id` and
+an optional `source_description`; and optional
+per-entry customizations (`default`, `description`,
+`label`, or a pinning `atom_site`) that annotate
+auto-discovered environments -- the harvest takes
+one representative per environment (5.2.2) and
+needs no enumerated sites.
 
 **What it deliberately omits**: the numerical
 potentials themselves (those are SCF outputs);
@@ -3764,17 +3891,16 @@ structure, each with a `reference_id` auto-derived
 from the CIF metadata
 (`<formula>_<symbol>_<number>_<year>`);
 `expand_manifest.py` reads that sketch and fills in
-the shared method defaults and the per-structure
-harvest curation, either interactively or by
-stamping the defaults and emitting a fill-in
-template.  Each sketch stub also carries two
-discovery hints cod_fish read from the CIF -- the
-composition (``elements``) and a
-``source_description`` -- which the interactive flow
-offers as the element and description defaults, so
-the curator invents neither; they are not schema
-fields (the producer ignores them and the finished
-manifest omits them).  `cod_fish.py` stays a pure
+the database-wide `[characterization]` recipe and
+each solid's run settings; entry customizations are
+optional, added interactively or left for the
+curator to write by hand.  Each sketch stub also
+carries discovery hints cod_fish read from the CIF.
+The composition (``elements``) is a non-schema hint
+the producer ignores and the finished manifest
+omits; the ``source_description`` is persisted as a
+`reference_solid` field, from which the harvest
+composes each environment's description (5.2.1).  `cod_fish.py` stays a pure
 discovery tool and never writes a manifest.  The writer emits
 human-readable TOML -- shortest round-trippable
 floats, inline `sub_spec` tables in their authored
@@ -3852,6 +3978,19 @@ not loaded by the v2 reader; curators must add the
 ```toml
 schema_version = 2
 
+# The characterization recipe is a database-wide constant: one
+# preferred sub_spec per method, applied to every harvested
+# environment (5.2 rule 11).  Declared once here, never repeated
+# on an entry.
+[characterization]
+  [[characterization.fingerprint]]
+  method   = "bispectrum"
+  sub_spec = { twoj1 = 8, twoj2 = 8 }
+  [[characterization.fingerprint]]
+  method   = "reduce"
+  sub_spec = { level = 2, thick = 0.5, cutoff = 5.0,
+               tolerance = 0.05 }
+
 [[reference_solid]]
 reference_id          = "au_fcc"
 system_type           = "crystalline"
@@ -3865,33 +4004,28 @@ scf_threshold         = 1.0e-6
 basis                 = "fb"
 functional            = "wigner"
 kpoint_integration    = "linear-tetrahedral"
+source_description    = "Au in fcc bulk (Fm-3m), COD 9008463."
 
+  # Entries are OPTIONAL customizations on the auto-harvested
+  # environments, not the harvest list.  This one designates the
+  # element default and gives a hand-written description; an
+  # environment no entry mentions is still harvested, taking
+  # default = false and an auto-composed description.
   [[reference_solid.entry]]
-  element     = "Au"
-  atom_site   = 1
+  element     = "Au"          # optional; cross-checked at harvest
+  atom_site   = 1             # optional handle: a representative
+                              #   atom of the target environment
   label       = "default_solid"
   default     = true
   description = "Au in fcc bulk (Fm-3m)."
 
-    # preferred = true is the record the consumer uses for a
-    # file-dictated match; one preferred sub_spec per family,
-    # uniform database-wide (see the convention note below).
-    [[reference_solid.entry.fingerprint]]
-    method    = "bispectrum"
-    sub_spec  = { twoj1 = 8, twoj2 = 8 }
-    preferred = true
-
-    # A non-preferred alternate sub_spec is allowed (stored for
-    # validation comparison); it just may not also be preferred.
+    # A per-entry fingerprint is a RARE override: an extra,
+    # non-preferred sub_spec to harvest for this environment
+    # alongside the database-wide preferred ones above.  The
+    # common entry carries none.
     [[reference_solid.entry.fingerprint]]
     method   = "bispectrum"
     sub_spec = { twoj1 = 6, twoj2 = 4 }
-
-    [[reference_solid.entry.fingerprint]]
-    method    = "reduce"
-    sub_spec  = { level = 2, thick = 0.5, cutoff = 5.0,
-                  tolerance = 0.05 }
-    preferred = true
 
 [[reference_solid]]
 # ... another solid ...
@@ -3912,6 +4046,12 @@ kpoint_integration    = "linear-tetrahedral"
   entries are crystalline (the canonical reference-solid case);
   amorphous and molecular references are rare in this manifest
   but supported for completeness.
+- `source_description` (string, optional): a one-line, structure-
+  level description of the reference solid, persisted from the
+  hint cod_fish reads from the CIF.  The harvest composes each
+  environment's auto-description from it, qualified by the species
+  and site it discovers (5.2.1); a curator entry customization can still
+  replace any environment's description by hand.
 - `cod_id` (positive integer, optional iff `structure_path` is
   set): Crystallography Open Database entry ID.  The
   structure-materialization step fetches the structure once, at
@@ -3975,37 +4115,66 @@ kpoint_integration    = "linear-tetrahedral"
   eV).  A bare `"gaussian"` names no width, so makeinput keeps its
   rc-sourced default (no smearing).
 
-**Per-entry fields (`[[reference_solid.entry]]`).**
+**Per-entry fields (`[[reference_solid.entry]]`).**  An entry
+is an *optional customization* on an auto-discovered environment, not
+a harvest instruction (5.2.2, 5.2.3).  Every field is optional;
+an entry exists only to override what the harvest would
+otherwise produce, and an environment no entry mentions is
+harvested all the same.
 
-- `element` (string): element symbol the entry contributes to.
-  Cross-checked against the species at `atom_site` after Imago
-  loads the structure.
-- `atom_site` (positive integer): 1-based site index into the
-  structure, matching Imago's site-indexing convention everywhere
-  else in the codebase.
-- `label` (string, *optional*): the label this entry is written
-  under in the element's `s_gaussian_pot.toml`.  When omitted, the
-  producer derives it at harvest per 5.2.1
+- `atom_site` (positive integer, *optional*): the handle that
+  addresses the target environment -- a representative atom of
+  it, 1-based into the structure (Imago's site-indexing
+  convention).  The species number cannot be the handle because
+  it is unknown until the run's grouping pass; a representative
+  atom is known up front, or chosen after an exploratory run.
+  When given, it also *pins* that exact atom as the
+  environment's representative instead of the computed
+  order-independent one.
+- `element` (string, *optional*): element symbol the customization
+  targets.  Cross-checked against the species at `atom_site`
+  after Imago loads the structure.
+- `label` (string, *optional*): the label this environment is
+  written under in the element's `s_gaussian_pot.toml`.  When
+  omitted, the producer derives it at harvest per 5.2.1
   (`<reference_id>-<element><species>-t<type>-a<site>`); when
   present it overrides that derived default.  An explicit
   `(element, label)` must be unique across the entire manifest;
   a derived label's `(reference_id, element, atom_site)` must be
   unique (rule 6).
-- `default` (bool): whether this entry should be tagged
-  `default = true` in the element's `s_gaussian_pot.toml`.
-  Exactly one entry per element across the entire manifest is
-  marked `true` (rule 7), giving each per-element file its
-  required-single default entry per 5.2 rule 7.
-- `description` (string): one-sentence prose explanation of the
-  chemical environment; copied verbatim into the database
-  entry's `description` field (5.2).
+- `default` (bool, *optional*): marks this environment the
+  element's default.  At most one environment per element
+  carries `default = true` (rule 7); when no customization does, the
+  producer falls back to the element's `"isolated"` baseline,
+  so each per-element file still gets its required-single
+  default entry per 5.2 rule 7.  An environment with no customization
+  is `default = false`.
+- `description` (string, *optional*): one-sentence prose
+  explanation of the chemical environment, copied verbatim into
+  the database entry's `description` field (5.2).  When omitted,
+  the producer auto-composes one from the reference solid's
+  `source_description`, qualified by the species and site
+  (5.2.1).
+
+**The `[characterization]` block (database-wide recipe).**  The
+fingerprint recipe -- one preferred `sub_spec` per method,
+applied to every harvested environment -- is a constant of the
+whole database, so it is declared once in a top-level
+`[characterization]` block rather than repeated on every entry.
+Each `[[characterization.fingerprint]]` carries a `method` and
+its `sub_spec`.  Lifting the recipe here makes rule 11
+structural: a single declaration per method cannot diverge
+between elements.  Every harvested environment computes these
+fingerprints, and the producer stamps the preferred flag onto
+each matching record in the per-element files.
 
 **Per-entry fingerprint declarations
-(`[[reference_solid.entry.fingerprint]]`).**  Each
-declaration tells the producer to compute and harvest one
-fingerprint record alongside the numerical potential.  The
-record is written into the database entry's
-`[[potential.fingerprint]]` array per 5.2.
+(`[[reference_solid.entry.fingerprint]]`).**  A per-entry
+declaration is a *rare override*: it asks the producer to
+harvest one *extra*, non-preferred fingerprint for this
+environment alongside the database-wide preferred ones above.
+The common entry carries none.  The record is written into the
+database entry's `[[potential.fingerprint]]` array per 5.2.
 
 - `method` (string): matcher name.  Must be a method known
   to the matcher registry in `matchers.py` (8.9).
@@ -4015,18 +4184,11 @@ record is written into the database entry's
   (rule 8); same `method` with differing `sub_spec` is
   explicitly allowed -- the database stores as many sub_specs
   per family as the curator wants.
-- `preferred` (bool, *optional*, default false): marks the one
-  record per matcher family the consumer uses for a
-  file-dictated (crystalline) match (5.6.5 step 2).  Exactly
-  one declaration per `method` is preferred for each element
-  that carries any fingerprint of that family, and the
-  preferred `sub_spec` for a family is *uniform across the
-  whole database* -- declared once and stamped onto the
-  matching record in every element file.  Storing additional
-  non-preferred sub_specs of the same family is always allowed;
-  what the validator forbids is a second preferred record, or a
-  preferred `sub_spec` that diverges from the database-wide one
-  for that family.
+- A per-entry declaration may not be marked `preferred`: the
+  preferred record of each family is fixed database-wide by the
+  `[characterization]` block (rule 11), so per-entry overrides
+  are always non-preferred alternates, stored for validation or
+  comparison.
 
 **Canonical-sub_spec convention (the `preferred` record).**  A
 file-dictated match (5.6.5 step 2) needs one unambiguous
@@ -4073,13 +4235,18 @@ file (5.2):
    they select the predictor sub-model (DESIGN 7.6) and are
    recorded on every produced entry's context, so nothing the
    producer emits depends on an implicit default (VISION
-   Principle 5).
-3. Every `[[reference_solid.entry]]` carries `element`,
-   `atom_site`, `default`, `description`.  `label` is *optional*
-   (5.2.1): when present it is an explicit curator override; when
-   absent the producer derives it at harvest from the run's site
-   identity, so the species and type numbers (unknown until the
-   grouping pass runs) need not be authored ahead of time.
+   Principle 5).  A top-level `[characterization]` block is
+   required (rule 10): it declares the database-wide fingerprint
+   recipe.
+3. `[[reference_solid.entry]]` blocks are *optional* customizations
+   (5.2.2): a reference solid may carry none.  When an entry is
+   present, all its fields are optional; `atom_site`, when given,
+   is the representative-atom handle that addresses the target
+   environment, and the species and type numbers (unknown until
+   the grouping pass runs) are never authored.  `label`, when
+   present, is an explicit curator override (5.2.1); when absent
+   the producer derives it at harvest from the run's site
+   identity.
 4. Exactly one of `cod_id` or `structure_path` is set on each
    `[[reference_solid]]`.  If `structure_path`, it resolves to
    an existing file under the manifest's directory.  If `cod_id`,
@@ -4089,48 +4256,52 @@ file (5.2):
    (lowercase letters, digits, `-`, `_`): it is embedded verbatim
    in every derived entry label and typed into `-pot`, so a
    non-conforming id is a hard error (5.2.1).
-6. No two entries may produce the same database entry.  For an
-   entry with an explicit `label`, `(element, label)` is unique
+6. No two database entries may collide on a label.  A
+   customization with an explicit `label` must be unique on `(element, label)`
    across the manifest — two solids cannot both produce, e.g.,
-   `("Au", "default_solid")`.  For an entry with a derived label,
-   `(reference_id, element, atom_site)` is unique, since the
-   derived label is built from exactly those three; two such
-   entries would collide on the identical label.  Either way a
-   silent overwrite that would mask a curation mistake is
-   refused.
-7. For every element appearing on any
-   `[[reference_solid.entry]]`, exactly one such entry across
-   the entire manifest carries `default = true`.  Zero or
-   multiple defaults for the same element is a hard error.
-   This rule mirrors per-element-database rule 7: the
-   manifest is the single source of truth for the default
-   tag.
+   `("Au", "default_solid")`.  Derived labels are unique by
+   construction: each auto-discovered environment mints
+   `<reference_id>-<element><species>-t<type>-a<site>` (5.2.1)
+   from its own run identity, so two environments differ in
+   species, type, or site within a solid and in the
+   `reference_id` prefix across solids.  A silent overwrite that
+   would mask a curation mistake is refused.
+7. At most one harvested environment per element carries
+   `default = true`, set by a `default = true` customization.  At
+   load time no element may carry two such customizations.  At
+   harvest, an element whose harvested environments include
+   no default customization is not an error: the producer tags that
+   element's `"isolated"` baseline as the default
+   (`is_isolated_default_for`, PSEUDOCODE 11.4), so a
+   hand-free element still yields exactly one default entry
+   (5.2 rule 7).  When a customization does designate a
+   default the manifest is the single source of truth; the
+   isolated
+   baseline is only the no-designation fallback.
 8. Within any one `[[reference_solid.entry]]`'s fingerprint
    declarations, `(method, sub_spec)` is unique.  Same
    `(method, sub_spec)` declared twice on the same entry is
    a hard error.  Same `method` with differing `sub_spec`
-   coexists on the same entry by design.
-9. Every `method` in a `[[reference_solid.entry.fingerprint]]`
-   declaration must be a name known to the matcher registry
-   in `makeinput.py` (8.9).  Unknown methods are a hard
-   error rather than a silent skip.
-10. For every `(element, method)` that appears with any
-    fingerprint declaration across the manifest, *exactly one*
-    of those declarations carries `preferred = true`.  Zero
-    preferred (a family present but none marked) or two-or-more
-    preferred for the same `(element, method)` is a hard error.
-    This mirrors rule 7 for the entry-level `default` tag:
-    the manifest is the single source of truth for which
-    record the consumer picks.
-11. The preferred `sub_spec` for a family is *uniform across
-    the whole manifest*: all `preferred = true` declarations
-    sharing a `method` must carry the identical `sub_spec`,
-    regardless of element.  A preferred record whose `sub_spec`
-    diverges from the family's database-wide preferred one is a
-    hard error naming both.  (Non-preferred declarations may
-    use any `sub_spec`; only the preferred ones are constrained
-    to agree, which is what guarantees a single loen run per
-    structure -- DESIGN 5.6.5 step 2.)
+   coexists on the same entry by design.  A per-entry
+   declaration may not carry `preferred = true` (rule 10).
+9. Every `method`, in `[characterization]` or in a
+   `[[reference_solid.entry.fingerprint]]` declaration, must be
+   a name known to the matcher registry in `makeinput.py` (8.9).
+   Unknown methods are a hard error rather than a silent skip.
+10. The `[characterization]` block declares *at most one*
+    fingerprint per `method`, and that single declaration is the
+    family's database-wide preferred record (its `sub_spec` is
+    the one the consumer queries, 5.6.5 step 2).  A `method`
+    named twice in `[characterization]`, or a per-entry
+    declaration marked `preferred = true`, is a hard error: the
+    preferred recipe has exactly one home.
+11. Rule 11 -- the preferred `sub_spec` for a family is uniform
+    across the whole database -- holds *structurally*: because
+    the preferred recipe is the single `[characterization]`
+    declaration per method, it cannot diverge between elements.
+    Non-preferred per-entry overrides may use any `sub_spec`;
+    only the global preferred one is constrained, and it is
+    constrained by construction.
 
 **Structure materialization.**
 
@@ -4260,17 +4431,23 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
       non-converged potential.
    b. Record that run's SCF iteration count and convergence
       metrics in the run log.
-   c. For each `[[reference_solid.entry]]`:
-      i.   `extract_potential` for the named `atom_site` from the
-           converged run.  The converged `scfV` output lists every
-           potential type (a `NUM_TYPES` header + per-type Gaussian
-           blocks under a `TOTAL__OR__SPIN_UP` channel); the harvest
-           selects the site's type block -- its type number read
-           from `datSkl.map` (ARCH 9.7) -- and takes each term's
+   c. Discover the run's environments: every atom carries a
+      species after the grouping pass (5.6.4), and the assigning
+      method's partition defines the distinct environments
+      (5.2.2).  For each distinct environment take one
+      order-independent representative (5.6.5), unless a curator
+      customization pins an `atom_site` for it, in which case that atom
+      is the representative:
+      i.   `extract_potential` for the representative's
+           `atom_site` from the converged run.  The converged
+           `scfV` output lists every potential type (a
+           `NUM_TYPES` header + per-type Gaussian blocks under a
+           `TOTAL__OR__SPIN_UP` channel); the harvest selects the
+           site's type block -- its type number read from
+           `datSkl.map` (ARCH 9.7) -- and takes each term's
            coefficient and alpha (columns 1 and 2) together.
-      ii.  For each `[[reference_solid.entry.fingerprint]]`
-           declaration, compute the fingerprint at `atom_site`
-           for the requested `(method, sub_spec)`.  Python-side
+      ii.  Compute the `[characterization]` fingerprints (and any
+           per-entry override) at the representative.  Python-side
            matchers (e.g., `reduce`) compute in-process from the
            run's *expanded* structure -- `outputs["structure"]`,
            makeinput's `imago.fract-mi` full cell -- not the
@@ -4285,17 +4462,27 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
            (e.g., `bispectrum`) read the matching `-loen` unit
            that kaleidoscope already dispatched in step 3c and
            parse the row for `atom_site` from `fort.21`.  Build a
-           `FingerprintRecord` (5.4) and attach it to the
-           entry-in-progress.
-      iii. Construct a `PotentialEntry` (5.2) with the
-           manifest-supplied `label`, `default`, and
-           `description`, the run-supplied numerical fields, the
-           run-supplied provenance (which records the solid's
+           `FingerprintRecord` (5.4) per method; the record at a
+           `[characterization]` method's `sub_spec` is marked
+           `preferred = true`.
+      iii. Build the entry.  Its `label`, `default`, and
+           `description` come from a curator customization when one
+           addresses this environment; otherwise `label` is
+           derived and `description` auto-composed (5.2.1), and
+           `default = false`.  Carry the run-supplied numerical
+           fields (the harvested coefficients seeding the mean,
+           5.2.3), the provenance (recording the solid's
            `system_type` for forensics, per rule 2), and the
-           `FingerprintRecord` list assembled in step ii.
-      iv.  Insert the entry into the in-memory `ElementDatabase`
-           for its element.  If an entry with the same label
-           already exists, replace it.
+           `FingerprintRecord` list from step ii.
+      iv.  Insert-or-merge the entry into the in-memory
+           `ElementDatabase` for its element (5.2.3).  If the
+           environment duplicates one already present under the
+           dedup rule, fold it in -- average the coefficients
+           (asserting equal alpha sets), update the
+           per-coefficient standard deviation, and advance
+           `multiplicity` and `model_count`; otherwise append it.
+           An explicit customization `label` naming an existing entry
+           replaces it.
    d. **Guidance contribution.**  Harvest the same converged grid
       point into the historical guidance dataspace's staging area
       (`share/historicalGuidanceDB/staging/<system_type>/`, via

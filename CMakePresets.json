@@ -1,0 +1,60 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "gfortran-base",
+      "hidden": true,
+      "description": "Shared settings for the gfortran (h5fc) builds. Each preset gets its own build tree under build/<preset-name>, and installs to a throwaway prefix inside that tree -- so a preset NEVER overwrites the production install in $IMAGO_DIR/bin or the hand-driven build/release and build/debug trees.",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "environment": { "FC": "h5fc" },
+      "cacheVariables": {
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/${presetName}/_install"
+      }
+    },
+    {
+      "name": "gfortran-release",
+      "inherits": "gfortran-base",
+      "displayName": "gfortran: release (optimized, no instrumentation)",
+      "description": "Optimized production-style build (-O3). Same flags as the default RELEASE build; useful for a clean reference binary.",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "gfortran-debug",
+      "inherits": "gfortran-base",
+      "displayName": "gfortran: debug (the historical debug flags)",
+      "description": "The long-standing debug build: -Og -g -fcheck=all -fbacktrace. No extra opt-in instrumentation.",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "gfortran-audit",
+      "inherits": "gfortran-base",
+      "displayName": "gfortran: audit (checks + FP traps + SNaN + warnings)",
+      "description": "Debug plus the static/runtime bug-hunting set: runtime checks, floating-point exception traps, signaling-NaN initialization, and the extra warning set. For the bug-squashing campaign (dev/DEBUG.md).",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "IMAGO_CHECKS": "ON",
+        "IMAGO_FPE_TRAP": "ON",
+        "IMAGO_INIT_SNAN": "ON",
+        "IMAGO_WARN_EXTRA": "ON"
+      }
+    },
+    {
+      "name": "gfortran-asan",
+      "inherits": "gfortran-base",
+      "displayName": "gfortran: asan (AddressSanitizer + leak detection)",
+      "description": "Debug plus AddressSanitizer (which includes LeakSanitizer at exit on Linux) and runtime checks. For runtime memory-error and leak hunting (dev/DEBUG.md Phase 3).",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "IMAGO_CHECKS": "ON",
+        "IMAGO_SANITIZE": "address"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "gfortran-release", "configurePreset": "gfortran-release" },
+    { "name": "gfortran-debug", "configurePreset": "gfortran-debug" },
+    { "name": "gfortran-audit", "configurePreset": "gfortran-audit" },
+    { "name": "gfortran-asan", "configurePreset": "gfortran-asan" }
+  ]
+}

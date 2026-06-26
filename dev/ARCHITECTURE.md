@@ -175,6 +175,37 @@ imago.F90 (top-level dispatcher)
 - HDF5 required for primary I/O in imago
 - Supported compilers: gfortran, ifort
 
+### 4.1 Debug instrumentation and build flavors
+
+The top-level `CMakeLists.txt` carries opt-in instrumentation
+options -- `IMAGO_CHECKS`, `IMAGO_FPE_TRAP`, `IMAGO_INIT_SNAN`,
+`IMAGO_WARN_EXTRA`, and `IMAGO_SANITIZE` -- all default OFF.  With
+every option off the compile and link flags are byte-for-byte
+identical to the historical build, so the production default is
+never disturbed; the instrumentation is only ever appended.
+`CMakePresets.json` bundles the common combinations as named
+presets (`gfortran-release` / `-debug` / `-audit` / `-asan`), each
+building into its own tree and installing to a per-preset sandbox,
+so a preset can never overwrite the production install.
+
+A *build flavor* is an alternative build of the engine kept under
+`$IMAGO_DIR/envs/<flavor>/bin` -- e.g. `asan` for leak hunting,
+`audit` for checks + traps + warnings, and later profiling and
+parallel-debug builds.  Because only the compiled Fortran
+executables differ between flavors (the Python helper scripts and
+the `share/` database are compiler-agnostic and identical), a
+flavor bin is just symlinks to the production bin with the engine
+executables overlaid.  The `envs.sh` switcher (installed to `bin/`,
+sourced into the shell) provides `imago_env <flavor>`, which
+activates a flavor by repointing only `IMAGO_BIN` (and
+`PATH` / `PYTHONPATH`) at it -- `share/` and `.imago/` are reused,
+so no data is duplicated and the production install is untouched.
+This is the durable replacement for ad-hoc overlay directories.
+Activation is per-shell, so different terminals can run different
+flavors at once without interference.  Operational details live in
+`BUILD.md`; the bug-squashing campaign that motivates the
+instrumented flavors is in `dev/DEBUG.md`.
+
 ---
 
 ## 5. Key Existing Infrastructure
@@ -807,17 +838,20 @@ ran SCFs through its own driver and kept its own
 per-solid SCF cache.  That bespoke cache is gone:
 kaleidoscope's run-reuse cache (9.6, keyed on the
 structure file plus the makeinput options and build
-identity) subsumes it, so editing an entry's harvest
-declarations no longer re-triggers SCF -- only the cheap
-harvest step re-runs.
+identity) subsumes it, so editing an entry
+customization no longer re-triggers SCF -- only the cheap harvest step
+re-runs.
 
 Inputs:
 - A curation manifest in TOML, schema v2 (full spec in DESIGN
-  5.7), listing reference solids, each solid's `system_type`,
-  the atom sites to harvest from each, the labels to assign,
-  which entry per element carries the `default` tag, and which
-  `(method, sub_spec)` fingerprints to harvest alongside each
-  numerical potential.
+  5.7).  It declares the reference solids, each solid's
+  `system_type`, a database-wide `[characterization]` fingerprint
+  recipe, and optional per-entry customizations.  The harvest is
+  automatic -- one representative per distinct environment (DESIGN
+  5.2.2/5.2.3) -- so the manifest does not enumerate atom sites;
+  a customization, when present, only annotates an auto-discovered
+  environment (its `default` tag, description, label, or a pinning
+  `atom_site`).
 - The historical guidance dataspace (section 10), consulted
   per reference solid to predict the converged k-point density
   and the width of the verification grid around it.  When the
@@ -828,7 +862,7 @@ Inputs:
 - An Imago build, used *through kaleidoscope* to run the
   verification flights and, for Fortran-side fingerprint
   matchers, the follow-on `imago.py -loen -scf no` runs per
-  declared fingerprint.
+  Fortran-side characterization fingerprint.
 
 **Structure materialization.**  A reference solid is named
 either by a local `structure_path` or by a `cod_id` pinned to
@@ -971,25 +1005,30 @@ litigating them inline:
 
 - **Curation manifest format.** *Resolved (2026-05-11).* TOML,
   schema v1 (Phase 1), bumped to v2 in Phase 2 to carry the
-  default tag and the per-entry fingerprint declarations.
-  Full schema, validation rules, cache layout, and COD-fetch
-  contract are specified in DESIGN 5.7.  TOML was
-  chosen so the manifest reader uses the same `tomllib` stdlib
-  machinery as the per-element database file.
+  default tag, the database-wide `[characterization]` fingerprint
+  recipe, and optional per-entry customizations.  Full schema,
+  validation rules, cache layout, and COD-fetch contract are
+  specified in DESIGN 5.7.  TOML was chosen so the manifest
+  reader uses the same `tomllib` stdlib machinery as the
+  per-element database file.
 - **Phase 2 selection / interpolation method.** *Selection
-  resolved (2026-05-19); interpolation parked for Phase 3.*
-  Per-site label selection is now driven by the matcher
-  protocol (8.9): environment-based grouping flags
-  (`-reduce`, `-bispec`) compute per-atom fingerprints,
-  bucket atoms into species by fingerprint similarity, and
-  pick the manifest entry whose recorded fingerprint best
-  matches the species centroid.  Atoms outside any
-  environment scheme fall through to the file's
-  default-tagged entry.  The interpolation question (what
-  to do when the best fingerprint match exceeds the
-  similarity floor) is parked for Phase 3; Phase 2 falls
-  back to the default tag with a warning.  Full algorithm
-  in DESIGN 5.6, parameter mapping in 5.10.
+  resolved (2026-05-19; decoupled from grouping 2026-06-17,
+  C93); interpolation parked for Phase 3.*  The per-species
+  database pick (DESIGN 5.6.5) runs for *every* species,
+  independent of how it was grouped -- crystallographic,
+  position-based (`-target`/`-block`), or environment-based
+  (`-reduce`/`-bispec`) -- and is default-on, with
+  `-nofingerprint` the opt-out.  The pick forms one
+  order-independent representative per species and matches it
+  against the element database: when the user chose an
+  environment scheme it matches that family at the user's
+  `sub_spec`; otherwise it reads the database's `preferred`
+  record per family (5.2.2, the `[characterization]`
+  convention).  The interpolation question (what to do when
+  the best match exceeds the similarity floor) is parked for
+  Phase 3; Phase 2 falls back to the default-tagged entry with
+  a warning.  Full algorithm in DESIGN 5.6, parameter mapping
+  in 5.10.
 
 ### 8.9 Matcher Protocol
 

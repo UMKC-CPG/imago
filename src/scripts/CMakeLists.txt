@@ -4,6 +4,7 @@
 message("At the set of scripts.")
 
 set (SCRIPTS
+   envs.sh
    ab2pf.py angle_utils.py
    bond_analysis.py build_initial_potentials.py
    cif2skl.py cluster_probe.py cod_fish.py

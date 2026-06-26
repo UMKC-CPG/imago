@@ -40,6 +40,24 @@ train of thought should not be stopped -- but when the thought
 resolves, help them recognize which documents it touches so
 nothing is left inconsistent.
 
+## Secondary Agents and Forks
+
+Do NOT spin up secondary agents, forks, or background
+subagents to edit documents or code without the programmer's
+explicit say-so. Asking is mandatory, and it must be a plain,
+visible question -- "Do you want me to fan this out to a
+separate agent, or should I just do it inline here?" -- never
+buried inside an obtuse command or a multi-step sequence the
+programmer cannot easily see and veto.
+
+The default for any bounded edit (a known set of spots across a
+few files) is to do it INLINE in the main thread, one edit at a
+time, so the programmer can follow along. Forks are expensive
+(they clone the whole conversation context) and confusing to
+watch alongside the main thread. Reserve them for genuinely
+parallel work or broad read-only searches, and only after an
+explicit, transparent yes.
+
 ## Coding Style
 
 ### Line Length
