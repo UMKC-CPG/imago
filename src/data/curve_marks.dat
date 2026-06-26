@@ -1,15 +1,15 @@
-None
-.
-o
-v
-s
-*
-+
-x
-X
-d
-^
-<
->
-D
-p
+None    none
+.       circle-open
+o       circle
+v       triangle-down
+s       square
+*       star
++       cross
+x       x-thin
+X       x
+d       diamond-tall
+^       triangle-up
+<       triangle-left
+>       triangle-right
+D       diamond
+p       pentagon

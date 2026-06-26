@@ -133,7 +133,7 @@ class ScriptSettings():
 
         # Define the selected display library to use.
         parser.add_argument('-d', '--display', dest='display',
-                            choices=['mpl', 'veusz'],
+                            choices=['mpl', 'veusz', 'plotly'],
                             default=self.display, help='Display library to ' +
                             f'use. Default: {self.display}.')
 
@@ -518,10 +518,25 @@ class ScriptSettings():
         #   environment variable IMAGO_DATA directory.
         IMAGO_DATA = os.getenv('IMAGO_DATA')
 
-        # The curve styles must pull data from curve_styles.dat.
+        # The curve styles must pull data from curve_styles.dat. Each
+        #   line of that file carries two whitespace-separated columns:
+        #   a matplotlib style token (column one) followed by its plotly
+        #   line-dash equivalent (column two). We keep only the column
+        #   that matches the active display backend, so that the
+        #   self.curve_style list ends up holding tokens the chosen
+        #   backend understands directly with no later translation.
         with open(f"{IMAGO_DATA}/curve_styles.dat", "r") as dat:
-            styles = dat.read().splitlines()
-        styles = [eval(x) for x in styles]
+            style_lines = dat.read().splitlines()
+        if (self.display == "plotly"):
+            # The plotly column is a plain dash string such as "solid"
+            #   or the on/off pixel pattern "10px,1px"; take it verbatim.
+            styles = [line.split()[1] for line in style_lines]
+        else:
+            # The matplotlib column is a Python literal -- either a dash
+            #   tuple like (0,(10,1)) or a quoted style name -- so it
+            #   must be evaluated before it can be dropped straight into
+            #   a plt.plot linestyle argument by the matplotlib emitter.
+            styles = [eval(line.split()[0]) for line in style_lines]
 
         # Append styles from curve_styles.dat starting at the requested
         #   index and stepping by the given step while remaining within
@@ -530,27 +545,44 @@ class ScriptSettings():
             self.curve_style.append(styles[(self.curve_style_start +
                     self.curve_style_step * x) % len(styles)])
 
-        # The curve colors must pull data from curve_colors.dat. Also,
-        #   The data file contains additional #hex representations of the
-        #   colors that we will ignore. We just want the fun color name.
-        #   Fortunately, after the color name, there is always a tab
-        #   character so we just take the slice of the line string from
-        #   the first character to (but not including) the first tab.
+        # The curve colors must pull data from curve_colors.dat. That
+        #   file is tab-separated (the one place a tab is genuinely
+        #   needed) because the color names contain spaces, e.g. "blue
+        #   with a hint of purple"; each line reads "<name>\t<#hex>\t".
+        #   For matplotlib we want the descriptive xkcd color name; for
+        #   plotly we want the #hex code, which a web browser renders
+        #   directly. We therefore select the appropriate field up front.
         with open(f"{IMAGO_DATA}/curve_colors.dat", "r") as dat:
-            colors = dat.read().splitlines()
-        colors = [x[:x.find('\t')] for x in colors]
+            color_lines = dat.read().splitlines()
+        if (self.display == "plotly"):
+            # The #hex code is the second tab-delimited field.
+            colors = [line.split('\t')[1] for line in color_lines]
+        else:
+            # The color name is the text up to the first tab; matplotlib
+            #   recognizes it once prefixed with the "xkcd:" namespace.
+            colors = ['xkcd:' + line[:line.find('\t')]
+                    for line in color_lines]
 
         # Append colors from curve_colors.dat starting at the requested
         #   index and stepping by the given step while remaining within
         #   the array that contains all colors from curve_colors.dat.
         for x in range(self.curve_color_size):
-            self.curve_color.append('xkcd:' + colors[
+            self.curve_color.append(colors[
                     (self.curve_color_start + self.curve_color_step * x)
                     % len(colors)])
 
-        # The curve marks must pull data from curve_marks.dat.
+        # The curve marks must pull data from curve_marks.dat. Each line
+        #   has two whitespace-separated columns: a matplotlib marker
+        #   token (column one) and its plotly marker-symbol equivalent
+        #   (column two). Pick the column for the active backend. The
+        #   plotly sentinel "none" denotes a curve drawn as a line with
+        #   no point markers, and the plotly emitter handles that case.
         with open(f"{IMAGO_DATA}/curve_marks.dat", "r") as dat:
-            marks = dat.read().splitlines()
+            mark_lines = dat.read().splitlines()
+        if (self.display == "plotly"):
+            marks = [line.split()[1] for line in mark_lines]
+        else:
+            marks = [line.split()[0] for line in mark_lines]
 
         # Append marks from curve_marks.dat starting at the requested
         #   index and stepping by the given step while remaining within
@@ -773,6 +805,41 @@ curves = []
 """
                 )
 
+
+
+def print_plotly_header(settings):
+    """Write the opening of the generated plotly script.
+
+    This is the plotly analog of print_mpl_header. It emits the
+    shebang, the library imports, the data read, and the empty list
+    that will collect one plotly figure per output page.
+
+    Where the matplotlib backend imports pyplot, the plotly backend
+    imports graph_objects -- whose Scatter object represents one
+    curve (one trace) -- and make_subplots, which builds the stacked
+    grid of subplots that becomes a single page. The data read is
+    deliberately identical in spirit to the matplotlib version so
+    that both backends ingest the input file in exactly the same way.
+    The symmetric band structure (sybd) figure type is not handled
+    here; the caller refuses that combination before we are reached."""
+
+    with open(settings.outfile, "w") as s:
+        s.write("""#!/usr/bin/env python3
+
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+
+data = pd.read_csv(""" + f"'{settings.infile}'" + """, sep='\\\\s+')
+
+# List holding one plotly figure -- one scrollable page -- per page.
+#   Each figure is a make_subplots grid into whose rows the curves
+#   (traces) are added. After all pages are built they are rendered
+#   to <div> fragments and concatenated into one scrolling document.
+figs = []
+"""
+                )
 
 
 def adjust_for_fig_type(settings):
@@ -1159,6 +1226,331 @@ def print_figs_subplots_curves(settings, x_col_headers, y_col_headers):
         subprocess.run([f"./{settings.outfile}"])
 
     
+def apply_plotly_x_limits(settings, s, wrap_subplot, curve, curr_subplot):
+    """Compute and apply the x-axis range for one plotly subplot row.
+
+    This mirrors apply_x_limits for the matplotlib backend. It works
+    out the lower and upper x bounds for the data columns that belong
+    to the current subplot, rounding outward to a tidy multiple unless
+    the user fixed the bounds explicitly. Then -- in place of
+    matplotlib's plt.xlim -- it sets that range on the matching row of
+    the current plotly figure with update_xaxes. When the x axes are
+    linked, the range is left to plotly's shared-axis autoscaling and
+    nothing is written here, exactly as the matplotlib path leaves the
+    limits alone for linked axes."""
+
+    if (settings.linked_x_axes == False):
+        if (settings.x_min_exists == False or
+                settings.x_max_exists == False):
+            # Gather the data columns feeding this subplot so their
+            #   spread can set the axis range. In single-x mode every
+            #   curve shares the one chosen x column (x_col-1 as a
+            #   0-based index); in multi-x mode each y column pairs with
+            #   the data column immediately to its left (y_col-2).
+            if (settings.multi_x_cols == 1):
+                curr_cols = [settings.x_col - 1]
+            else:
+                curr_cols = []
+                for idx in range(
+                        settings.curves_per_subplot[wrap_subplot]):
+                    curr_cols.append(settings.y_col[curve+idx] - 2)
+            s.write(f"data_temp = data.iloc[:, {curr_cols}]\n")
+
+        # When no explicit minimum was given, take the data minimum and
+        #   round it down to the next lower x_multiple so the axis ends
+        #   on a tidy value. The type guard collapses a pandas Series
+        #   (several columns) down to a single scalar bound.
+        if (settings.x_min_exists == False):
+            s.write("x_min = data_temp.min()\n")
+            s.write("if (type(x_min) is not float and "
+                    "type(x_min) is not int):\n")
+            s.write("    x_min = x_min.min()\n")
+            s.write("if (x_min != 0):\n")
+            s.write(f"    x_min = (int(x_min/{settings.x_multiple}) - 1)"
+                    f" * {settings.x_multiple}\n")
+        else:
+            s.write(f"x_min = {settings.x_min}\n")
+
+        if (settings.x_max_exists == False):
+            s.write("x_max = data_temp.max()\n")
+            s.write("if (type(x_max) is not float and "
+                    "type(x_max) is not int):\n")
+            s.write("    x_max = x_max.max()\n")
+            s.write("if (x_max != 0):\n")
+            s.write(f"    x_max = (int(x_max/{settings.x_multiple}) + 1)"
+                    f" * {settings.x_multiple}\n")
+        else:
+            s.write(f"x_max = {settings.x_max}\n")
+
+        # Set the computed or assigned range on this figure's row.
+        s.write("figs[-1].update_xaxes(range=[x_min, x_max], "
+                f"row={curr_subplot}, col=1)\n")
+
+
+def apply_plotly_y_limits(settings, s, wrap_subplot, curve, curr_subplot):
+    """Compute and apply the y-axis range for one plotly subplot row.
+
+    This is the y-axis twin of apply_plotly_x_limits, mirroring
+    apply_y_limits for the matplotlib backend. It spans every y column
+    that will be drawn in this subplot (from the current curve through
+    the last curve the subplot holds), rounds the bounds out to a tidy
+    y_multiple unless fixed by the user, and applies the range to the
+    matching figure row with update_yaxes. Linked y axes are left to
+    plotly's shared-axis autoscaling."""
+
+    if (settings.linked_y_axes == False):
+        if (settings.y_min_exists == False or
+                settings.y_max_exists == False):
+            # Build the list of y columns included in this subplot,
+            #   from the current curve to the last one the subplot
+            #   holds, so the combined spread sets the axis range.
+            curr_cols = []
+            for idx in range(settings.curves_per_subplot[wrap_subplot]):
+                curr_cols.append(settings.y_col[curve+idx] - 1)
+            s.write(f"data_temp = data.iloc[:, {curr_cols}]\n")
+
+        if (settings.y_min_exists == False):
+            s.write("y_min = data_temp.min()\n")
+            s.write("if (type(y_min) is not float and "
+                    "type(y_min) is not int):\n")
+            s.write("    y_min = y_min.min()\n")
+            s.write("if (y_min != 0):\n")
+            s.write(f"    y_min = (int(y_min/{settings.y_multiple}) - 1)"
+                    f" * {settings.y_multiple}\n")
+        else:
+            s.write(f"y_min = {settings.y_min}\n")
+
+        if (settings.y_max_exists == False):
+            s.write("y_max = data_temp.max()\n")
+            s.write("if (type(y_max) is not float and "
+                    "type(y_max) is not int):\n")
+            s.write("    y_max = y_max.max()\n")
+            s.write("if (y_max != 0):\n")
+            s.write(f"    y_max = (int(y_max/{settings.y_multiple}) + 1)"
+                    f" * {settings.y_multiple}\n")
+        else:
+            s.write(f"y_max = {settings.y_max}\n")
+
+        s.write("figs[-1].update_yaxes(range=[y_min, y_max], "
+                f"row={curr_subplot}, col=1)\n")
+
+
+def print_plotly_figs_subplots_curves(settings, x_col_headers,
+                                      y_col_headers):
+    """Emit the body of the generated plotly script: the figures,
+    their subplots, and their curves.
+
+    This is the plotly twin of print_figs_subplots_curves. The
+    bookkeeping that decides when a new figure, subplot, or curve
+    begins is identical to the matplotlib version -- the same wrapping
+    walk over curves_per_subplot and subplots_per_fig -- because that
+    logic is about organizing the data, not about any one plotting
+    library. Only the strings written out differ:
+
+      * a new page becomes a make_subplots grid appended to figs,
+      * a new subplot selects the grid row that traces will land in,
+      * a new curve becomes a go.Scatter trace added to that row.
+
+    The hover label that motivated this whole backend comes for free:
+    each trace carries a hovertemplate headed by its legend name, so
+    resting the pointer on a curve names it even where many curves
+    overlap and share a color. After the walk, every figure is
+    rendered to a <div> and the divs are joined into one scrolling
+    HTML document (the option-(b) layout the user chose)."""
+
+    # The same tracking variables as the matplotlib emitter. See
+    #   print_figs_subplots_curves for the full prose description of
+    #   each one; the meaning is unchanged here.
+    make_new_fig = False
+    make_new_subplot = False
+    curr_subplot_curve = 1
+    curr_subplot = 1
+    wrap_subplot = 0
+    wrap_fig = 0
+
+    # Running totals of the figures, subplots, and curves produced.
+    num_total_figs = 0
+    num_total_subplots = 0
+    num_total_curves = 0
+
+    # Shorthand for the curve count and the points at which the wrap
+    #   indices reset back to the start of their lists.
+    num_curves = len(settings.y_col)
+    num_subplots_reset = len(settings.curves_per_subplot)
+    num_figs_reset = len(settings.subplots_per_fig)
+
+    # The overall figure-set title, reused as each page's title and as
+    #   the HTML document title.
+    title = settings.title
+
+    # Reopen the script file in append mode (the header was already
+    #   written), and keep a handle for the per-curve emission below.
+    s = open(settings.outfile, "a")
+
+    # Walk every requested curve, opening new subplots and pages as the
+    #   wrapping limits dictate, exactly like the matplotlib emitter.
+    for curve in range(num_curves):
+
+        # Handle the very first figure, subplot, and curve specially.
+        if (curve == 0):
+            make_new_fig = True
+            make_new_subplot = True
+            curr_subplot_curve = 1
+            curr_subplot = 1
+            wrap_subplot = 0
+            wrap_fig = 0
+        else:
+            # Assume no new figure or subplot until proven otherwise.
+            make_new_fig = False
+            make_new_subplot = False
+
+            # If this subplot already holds all the curves it should,
+            #   move on to a new subplot.
+            if (curr_subplot_curve ==
+                    settings.curves_per_subplot[wrap_subplot]):
+
+                make_new_subplot = True
+                curr_subplot_curve = 1
+                curr_subplot += 1
+                wrap_subplot += 1
+
+                # Wrap the per-subplot curve-count index when it runs
+                #   off the end of curves_per_subplot.
+                if (wrap_subplot == num_subplots_reset):
+                    wrap_subplot = 0
+
+                # If this figure already holds all its subplots, start
+                #   a new figure (page).
+                if (curr_subplot > settings.subplots_per_fig[wrap_fig]):
+                    make_new_fig = True
+                    curr_subplot = 1
+                    wrap_fig += 1
+                    if (wrap_fig == num_figs_reset):
+                        wrap_fig = 0
+            else:
+                # Otherwise just count one more curve in this subplot.
+                curr_subplot_curve += 1
+
+        if (make_new_subplot == True):
+
+            # Count this subplot toward the running total.
+            num_total_subplots += 1
+
+            # If a new page is needed, create the make_subplots grid
+            #   that will hold this figure's subplots as stacked rows.
+            if (make_new_fig == True):
+
+                num_total_figs += 1
+
+                # Number of subplot rows this page will hold.
+                num_rows = settings.subplots_per_fig[wrap_fig]
+
+                # Rows share one x (or y) axis when the user asked for
+                #   linked axes; that is plotly's native equivalent of
+                #   the matplotlib linked-axis behavior. A small gap is
+                #   placed between rows, kept safely below plotly's
+                #   maximum spacing of 1/(rows-1) for multi-row pages.
+                if (num_rows > 1):
+                    row_gap = min(0.06, 0.8 / (num_rows - 1))
+                    s.write("figs.append(make_subplots("
+                            f"rows={num_rows}, cols=1, "
+                            f"shared_xaxes={settings.linked_x_axes}, "
+                            f"shared_yaxes={settings.linked_y_axes}, "
+                            f"vertical_spacing={row_gap:.4f}))\n")
+                else:
+                    s.write("figs.append(make_subplots("
+                            f"rows={num_rows}, cols=1, "
+                            f"shared_xaxes={settings.linked_x_axes}, "
+                            f"shared_yaxes={settings.linked_y_axes}))\n")
+
+                # Give the new page its title, legend visibility, and a
+                #   height that grows with the number of stacked rows so
+                #   each subplot keeps a comfortable size when scrolled.
+                page_height = num_rows * 350 + 100
+                s.write(f"figs[-1].update_layout(title={title!r}, "
+                        f"showlegend={settings.print_legend}, "
+                        f"height={page_height}, hovermode='closest')\n")
+
+            # Apply the axis ranges to the row this subplot occupies.
+            apply_plotly_x_limits(settings, s, wrap_subplot, curve,
+                    curr_subplot)
+            apply_plotly_y_limits(settings, s, wrap_subplot, curve,
+                    curr_subplot)
+
+        # Add this curve as a trace on the current row. Pre-compute the
+        #   indices into the color, marker, style, and width lists, the
+        #   same cycling lookup the matplotlib emitter uses.
+        color_index = (curr_subplot_curve - 1) % len(settings.curve_color)
+        mark_index = (curr_subplot_curve - 1) % len(settings.curve_mark)
+        style_index = (curr_subplot_curve - 1) % len(settings.curve_style)
+        width_index = (curr_subplot_curve - 1) % len(settings.curve_width)
+
+        curve_color = settings.curve_color[color_index]
+        curve_dash = settings.curve_style[style_index]
+        curve_width = settings.curve_width[width_index]
+        curve_mark = settings.curve_mark[mark_index]
+        x_header = x_col_headers[curve]
+        y_header = y_col_headers[curve]
+
+        # A "none" marker means draw the curve as a pure line; any other
+        #   marker draws both the connecting line and the point symbol.
+        if (curve_mark == "none"):
+            draw_mode = "lines"
+            marker_arg = ""
+        else:
+            draw_mode = "lines+markers"
+            marker_arg = (f"marker=dict(symbol='{curve_mark}', size=5, "
+                          f"color='{curve_color}'), ")
+
+        # Write the trace. The hovertemplate is headed by the curve's
+        #   legend name so overlapping, same-color curves stay tellable
+        #   apart on hover; the trailing <extra></extra> suppresses
+        #   plotly's default secondary box that would repeat the name.
+        s.write("figs[-1].add_trace(go.Scatter("
+                f"x=data['{x_header}'], y=data['{y_header}'], "
+                f"name='{y_header}', mode='{draw_mode}', "
+                f"line=dict(color='{curve_color}', dash='{curve_dash}', "
+                f"width={curve_width}), "
+                + marker_arg
+                + f"hovertemplate='<b>{y_header}</b><br>"
+                f"{x_header}=%{{x:.4g}}<br>{y_header}=%{{y:.4g}}"
+                f"<extra></extra>'), "
+                f"row={curr_subplot}, col=1)\n")
+
+        num_total_curves += 1
+
+    # Render every page to a <div> fragment and concatenate the
+    #   fragments into one scrolling HTML document. The plotly
+    #   JavaScript library is inlined exactly once -- in the first
+    #   fragment -- so the file renders offline (no internet needed at
+    #   view time) without giving every figure its own copy of the
+    #   library. The browser stacks the divs vertically, producing the
+    #   single scrolling page the user asked for.
+    html_name = os.path.splitext(
+            os.path.basename(settings.infile))[0] + ".html"
+    s.write("\nfragments = []\n")
+    s.write("for page_index, page_figure in enumerate(figs):\n")
+    s.write("    fragments.append(page_figure.to_html("
+            "full_html=False, include_plotlyjs=(page_index == 0)))\n")
+    s.write("document = ('<!DOCTYPE html>\\n<html>\\n<head>\\n'\n")
+    s.write("            '<meta charset=\"utf-8\">\\n'\n")
+    s.write(f"            '<title>{title}</title>\\n'\n")
+    s.write("            '</head>\\n<body>\\n'\n")
+    s.write("            + '\\n<hr>\\n'.join(fragments)\n")
+    s.write("            + '\\n</body>\\n</html>\\n')\n")
+    s.write(f"with open('{html_name}', 'w') as html_file:\n")
+    s.write("    html_file.write(document)\n")
+    s.write(f"print('Wrote scrolling plotly document: {html_name}')\n")
+
+    # Close the script file.
+    s.close()
+
+    # Make the generated script executable (rwx for user, rx for group,
+    #   matching the matplotlib backend) and run it to produce the HTML.
+    os.chmod(settings.outfile, 0o750)
+    subprocess.run([f"./{settings.outfile}"])
+
+
 def record_command():
     """Append the issued command line to a file named "command" in
     the current directory, so the exact invocation can be recovered
@@ -1194,18 +1586,32 @@ def main():
     #   to the figure.
     adjust_for_fig_type(settings)
 
-    # If the user wants a veusz visual then make the header for it.
-    #   Otherwise, make a matplotlib based header.
+    # Build the chosen backend's script: write its header, then emit
+    #   the figures, subplots, and curves. Each backend owns the whole
+    #   body emission because the libraries express figures and curves
+    #   very differently, even though the figure/subplot/curve walk is
+    #   conceptually the same across all of them.
     if (settings.display == "mpl"):
         print_mpl_header(settings)
+        print_figs_subplots_curves(settings, x_col_headers,
+                y_col_headers)
+    elif (settings.display == "plotly"):
+        # The symmetric band structure decorations (vertical k-point
+        #   lines and relabeled axis) are matplotlib-specific and have
+        #   no plotly emitter yet, so refuse that one combination
+        #   clearly rather than producing a broken page.
+        if (settings.fig_type == "sybd"):
+            print("The plotly backend does not yet support the sybd "
+                    "figure type. Use -d mpl for sybd plots.")
+            exit()
+        print_plotly_header(settings)
+        print_plotly_figs_subplots_curves(settings, x_col_headers,
+                y_col_headers)
     elif (settings.display == "veusz"):
         print_veusz_header(settings)
     else:
         print ("Unknown display style. Should not get here.")
         exit()
-
-    # Compute the number of lines and plots to make.
-    print_figs_subplots_curves(settings, x_col_headers, y_col_headers)
 
 
 if __name__ == '__main__':
