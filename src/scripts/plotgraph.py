@@ -45,9 +45,6 @@ class ScriptSettings():
         #   file.
         self.process_settings()
 
-        # Record the command line parameters.
-        self.recordCLP()
-
 
     def assign_rc_defaults(self, default_rc):
 
@@ -119,10 +116,7 @@ class ScriptSettings():
         parser = ap.ArgumentParser(description='Control parameters')
     
         # Add arguments to the parser.
-        self.add_parser_arguments(parser)
-
-        # Parse the arguments.
-        args = parser.parse_args()
+        args = self.add_parser_arguments(parser)
 
         # Return the result.
         return args
@@ -228,8 +222,10 @@ class ScriptSettings():
 
         # Select the x_column.
         parser.add_argument('-xc', '--xcol', dest='x_col', type=int,
-                            default=self.x_col, help='X column. Default: ' +
-                            f'{self.x_col}.')
+                            default=self.x_col, help='X column (1-based) ' +
+                            'shared by every curve. Used only in single-x ' +
+                            'mode; ignored when multi-x columns (-mx) is ' +
+                            f'on. Default: {self.x_col}.')
 
         # Select the y_column(s).
         parser.add_argument('-yc', '--ycol', dest='y_col', type=ascii,
@@ -585,6 +581,23 @@ class ScriptSettings():
         if (self.y_max != m.inf):
             self.y_max_exists = True
 
+        # The -xc (single shared x column) and -mx (a separate x column to
+        #   the left of every y column) options describe contradictory
+        #   layouts, so the two must never be combined. The -xc value
+        #   always carries its default of column one even when the user
+        #   never typed it, so a simple value test cannot tell "explicitly
+        #   chosen" from "left at default." We therefore look directly at
+        #   the command line: if the user actually passed -xc (or its long
+        #   form --xcol) while multi-x mode is active, then refuse to run
+        #   and explain the conflict rather than silently ignoring -xc.
+        x_col_given = any(token == "-xc" or token == "--xcol" or
+                token.startswith("--xcol=") for token in sys.argv)
+        if (self.multi_x_cols == True and x_col_given):
+            sys.exit("Error: -xc/--xcol (a single shared x column) cannot "
+                    "be combined with -mx/--multix (a separate x column "
+                    "per y column). These describe contradictory input "
+                    "layouts. Please choose only one.")
+
         # Internally, it is easier for multi_x_cols to be an integer 1 for
         #   False, and integer 2 for True.
         if (self.multi_x_cols == False):
@@ -597,17 +610,6 @@ class ScriptSettings():
         #   script.
         if (self.outfile == "Xscript.py"):
             self.outfile = self.outfile.replace("X", self.display, 1)
-
-
-    def recordCLP(self):
-        with open("command", "a") as cmd:
-            now = datetime.now()
-            formatted_dt = now.strftime("%b. %d, %Y: %H:%M:%S")
-            cmd.write(f"Date: {formatted_dt}\n")
-            cmd.write(f"Cmnd:")
-            for argument in sys.argv:
-                cmd.write(f" {argument}")
-            cmd.write("\n\n")
 
 
 # Convert a string of space separated integers mixed with #..# style
@@ -679,8 +681,13 @@ def read_data_headers(settings):
             # Get all even numbered columns from two onward.
             settings.y_col = [x for x in range(2, len(all_headers)+1, 2)]
         else:
-            # Get all columns from two onward.
-            settings.y_col = [x for x in range(2, len(all_headers)+1)]
+            # Single x column: plot every column except the x column
+            #   itself. The x column defaults to column one, so this
+            #   reduces to "all columns from two onward"; but if the user
+            #   selected a different x_col with -xc, then that column is
+            #   the one excluded from the set of plotted y columns instead.
+            settings.y_col = [x for x in range(1, len(all_headers)+1)
+                    if x != settings.x_col]
     else:
         settings.y_col = string_2_list(settings.y_col)
 
@@ -691,13 +698,17 @@ def read_data_headers(settings):
     #   need to subtract one for the python array index below.
     y_col_headers = [all_headers[col-1] for col in settings.y_col]
 
-    # For each y_col, extract the associated x_col header. Note, for the
-    #   same reason as described above, we will subtract 2 when getting
-    #   the x_col values.
+    # For each y_col, extract the associated x_col header. In multi-x
+    #   mode every y column is paired with the data column immediately to
+    #   its left, so we subtract 2 (1-based y number to 0-based x index).
+    #   In single-x mode every curve shares the one x column chosen by
+    #   the user via -xc (column one by default); x_col is 1-based, so we
+    #   subtract 1 to get its 0-based index.
     if (settings.multi_x_cols == 2):  # True
         x_col_headers = [all_headers[col-2] for col in settings.y_col]
     else:
-        x_col_headers = [all_headers[0] for col in settings.y_col]
+        x_col_headers = [all_headers[settings.x_col-1]
+                for col in settings.y_col]
 
 
     return (x_col_headers, y_col_headers)
@@ -715,6 +726,13 @@ def print_mpl_header(settings):
 
 import matplotlib.pyplot as plt
 import pandas as pd
+
+# mplcursors layers interactive hover labels onto the otherwise
+#   static matplotlib figure: when the pointer rests on a curve, a
+#   small annotation pops up showing that curve's legend name. This
+#   is meant to disambiguate heavily overlapping lines, where color
+#   alone is not enough to tell which curve is which.
+import mplcursors
 """
         )
 
@@ -789,9 +807,16 @@ def compute_fig_size(settings):
         print(f"Unknown page_orientation: {page_orientation}.")
         quit()
 
-    # Compute the figure size from the page size and figure use %.
-    return [page_size[0] * fig_height / 100.0,
-            page_size[1] * fig_width / 100.0]
+    # Compute the figure size from the page size and the requested
+    #   figure-use percentages. The page_size list is ordered as
+    #   [width, height] (orientation handling above preserves that
+    #   order), and matplotlib's figsize is likewise (width, height).
+    #   So the width entry must be scaled by the width percentage and
+    #   the height entry by the height percentage; pairing each
+    #   dimension with its own percentage is what keeps a request like
+    #   "tall and narrow" from coming out short and wide.
+    return [page_size[0] * fig_width / 100.0,
+            page_size[1] * fig_height / 100.0]
 
 
 def draw_sybd_verticals(s):
@@ -812,14 +837,21 @@ def apply_x_limits(settings, s, wrap_subplot, curve):
         if (settings.x_min_exists == False or settings.x_max_exists == False):
             # See below for the y_min, y_max description. This one is almost
             #   the same except that we need to account for the multi_x_cols
-            #   flag. For only one x_col, we always use the first column. For
-            #   multiple x columns, we need to build a list of them.
+            #   flag. For only one x_col, every curve shares the single x
+            #   column the user selected with -xc (column one by default,
+            #   so x_col-1 is its 0-based index). For multiple x columns,
+            #   we need to build a list of them.
             if (settings.multi_x_cols == 1):
-                curr_cols = [0]
+                curr_cols = [settings.x_col - 1]
             else:
                 curr_cols = []
                 for idx in range(settings.curves_per_subplot[wrap_subplot]):
-                    curr_cols.append(settings.x_col[curve+idx]-1)
+                    # In multi-x mode each y column is paired with the data
+                    #   column immediately to its left.  y_col holds 1-based
+                    #   column numbers, so the paired x column is y_col-1
+                    #   (1-based), i.e. y_col-2 as a 0-based iloc index --
+                    #   the same mapping read_data_headers uses for headers.
+                    curr_cols.append(settings.y_col[curve+idx] - 2)
             s.write(f"data_temp = data.iloc[:, {curr_cols}]\n")
 
 
@@ -1053,13 +1085,13 @@ def print_figs_subplots_curves(settings, x_col_headers, y_col_headers):
                 #   index #1 position of the subplot as the next subplot
                 #   that will be filled with a "plot" method in pyplot.
                 s.write(f"subplots.append(plt.subplot(" +
-                        f"{settings.subplots_per_fig[wrap_subplot]}," +
+                        f"{settings.subplots_per_fig[wrap_fig]}," +
                         " 1, 1))\n")
 
             else:
                 # Select the next subplot index of the subplot.
                 s.write(f"subplots.append(plt.subplot(" +
-                        f"{settings.subplots_per_fig[wrap_subplot]}, 1, " +
+                        f"{settings.subplots_per_fig[wrap_fig]}, 1, " +
                         f"{curr_subplot}), )\n")
 
             # Now that we have created the subplot, we can apply the limits
@@ -1094,6 +1126,24 @@ def print_figs_subplots_curves(settings, x_col_headers, y_col_headers):
     if (settings.print_legend == True):
         s.write(f"plt.legend()\n")
 
+    # Wire up interactive hover labels. Each plt.plot() call returns a
+    #   list of Line2D artists, so the curves list collected above is a
+    #   list of lists; flatten it into one list of line artists that
+    #   mplcursors can watch. With hover=True the annotation appears
+    #   whenever the pointer is over a curve and disappears when it
+    #   leaves. The "add" callback then rewrites the annotation text to
+    #   be the curve's label (its legend name), so the reader sees
+    #   exactly which curve is under the cursor even where many lines
+    #   overlap.
+    s.write("hover_lines = [line for curve_lines in curves "
+            "for line in curve_lines]\n")
+    s.write("hover_cursor = mplcursors.cursor(hover_lines, "
+            "hover=True)\n")
+    s.write("@hover_cursor.connect('add')\n")
+    s.write("def show_hovered_curve_label(selection):\n")
+    s.write("    selection.annotation.set_text("
+            "selection.artist.get_label())\n")
+
     # Show the plot(s)
     s.write("plt.show()\n")
 
@@ -1109,10 +1159,30 @@ def print_figs_subplots_curves(settings, x_col_headers, y_col_headers):
         subprocess.run([f"./{settings.outfile}"])
 
     
-def main():
+def record_command():
+    """Append the issued command line to a file named "command" in
+    the current directory, so the exact invocation can be recovered
+    later.  This is a standing project convention: each run appends
+    a dated block, so the file builds up a history of how the script
+    was called.
 
-    # Define and initialize all the global variables.
-    num_lines = 0
+    This lives at module scope and is called only from the real
+    "__main__" entry point (not from inside main()).  That way it
+    logs the genuine sys.argv of a user invocation and does not fire
+    when the test suite drives main() directly, which would otherwise
+    scatter stray "command" files through the test environment."""
+
+    with open("command", "a") as cmd:
+        now = datetime.now()
+        formatted_dt = now.strftime("%b. %d, %Y: %H:%M:%S")
+        cmd.write(f"Date: {formatted_dt}\n")
+        cmd.write("Cmnd:")
+        for argument in sys.argv:
+            cmd.write(f" {argument}")
+        cmd.write("\n\n")
+
+
+def main():
 
     # Set default values from the user resource control file.
     settings = ScriptSettings()
@@ -1142,6 +1212,11 @@ if __name__ == '__main__':
     # Everything before this point was a subroutine definition or a request
     #   to import information from external modules. Only now do we actually
     #   start running the program.
+
+    # Log the exact command line used for this run, then run the program.
+    #   Recording here (rather than inside main()) keeps the convention's
+    #   stray-file guard intact for any test that calls main() directly.
+    record_command()
     main()
 
     #from cProfile import Profile

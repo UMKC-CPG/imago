@@ -15,8 +15,8 @@ def parameters_and_defaults():
             "print_legend" : False,  # -pl
             "page_orientation" : "portrait",  # -po "portrait"; "landscape"
             "fig_format" : "letter",  # -ff "letter"; "A4"
-            "fig_height" : 80,  # -fh
-            "fig_width" : 40,  # -fw
+            "fig_height" : 40,  # -fh
+            "fig_width" : 80,  # -fw
             "fig_type" : "general",  # -ft general; dos, optc, sybd, loci, ...
             "link_subplots" : True,  # -l
             "multi_x_cols" : False,  # -mx
