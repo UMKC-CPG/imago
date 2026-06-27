@@ -148,7 +148,7 @@ class ReferenceSolid:
     predictor sub-model (DESIGN 7.6) and are recorded on every
     produced entry's context.  All four are *required* in the
     manifest (rule 2): nothing the producer emits depends on an
-    implicit default (VISION Principle 5).
+    implicit default (VISION Principles 5 and 11).
 
     ``source_description`` is an optional one-line, structure-level
     description of the solid (the hint cod_fish reads from the CIF).
@@ -344,7 +344,7 @@ def load_manifest_v2(path: str,
     # a [characterization] block with at least one fingerprint, so
     # the build cannot silently produce a database with no preferred
     # descriptors for the consumer to match against (DESIGN 5.7,
-    # VISION Principle 5).  The relaxed --materialize-only reader
+    # VISION Principles 5 and 11).  The relaxed --materialize-only reader
     # (load_structure_sources) does not apply this -- it only
     # materializes structures and never harvests.
     _require(len(characterization) > 0, path,
@@ -368,7 +368,7 @@ def load_manifest_v2(path: str,
         # system_type are required alongside the run settings:
         # they select the guidance sub-model and land on every
         # produced entry, so nothing emitted rides on an implicit
-        # default (VISION Principle 5).
+        # default (VISION Principles 5 and 11).
         for field_name in ("reference_id", "system_type", "basis",
                            "functional", "kpoint_integration",
                            "kpoint_spec", "scf_threshold"):

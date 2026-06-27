@@ -4108,9 +4108,9 @@ function load_manifest_v2(path):
     # [characterization] block with at least one fingerprint, so
     # the build cannot silently produce a database with no
     # preferred descriptors for the consumer to match against
-    # (VISION Principle 5).  The relaxed load_structure_sources
-    # reader does NOT apply this -- it only materializes
-    # structures and never harvests.
+    # (VISION Principles 5 and 11).  The relaxed
+    # load_structure_sources reader does NOT apply this -- it
+    # only materializes structures and never harvests.
     require(len(char_methods) > 0, path,
         "manifest rule 2: a [characterization] block"
         + " declaring at least one fingerprint is required")
@@ -4127,8 +4127,8 @@ function load_manifest_v2(path):
         # Rule 2: required per-solid fields.  basis,
         # functional, and kpoint_integration are required
         # so that nothing the producer emits depends on an
-        # implicit default (VISION Principle 5); together
-        # with system_type they select the guidance
+        # implicit default (VISION Principles 5 and 11);
+        # together with system_type they select the guidance
         # predictor's sub-model (DESIGN 7.6).
         for f in ("reference_id", "system_type", "basis",
                   "functional", "kpoint_integration",

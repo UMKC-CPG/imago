@@ -882,10 +882,11 @@ pins structures and prints a complete sketch -- a `schema_version`
 header plus `[[reference_solid]]` stubs whose `reference_id` is
 auto-derived from each CIF's metadata -- so `cod_fish.py pin <ids>
 > sketch.toml` writes it in one step; `expand_manifest.py`
-reads the sketch and fills in the shared method defaults and the
-per-structure harvest curation, then writes the finished
-manifest.  The producer reads only that finished manifest, and
-`cod_fish.py` never writes one.  The manifest schema -- the
+reads the sketch and fills in the database-wide
+`[characterization]` recipe and the shared method defaults, then
+writes the finished manifest (per-structure customizations are
+optional -- added interactively or by hand).  The producer reads
+only that finished manifest, and `cod_fish.py` never writes one.  The manifest schema -- the
 dataclasses, the strict and relaxed readers, and the writer --
 lives in the shared leaf library `curation_manifest.py`, imported
 by both `expand_manifest.py` (to write a manifest) and the
@@ -1550,10 +1551,14 @@ local database and writes no SQL of its own:
   5).  Each stub also carries two discovery hints read from
   the same CIF -- the composition (`elements`) and a
   `source_description` (chemical name + space group + year) --
-  which the authoring tool uses to auto-fill each entry's
-  element and description so the curator invents neither.  They
-  are not manifest-schema fields (the producer ignores them,
-  and the finished manifest omits them).  So `cod_fish.py pin
+  which the authoring tool uses to auto-fill each
+  customization's element and description so the curator
+  invents neither.  The two part ways in the finished
+  manifest: `elements` is a transient, non-schema hint the
+  producer ignores and the finished manifest omits, while
+  `source_description` is *persisted* as a `reference_solid`
+  field (DESIGN 5.7), the structure-level description the
+  harvest qualifies per environment.  So `cod_fish.py pin
   <ids> > sketch.toml` writes a sketch the authoring tool reads
   directly.  This is the bridge from browsing to a reproducible
   pull; indices come from the saved search, so a student never

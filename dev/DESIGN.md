@@ -4235,7 +4235,7 @@ file (5.2):
    they select the predictor sub-model (DESIGN 7.6) and are
    recorded on every produced entry's context, so nothing the
    producer emits depends on an implicit default (VISION
-   Principle 5).  A top-level `[characterization]` block
+   Principles 5 and 11).  A top-level `[characterization]` block
    declaring at least one fingerprint is required (rule 10): it
    sets the database-wide preferred recipe, so a manifest without
    one is refused rather than silently producing a database with

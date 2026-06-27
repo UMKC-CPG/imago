@@ -206,6 +206,26 @@ source_description = "Silicon, I m m a (74), 1993"
 """
 
 
+def test_source_description_persists_through_expand(tmp_path):
+    # The CIF-derived source_description is a persisted reference_solid
+    #   field (DESIGN 5.7): stamp_shared_defaults carries it from the
+    #   sketch onto the finished solid, and it round-trips through the
+    #   strict loader.  (`elements`, by contrast, is a transient hint
+    #   the finished manifest omits.)
+    sources = load_structure_sources(
+        _write_sketch(tmp_path, _HINTED_SKETCH))
+    manifest = build_mechanical(sources, **_SHARED)
+    solid = manifest.reference_solids[0]
+    assert solid.source_description == "Silicon, I m m a (74), 1993"
+
+    from curation_manifest import write_manifest
+    out = tmp_path / "manifest.toml"
+    write_manifest(manifest, str(out))
+    reloaded = load_manifest_v2(str(out))
+    assert reloaded.reference_solids[0].source_description == \
+        "Silicon, I m m a (74), 1993"
+
+
 def test_load_sketch_hints_reads_elements_and_description(tmp_path):
     path = _write_sketch(tmp_path, _HINTED_SKETCH)
     hints = em.load_sketch_hints(path)

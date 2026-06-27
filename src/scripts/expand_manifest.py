@@ -177,8 +177,11 @@ def stamp_shared_defaults(source: ReferenceSolid, *, basis: str,
     placeholder run fields.  ``system_type`` is taken from the sketch
     when it named one, else the supplied default.  The ``kpoint_spec``
     is left empty (no density) so the producer predicts and verifies
-    it.  Entries are carried through unchanged -- the caller fills
-    them (interactively or by hand)."""
+    it.  The ``source_description`` cod_fish read from the CIF is
+    persisted onto the solid (DESIGN 5.7), so the harvest can compose
+    each environment's auto-description from it.  Entries are carried
+    through unchanged -- the caller fills them (interactively or by
+    hand)."""
 
     return ReferenceSolid(
         reference_id=source.reference_id,
@@ -191,6 +194,7 @@ def stamp_shared_defaults(source: ReferenceSolid, *, basis: str,
         cod_id=source.cod_id,
         cod_revision=source.cod_revision,
         structure_path=source.structure_path,
+        source_description=source.source_description,
         entries=list(source.entries))
 
 
