@@ -4235,9 +4235,13 @@ file (5.2):
    they select the predictor sub-model (DESIGN 7.6) and are
    recorded on every produced entry's context, so nothing the
    producer emits depends on an implicit default (VISION
-   Principle 5).  A top-level `[characterization]` block is
-   required (rule 10): it declares the database-wide fingerprint
-   recipe.
+   Principle 5).  A top-level `[characterization]` block
+   declaring at least one fingerprint is required (rule 10): it
+   sets the database-wide preferred recipe, so a manifest without
+   one is refused rather than silently producing a database with
+   no preferred descriptors for the consumer to match against.
+   The relaxed `--materialize-only` reader does not apply this --
+   it only materializes structures and never harvests.
 3. `[[reference_solid.entry]]` blocks are *optional* customizations
    (5.2.2): a reference solid may carry none.  When an entry is
    present, all its fields are optional; `atom_site`, when given,

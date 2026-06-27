@@ -185,8 +185,10 @@ class CurationManifest:
     most one declaration per method, each marked ``preferred`` by
     the reader.  It is the one ``sub_spec`` per family the consumer
     queries (5.6.5 step 2) and the producer harvests for every
-    environment.  An empty list means the manifest declared no
-    recipe (no preferred fingerprints are stamped).
+    environment.  :func:`load_manifest_v2` requires at least one
+    declaration here (manifest rule 2), so a loaded manifest always
+    carries a recipe; the field defaults to an empty list only for
+    a manifest assembled in memory before its recipe is set.
     """
 
     schema_version: int
@@ -247,7 +249,10 @@ def load_manifest_v2(path: str,
        ``kpoint_integration``, ``kpoint_spec``, and
        ``scf_threshold``; ``system_type`` must be one of the four
        guidance system types (``crystalline`` / ``amorphous`` /
-       ``nanostructure`` / ``molecular``).
+       ``nanostructure`` / ``molecular``).  A top-level
+       ``[characterization]`` block declaring at least one
+       fingerprint is also required: it sets the database-wide
+       preferred recipe, so a manifest without one is refused.
     3. ``[[reference_solid.entry]]`` blocks are *optional*
        customizations (DESIGN 5.2.2): a solid may carry none, and
        every customization field (``element``, ``atom_site``,
@@ -334,6 +339,19 @@ def load_manifest_v2(path: str,
         characterization.append(ManifestFingerprint(
             method=method, sub_spec=dict(fp["sub_spec"]),
             preferred=True))
+
+    # ----- Rule 2: the recipe is required.  A manifest must declare
+    # a [characterization] block with at least one fingerprint, so
+    # the build cannot silently produce a database with no preferred
+    # descriptors for the consumer to match against (DESIGN 5.7,
+    # VISION Principle 5).  The relaxed --materialize-only reader
+    # (load_structure_sources) does not apply this -- it only
+    # materializes structures and never harvests.
+    _require(len(characterization) > 0, path,
+             "manifest rule 2: a [characterization] block declaring "
+             "at least one fingerprint is required (it sets the "
+             "database-wide preferred recipe the consumer matches "
+             "against)")
 
     seen_ref_ids: set[str] = set()
     seen_element_label: set[tuple[str, str]] = set()

@@ -8,10 +8,11 @@ sketch ``[[reference_solid]]`` stubs -- each carrying only the
 structure's identity (``reference_id``, ``system_type``) and source
 (``cod_id`` + ``cod_revision``, or ``structure_path``).  The curator
 collects those stubs into a sketch file.  This tool reads that sketch
-and fills in the rest of the manifest the producer needs: the shared
-method defaults (basis, functional, k-point integration, SCF
-threshold) and the per-structure harvest curation (which atom sites
-become database entries, and the fingerprints to compute for each).
+and fills in the rest of the manifest the producer needs: the
+database-wide fingerprint recipe (the ``[characterization]`` block),
+the shared method defaults (basis, functional, k-point integration,
+SCF threshold), and any per-structure customizations (overrides on
+the environments the harvest auto-discovers).
 
 ``cod_fish`` stays a pure discovery tool and never writes a manifest;
 this tool owns the sketch-to-manifest expansion, and the producer only
@@ -21,15 +22,17 @@ one schema definition by importing ``curation_manifest``.
 Two modes:
 
 * Interactive (``-i``) walks each sketched structure and prompts for
-  the shared defaults once and then the per-structure entries and
-  fingerprints, offering a sensible default at every step.  It writes
+  the shared defaults once and then the optional per-structure
+  customizations, offering a sensible default at every step.  The
+  database-wide fingerprint recipe is set automatically, so it writes
   a complete, immediately loadable manifest.  Because the prompts use
   standard output, interactive mode requires an output file (``-o``).
-* Mechanical (the default) stamps the shared defaults onto every
-  sketched structure and emits the result with a commented
-  copy-and-edit template for the per-structure entries, which the
-  curator fills in by hand.  Without ``-o`` it prints to standard
-  output, so the result can be reviewed or redirected.
+* Mechanical (the default) stamps the shared defaults and the
+  database-wide recipe onto every sketched structure and emits the
+  result with a commented copy-and-edit template for the optional
+  per-structure customizations, which the curator fills in by hand.
+  Without ``-o`` it prints to standard output, so the result can be
+  reviewed or redirected.
 
 The k-point density is deliberately left out of every emitted
 ``kpoint_spec``: the producer predicts a starting density and verifies
@@ -54,15 +57,37 @@ from curation_manifest import (
 
 
 # The settled canonical fingerprint sub-specs (the Si seed defaults).
-#   Rule 11 fixes one sub_spec per method across the whole database,
-#   so these are offered as the interactive defaults and shown in the
-#   mechanical-mode template.  The reduce descriptor is a pure-Python
-#   shell code; the bispectrum descriptor needs a per-structure loen
-#   run but discriminates disordered environments far better.
+#   These make up the database-wide preferred recipe -- the
+#   ``[characterization]`` block (DESIGN 5.7) -- one sub_spec per
+#   method, applied to every harvested environment.  The reduce
+#   descriptor is a pure-Python shell code; the bispectrum descriptor
+#   needs a per-structure loen run but discriminates disordered
+#   environments far better.
 DEFAULT_REDUCE_SUB_SPEC = {
     "level": 2, "thick": 0.5, "cutoff": 5.0, "tolerance": 0.05}
 DEFAULT_BISPECTRUM_SUB_SPEC = {
     "twoj1": 8, "twoj2": 8, "cutoff": 9.0}
+
+
+def default_characterization() -> list[ManifestFingerprint]:
+    """The canonical database-wide preferred recipe (DESIGN 5.7): the
+    settled reduce and bispectrum sub-specs, each the family's single
+    preferred record.  Both authoring modes stamp this into the
+    manifest's ``[characterization]`` block so the file loads (the
+    block is required, manifest rule 2) and the consumer has one
+    preferred descriptor per family to match against (5.6.5 step 2).
+    A curator who wants a different recipe edits the emitted block;
+    the recipe is a constant of the whole database, not a per-entry
+    choice, so it is set once here rather than prompted per entry."""
+
+    return [
+        ManifestFingerprint(
+            method="reduce",
+            sub_spec=dict(DEFAULT_REDUCE_SUB_SPEC), preferred=True),
+        ManifestFingerprint(
+            method="bispectrum",
+            sub_spec=dict(DEFAULT_BISPECTRUM_SUB_SPEC),
+            preferred=True)]
 
 # Human-readable vocabularies, used in help text and interactive
 #   menus.  The producer translates these names into each tool's coded
@@ -77,39 +102,42 @@ VALID_SYSTEM_TYPES = (
 
 
 # A commented copy-and-edit template appended to mechanical-mode
-#   output.  The curator pastes one [[reference_solid.entry]] block
-#   (and its fingerprints) under each [[reference_solid]] above and
-#   edits the element, site, and description.  load_manifest_v2
-#   ignores comments, so the mechanical output is already loadable
-#   (with no entries) until these are filled in.
+#   output.  The mechanical output already carries the required
+#   [characterization] recipe and every structure's run settings, so
+#   it is loadable as-is: the harvest auto-discovers one
+#   representative per distinct environment with no entries at all.
+#   Entries are OPTIONAL customizations -- add one only to override
+#   what the harvest would otherwise produce for an environment.
+#   load_manifest_v2 ignores comments, so these stay inert until
+#   uncommented.
 ENTRY_TEMPLATE = """\
 # -----------------------------------------------------------------
-# Per-structure curation -- fill this in.
+# Per-structure customizations -- OPTIONAL.
 #
-# Under each [[reference_solid]] above, add one or more
-#   [[reference_solid.entry]] blocks (before the next
-#   [[reference_solid]]).  Each names an atom site whose converged
-#   potential becomes a database entry.  Exactly one entry per
-#   element across the WHOLE manifest must carry default = true.
-#   Omit label to derive it at harvest from the run's site identity.
-#   Copy, uncomment, and edit:
+# The harvest already discovers and stores one representative per
+#   distinct environment in every structure above, computing the
+#   [characterization] recipe for each.  Add an
+#   [[reference_solid.entry]] block (under its [[reference_solid]],
+#   before the next one) ONLY to override what the harvest would
+#   otherwise produce -- every field is optional:
 #
 # [[reference_solid.entry]]
-# element = "Si"
-# atom_site = 1
-# default = true
-# description = "describe this site"
-# # label = "explicit-label"   # optional override; omit to derive
+# atom_site   = 1               # representative atom of the target
+# element     = "Si"            # cross-checked at harvest
+# default     = true            # this environment is the element
+#                               #   default (at most one per element;
+#                               #   omitted -> the isolated baseline)
+# description = "describe this site"   # else auto-composed
+# label       = "explicit-label"       # else derived at harvest
+#
+# The preferred fingerprint recipe is the database-wide
+#   [characterization] block above, NOT a per-entry choice.  A
+#   per-entry fingerprint is a RARE extra, non-preferred descriptor
+#   harvested for this one environment (no preferred flag):
 #
 # [[reference_solid.entry.fingerprint]]
-# method = "reduce"
-# sub_spec = { level = 2, thick = 0.5, cutoff = 5.0, tolerance = 0.05 }
-# preferred = true
-#
-# [[reference_solid.entry.fingerprint]]
-# method = "bispectrum"
-# sub_spec = { twoj1 = 8, twoj2 = 8, cutoff = 9.0 }
-# preferred = true
+# method   = "bispectrum"
+# sub_spec = { twoj1 = 6, twoj2 = 4 }
 # -----------------------------------------------------------------
 """
 
@@ -170,10 +198,13 @@ def build_mechanical(sources: list[ReferenceSolid], *, basis: str,
                      functional: str, kpoint_integration: str,
                      scf_threshold: float,
                      system_type_default: str) -> CurationManifest:
-    """Stamp the shared defaults onto every sketched structure,
-    leaving the per-structure entries empty for the curator.  The
-    result is a structurally valid (loadable) manifest; it simply
-    harvests nothing until entries are added."""
+    """Stamp the shared defaults and the database-wide
+    ``[characterization]`` recipe onto every sketched structure,
+    leaving the per-structure customizations empty for the curator.
+    The result is a structurally valid (loadable) manifest -- the
+    required recipe block is present (manifest rule 2) -- that simply
+    harvests every environment with the default descriptions until
+    customizations are added."""
 
     solids = [
         stamp_shared_defaults(
@@ -184,6 +215,7 @@ def build_mechanical(sources: list[ReferenceSolid], *, basis: str,
         for source in sources]
     return CurationManifest(
         schema_version=2, manifest_path="(generated)",
+        characterization=default_characterization(),
         reference_solids=solids)
 
 
@@ -216,13 +248,18 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
     rather than calling ``input`` directly keeps this flow testable.
 
     The shared method defaults are confirmed once up front (each
-    pre-filled with the value passed in).  Then, for each structure,
-    the curator sets its system type and adds entries; each entry may
-    carry the canonical reduce and bispectrum fingerprints.  The
-    ``preferred`` flag is managed automatically: the first entry to
-    declare a given ``(element, method)`` is marked preferred, so the
-    manifest satisfies the one-preferred-per-family rule (rule 10)
-    without the curator tracking it."""
+    pre-filled with the value passed in), and the database-wide
+    ``[characterization]`` recipe is stamped automatically (the
+    canonical reduce + bispectrum sub-specs, so the file satisfies
+    manifest rule 2).  Then, for each structure, the curator sets its
+    system type and adds optional customizations (5.2.2): each names
+    an atom site and overrides what the harvest would otherwise
+    produce -- the element, the default flag, the description, or the
+    label.  The fingerprint recipe is NOT a per-entry choice; it
+    lives in ``[characterization]``, so no per-entry fingerprints are
+    authored here.  The rare non-preferred per-entry override is
+    added to the emitted file by hand (the producer harvests it
+    alongside the preferred recipe)."""
 
     print("Shared run settings (press Enter to accept the default):",
           file=sys.stderr)
@@ -241,10 +278,9 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
     #   with blank defaults.
     hints = hints or {}
 
-    # (element, method) pairs already marked preferred, and elements
-    #   that already hold their one default entry -- both tracked
-    #   across the whole manifest so rules 10 and 7 hold by default.
-    preferred_seen: set[tuple[str, str]] = set()
+    # Elements that already hold their one default customization,
+    #   tracked across the whole manifest so rule 7 (at most one
+    #   default per element) holds by default.
     default_elements: set[str] = set()
     solids: list[ReferenceSolid] = []
 
@@ -288,25 +324,14 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
             description = ask("  description", hint_description)
             label = ask("  label (blank to derive at harvest)", "")
 
-            fingerprints: list[ManifestFingerprint] = []
-            if _ask_yes_no(
-                    ask, "  attach canonical reduce + bispectrum "
-                    "fingerprints?", True):
-                for method, sub_spec in (
-                        ("reduce", DEFAULT_REDUCE_SUB_SPEC),
-                        ("bispectrum", DEFAULT_BISPECTRUM_SUB_SPEC)):
-                    key = (element, method)
-                    preferred = key not in preferred_seen
-                    if preferred:
-                        preferred_seen.add(key)
-                    fingerprints.append(ManifestFingerprint(
-                        method=method, sub_spec=dict(sub_spec),
-                        preferred=preferred))
-
+            # No per-entry fingerprints are authored here: the
+            #   preferred recipe is the database-wide
+            #   [characterization] block (set once below), and a
+            #   per-entry override is a rare hand-edit.
             entries.append(ReferenceEntry(
                 element=element, atom_site=atom_site,
                 default=is_default, description=description,
-                label=label or None, fingerprints=fingerprints))
+                label=label or None, fingerprints=[]))
             add_entry = _ask_yes_no(
                 ask, f"add another entry for {source.reference_id}?",
                 False)
@@ -327,6 +352,7 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
 
     return CurationManifest(
         schema_version=2, manifest_path="(generated)",
+        characterization=default_characterization(),
         reference_solids=solids)
 
 

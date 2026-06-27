@@ -4104,6 +4104,17 @@ function load_manifest_v2(path):
             + " (the preferred recipe has one home)")
         char_methods.add(fp["method"])
 
+    # Rule 2: the recipe is required.  A manifest must declare a
+    # [characterization] block with at least one fingerprint, so
+    # the build cannot silently produce a database with no
+    # preferred descriptors for the consumer to match against
+    # (VISION Principle 5).  The relaxed load_structure_sources
+    # reader does NOT apply this -- it only materializes
+    # structures and never harvests.
+    require(len(char_methods) > 0, path,
+        "manifest rule 2: a [characterization] block"
+        + " declaring at least one fingerprint is required")
+
     solids               = raw.get("reference_solid",
                                    [])
     seen_ref_ids         = set()

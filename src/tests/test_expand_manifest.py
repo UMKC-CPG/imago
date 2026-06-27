@@ -101,20 +101,26 @@ def test_mechanical_stamps_defaults_and_loads(tmp_path):
     out = tmp_path / "manifest.toml"
     from curation_manifest import format_manifest
     out.write_text(format_manifest(manifest) + "\n" + em.ENTRY_TEMPLATE)
-    # The stamped-but-entry-less manifest is structurally loadable.
+    # The stamped manifest carries the required [characterization]
+    #   recipe, so it loads with no entries (the harvest fills them).
     loaded = load_manifest_v2(str(out))
     solid = loaded.reference_solids[0]
     assert solid.basis == "fb"
     assert solid.functional == "wigner"
     assert solid.entries == []
+    methods = {fp.method for fp in loaded.characterization}
+    assert methods == {"reduce", "bispectrum"}
+    assert all(fp.preferred for fp in loaded.characterization)
 
 
 def test_mechanical_output_carries_fill_in_template():
     text = em.ENTRY_TEMPLATE
-    assert "Per-structure curation" in text
+    assert "Per-structure customizations" in text
     assert "[[reference_solid.entry]]" in text
-    # The canonical sub-specs are shown so the curator can copy them.
-    assert "level = 2" in text and "twoj1 = 8" in text
+    # The template shows a RARE per-entry override (non-preferred);
+    #   the preferred recipe lives in the [characterization] block.
+    assert "preferred = true" not in text
+    assert "twoj1 = 6, twoj2 = 4" in text
 
 
 # ==============================================================
@@ -125,10 +131,9 @@ def test_interactive_builds_complete_manifest(tmp_path):
     answers = [
         "fb", "wigner", "gaussian", "1e-6",   # shared defaults
         "crystalline",                        # system_type
-        "y",                                  # add an entry?
+        "y",                                  # add a customization?
         "Si", "1", "y", "Si diamond site 1", "",   # entry fields
-        "y",                                  # attach fingerprints?
-        "n",                                  # add another entry?
+        "n",                                  # add another?
     ]
     sources = load_structure_sources(_write_sketch(tmp_path))
     manifest = build_interactive(
@@ -142,39 +147,46 @@ def test_interactive_builds_complete_manifest(tmp_path):
     assert entry.atom_site == 1
     assert entry.default is True
     assert entry.label is None            # blank reply -> derived
-    methods = [fp.method for fp in entry.fingerprints]
-    assert methods == ["reduce", "bispectrum"]
-    assert all(fp.preferred for fp in entry.fingerprints)
+    # No per-entry fingerprints are authored: the preferred recipe
+    #   is the database-wide [characterization] block.
+    assert entry.fingerprints == []
+    methods = {fp.method for fp in manifest.characterization}
+    assert methods == {"reduce", "bispectrum"}
+    assert all(fp.preferred for fp in manifest.characterization)
 
     # And it round-trips through the strict loader.
     from curation_manifest import write_manifest
     out = tmp_path / "manifest.toml"
     write_manifest(manifest, str(out))
-    assert load_manifest_v2(str(out)).reference_solids == \
-        manifest.reference_solids
+    reloaded = load_manifest_v2(str(out))
+    assert reloaded.reference_solids == manifest.reference_solids
+    assert reloaded.characterization == manifest.characterization
 
 
-def test_interactive_marks_preferred_only_once_per_family(tmp_path):
-    # Two Si entries, both fingerprinted: only the FIRST is preferred
-    #   for each (element, method), so rule 10 holds.
+def test_interactive_sets_database_wide_recipe_once(tmp_path):
+    # Two Si customizations: neither carries a per-entry fingerprint,
+    #   and the manifest carries the one database-wide preferred
+    #   recipe, so the strict loader (which enforces rules 2 and 10)
+    #   accepts it.
     answers = [
         "fb", "wigner", "gaussian", "1e-6",
         "crystalline",
-        "y", "Si", "1", "y", "site 1", "", "y",   # entry 1 (default)
-        "y", "Si", "2", "n", "site 2", "", "y",   # entry 2
+        "y", "Si", "1", "y", "site 1", "",   # entry 1 (default)
+        "y", "Si", "2", "n", "site 2", "",   # entry 2
         "n",
     ]
     sources = load_structure_sources(_write_sketch(tmp_path))
     manifest = build_interactive(
         sources, _scripted(answers), **_SHARED)
     first, second = manifest.reference_solids[0].entries
-    assert all(fp.preferred for fp in first.fingerprints)
-    assert not any(fp.preferred for fp in second.fingerprints)
-    # rule 10 (exactly one preferred per family) is satisfied:
+    assert first.fingerprints == []
+    assert second.fingerprints == []
+    assert len(manifest.characterization) == 2
+    # rules 2 and 10 hold, so the strict loader accepts the file.
     from curation_manifest import write_manifest
     out = tmp_path / "manifest.toml"
     write_manifest(manifest, str(out))
-    load_manifest_v2(str(out))   # would raise on a rule-10 violation
+    load_manifest_v2(str(out))   # would raise on a rule violation
 
 
 # ==============================================================
@@ -216,10 +228,9 @@ def test_interactive_accepts_hinted_element_and_description(tmp_path):
     answers = [
         None, None, None, None,   # shared defaults
         None,                     # system_type
-        "y",                      # add an entry?
+        "y",                      # add a customization?
         None, None, "y", None, None,   # element, atom_site, default,
                                        #   description, label (all Enter)
-        "y",                      # attach fingerprints?
         "n",                      # add another?
     ]
     sources = load_structure_sources(_write_sketch(tmp_path))

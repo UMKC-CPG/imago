@@ -70,34 +70,14 @@ pytestmark = pytest.mark.unit
 # ============================================================
 
 # A canonical valid single-solid manifest in the cod_id form.
-_VALID_COD_MANIFEST = """\
-schema_version = 2
-
-[[reference_solid]]
-reference_id = "au_fcc"
-system_type = "crystalline"
-basis = "fb"
-functional = "wigner"
-kpoint_integration = "linear-tetrahedral"
-cod_id = 9008463
-cod_revision = "2023-04-12"
-kpoint_spec = { density = 60.0, shift = [0.0, 0.0, 0.0] }
-scf_threshold = 1.0e-6
-
-  [[reference_solid.entry]]
-  element = "Au"
-  atom_site = 1
-  label = "default_solid"
-  default = true
-  description = "Au in fcc bulk (Fm-3m)."
-"""
-
-
 # The database-wide preferred recipe (DESIGN 5.7): one declaration
-#   per method, each the family's single preferred record.  Appended
-#   to a manifest body to exercise the [characterization] rules.
+#   per method, each the family's single preferred record.  A
+#   [characterization] block is required (rule 2), so this leads
+#   every valid manifest; tests that probe the recipe rules rebuild
+#   it (e.g. via _VALID_COD_MANIFEST.replace) rather than appending a
+#   second block, which TOML would reject as a duplicate table.
 _CHAR_BLOCK = (
-    "\n[characterization]\n"
+    "[characterization]\n"
     "  [[characterization.fingerprint]]\n"
     "  method = \"bispectrum\"\n"
     "  sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
@@ -105,6 +85,31 @@ _CHAR_BLOCK = (
     "  method = \"reduce\"\n"
     "  sub_spec = { level = 2, thick = 0.5, cutoff = 5.0,"
     " tolerance = 0.05 }\n")
+
+
+# A fully valid cod-sourced manifest: the required recipe followed by
+#   one reference solid carrying a single default customization.  The
+#   bulk of the rule tests build on this body, replacing or appending
+#   to exercise one rule at a time.
+_VALID_COD_MANIFEST = (
+    "schema_version = 2\n\n"
+    + _CHAR_BLOCK +
+    "\n[[reference_solid]]\n"
+    "reference_id = \"au_fcc\"\n"
+    "system_type = \"crystalline\"\n"
+    "basis = \"fb\"\n"
+    "functional = \"wigner\"\n"
+    "kpoint_integration = \"linear-tetrahedral\"\n"
+    "cod_id = 9008463\n"
+    "cod_revision = \"2023-04-12\"\n"
+    "kpoint_spec = { density = 60.0, shift = [0.0, 0.0, 0.0] }\n"
+    "scf_threshold = 1.0e-6\n\n"
+    "  [[reference_solid.entry]]\n"
+    "  element = \"Au\"\n"
+    "  atom_site = 1\n"
+    "  label = \"default_solid\"\n"
+    "  default = true\n"
+    "  description = \"Au in fcc bulk (Fm-3m).\"\n")
 
 
 def _write(tmp_path, text, name="manifest.toml") -> str:
@@ -150,13 +155,15 @@ class TestLoadHappyPath:
         assert entry.default is True
         assert entry.fingerprints == []
 
-    def test_empty_manifest_is_valid(self, tmp_path):
-        # A manifest with no reference solids is valid: rules
-        # 2-9 are per-solid/per-entry and vacuously pass, and
-        # rule 7 ranges over the (empty) set of elements seen.
-        path = _write(tmp_path, "schema_version = 2\n")
+    def test_solid_less_manifest_is_valid(self, tmp_path):
+        # A manifest with the required recipe but no reference solids
+        # is valid: the per-solid/per-entry rules (3-9) vacuously
+        # pass, and rule 7 ranges over the (empty) set of elements.
+        # The [characterization] block is still required (rule 2).
+        path = _write(tmp_path, "schema_version = 2\n\n" + _CHAR_BLOCK)
         manifest = load_manifest_v2(path)
         assert manifest.reference_solids == []
+        assert len(manifest.characterization) == 2
 
     def test_structure_path_form_parses(self, tmp_path):
         # structure_path must resolve to a real file under the
@@ -164,7 +171,8 @@ class TestLoadHappyPath:
         _write(tmp_path, "dummy structure bytes\n", name="x.skel")
         text = (
             "schema_version = 2\n\n"
-            "[[reference_solid]]\n"
+            + _CHAR_BLOCK +
+            "\n[[reference_solid]]\n"
             "reference_id = \"x_local\"\n"
             "system_type = \"crystalline\"\n"
             "basis = \"fb\"\n"
@@ -213,19 +221,23 @@ class TestLoadHappyPath:
         # The database-wide [characterization] recipe parses into
         # manifest.characterization, one record per method, each
         # marked preferred by the reader.
-        path = _write(tmp_path, _VALID_COD_MANIFEST + _CHAR_BLOCK)
+        path = _write(tmp_path, _VALID_COD_MANIFEST)
         manifest = load_manifest_v2(path)
         char = manifest.characterization
         assert len(char) == 2
         assert {fp.method for fp in char} == {"bispectrum", "reduce"}
         assert all(fp.preferred for fp in char)
 
-    def test_absent_characterization_is_empty_recipe(self, tmp_path):
-        # A manifest with no [characterization] block loads with an
-        # empty recipe (no preferred fingerprints are stamped).
-        path = _write(tmp_path, _VALID_COD_MANIFEST)
-        manifest = load_manifest_v2(path)
-        assert manifest.characterization == []
+    def test_absent_characterization_raises(self, tmp_path):
+        # A [characterization] block is required (rule 2): a manifest
+        # without one is refused, so the build cannot silently
+        # produce a database with no preferred descriptors.
+        path = _write(
+            tmp_path, _VALID_COD_MANIFEST.replace(_CHAR_BLOCK, ""))
+        with pytest.raises(
+                ValueError,
+                match="manifest rule 2.*characterization"):
+            load_manifest_v2(path)
 
 
 # ============================================================
@@ -397,7 +409,8 @@ class TestRule4StructureSource:
     def test_structure_path_missing_file_raises(self, tmp_path):
         text = (
             "schema_version = 2\n\n"
-            "[[reference_solid]]\n"
+            + _CHAR_BLOCK +
+            "\n[[reference_solid]]\n"
             "reference_id = \"x_local\"\n"
             "system_type = \"crystalline\"\n"
             "basis = \"fb\"\n"
@@ -608,12 +621,10 @@ class TestRule9MethodRegistered:
     def test_unknown_characterization_method_raises(self, tmp_path):
         # Rule 9 covers the [characterization] block too: an unknown
         # preferred method is a hard error when a registry is given.
-        bad_char = (
-            "\n[characterization]\n"
-            "  [[characterization.fingerprint]]\n"
-            "  method = \"nonsense\"\n"
-            "  sub_spec = { twoj1 = 8, twoj2 = 8 }\n")
-        path = _write(tmp_path, _VALID_COD_MANIFEST + bad_char)
+        # Swap the recipe's reduce record for an unknown method.
+        text = _VALID_COD_MANIFEST.replace(
+            'method = "reduce"', 'method = "nonsense"')
+        path = _write(tmp_path, text)
         with pytest.raises(ValueError, match="manifest rule 9"):
             load_manifest_v2(
                 path, known_methods={"bispectrum", "reduce"})
@@ -664,7 +675,7 @@ class TestRule10ManifestPreferred:
     def test_characterization_one_per_method_ok(self, tmp_path):
         # A well-formed recipe (bispectrum + reduce, one each) loads,
         # and each characterization record is marked preferred.
-        path = _write(tmp_path, _VALID_COD_MANIFEST + _CHAR_BLOCK)
+        path = _write(tmp_path, _VALID_COD_MANIFEST)
         manifest = load_manifest_v2(path)
         assert len(manifest.characterization) == 2
         assert all(fp.preferred for fp in manifest.characterization)
@@ -672,16 +683,11 @@ class TestRule10ManifestPreferred:
     def test_method_declared_twice_in_characterization_raises(
             self, tmp_path):
         # The preferred recipe has exactly one home: naming a method
-        # twice in [characterization] is a hard error.
-        dup_char = (
-            "\n[characterization]\n"
-            "  [[characterization.fingerprint]]\n"
-            "  method = \"bispectrum\"\n"
-            "  sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
-            "  [[characterization.fingerprint]]\n"
-            "  method = \"bispectrum\"\n"
-            "  sub_spec = { twoj1 = 6, twoj2 = 4 }\n")
-        path = _write(tmp_path, _VALID_COD_MANIFEST + dup_char)
+        # twice in [characterization] is a hard error.  Renaming the
+        # recipe's reduce record to bispectrum collides the two.
+        text = _VALID_COD_MANIFEST.replace(
+            'method = "reduce"', 'method = "bispectrum"')
+        path = _write(tmp_path, text)
         with pytest.raises(ValueError,
                            match="manifest rule 10.*twice"):
             load_manifest_v2(path)
@@ -714,7 +720,7 @@ class TestRule11ManifestPreferredSubspec:
         # database-wide [characterization] recipe.  There is no
         # per-element preferred record to diverge, so the manifest
         # loads and the recipe is a single bispectrum + reduce pair.
-        text = (_VALID_COD_MANIFEST + _SECOND_AG_SOLID + _CHAR_BLOCK)
+        text = (_VALID_COD_MANIFEST + _SECOND_AG_SOLID)
         path = _write(tmp_path, text)
         manifest = load_manifest_v2(path)
         assert len(manifest.reference_solids) == 2
@@ -1824,9 +1830,10 @@ def test_write_run_log_round_trips(tmp_path):
 
 # ---- the orchestrator (toolchain seam mocked) ----------------
 
-_AU_LOCAL_MANIFEST = """\
-schema_version = 2
-
+_AU_LOCAL_MANIFEST = (
+    "schema_version = 2\n\n"
+    + _CHAR_BLOCK +
+    """
 [[reference_solid]]
 reference_id = "au_fcc"
 system_type = "crystalline"
@@ -1843,7 +1850,7 @@ scf_threshold = 1.0e-6
   label = "default_solid"
   default = true
   description = "Au in fcc bulk."
-"""
+""")
 
 
 def test_build_initial_potentials_harvests_curated_entry(
