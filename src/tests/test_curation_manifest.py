@@ -3,9 +3,10 @@
 These exercise :func:`curation_manifest.format_manifest` and its
 file-producing counterpart :func:`write_manifest`, with the central
 guarantee being a round-trip: a manifest written by the emitter reads
-back through :func:`load_manifest_v2` to the same reference solids.
-The readers themselves are covered alongside the producer in
-test_build_initial_potentials.py.
+back through :func:`load_manifest_v2` to the same manifest -- the
+database-wide ``[characterization]`` recipe and the reference solids
+both survive unchanged.  The readers themselves are covered alongside
+the producer in test_build_initial_potentials.py.
 """
 
 import pytest
@@ -23,10 +24,31 @@ from curation_manifest import (
 pytestmark = pytest.mark.unit
 
 
+def _characterization() -> list[ManifestFingerprint]:
+    """The database-wide preferred recipe: one reduce and one
+    bispectrum declaration, each the family's single preferred
+    record (DESIGN 5.7).  The reader stamps ``preferred=True`` on
+    every ``[characterization]`` record, so that is the shape a
+    round-trip recovers."""
+
+    return [
+        ManifestFingerprint(
+            method="reduce",
+            sub_spec={"level": 2, "thick": 0.5,
+                      "cutoff": 5.0, "tolerance": 0.05},
+            preferred=True),
+        ManifestFingerprint(
+            method="bispectrum",
+            sub_spec={"twoj1": 8, "twoj2": 8, "cutoff": 9.0},
+            preferred=True)]
+
+
 def _si_solid(**overrides) -> ReferenceSolid:
     """A valid single-element Si reference solid (cod-sourced) with
-    one default entry carrying a preferred reduce and a preferred
-    bispectrum fingerprint -- enough to satisfy rules 7, 10, 11."""
+    one default customization.  The customization carries a single
+    NON-preferred per-entry fingerprint override (a coarser
+    bispectrum), exercising the per-entry path; the preferred recipe
+    lives in the manifest's [characterization] block, not here."""
 
     base = dict(
         reference_id="si_diamond",
@@ -44,22 +66,23 @@ def _si_solid(**overrides) -> ReferenceSolid:
             description="Si diamond, site 1", label=None,
             fingerprints=[
                 ManifestFingerprint(
-                    method="reduce",
-                    sub_spec={"level": 2, "thick": 0.5,
-                              "cutoff": 5.0, "tolerance": 0.05},
-                    preferred=True),
-                ManifestFingerprint(
                     method="bispectrum",
-                    sub_spec={"twoj1": 8, "twoj2": 8,
-                              "cutoff": 9.0},
-                    preferred=True)])])
+                    sub_spec={"twoj1": 6, "twoj2": 4},
+                    preferred=False)])])
     base.update(overrides)
     return ReferenceSolid(**base)
 
 
-def _manifest(*solids) -> CurationManifest:
+def _manifest(*solids, characterization=None) -> CurationManifest:
+    """Wrap reference solids in a manifest, defaulting to the
+    standard preferred recipe so every round-trip exercises the
+    [characterization] block unless a test overrides it."""
+
     return CurationManifest(
         schema_version=2, manifest_path="(in memory)",
+        characterization=(characterization
+                          if characterization is not None
+                          else _characterization()),
         reference_solids=list(solids))
 
 
@@ -71,15 +94,18 @@ def _write_and_load(manifest, tmp_path):
 
 
 # ==============================================================
-#  Round-trip: written manifest reads back to the same solids
+#  Round-trip: written manifest reads back to the same manifest
 # ==============================================================
 
 def test_cod_solid_round_trips(tmp_path):
-    """A cod-sourced solid with entries and fingerprints survives a
-    format -> write -> load_manifest_v2 round-trip unchanged."""
+    """A cod-sourced solid with a customization and a per-entry
+    fingerprint override survives a format -> write ->
+    load_manifest_v2 round-trip, and the database-wide preferred
+    recipe round-trips alongside it."""
     original = _si_solid()
     loaded = _write_and_load(_manifest(original), tmp_path)
     assert loaded.schema_version == 2
+    assert loaded.characterization == _characterization()
     assert loaded.reference_solids == [original]
 
 
@@ -98,9 +124,9 @@ def test_structure_path_solid_round_trips(tmp_path):
 
 def test_multiple_solids_round_trip(tmp_path):
     """Two reference solids in one manifest both survive.  Only the
-    first carries the element's single default entry and its
-    preferred fingerprints (rules 7, 10); the second contributes a
-    non-default, non-fingerprinted Si site."""
+    first carries the element's single default customization (rule
+    7); the second contributes a non-default, non-fingerprinted Si
+    site."""
     first = _si_solid()
     second = _si_solid(
         reference_id="si_bc8", cod_id=4350826,
@@ -111,6 +137,22 @@ def test_multiple_solids_round_trip(tmp_path):
             fingerprints=[])])
     loaded = _write_and_load(_manifest(first, second), tmp_path)
     assert loaded.reference_solids == [first, second]
+
+
+def test_source_description_round_trips(tmp_path):
+    """A per-solid source_description is emitted when present and
+    reads back verbatim; an absent one stays None and is omitted."""
+    with_hint = _si_solid(
+        source_description="Si in the diamond structure (Fd-3m).")
+    text = format_manifest(_manifest(with_hint))
+    assert ('source_description = "Si in the diamond '
+            'structure (Fd-3m)."') in text
+    loaded = _write_and_load(_manifest(with_hint), tmp_path)
+    assert loaded.reference_solids[0].source_description == \
+        "Si in the diamond structure (Fd-3m)."
+
+    without = format_manifest(_manifest(_si_solid()))
+    assert "source_description =" not in without
 
 
 # ==============================================================
@@ -130,11 +172,47 @@ def test_floats_use_readable_repr_not_padded_scientific():
 
 def test_inline_table_keeps_authored_key_order():
     """A sub_spec keeps the order it was authored in, rather than
-    being alphabetised, so it reads in its natural sequence."""
+    being alphabetised, so it reads in its natural sequence.  The
+    preferred reduce recipe lives in the [characterization] block."""
     text = format_manifest(_manifest(_si_solid()))
     assert ("sub_spec = { level = 2, thick = 0.5, "
             "cutoff = 5.0, tolerance = 0.05 }") in text
 
+
+def test_characterization_block_emitted_without_preferred_key(
+        tmp_path):
+    """The preferred recipe is emitted as a [characterization]
+    block, one [[characterization.fingerprint]] per method.  The
+    preferred flag is structural, so it is NEVER serialized -- not
+    on the characterization records and not on per-entry overrides
+    -- yet the reader recovers it from the block each record lands
+    in."""
+    text = format_manifest(_manifest(_si_solid()))
+    assert "[characterization]" in text
+    assert text.count("[[characterization.fingerprint]]") == 2
+    assert "preferred" not in text
+
+    loaded = _write_and_load(_manifest(_si_solid()), tmp_path)
+    # Characterization records read back preferred; the per-entry
+    #   override reads back non-preferred -- both derived from the
+    #   block, not from any written flag.
+    assert all(fp.preferred for fp in loaded.characterization)
+    entry = loaded.reference_solids[0].entries[0]
+    assert all(not fp.preferred for fp in entry.fingerprints)
+
+
+def test_no_characterization_block_when_recipe_empty():
+    """A manifest with no preferred recipe emits no
+    [characterization] block, and the reader tolerates its
+    absence (an empty recipe)."""
+    text = format_manifest(
+        _manifest(_si_solid(), characterization=[]))
+    assert "[characterization]" not in text
+
+
+# ==============================================================
+#  Optional customization fields: emitted only when set
+# ==============================================================
 
 def test_label_omitted_when_absent_emitted_when_present(tmp_path):
     """An absent label is left out (derived at harvest); an explicit
@@ -154,27 +232,36 @@ def test_label_omitted_when_absent_emitted_when_present(tmp_path):
         "si_diamond-Si1"
 
 
-def test_preferred_emitted_only_when_true():
-    """preferred = true is emitted for a preferred record; a
-    non-preferred record omits the flag (the reader defaults it to
+def test_optional_customization_fields_omitted_when_absent(
+        tmp_path):
+    """Every customization field is optional (DESIGN 5.2.2).  An
+    entry that sets none emits a bare [[reference_solid.entry]]
+    header with no field lines, and reads back all-None / False."""
+    bare = _si_solid(entries=[ReferenceEntry()])
+    text = format_manifest(_manifest(bare))
+    assert "[[reference_solid.entry]]" in text
+    assert "element =" not in text
+    assert "atom_site =" not in text
+    assert "description =" not in text
+    # default=False is the absent reading, so no default line.
+    assert "default =" not in text
+
+    loaded = _write_and_load(_manifest(bare), tmp_path)
+    entry = loaded.reference_solids[0].entries[0]
+    assert entry.element is None
+    assert entry.atom_site is None
+    assert entry.default is False
+    assert entry.description is None
+    assert entry.label is None
+
+
+def test_default_emitted_only_when_true(tmp_path):
+    """A default = true customization emits its flag and round-trips;
+    a default = false one omits it (the absent flag reads as
     false)."""
-    entry = ReferenceEntry(
-        element="Si", atom_site=1, default=True,
-        description="Si diamond", label=None,
-        fingerprints=[
-            ManifestFingerprint(
-                method="reduce",
-                sub_spec={"level": 2, "thick": 0.5,
-                          "cutoff": 5.0, "tolerance": 0.05},
-                preferred=True),
-            ManifestFingerprint(
-                method="reduce",
-                sub_spec={"level": 3, "thick": 0.5,
-                          "cutoff": 5.0, "tolerance": 0.05},
-                preferred=False)])
-    text = format_manifest(_manifest(_si_solid(entries=[entry])))
-    assert text.count("preferred = true") == 1
-    assert "preferred = false" not in text
+    text = format_manifest(_manifest(_si_solid()))
+    assert "default = true" in text
+    assert "default = false" not in text
 
 
 def test_empty_kpoint_spec_renders_braces(tmp_path):

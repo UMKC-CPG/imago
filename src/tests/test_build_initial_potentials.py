@@ -93,6 +93,20 @@ scf_threshold = 1.0e-6
 """
 
 
+# The database-wide preferred recipe (DESIGN 5.7): one declaration
+#   per method, each the family's single preferred record.  Appended
+#   to a manifest body to exercise the [characterization] rules.
+_CHAR_BLOCK = (
+    "\n[characterization]\n"
+    "  [[characterization.fingerprint]]\n"
+    "  method = \"bispectrum\"\n"
+    "  sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
+    "  [[characterization.fingerprint]]\n"
+    "  method = \"reduce\"\n"
+    "  sub_spec = { level = 2, thick = 0.5, cutoff = 5.0,"
+    " tolerance = 0.05 }\n")
+
+
 def _write(tmp_path, text, name="manifest.toml") -> str:
     """Write manifest ``text`` to ``tmp_path/name``; return path."""
 
@@ -172,14 +186,15 @@ class TestLoadHappyPath:
         assert solid.cod_id is None
 
     def test_fingerprint_declarations_parse(self, tmp_path):
-        # One preferred record (satisfying rule 10) plus a
-        # non-preferred alternate sub_spec of the same family.
+        # Two per-entry fingerprint overrides on the same entry.
+        # Per-entry declarations are RARE non-preferred alternates
+        # (the preferred recipe lives in [characterization]), so
+        # both parse with preferred False.
         text = _VALID_COD_MANIFEST + (
             "\n"
             "    [[reference_solid.entry.fingerprint]]\n"
             "    method = \"bispectrum\"\n"
-            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
-            "    preferred = true\n\n"
+            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n\n"
             "    [[reference_solid.entry.fingerprint]]\n"
             "    method = \"bispectrum\"\n"
             "    sub_spec = { twoj1 = 6, twoj2 = 4 }\n")
@@ -190,9 +205,27 @@ class TestLoadHappyPath:
         assert all(isinstance(f, ManifestFingerprint) for f in fps)
         assert fps[0].method == "bispectrum"
         assert fps[0].sub_spec == {"twoj1": 8, "twoj2": 8}
-        # The preferred flag parses; the alternate defaults to false.
-        assert fps[0].preferred is True
+        # Per-entry declarations are never preferred (rule 10).
+        assert fps[0].preferred is False
         assert fps[1].preferred is False
+
+    def test_characterization_block_parses(self, tmp_path):
+        # The database-wide [characterization] recipe parses into
+        # manifest.characterization, one record per method, each
+        # marked preferred by the reader.
+        path = _write(tmp_path, _VALID_COD_MANIFEST + _CHAR_BLOCK)
+        manifest = load_manifest_v2(path)
+        char = manifest.characterization
+        assert len(char) == 2
+        assert {fp.method for fp in char} == {"bispectrum", "reduce"}
+        assert all(fp.preferred for fp in char)
+
+    def test_absent_characterization_is_empty_recipe(self, tmp_path):
+        # A manifest with no [characterization] block loads with an
+        # empty recipe (no preferred fingerprints are stamped).
+        path = _write(tmp_path, _VALID_COD_MANIFEST)
+        manifest = load_manifest_v2(path)
+        assert manifest.characterization == []
 
 
 # ============================================================
@@ -278,20 +311,58 @@ class TestRule2RequiredSolidFields:
             load_manifest_v2(path)
 
 
-class TestRule3RequiredEntryFields:
-    def test_missing_default_raises(self, tmp_path):
+class TestRule3OptionalEntryFields:
+    """Rule 3 (DESIGN 5.7): entries are OPTIONAL customizations and
+    every field is optional.  An absent field is filled by the
+    harvest (or, for default, reads as False); none is a hard
+    error."""
+
+    def test_solid_with_no_entries_loads(self, tmp_path):
+        # A reference solid may carry no customizations at all: the
+        # harvest auto-discovers every environment on its own.
+        path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
+            '\n  [[reference_solid.entry]]\n'
+            '  element = "Au"\n'
+            '  atom_site = 1\n'
+            '  label = "default_solid"\n'
+            '  default = true\n'
+            '  description = "Au in fcc bulk (Fm-3m)."\n', ""))
+        manifest = load_manifest_v2(path)
+        assert manifest.reference_solids[0].entries == []
+
+    def test_missing_default_reads_as_false(self, tmp_path):
+        # An absent default is no longer an error; it reads False.
         path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
             "  default = true\n", ""))
-        with pytest.raises(ValueError,
-                           match="manifest rule 3.*default"):
-            load_manifest_v2(path)
+        manifest = load_manifest_v2(path)
+        assert manifest.reference_solids[0].entries[0].default \
+            is False
 
-    def test_missing_atom_site_raises(self, tmp_path):
+    def test_missing_atom_site_reads_as_none(self, tmp_path):
+        # An absent atom_site is filled by the harvest; the parsed
+        # customization holds atom_site is None.
         path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
             "  atom_site = 1\n", ""))
-        with pytest.raises(ValueError,
-                           match="manifest rule 3.*atom_site"):
-            load_manifest_v2(path)
+        manifest = load_manifest_v2(path)
+        assert manifest.reference_solids[0].entries[0].atom_site \
+            is None
+
+    def test_bare_entry_loads_all_optional(self, tmp_path):
+        # A customization with NO fields at all is valid: every
+        # field is optional, so it parses to all-None / False.
+        path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
+            '  element = "Au"\n'
+            '  atom_site = 1\n'
+            '  label = "default_solid"\n'
+            '  default = true\n'
+            '  description = "Au in fcc bulk (Fm-3m)."\n', ""))
+        manifest = load_manifest_v2(path)
+        entry = manifest.reference_solids[0].entries[0]
+        assert entry.element is None
+        assert entry.atom_site is None
+        assert entry.default is False
+        assert entry.description is None
+        assert entry.label is None
 
 
 class TestRule4StructureSource:
@@ -418,29 +489,34 @@ class TestRule6ElementLabelUniqueness:
         entry = manifest.reference_solids[0].entries[0]
         assert entry.label is None
 
-    def test_two_derived_labels_same_site_raise(self, tmp_path):
-        # Two label-less entries with the same (reference_id,
-        # element, atom_site) would derive the identical label.
+    def test_label_less_customizations_need_no_cross_check(
+            self, tmp_path):
+        # Derived labels are unique by construction (DESIGN 5.7):
+        # each environment mints its own at harvest from the run
+        # identity, so two label-less customizations carry no
+        # cross-manifest collision and the manifest loads.
         text = _VALID_COD_MANIFEST.replace(
             '  label = "default_solid"\n', "") + (
             "\n  [[reference_solid.entry]]\n"
             "  element = \"Au\"\n"
-            "  atom_site = 1\n"
+            "  atom_site = 2\n"
             "  default = false\n"
-            "  description = \"Au bulk again.\"\n")
+            "  description = \"Au bulk, second site.\"\n")
         path = _write(tmp_path, text)
-        with pytest.raises(ValueError,
-                           match="manifest rule 6.*derive the same"):
-            load_manifest_v2(path)
+        manifest = load_manifest_v2(path)
+        assert len(manifest.reference_solids[0].entries) == 2
 
 
 class TestRule7DefaultPerElement:
-    def test_zero_defaults_raises(self, tmp_path):
+    def test_zero_defaults_loads(self, tmp_path):
+        # Zero default customizations is no longer an error (DESIGN
+        # 5.7): the element takes its isolated baseline as the
+        # default at harvest.  Load enforces only "at most one".
         path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
             "  default = true\n", "  default = false\n"))
-        with pytest.raises(ValueError,
-                           match="manifest rule 7.*Au has 0"):
-            load_manifest_v2(path)
+        manifest = load_manifest_v2(path)
+        assert manifest.reference_solids[0].entries[0].default \
+            is False
 
     def test_two_defaults_same_element_raises(self, tmp_path):
         # A second Au entry (distinct label) also marked default.
@@ -487,14 +563,14 @@ class TestRule8FingerprintUniqueness:
             load_manifest_v2(path)
 
     def test_same_method_different_subspec_ok(self, tmp_path):
-        # Same method, two sub_specs, exactly one preferred -> rules
-        # 8 and 10 both satisfied, so the file loads cleanly.
+        # Same method, two distinct sub_specs on one entry -> rule 8
+        # is satisfied (the database stores as many sub_specs per
+        # family as the curator wants), so the file loads cleanly.
         text = _VALID_COD_MANIFEST + (
             "\n"
             "    [[reference_solid.entry.fingerprint]]\n"
             "    method = \"bispectrum\"\n"
-            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
-            "    preferred = true\n\n"
+            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n\n"
             "    [[reference_solid.entry.fingerprint]]\n"
             "    method = \"bispectrum\"\n"
             "    sub_spec = { twoj1 = 6, twoj2 = 4 }\n")
@@ -514,8 +590,7 @@ class TestRule9MethodRegistered:
         "\n"
         "    [[reference_solid.entry.fingerprint]]\n"
         "    method = \"nonsense\"\n"
-        "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
-        "    preferred = true\n")
+        "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n")
 
     def test_unknown_method_raises_with_registry(self, tmp_path):
         path = _write(tmp_path, self._UNKNOWN)
@@ -530,13 +605,25 @@ class TestRule9MethodRegistered:
         fps = manifest.reference_solids[0].entries[0].fingerprints
         assert fps[0].method == "nonsense"
 
+    def test_unknown_characterization_method_raises(self, tmp_path):
+        # Rule 9 covers the [characterization] block too: an unknown
+        # preferred method is a hard error when a registry is given.
+        bad_char = (
+            "\n[characterization]\n"
+            "  [[characterization.fingerprint]]\n"
+            "  method = \"nonsense\"\n"
+            "  sub_spec = { twoj1 = 8, twoj2 = 8 }\n")
+        path = _write(tmp_path, _VALID_COD_MANIFEST + bad_char)
+        with pytest.raises(ValueError, match="manifest rule 9"):
+            load_manifest_v2(
+                path, known_methods={"bispectrum", "reduce"})
+
     def test_known_method_accepted_with_registry(self, tmp_path):
         text = _VALID_COD_MANIFEST + (
             "\n"
             "    [[reference_solid.entry.fingerprint]]\n"
             "    method = \"bispectrum\"\n"
-            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
-            "    preferred = true\n")
+            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n")
         path = _write(tmp_path, text)
         manifest = load_manifest_v2(
             path, known_methods={"bispectrum", "reduce"})
@@ -568,112 +655,71 @@ _SECOND_AG_SOLID = (
     "  description = \"Ag fcc.\"\n")
 
 
-def _fp_block(method, sub_spec_toml, preferred=False):
-    """Render one ``[[reference_solid.entry.fingerprint]]`` block."""
-
-    block = ("\n    [[reference_solid.entry.fingerprint]]\n"
-             f"    method = \"{method}\"\n"
-             f"    sub_spec = {sub_spec_toml}\n")
-    if preferred:
-        block += "    preferred = true\n"
-    return block
-
-
 class TestRule10ManifestPreferred:
-    """Manifest rule 10: for every (element, method) appearing in any
-    fingerprint declaration across the manifest, exactly one
-    declaration is preferred (DESIGN 5.7)."""
+    """Manifest rule 10 (DESIGN 5.7): the [characterization] block
+    declares at most one fingerprint per method -- that single
+    declaration is the family's database-wide preferred record -- and
+    a per-entry declaration may not be marked preferred."""
 
-    def test_zero_preferred_for_present_method_raises(self, tmp_path):
-        # A lone bispectrum declaration that is not preferred leaves
-        # (Au, bispectrum) present but with no representative.
-        text = _VALID_COD_MANIFEST + _fp_block(
-            "bispectrum", "{ twoj1 = 8, twoj2 = 8 }")
-        path = _write(tmp_path, text)
-        with pytest.raises(ValueError, match="manifest rule 10"):
+    def test_characterization_one_per_method_ok(self, tmp_path):
+        # A well-formed recipe (bispectrum + reduce, one each) loads,
+        # and each characterization record is marked preferred.
+        path = _write(tmp_path, _VALID_COD_MANIFEST + _CHAR_BLOCK)
+        manifest = load_manifest_v2(path)
+        assert len(manifest.characterization) == 2
+        assert all(fp.preferred for fp in manifest.characterization)
+
+    def test_method_declared_twice_in_characterization_raises(
+            self, tmp_path):
+        # The preferred recipe has exactly one home: naming a method
+        # twice in [characterization] is a hard error.
+        dup_char = (
+            "\n[characterization]\n"
+            "  [[characterization.fingerprint]]\n"
+            "  method = \"bispectrum\"\n"
+            "  sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
+            "  [[characterization.fingerprint]]\n"
+            "  method = \"bispectrum\"\n"
+            "  sub_spec = { twoj1 = 6, twoj2 = 4 }\n")
+        path = _write(tmp_path, _VALID_COD_MANIFEST + dup_char)
+        with pytest.raises(ValueError,
+                           match="manifest rule 10.*twice"):
             load_manifest_v2(path)
 
-    def test_one_preferred_per_present_method_ok(self, tmp_path):
-        # bispectrum (preferred + a non-preferred alternate) and a
-        # preferred reduce record: each present method has exactly one
-        # preferred, so the manifest loads.
-        text = (_VALID_COD_MANIFEST
-                + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
-                            preferred=True)
-                + _fp_block("bispectrum", "{ twoj1 = 6, twoj2 = 4 }")
-                + _fp_block("reduce",
-                            "{ level = 2, thick = 0.5, cutoff = 5.0,"
-                            " tolerance = 0.05 }", preferred=True))
-        path = _write(tmp_path, text)
-        manifest = load_manifest_v2(path)
-        fps = manifest.reference_solids[0].entries[0].fingerprints
-        assert len(fps) == 3
-
-    def test_counts_preferred_across_solids(self, tmp_path):
-        # The count spans the whole manifest, per (element, method).
-        # Two solids each declare a preferred bispectrum for Au, so
-        # (Au, bispectrum) has two preferred -> a hard error.  The
-        # second solid carries a non-default Au entry with a distinct
-        # label so rules 6 and 7 stay satisfied.
-        second_au = (
-            "\n[[reference_solid]]\n"
-            "reference_id = \"au_hcp\"\n"
-            "system_type = \"crystalline\"\n"
-            "basis = \"fb\"\n"
-            "functional = \"wigner\"\n"
-            "kpoint_integration = \"linear-tetrahedral\"\n"
-            "structure_path = \"au_hcp.skel\"\n"
-            "kpoint_spec = { density = 60.0, shift = [0,0,0] }\n"
-            "scf_threshold = 1.0e-6\n"
+    def test_per_entry_preferred_raises(self, tmp_path):
+        # A per-entry fingerprint may not be preferred -- the
+        # preferred record is fixed by [characterization].
+        text = _VALID_COD_MANIFEST + (
             "\n"
-            "  [[reference_solid.entry]]\n"
-            "  element = \"Au\"\n"
-            "  atom_site = 1\n"
-            "  label = \"au-hcp\"\n"
-            "  default = false\n"
-            "  description = \"Au hcp.\"\n"
-            + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
-                        preferred=True))
-        (tmp_path / "au_hcp.skel").write_text("placeholder\n")
-        text = (_VALID_COD_MANIFEST
-                + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
-                            preferred=True)
-                + second_au)
+            "    [[reference_solid.entry.fingerprint]]\n"
+            "    method = \"bispectrum\"\n"
+            "    sub_spec = { twoj1 = 8, twoj2 = 8 }\n"
+            "    preferred = true\n")
         path = _write(tmp_path, text)
-        with pytest.raises(ValueError, match="manifest rule 10"):
+        with pytest.raises(
+                ValueError,
+                match="manifest rule 10.*may not be preferred"):
             load_manifest_v2(path)
 
 
 class TestRule11ManifestPreferredSubspec:
-    """Manifest rule 11: all preferred declarations of one method
-    carry the identical sub_spec across the whole manifest, so the
-    consumer queries one sub_spec per family (DESIGN 5.7)."""
+    """Manifest rule 11 (DESIGN 5.7): the preferred sub_spec for a
+    family is uniform across the whole database.  It holds
+    structurally -- the preferred recipe is the single
+    [characterization] declaration per method, so it cannot diverge
+    between elements; there is no runtime check to fire."""
 
-    def test_divergent_preferred_subspec_raises(self, tmp_path):
-        # Au's preferred bispectrum sub_spec differs from Ag's; the
-        # family's preferred sub_spec must be database-wide uniform.
-        text = (_VALID_COD_MANIFEST
-                + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
-                            preferred=True)
-                + _SECOND_AG_SOLID
-                + _fp_block("bispectrum", "{ twoj1 = 6, twoj2 = 4 }",
-                            preferred=True))
-        path = _write(tmp_path, text)
-        with pytest.raises(ValueError, match="manifest rule 11"):
-            load_manifest_v2(path)
-
-    def test_uniform_preferred_subspec_ok(self, tmp_path):
-        # Both elements' preferred bispectrum records share one
-        # sub_spec, so rule 11 is satisfied and the manifest loads.
-        text = (_VALID_COD_MANIFEST
-                + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
-                            preferred=True)
-                + _SECOND_AG_SOLID
-                + _fp_block("bispectrum", "{ twoj1 = 8, twoj2 = 8 }",
-                            preferred=True))
+    def test_single_recipe_applies_across_elements(self, tmp_path):
+        # Two solids contributing two elements (Au, Ag) share the one
+        # database-wide [characterization] recipe.  There is no
+        # per-element preferred record to diverge, so the manifest
+        # loads and the recipe is a single bispectrum + reduce pair.
+        text = (_VALID_COD_MANIFEST + _SECOND_AG_SOLID + _CHAR_BLOCK)
         path = _write(tmp_path, text)
         manifest = load_manifest_v2(path)
         assert len(manifest.reference_solids) == 2
+        methods = {fp.method for fp in manifest.characterization}
+        assert methods == {"bispectrum", "reduce"}
 
 
 def test_harvest_fingerprints_stamps_preferred(tmp_path):

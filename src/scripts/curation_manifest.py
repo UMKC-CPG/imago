@@ -1,11 +1,15 @@
 """Curation-manifest schema library (DESIGN 5.7).
 
 The curation manifest is the hand-authored file that drives the
-initial-potential database build: it names each reference solid (its
-structure source and SCF run settings) and the per-site potentials to
-harvest from the converged calculation.  This module is the single,
-neutral home for that schema -- the dataclasses a parsed manifest
-becomes and the readers that parse and validate the file.
+initial-potential database build: it declares the database-wide
+fingerprint recipe (the ``[characterization]`` block), names each
+reference solid (its structure source and SCF run settings), and
+carries optional per-environment customizations.  The build itself
+auto-discovers one representative per distinct environment in every
+converged calculation; an entry exists only to override what that
+harvest would otherwise produce.  This module is the single, neutral
+home for that schema -- the dataclasses a parsed manifest becomes and
+the readers that parse and validate the file.
 
 Keeping the schema here, rather than inside any one tool, lets every
 side of the pipeline share one definition without depending on the
@@ -41,25 +45,38 @@ from guidance_db import VALID_SYSTEM_TYPES
 
 @dataclass
 class ManifestFingerprint:
-    """One ``[[reference_solid.entry.fingerprint]]`` declaration.
+    """One fingerprint declaration -- a ``method`` plus its
+    ``sub_spec`` (DESIGN 5.7).
 
-    Tells the producer to compute and harvest one fingerprint
-    record alongside the numerical potential (the harvest itself
-    is C60).  ``method`` names a matcher (ARCHITECTURE 8.9) and
-    ``sub_spec`` is its method-specific parameter table.  Unlike a
+    The same shape serves both kinds of declaration a manifest
+    carries, and the *kind* is fixed by which block holds it, not
+    by an authored field:
+
+    - In the database-wide ``[characterization]`` block it is the
+      family's **preferred** record -- the one ``sub_spec`` per
+      method the consumer queries for a file-dictated structure
+      (DESIGN 5.6.5 step 2).  Lifting the recipe into one block
+      makes manifest rule 11 (a uniform preferred ``sub_spec`` per
+      family) hold *structurally*: a single declaration per method
+      cannot diverge between elements.
+    - In a ``[[reference_solid.entry.fingerprint]]`` block it is a
+      rare **non-preferred** override: an extra ``sub_spec`` to
+      harvest for one environment alongside the preferred recipe.
+
+    ``method`` names a matcher (ARCHITECTURE 8.9) and ``sub_spec``
+    is its method-specific parameter table.  Unlike a
     :class:`initial_potential_db.FingerprintRecord`, a declaration
     carries *no* payload: the payload is the SCF/loen output the
     producer will harvest, not something the curator writes.
 
-    ``preferred`` marks the one record per matcher family the
-    consumer matches against for a file-dictated (crystalline)
-    structure (DESIGN 5.6.5 step 2).  Exactly one declaration per
-    ``method`` is preferred for each element that carries any
-    fingerprint of that family (manifest rule 10), and every
-    preferred declaration of a family shares one ``sub_spec``
-    across the whole manifest (manifest rule 11).  The flag rides
-    through harvest onto the produced
-    :class:`initial_potential_db.FingerprintRecord`.
+    ``preferred`` is **derived by the reader from the containing
+    block**, never read from the file: ``True`` for a
+    ``[characterization]`` declaration, ``False`` for a per-entry
+    override (manifest rule 10 forbids authoring ``preferred`` on a
+    per-entry declaration).  The producer carries the flag onto
+    each produced :class:`initial_potential_db.FingerprintRecord`,
+    and the writer never serializes it -- a round-trip recovers it
+    from the block the declaration lands in.
     """
 
     method: str
@@ -69,28 +86,43 @@ class ManifestFingerprint:
 
 @dataclass
 class ReferenceEntry:
-    """One ``[[reference_solid.entry]]`` harvest declaration.
+    """One ``[[reference_solid.entry]]`` customization (DESIGN 5.7).
 
-    Names a single atom site whose converged potential becomes a
-    labeled entry in the element's database.  ``default`` records
-    whether this entry should carry the database file's single
-    ``default = true`` tag (per-element-database rule 7); the
-    manifest is the single source of truth for that choice.
+    An entry is an *optional customization* on an auto-discovered
+    environment, not a harvest instruction: the harvest finds one
+    representative per distinct environment on its own, and an
+    environment no entry mentions is harvested all the same (5.2.2,
+    5.2.3).  An entry exists only to override what the harvest would
+    otherwise produce, so **every field is optional**:
 
-    ``label`` is optional (DESIGN 5.2.1).  When the curator omits
-    it, the producer derives the label at harvest from the run's
-    site identity --
-    ``<reference_id>-<element><species>-t<type>-a<site>`` -- so the
-    species and type numbers (unknown until the grouping pass runs)
-    land in the label without being authored ahead of time.  A
-    present ``label`` is an explicit override of that derived
-    default.
+    - ``atom_site`` -- the representative-atom handle that addresses
+      the target environment (1-based site index).  The species
+      number cannot be the handle because it is unknown until the
+      run's grouping pass; a representative atom is known up front.
+      When given it also *pins* that atom as the environment's
+      representative.
+    - ``element`` -- the element symbol the customization targets,
+      cross-checked against the species at ``atom_site`` once Imago
+      loads the structure.
+    - ``default`` -- marks this environment the element's default
+      (per-element-database rule 7).  When no customization
+      designates one, the producer falls back to the element's
+      ``"isolated"`` baseline, so each file still gets its single
+      default entry.  Absent reads as ``False``.
+    - ``description`` -- one-sentence prose for the database entry.
+      When omitted the producer auto-composes one from the solid's
+      ``source_description``, qualified by the species and site.
+    - ``label`` -- the label this environment is written under
+      (DESIGN 5.2.1).  When omitted the producer derives it at
+      harvest from the run's site identity
+      (``<reference_id>-<element><species>-t<type>-a<site>``); a
+      present ``label`` overrides that derived default.
     """
 
-    element: str
-    atom_site: int
-    default: bool
-    description: str
+    element: str | None = None
+    atom_site: int | None = None
+    default: bool = False
+    description: str | None = None
     label: str | None = None
     fingerprints: list[ManifestFingerprint] = field(
         default_factory=list)
@@ -117,6 +149,13 @@ class ReferenceSolid:
     produced entry's context.  All four are *required* in the
     manifest (rule 2): nothing the producer emits depends on an
     implicit default (VISION Principle 5).
+
+    ``source_description`` is an optional one-line, structure-level
+    description of the solid (the hint cod_fish reads from the CIF).
+    The harvest composes each environment's auto-description from
+    it, qualified by the species and site it discovers (5.2.1); a
+    per-entry ``description`` customization can still replace any
+    one by hand.  ``None`` when the curator authored no hint.
     """
 
     reference_id: str
@@ -129,6 +168,7 @@ class ReferenceSolid:
     cod_id: int | None
     cod_revision: str | None
     structure_path: str | None
+    source_description: str | None = None
     entries: list[ReferenceEntry] = field(default_factory=list)
 
 
@@ -139,10 +179,20 @@ class CurationManifest:
     ``manifest_path`` is retained so later pipeline steps can
     resolve ``structure_path`` entries relative to the manifest's
     directory and report errors against the source file.
+
+    ``characterization`` is the database-wide fingerprint recipe
+    lifted out of the ``[characterization]`` block (DESIGN 5.7): at
+    most one declaration per method, each marked ``preferred`` by
+    the reader.  It is the one ``sub_spec`` per family the consumer
+    queries (5.6.5 step 2) and the producer harvests for every
+    environment.  An empty list means the manifest declared no
+    recipe (no preferred fingerprints are stamped).
     """
 
     schema_version: int
     manifest_path: str
+    characterization: list[ManifestFingerprint] = field(
+        default_factory=list)
     reference_solids: list[ReferenceSolid] = field(
         default_factory=list)
 
@@ -183,9 +233,11 @@ def load_manifest_v2(path: str,
     registered matcher).  Callers without a registry pass ``None``
     and rule 9 is skipped -- the matcher registry lives in
     ``makeinput.py`` (ARCHITECTURE 8.9) and is not wired in until
-    C54.  Rule 8 (per-entry ``(method, sub_spec)`` uniqueness) is
-    enforced regardless, using the same canonical sub-spec equality
-    as the per-element-database reader.
+    C54.  When supplied it is checked against every method, both in
+    the ``[characterization]`` block and in per-entry overrides.
+    Rule 8 (per-entry ``(method, sub_spec)`` uniqueness) is enforced
+    regardless, using the same canonical sub-spec equality as the
+    per-element-database reader.
 
     The validation rules (DESIGN 5.7):
 
@@ -196,11 +248,13 @@ def load_manifest_v2(path: str,
        ``scf_threshold``; ``system_type`` must be one of the four
        guidance system types (``crystalline`` / ``amorphous`` /
        ``nanostructure`` / ``molecular``).
-    3. Every ``[[reference_solid.entry]]`` carries ``element``,
-       ``atom_site``, ``default``, ``description``.  ``label`` is
-       optional (DESIGN 5.2.1): when present it overrides the
-       derived default; when absent the producer assembles it at
-       harvest from the run's site identity.
+    3. ``[[reference_solid.entry]]`` blocks are *optional*
+       customizations (DESIGN 5.2.2): a solid may carry none, and
+       every customization field (``element``, ``atom_site``,
+       ``default``, ``description``, ``label``) is optional.  An
+       entry only overrides what the harvest would otherwise
+       produce; an unmentioned environment is harvested all the
+       same.
     4. Exactly one of ``cod_id`` / ``structure_path`` per solid;
        ``cod_id`` must be a positive integer with a non-empty
        ``cod_revision``; ``structure_path`` must resolve to an
@@ -209,26 +263,32 @@ def load_manifest_v2(path: str,
        label-safe (lowercase letters, digits, ``-``, ``_``),
        because it is embedded verbatim in every derived entry
        label and typed into ``-pot`` (DESIGN 5.2.1).
-    6. For entries with an explicit ``label``, ``(element, label)``
-       is unique across the manifest.  For entries with a derived
-       label, ``(reference_id, element, atom_site)`` is unique --
-       two such entries would derive the identical label (the
-       per-construction uniqueness of DESIGN 5.2.1).
-    7. Exactly one ``default = true`` entry per element that
-       appears anywhere in the manifest.
+    6. For customizations with an explicit ``label`` (and
+       ``element``), ``(element, label)`` is unique across the
+       manifest.  Derived labels are unique by construction (each
+       auto-discovered environment mints its own from the run
+       identity, DESIGN 5.2.1), so they need no cross-manifest
+       check.
+    7. At most one ``default = true`` customization per element at
+       load time (the "exactly one per harvested element" half is
+       checked at harvest, once the run reveals which elements
+       exist).  An element with no default customization falls back
+       to its ``"isolated"`` baseline at harvest (DESIGN 5.7).
     8. Within one entry's fingerprint declarations,
        ``(method, sub_spec)`` is unique.
     9. Every fingerprint ``method`` is a registered matcher
        (checked only when ``known_methods`` is supplied).
-    10. For every ``(element, method)`` that appears with any
-       fingerprint declaration across the manifest, exactly one
-       declaration carries ``preferred = true``.  Zero or
-       two-or-more is a hard error: the file-dictated consumer
-       (DESIGN 5.6.5) needs one unambiguous record per family.
-    11. All ``preferred = true`` declarations sharing a ``method``
-       carry the identical ``sub_spec`` across the whole manifest,
-       so the consumer queries one sub_spec per family (and a
-       multi-element structure costs a single loen run).
+    10. The ``[characterization]`` block declares *at most one*
+       fingerprint per ``method``; that single declaration is the
+       family's database-wide preferred record.  A method named
+       twice there, or a per-entry declaration marked
+       ``preferred = true``, is a hard error: the preferred recipe
+       has exactly one home (DESIGN 5.6.5).
+    11. Holds *structurally* (no runtime check): because the
+       preferred recipe is the single ``[characterization]``
+       declaration per method, the preferred ``sub_spec`` for a
+       family cannot diverge between elements.  Non-preferred
+       per-entry overrides may use any ``sub_spec``.
     """
 
     if not os.path.isfile(path):
@@ -246,24 +306,41 @@ def load_manifest_v2(path: str,
 
     manifest_dir = os.path.dirname(os.path.abspath(path))
 
+    # ----- Rules 9, 10: the [characterization] block is the
+    # database-wide preferred recipe.  At most one fingerprint per
+    # method (rule 10) and each method a registered matcher (rule
+    # 9, gated on known_methods).  That single declaration per
+    # method IS the family's preferred record, so the reader stamps
+    # preferred=True on it; per-entry overrides (parsed below) may
+    # never be preferred.  Rule 11 then holds by construction: one
+    # declaration per method cannot diverge between elements.
+    characterization: list[ManifestFingerprint] = []
+    char_methods: set[str] = set()
+    char_block = raw.get("characterization", {})
+    for fp in char_block.get("fingerprint", []):
+        _require("method" in fp and "sub_spec" in fp, path,
+                 "manifest rule 10: [characterization] fingerprint "
+                 "must carry both method and sub_spec")
+        method = fp["method"]
+        if known_methods is not None:
+            _require(method in known_methods, path,
+                     f"manifest rule 9: unknown matcher method "
+                     f"{method!r} in [characterization]")
+        _require(method not in char_methods, path,
+                 f"manifest rule 10: method {method!r} declared "
+                 f"twice in [characterization] (the preferred "
+                 f"recipe has exactly one home)")
+        char_methods.add(method)
+        characterization.append(ManifestFingerprint(
+            method=method, sub_spec=dict(fp["sub_spec"]),
+            preferred=True))
+
     seen_ref_ids: set[str] = set()
     seen_element_label: set[tuple[str, str]] = set()
-    # (reference_id, element, atom_site) for derived-label entries:
-    # two with the same triple would derive the identical label.
-    seen_derived_key: set[tuple[str, str, int]] = set()
-    # elem -> count of default=true entries (rule 7, post-loop).
+    # elem -> count of default=true customizations (rule 7 load
+    # half: at most one per element; the exactly-one-per-harvested-
+    # element half is checked at harvest, DESIGN 5.7).
     default_per_element: dict[str, int] = {}
-    seen_elements: set[str] = set()
-    # Fingerprint preferred-flag bookkeeping (rules 10 and 11,
-    # post-loop).  (element, method) -> count of declarations and
-    # count of preferred declarations: every present (element,
-    # method) needs exactly one preferred (rule 10).  method ->
-    # the canonical sub_spec of the family's preferred record:
-    # every preferred declaration of one method must agree (rule
-    # 11), so the consumer queries one sub_spec per family.
-    fingerprint_decls_seen: set[tuple[str, str]] = set()
-    preferred_per_elem_method: dict[tuple[str, str], int] = {}
-    preferred_subspec_per_method: dict[str, Any] = {}
 
     reference_solids: list[ReferenceSolid] = []
 
@@ -338,48 +415,40 @@ def load_manifest_v2(path: str,
 
         entries: list[ReferenceEntry] = []
         for entry in ref.get("entry", []):
-            # ----- Rule 3: required entry fields.  ``label`` is
-            # NOT required (DESIGN 5.2.1): absent => derived at
-            # harvest, present => explicit override.
-            for field_name in ("element", "atom_site",
-                               "default", "description"):
-                _require(field_name in entry, path,
-                         f"manifest rule 3: "
-                         f"[[reference_solid.entry]] in {rid} "
-                         f"missing field: {field_name}")
-
-            elem = entry["element"]
+            # ----- Rule 3: entries are OPTIONAL customizations and
+            # every field is optional (DESIGN 5.2.2).  An absent
+            # element / atom_site / description / label is filled by
+            # the harvest; an absent default reads as False.
+            elem = entry.get("element")
             label = entry.get("label")
-            seen_elements.add(elem)
 
-            # ----- Rule 6: no two entries may produce the same
-            # database entry.  With an explicit label that means
-            # (element, label) is unique across the manifest; with
-            # a derived label it means (reference_id, element,
-            # atom_site) is unique, since those three are exactly
-            # what the derived label is built from (DESIGN 5.2.1).
-            if label is not None:
+            # ----- Rule 6: only an EXPLICIT label (with an element
+            # to key it on) needs the cross-manifest (element,
+            # label) uniqueness check -- two solids cannot both
+            # produce, e.g., ("Au", "default_solid").  Derived
+            # labels are unique by construction (each environment
+            # mints its own from the run identity, DESIGN 5.2.1), so
+            # they need no check here.
+            if label is not None and elem is not None:
                 key = (elem, label)
                 _require(key not in seen_element_label, path,
                          f"manifest rule 6: duplicate "
                          f"(element, label): {key}")
                 seen_element_label.add(key)
-            else:
-                dkey = (rid, elem, entry["atom_site"])
-                _require(dkey not in seen_derived_key, path,
-                         f"manifest rule 6: two entries derive the "
-                         f"same label (same reference_id, element, "
-                         f"atom_site): {dkey}")
-                seen_derived_key.add(dkey)
 
-            # ----- Rule 7 tally: count default=true per element;
-            # the "exactly one" check runs after the full walk.
-            if entry["default"]:
+            # ----- Rule 7 (load half): count default=true
+            # customizations per element; "at most one" is checked
+            # after the full walk.  Only countable when the
+            # customization names its element.
+            if entry.get("default", False) and elem is not None:
                 default_per_element[elem] = (
                     default_per_element.get(elem, 0) + 1)
 
-            # ----- Fingerprint declarations (rules 8, 9, and the
-            # tallies for rules 10 and 11, checked post-loop).
+            # ----- Per-entry fingerprint declarations are RARE
+            # overrides: extra NON-preferred sub_specs harvested for
+            # this environment alongside the [characterization]
+            # recipe.  Rules 8 (uniqueness), 9 (known method), and
+            # 10 (may-not-be-preferred) apply.
             fingerprints: list[ManifestFingerprint] = []
             seen_method_subspec: set = set()
             for fp in entry.get("fingerprint", []):
@@ -389,7 +458,15 @@ def load_manifest_v2(path: str,
                          f"sub_spec ({rid}, label={label})")
                 method = fp["method"]
                 sub_spec = fp["sub_spec"]
-                preferred = bool(fp.get("preferred", False))
+
+                # Rule 10: a per-entry declaration may not be
+                # preferred -- the preferred record of each family
+                # is fixed database-wide by [characterization].
+                _require(not fp.get("preferred", False), path,
+                         f"manifest rule 10: per-entry fingerprint "
+                         f"may not be preferred ({rid}, "
+                         f"label={label}); set it in "
+                         f"[characterization]")
 
                 # Rule 9: method must be a registered matcher.
                 # Skipped when the caller passed no registry.
@@ -411,42 +488,16 @@ def load_manifest_v2(path: str,
                          f"of {rid}")
                 seen_method_subspec.add(fp_key)
 
-                # Tally for rules 10 and 11 (checked post-loop).
-                # Every (element, method) seen here is "present", so
-                # it must end with exactly one preferred record; the
-                # family's preferred sub_spec must be uniform.
-                elem_method = (elem, method)
-                fingerprint_decls_seen.add(elem_method)
-                if preferred:
-                    preferred_per_elem_method[elem_method] = (
-                        preferred_per_elem_method.get(
-                            elem_method, 0) + 1)
-                    # Rule 11: a preferred record fixes the family's
-                    # database-wide sub_spec; a later preferred
-                    # record of the same method must match it.
-                    prior = preferred_subspec_per_method.get(method)
-                    if prior is None:
-                        preferred_subspec_per_method[method] = canon
-                    else:
-                        _require(canon == prior, path,
-                                 f"manifest rule 11: preferred "
-                                 f"{method!r} sub_spec {sub_spec!r} "
-                                 f"({rid}, label={label}) diverges "
-                                 f"from the database-wide preferred "
-                                 f"sub_spec for {method!r}; all "
-                                 f"preferred records of a family "
-                                 f"must share one sub_spec")
-
                 fingerprints.append(ManifestFingerprint(
                     method=method, sub_spec=dict(sub_spec),
-                    preferred=preferred))
+                    preferred=False))
 
             entries.append(ReferenceEntry(
                 element=elem,
-                atom_site=entry["atom_site"],
+                atom_site=entry.get("atom_site"),
                 label=label,
-                default=entry["default"],
-                description=entry["description"],
+                default=bool(entry.get("default", False)),
+                description=entry.get("description"),
                 fingerprints=fingerprints))
 
         reference_solids.append(ReferenceSolid(
@@ -460,34 +511,26 @@ def load_manifest_v2(path: str,
             cod_id=ref.get("cod_id"),
             cod_revision=ref.get("cod_revision"),
             structure_path=ref.get("structure_path"),
+            source_description=ref.get("source_description"),
             entries=entries))
 
-    # ----- Rule 7 post-loop: exactly one default-tagged entry
-    # per element that appears anywhere in the manifest.
-    for elem in sorted(seen_elements):
-        count = default_per_element.get(elem, 0)
-        _require(count == 1, path,
+    # ----- Rule 7 post-loop (load half): at most one default=true
+    # customization per element.  Zero is allowed -- an element may
+    # take its default at harvest, or fall back to its isolated
+    # baseline (DESIGN 5.7); the "exactly one per HARVESTED element"
+    # half is checked once the run reveals which elements exist.
+    # Sorting keeps the message deterministic.
+    for elem in sorted(default_per_element):
+        count = default_per_element[elem]
+        _require(count <= 1, path,
                  f"manifest rule 7: element {elem} has {count} "
-                 f"default-tagged entries across the manifest "
-                 f"(need exactly one)")
-
-    # ----- Rule 10 post-loop: every (element, method) present in
-    # any fingerprint declaration carries exactly one preferred
-    # record across the manifest.  Sorting keeps the message
-    # deterministic.  (Rule 11's uniform-sub_spec check ran inline
-    # above, as each preferred record was seen.)
-    for elem, method in sorted(fingerprint_decls_seen):
-        count = preferred_per_elem_method.get((elem, method), 0)
-        _require(count == 1, path,
-                 f"manifest rule 10: element {elem} method "
-                 f"{method!r} has {count} preferred fingerprint "
-                 f"declarations across the manifest (need exactly "
-                 f"one so the file-dictated consumer has an "
-                 f"unambiguous record to match)")
+                 f"default=true customizations across the manifest "
+                 f"(at most one)")
 
     return CurationManifest(
         schema_version=raw["schema_version"],
         manifest_path=os.path.abspath(path),
+        characterization=characterization,
         reference_solids=reference_solids)
 
 
@@ -591,7 +634,8 @@ def load_structure_sources(path: str) -> list[ReferenceSolid]:
             functional="", kpoint_integration="", kpoint_spec={},
             scf_threshold=0.0, cod_id=cod_id,
             cod_revision=cod_revision,
-            structure_path=structure_path))
+            structure_path=structure_path,
+            source_description=ref.get("source_description")))
 
     return sources
 
@@ -716,21 +760,38 @@ def format_manifest(manifest: CurationManifest) -> str:
     """Serialize a :class:`CurationManifest` to schema-v2 TOML text.
 
     The emitted file round-trips through :func:`load_manifest_v2`:
-    the reference solids it yields equal the ones written here.
-    Each ``[[reference_solid]]`` emits its scalar fields and inline
-    ``kpoint_spec`` first, then its ``[[reference_solid.entry]]``
-    sub-tables, each followed by its
+    the manifest it yields equals the one written here.  The
+    database-wide ``[characterization]`` recipe is emitted first
+    (after ``schema_version``), then each ``[[reference_solid]]``
+    emits its scalar fields and inline ``kpoint_spec``, then its
+    ``[[reference_solid.entry]]`` sub-tables, each followed by its
     ``[[reference_solid.entry.fingerprint]]`` sub-tables -- the
     order TOML requires (a table's own keys before any of its
     sub-tables).  Blank lines separate blocks for readability.
 
-    A ``label`` is emitted only when present (an absent label means
-    "derive it at harvest", DESIGN 5.2.1), and ``preferred`` is
-    emitted only when true (the schema reads an absent flag as
-    false), so the common case stays uncluttered.
+    Customization fields are emitted only when set, since every one
+    is optional (DESIGN 5.2.2): ``element`` / ``atom_site`` /
+    ``description`` / ``label`` are emitted only when not ``None``,
+    and ``default`` only when true (an absent flag reads as false).
+    A per-solid ``source_description`` is emitted only when present.
+    The ``preferred`` flag is never serialized: it is recovered
+    from the block a declaration lands in (``True`` for a
+    ``[characterization]`` record, ``False`` for a per-entry one),
+    so the writer emits no ``preferred`` key anywhere.
     """
 
     lines = [_field("schema_version", manifest.schema_version)]
+
+    # The database-wide preferred recipe (DESIGN 5.7).  Each method
+    #   is its own [[characterization.fingerprint]] sub-table; the
+    #   preferred flag is structural, so it is never written.
+    if manifest.characterization:
+        lines.append("")
+        lines.append("[characterization]")
+        for fingerprint in manifest.characterization:
+            lines.append("[[characterization.fingerprint]]")
+            lines.append(_field("method", fingerprint.method))
+            lines.append(_field("sub_spec", fingerprint.sub_spec))
 
     for solid in manifest.reference_solids:
         lines.append("")
@@ -751,14 +812,24 @@ def format_manifest(manifest: CurationManifest) -> str:
             _field("kpoint_integration", solid.kpoint_integration))
         lines.append(_field("kpoint_spec", solid.kpoint_spec))
         lines.append(_field("scf_threshold", solid.scf_threshold))
+        if solid.source_description is not None:
+            lines.append(_field("source_description",
+                                solid.source_description))
 
         for entry in solid.entries:
             lines.append("")
             lines.append("[[reference_solid.entry]]")
-            lines.append(_field("element", entry.element))
-            lines.append(_field("atom_site", entry.atom_site))
-            lines.append(_field("default", entry.default))
-            lines.append(_field("description", entry.description))
+            # Every customization field is optional (DESIGN 5.2.2),
+            #   so each is emitted only when the entry sets it.
+            if entry.element is not None:
+                lines.append(_field("element", entry.element))
+            if entry.atom_site is not None:
+                lines.append(_field("atom_site", entry.atom_site))
+            if entry.default:
+                lines.append(_field("default", entry.default))
+            if entry.description is not None:
+                lines.append(
+                    _field("description", entry.description))
             if entry.label is not None:
                 lines.append(_field("label", entry.label))
 
@@ -769,8 +840,6 @@ def format_manifest(manifest: CurationManifest) -> str:
                 lines.append(_field("method", fingerprint.method))
                 lines.append(
                     _field("sub_spec", fingerprint.sub_spec))
-                if fingerprint.preferred:
-                    lines.append("preferred = true")
 
     return "\n".join(lines) + "\n"
 
