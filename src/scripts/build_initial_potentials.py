@@ -338,6 +338,10 @@ def build_isolated_entry(pdb_root: str, elem: str, commit: str,
         alpha_min=pot.alpha_min,
         alpha_max=pot.alpha_max,
         coefficients=coefficients,
+        # A single observed potential: the running mean is just
+        # this potential, its spread is zero, and the dedup
+        # counts start at 1 (DESIGN 5.2.3).
+        coefficient_std=[0.0] * pot.num_gaussians,
         alphas=alphas,
         provenance={
             "source": "atomSCF",
@@ -1516,6 +1520,11 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                 alpha_min=min(alphas),
                 alpha_max=max(alphas),
                 coefficients=coefficients,
+                # A freshly harvested atom seeds the running mean
+                # with its own potential, a zero spread, and unit
+                # dedup counts; the insert-or-merge of the B phase
+                # (C88) updates all four on a duplicate.
+                coefficient_std=[0.0] * len(coefficients),
                 alphas=alphas,
                 provenance=make_imago_provenance(
                     imago_commit, timestamp, ref, spec.atom_site,

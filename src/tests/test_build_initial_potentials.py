@@ -958,12 +958,12 @@ class TestRefreshIsolatedEntries:
         seed = ipdb.ElementDatabase(2, "Au", 79.0, 20.0, 1.0)
         seed.potentials.append(ipdb.PotentialEntry(
             "isolated", False, "old iso", 1, 0.15, 1.0e8,
-            [9.0], [0.15],
+            [9.0], [0.0], [0.15],
             {"source": "atomSCF", "commit": "old",
              "generated_at": "old"}))
         seed.potentials.append(ipdb.PotentialEntry(
             "default_solid", True, "Au bulk", 1, 0.15, 1.0e8,
-            [0.5], [0.15],
+            [0.5], [0.0], [0.15],
             {"source": "Imago", "commit": "old",
              "generated_at": "old", "reference_id": "au_fcc",
              "atom_site": 1, "kpoint_spec": "k",

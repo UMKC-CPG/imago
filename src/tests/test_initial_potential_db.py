@@ -113,15 +113,16 @@ def _isolated_entry() -> PotentialEntry:
     """
 
     return PotentialEntry(
-        label         = "isolated",
-        default       = False,
-        description   = "Isolated Au atom from atomSCF.",
-        num_gaussians = 3,
-        alpha_min     = 1.0e-3,
-        alpha_max     = 1.0e+2,
-        coefficients  = [1.0, 2.0, 3.0],
-        alphas        = [1.0e-3, 1.0e-1, 1.0e+2],
-        provenance    = _atomscf_provenance(),
+        label           = "isolated",
+        default         = False,
+        description     = "Isolated Au atom from atomSCF.",
+        num_gaussians   = 3,
+        alpha_min       = 1.0e-3,
+        alpha_max       = 1.0e+2,
+        coefficients    = [1.0, 2.0, 3.0],
+        coefficient_std = [0.0, 0.0, 0.0],
+        alphas          = [1.0e-3, 1.0e-1, 1.0e+2],
+        provenance      = _atomscf_provenance(),
     )
 
 
@@ -133,15 +134,16 @@ def _default_solid_entry() -> PotentialEntry:
     """
 
     return PotentialEntry(
-        label         = "default_solid",
-        default       = True,
-        description   = "Au in fcc bulk (Fm-3m).",
-        num_gaussians = 3,
-        alpha_min     = 1.0e-3,
-        alpha_max     = 1.0e+2,
-        coefficients  = [0.1, 0.2, 0.3],
-        alphas        = [1.0e-3, 1.0e-1, 1.0e+2],
-        provenance    = _imago_provenance(),
+        label           = "default_solid",
+        default         = True,
+        description     = "Au in fcc bulk (Fm-3m).",
+        num_gaussians   = 3,
+        alpha_min       = 1.0e-3,
+        alpha_max       = 1.0e+2,
+        coefficients    = [0.1, 0.2, 0.3],
+        coefficient_std = [0.0, 0.0, 0.0],
+        alphas          = [1.0e-3, 1.0e-1, 1.0e+2],
+        provenance      = _imago_provenance(),
     )
 
 
@@ -369,7 +371,7 @@ class TestRule3RequiredFieldsPresent:
         path = _path_for(tmp_path, "Au")
         save(_valid_db("Au"), path)
         text = open(path).read().replace(
-            "description   = \"Isolated Au atom from "
+            "description     = \"Isolated Au atom from "
             "atomSCF.\"\n", "", 1)
         _write_toml(path, text)
         with pytest.raises(ValueError) as excinfo:
@@ -423,7 +425,7 @@ class TestRule3RequiredFieldsPresent:
 
 class TestRule4LengthConsistency:
     """Rule 4: ``len(coefficients) == len(alphas) ==
-    num_gaussians`` for every entry.
+    len(coefficient_std) == num_gaussians`` for every entry.
     """
 
     def test_coefficients_too_short_raises(self, tmp_path):
@@ -437,7 +439,7 @@ class TestRule4LengthConsistency:
             load(path)
         msg = str(excinfo.value)
         assert "isolated" in msg
-        assert "coefficients/alphas length" in msg
+        assert "coefficients/alphas/coefficient_std length" in msg
         assert "num_gaussians" in msg
 
     def test_alphas_too_short_raises(self, tmp_path):
@@ -447,8 +449,107 @@ class TestRule4LengthConsistency:
         save(db, path)
         with pytest.raises(ValueError) as excinfo:
             load(path)
-        assert "coefficients/alphas length" in str(
+        assert "coefficients/alphas/coefficient_std length" in str(
             excinfo.value)
+
+
+class TestDedupStorageFields:
+    """The dedup-storage fields (DESIGN 5.2.3): coefficient_std
+    is a required per-coefficient array length-checked under
+    rule 4; multiplicity and model_count are optional integers
+    that default to 1 and must be >= 1.  The emitter always
+    writes all three, so a regenerated file is self-describing.
+    """
+
+    def test_missing_coefficient_std_raises(self, tmp_path):
+        # A [[potential]] block that omits coefficient_std fires
+        # the rule-3 missing-field check, naming the field so the
+        # curator can see exactly what the producer failed to
+        # emit.
+        path = _path_for(tmp_path, "Au")
+        text = (
+            "schema_version  = 2\n"
+            "element_symbol  = \"Au\"\n"
+            "nuclear_z       = 79\n"
+            "nuclear_alpha   = 0.4\n"
+            "covalent_radius = 1.0\n"
+            "\n"
+            "[[potential]]\n"
+            "label         = \"isolated\"\n"
+            "default       = true\n"
+            "description   = \"x\"\n"
+            "num_gaussians = 1\n"
+            "alpha_min     = 1.0e-3\n"
+            "alpha_max     = 1.0e+2\n"
+            "coefficients  = [1.0]\n"
+            "alphas        = [1.0]\n"
+            "\n"
+            "[potential.provenance]\n"
+            "source       = \"atomSCF\"\n"
+            "commit       = \"x\"\n"
+            "generated_at = \"x\"\n"
+        )
+        _write_toml(path, text)
+        with pytest.raises(
+                ValueError,
+                match="missing required field: coefficient_std"):
+            load(path)
+
+    def test_coefficient_std_wrong_length_raises(self, tmp_path):
+        # coefficient_std must match num_gaussians like the other
+        # per-coefficient arrays (rule 4).
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        db.potentials[0].coefficient_std = [0.0, 0.0]   # n = 3
+        save(db, path)
+        with pytest.raises(ValueError) as excinfo:
+            load(path)
+        msg = str(excinfo.value)
+        assert "isolated" in msg
+        assert "coefficients/alphas/coefficient_std length" in msg
+
+    def test_counts_default_to_one_when_absent(self, tmp_path):
+        # multiplicity and model_count are optional; a file that
+        # omits them -- a hand-trimmed or older file -- loads with
+        # each defaulting to 1.
+        path = _path_for(tmp_path, "Au")
+        save(_valid_db("Au"), path)
+        text = open(path).read()
+        text = text.replace("multiplicity    = 1\n", "")
+        text = text.replace("model_count     = 1\n", "")
+        _write_toml(path, text)
+        db = load(path)
+        for entry in db.potentials:
+            assert entry.multiplicity == 1
+            assert entry.model_count == 1
+
+    def test_multiplicity_below_one_raises(self, tmp_path):
+        path = _path_for(tmp_path, "Au")
+        save(_valid_db("Au"), path)
+        text = open(path).read().replace(
+            "multiplicity    = 1\n",
+            "multiplicity    = 0\n", 1)
+        _write_toml(path, text)
+        with pytest.raises(
+                ValueError,
+                match="multiplicity and model_count must be >= 1"):
+            load(path)
+
+    def test_dedup_fields_round_trip(self, tmp_path):
+        # The non-default values of a merged entry (a non-zero
+        # spread and counts above 1) survive save -> load.
+        path = _path_for(tmp_path, "Au")
+        db = _valid_db("Au")
+        merged = db.potentials[1]                # default_solid
+        merged.coefficient_std = [0.05, 0.10, 0.15]
+        merged.multiplicity = 7
+        merged.model_count = 3
+        save(db, path)
+        reloaded = lookup(load(path), "default_solid")
+        assert reloaded.coefficient_std == pytest.approx(
+            [0.05, 0.10, 0.15])
+        assert reloaded.multiplicity == 7
+        assert reloaded.model_count == 3
 
 
 class TestRule5LabelUniqueness:
@@ -632,18 +733,24 @@ class TestEmitterFormat:
         path = _path_for(tmp_path, "Au")
         save(_valid_db("Au"), path)
         text = open(path).read()
-        # Body-block width is the max over body keys plus the
-        # two array keys: max(5, 11, 13, 9, 9, 12, 6) = 13.
-        # "label" (5) -> 8 spaces of padding before " = ".
-        assert "label         = \"isolated\"\n" in text
+        # Body-block width is the max over the scalar body keys
+        # and the array keys; "coefficient_std" (15) is now the
+        # widest, so every "=" aligns one space past column 15.
+        # "label" (5) -> 10 spaces of padding before " = ".
+        assert "label           = \"isolated\"\n" in text
         # The v2 `default` flag slots right after the label and
         # aligns at the same width; isolated is not the default.
-        assert "default       = false\n" in text
-        # "num_gaussians" (13) -> no padding before " = ".
-        assert "num_gaussians = 3\n" in text
-        # The array openers align with the rest of the body.
-        assert "coefficients  = [\n" in text
-        assert "alphas        = [\n" in text
+        assert "default         = false\n" in text
+        # The dedup counts emit as scalars in the body block.
+        assert "multiplicity    = 1\n" in text
+        assert "model_count     = 1\n" in text
+        # "num_gaussians" (13) -> 2 spaces of padding before " = ".
+        assert "num_gaussians   = 3\n" in text
+        # The array openers align with the rest of the body;
+        # "coefficient_std" (15) needs no padding.
+        assert "coefficients    = [\n" in text
+        assert "coefficient_std = [\n" in text
+        assert "alphas          = [\n" in text
 
     def test_provenance_alignment_grows_for_imago(
             self, tmp_path):
@@ -770,11 +877,13 @@ class TestRoundTrip:
         db = _valid_db("Au")
         db.potentials[0].num_gaussians = len(awkward)
         db.potentials[0].coefficients = list(awkward)
+        db.potentials[0].coefficient_std = list(awkward)
         db.potentials[0].alphas       = list(awkward)
         # Match the other entry to the same length so it
         # remains valid (rule 4).
         db.potentials[1].num_gaussians = len(awkward)
         db.potentials[1].coefficients = list(awkward)
+        db.potentials[1].coefficient_std = list(awkward)
         db.potentials[1].alphas       = list(awkward)
 
         save(db, path)
@@ -785,6 +894,11 @@ class TestRoundTrip:
             assert recovered == original
         for original, recovered in zip(
                 awkward, baseline_entry.alphas):
+            assert recovered == original
+        # coefficient_std rides the same multi-line array path,
+        # so the awkward doubles must round-trip there too.
+        for original, recovered in zip(
+                awkward, baseline_entry.coefficient_std):
             assert recovered == original
 
     def test_round_trip_provenance_full(self, tmp_path):
@@ -836,8 +950,8 @@ class TestRoundTrip:
             label="default_solid", default=True,
             description="Au bulk.", num_gaussians=2,
             alpha_min=1.0, alpha_max=2.0,
-            coefficients=[0.5, 0.3], alphas=[1.0, 2.0],
-            provenance=provenance))
+            coefficients=[0.5, 0.3], coefficient_std=[0.0, 0.0],
+            alphas=[1.0, 2.0], provenance=provenance))
 
         path = _path_for(tmp_path, "Au")
         save(db, path)
@@ -904,7 +1018,7 @@ class TestRule7DefaultTag:
         path = _path_for(tmp_path, "Au")
         save(_valid_db("Au"), path)
         text = open(path).read().replace(
-            "default       = false\n", "", 1)
+            "default         = false\n", "", 1)
         _write_toml(path, text)
         with pytest.raises(ValueError) as excinfo:
             load(path)
