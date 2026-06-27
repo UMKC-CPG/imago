@@ -3835,6 +3835,15 @@ so the regeneration becomes a deterministic
 function of (manifest, structure files, Imago
 build).
 
+To keep that function pure, the producer **regenerates**
+rather than edits: each run resets every affected element
+file to a single fresh `"isolated"` baseline (rebuilt from
+the current `pot1`/`coeff1`), discarding all previously
+harvested solid entries, then re-harvests from the manifest.
+A solid dropped from the manifest therefore leaves no orphan
+entry behind, and re-running cannot double-count a dedup
+entry's `multiplicity`/`model_count` (5.2.3).
+
 **What it contains** (per the schema sketched
 below): a database-wide `[characterization]`
 recipe (the fingerprint sub_specs, 5.2 rule 11);

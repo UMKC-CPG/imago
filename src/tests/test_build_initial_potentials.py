@@ -728,26 +728,45 @@ class TestRule11ManifestPreferredSubspec:
         assert methods == {"bispectrum", "reduce"}
 
 
-def test_harvest_fingerprints_stamps_preferred(tmp_path):
-    """The harvested FingerprintRecord carries the declaration's
-    preferred flag through to the on-disk record (DESIGN 5.6.5)."""
+def test_harvest_fingerprints_recipe_and_override(tmp_path):
+    """Every environment harvests the database-wide [characterization]
+    recipe (preferred) plus any per-entry override (non-preferred);
+    the preferred flag rides through onto each FingerprintRecord
+    (DESIGN 5.7 / 5.6.5)."""
     dat_skl = tmp_path / "datSkl.map"
     dat_skl.write_text("DAT SKEL ELEM SPECIES TYPE\n"
                        "  2    1   Si       1    1\n"
                        "  1    2   O        1    1\n")
     result_toml = {"outputs": {"datSkl_map": str(dat_skl)}}
-    sub_spec = {"twoj1": 4, "twoj2": 4, "cutoff": 9.0}
+
+    # Both sub_specs use twoj2 = 4 (5 descriptor components) but
+    #   differ in twoj1, so each has its own dispatched loen unit.
+    recipe_spec = {"twoj1": 6, "twoj2": 4, "cutoff": 9.0}
+    override_spec = {"twoj1": 4, "twoj2": 4, "cutoff": 9.0}
+    rows = ("1 O  1 1 1   9 9 9 9 9   0\n"
+            "2 Si 1 1 2   1 2 3 4 5   0\n")
+    # Each bispectrum sub_spec has its own dispatched loen unit.
+    _write_loen_descriptor(tmp_path, "au_fcc", recipe_spec, rows)
     flight = _write_loen_descriptor(
-        tmp_path, "au_fcc", sub_spec,
-        "1 O  1 1 1   9 9 9 9 9   0\n"
-        "2 Si 1 1 2   1 2 3 4 5   0\n")
+        tmp_path, "au_fcc", override_spec, rows)
+
+    characterization = [ManifestFingerprint(
+        method="bispectrum", sub_spec=recipe_spec, preferred=True)]
     spec = ReferenceEntry(
         element="Si", atom_site=1, label="t", default=True,
         description="d",
         fingerprints=[ManifestFingerprint(
-            method="bispectrum", sub_spec=sub_spec, preferred=True)])
-    records = harvest_fingerprints(flight, _ref(), spec, result_toml)
+            method="bispectrum", sub_spec=override_spec)])
+    records = harvest_fingerprints(
+        flight, _ref(), spec, result_toml, characterization)
+
+    assert len(records) == 2
+    # The [characterization] record comes first and is preferred; the
+    #   per-entry override follows and is not.
+    assert records[0].sub_spec == recipe_spec
     assert records[0].preferred is True
+    assert records[1].sub_spec == override_spec
+    assert records[1].preferred is False
 
 
 # ============================================================
@@ -997,16 +1016,17 @@ class TestRefreshIsolatedEntries:
         assert ipdb.baseline(reloaded).label == "isolated"
         assert ipdb.default_entry(reloaded).label == "isolated"
 
-    def test_existing_curated_entry_preserved(self, tmp_path):
-        # An existing file with a curated default_solid entry
-        # keeps it; only the isolated entry is rebuilt, and its
-        # default flag follows the manifest (false here, since
-        # the manifest curates Au's default).
+    def test_regenerate_drops_prior_curated_entries(self, tmp_path):
+        # REGENERATE (DESIGN 5.7): the refresh resets each element file
+        # to a single fresh isolated baseline, dropping any previously
+        # harvested solid entries; the harvest phase re-adds this run's
+        # entries afterward.  So a prior default_solid does NOT survive
+        # the refresh -- the file is rebuilt, not edited.
         root = str(tmp_path)
         _make_element(root, "au",
                       [1.0, 2.0, 3.0], [0.15, 1.5, 1.0e8])
         # Seed a valid v2 file: isolated (non-default) plus a
-        # curated default_solid (default).
+        # previously harvested default_solid (default).
         seed = ipdb.ElementDatabase(2, "Au", 79.0, 20.0, 1.0)
         seed.potentials.append(ipdb.PotentialEntry(
             "isolated", False, "old iso", 1, 0.15, 1.0e8,
@@ -1025,16 +1045,18 @@ class TestRefreshIsolatedEntries:
         dbs = refresh_isolated_entries(
             root, _manifest_curating_au(), "new", "now")
         db = dbs["au"]
-        labels = sorted(e.label for e in db.potentials)
-        assert labels == ["default_solid", "isolated"]
-        # The curated entry survived untouched.
-        assert ipdb.lookup(db, "default_solid").default is True
-        # The isolated entry was rebuilt from current pot1/coeff1
-        # (3 terms, not the seed's 1) and is no longer default.
+        # Only the fresh isolated baseline remains; the prior
+        #   default_solid was dropped (the harvest re-adds it).
+        assert [e.label for e in db.potentials] == ["isolated"]
+        # That baseline was rebuilt from current pot1/coeff1 (3 terms,
+        #   not the seed's 1) with the new commit.
         iso = ipdb.lookup(db, "isolated")
         assert iso.num_gaussians == 3
-        assert iso.default is False
         assert iso.provenance["commit"] == "new"
+        # is_isolated_default_for(au) is False because the manifest
+        #   curates Au's default (re-added at harvest), so the rebuilt
+        #   baseline is not the default at this refresh stage.
+        assert iso.default is False
 
 
 # ============================================================
@@ -1211,7 +1233,8 @@ def test_harvest_fingerprints_no_declarations_is_empty():
     #   result_toml is not even read.
     entry = _ref().entries[0]
     assert entry.fingerprints == []
-    assert harvest_fingerprints(None, _ref(), entry, {}) == []
+    # Empty recipe and no per-entry override -> nothing to harvest.
+    assert harvest_fingerprints(None, _ref(), entry, {}, []) == []
 
 
 def _fake_two_atom_structure():
@@ -1268,11 +1291,13 @@ def test_harvest_fingerprints_reduce(tmp_path, monkeypatch):
     spec = ReferenceEntry(
         element="Si", atom_site=1, label="t", default=True,
         description="d", fingerprints=[_REDUCE_DECL])
-    records = harvest_fingerprints(None, _ref(), spec, result_toml)
+    # An empty recipe, so only the per-entry override is harvested.
+    records = harvest_fingerprints(None, _ref(), spec, result_toml, [])
 
     assert len(records) == 1
     record = records[0]
     assert record.method == "reduce"
+    assert record.preferred is False     # per-entry overrides aren't
     assert record.sub_spec == _REDUCE_DECL.sub_spec
     # Si at site 1 sees a single O neighbor at 2.0 Angstrom; the
     #   stored shell_code is element-only and lowercased.
@@ -1323,10 +1348,11 @@ def test_harvest_fingerprints_loen_side(tmp_path):
         description="d",
         fingerprints=[ManifestFingerprint(
             method="bispectrum", sub_spec=sub_spec)])
-    records = harvest_fingerprints(flight, _ref(), spec, result_toml)
+    records = harvest_fingerprints(flight, _ref(), spec, result_toml, [])
 
     assert len(records) == 1
     assert records[0].method == "bispectrum"
+    assert records[0].preferred is False    # per-entry overrides aren't
     assert records[0].sub_spec == sub_spec
     # atom_site 1 -> dat row 2 (Si) -> that row's five components.
     assert records[0].payload == {
@@ -1353,7 +1379,7 @@ def test_harvest_fingerprints_loen_guards_numbering_desync(tmp_path):
         fingerprints=[ManifestFingerprint(
             method="bispectrum", sub_spec=sub_spec)])
     with pytest.raises(ValueError):
-        harvest_fingerprints(flight, _ref(), spec, result_toml)
+        harvest_fingerprints(flight, _ref(), spec, result_toml, [])
 
 
 def test_harvest_fingerprints_guards_numbering_desync(
@@ -1374,7 +1400,7 @@ def test_harvest_fingerprints_guards_numbering_desync(
         element="Au", atom_site=1, label="t", default=True,
         description="d", fingerprints=[_REDUCE_DECL])
     with pytest.raises(ValueError):
-        harvest_fingerprints(None, _ref(), spec, result_toml)
+        harvest_fingerprints(None, _ref(), spec, result_toml, [])
 
 
 def test_materialize_structure_resolves_local_path(tmp_path):
@@ -1915,7 +1941,12 @@ def test_build_initial_potentials_harvests_curated_entry(
     build_initial_potentials(
         manifest_path, pdb_root, data_root,
         dispatch_fn=fake_dispatch,
-        extract_fn=lambda result, site: ([0.5, 0.3], [1.0, 2.0]))
+        extract_fn=lambda result, site: ([0.5, 0.3], [1.0, 2.0]),
+        # Site 1 is Au (cross-checks the entry's element); the
+        #   fingerprint harvest (recipe + override) needs a live run,
+        #   so it is stubbed away here.
+        identity_fn=lambda result: {1: ("au", 1, 1)},
+        fingerprint_fn=lambda *args, **kwargs: [])
 
     # The Au database gained the curated default_solid entry.
     database = ipdb.load(element_path(pdb_root, "au"),
@@ -1991,7 +2022,8 @@ def test_build_initial_potentials_derives_label_at_harvest(
         manifest_path, pdb_root, data_root,
         dispatch_fn=fake_dispatch,
         extract_fn=lambda result, site: ([0.5, 0.3], [1.0, 2.0]),
-        identity_fn=lambda result: {1: ("au", 1, 1)})
+        identity_fn=lambda result: {1: ("au", 1, 1)},
+        fingerprint_fn=lambda *args, **kwargs: [])
 
     database = ipdb.load(element_path(pdb_root, "au"),
                          known_methods=None)

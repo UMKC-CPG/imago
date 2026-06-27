@@ -280,20 +280,24 @@ def is_isolated_default_for(elem: str,
 
     The isolated baseline carries the per-element file's
     ``default = true`` tag exactly when the manifest declares no
-    other default-tagged entry for the element (PSEUDOCODE 11.4
-    ``is_isolated_default_for``).  Manifest rule 7 forbids zero
-    defaults for any element that *appears* in the manifest, so a
-    manifest entry with ``default = true`` always wins over the
-    baseline; an element absent from the manifest has only its
-    isolated entry, which must therefore be the default.  Element
-    symbols are compared case-insensitively because the manifest
-    uses proper case (``Au``) while directory names are lower
-    case (``au``).
+    other default-tagged customization for the element (PSEUDOCODE
+    11.4 ``is_isolated_default_for``).  A ``default = true``
+    customization that names this element wins over the baseline; an
+    element no such customization names falls back to its isolated
+    entry as the default.  A customization may omit its ``element``
+    (DESIGN 5.7 rule 3) -- the harvest attributes it once the run
+    reveals the site's element -- so a default customization without
+    an element cannot be credited to any element here and is skipped;
+    the interim build honours only element-named default
+    customizations.  Element symbols are compared case-insensitively
+    because the manifest uses proper case (``Au``) while directory
+    names are lower case (``au``).
     """
 
     for solid in manifest.reference_solids:
         for entry in solid.entries:
-            if (entry.element.lower() == elem.lower()
+            if (entry.element is not None
+                    and entry.element.lower() == elem.lower()
                     and entry.default):
                 return False
     return True
@@ -371,22 +375,27 @@ def refresh_isolated_entries(pdb_root: str,
                              commit: str, timestamp: str,
                              elements: list[str] | None = None
                              ) -> dict[str, ipdb.ElementDatabase]:
-    """Step 1 of the pipeline: rebuild every isolated baseline.
+    """Step 1 of the pipeline: reset every element database to a
+    fresh isolated baseline (the REGENERATE model, DESIGN 5.7).
 
     For each element (all element directories under ``pdb_root``,
     or just ``elements`` when given), load the existing
     ``s_gaussian_pot.toml`` if present or create a fresh
     :class:`initial_potential_db.ElementDatabase` from the
-    element's ``pot1`` scalars, then drop and re-insert the
-    ``"isolated"`` entry rebuilt from the current pot1/coeff1.
-    Returns the in-memory databases keyed by element directory
-    name; the caller saves them (see :func:`save_databases`).
+    element's ``pot1`` scalars, then **discard all of its prior
+    entries** and seed it with a single ``"isolated"`` entry rebuilt
+    from the current pot1/coeff1.  The harvest phase appends this
+    run's solid entries afterward, so the produced file is a pure
+    function of the current pot1/coeff1 and the manifest -- no entry
+    from a removed solid lingers, and re-running cannot double-count
+    a dedup entry's multiplicity.  Returns the in-memory databases
+    keyed by element directory name; the caller saves them (see
+    :func:`save_databases`).
 
     Implements PSEUDOCODE 11.4 step 1.  The existing-file load
     passes ``known_methods=None`` (rule 9 is skipped) because the
-    matcher registry does not exist until C54; any fingerprint
-    records already in the file are preserved untouched -- only
-    the isolated entry is rewritten here.
+    matcher registry is not threaded in here; the loaded entries are
+    dropped regardless, so the file is rebuilt rather than edited.
     """
 
     if elements is None:
@@ -408,13 +417,17 @@ def refresh_isolated_entries(pdb_root: str,
                 covalent_radius=pot.covalent_radius,
                 potentials=[])
 
-        # Drop any prior isolated entry and re-insert a fresh one
-        # at the front so atomSCF refreshes always propagate.
-        database.potentials = [
-            entry for entry in database.potentials
-            if entry.label != "isolated"]
-        database.potentials.insert(0, build_isolated_entry(
-            pdb_root, elem, commit, timestamp, manifest))
+        # REGENERATE (DESIGN 5.7): drop *every* prior entry -- the
+        # isolated baseline and all previously harvested solid
+        # entries alike -- and start the file from a single fresh
+        # isolated baseline.  Rebuilding from scratch each run keeps
+        # the database a pure function of the current pot1/coeff1 and
+        # the manifest: a solid dropped from the manifest leaves no
+        # orphan, and re-running never inflates the dedup
+        # multiplicity/model_count of an entry (DESIGN 5.2.3).  The
+        # harvest phase then appends this run's solid entries.
+        database.potentials = [build_isolated_entry(
+            pdb_root, elem, commit, timestamp, manifest)]
         databases[elem] = database
 
     return databases
@@ -925,33 +938,38 @@ def read_skeleton_to_dat_map(result_toml: dict
 
 
 def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
-                         spec: ReferenceEntry,
-                         result_toml: dict) -> list:
-    """Build one ``FingerprintRecord`` per declared fingerprint
+                         spec: ReferenceEntry, result_toml: dict,
+                         characterization: list) -> list:
+    """Build the ``FingerprintRecord`` list for one environment
     (PSEUDOCODE 11.4 ``harvestFingerprints``).
 
-    An entry that declares no fingerprints harvests nothing and
-    never reads the structure -- the common case so far.  Otherwise,
-    Python-side matchers (currently only ``reduce``) compute in
-    process from the run's *expanded* full-cell structure
-    (``outputs["structure"]``), which carries the geometry the shells
-    need and the run's numbering; ``atom_site`` (a skeleton index) is
-    mapped to a structure row through ``datSkl.map`` (the same map
-    :func:`extract_potential` reads).  The neighbor multiset is
-    element-only, so the stored fingerprint transfers across
-    structures (DESIGN 5.2).
+    Every environment harvests the database-wide ``[characterization]``
+    preferred recipe (one ``sub_spec`` per method, each
+    ``preferred = true``) plus any rare per-entry override the
+    customization added (extra ``preferred = false`` ``sub_spec``\\ s,
+    DESIGN 5.7).  Each declaration already carries its ``preferred``
+    flag -- ``True`` for a characterization record, ``False`` for an
+    override -- so the two lists simply concatenate; a curator is
+    expected to give overrides ``sub_spec``\\ s distinct from the
+    recipe.  An environment with an empty recipe and no override
+    harvests nothing and never reads the structure.
 
     Each declaration is dispatched by its matcher's family.  Python-side
     matchers (``reduce``) compute in process from the run's *expanded*
-    full-cell structure (``outputs["structure"]``); Fortran-side
+    full-cell structure (``outputs["structure"]``), which carries the
+    geometry the shells need and the run's numbering; Fortran-side
     matchers (``bispectrum``) read the descriptor of the
     ``-loen -scf no`` unit ``build_loen_units`` already dispatched for
     this solid (:func:`harvest_loen_fingerprint`), which is why
     ``flight`` and ``ref`` are needed.  ``atom_site`` (a skeleton index)
     is mapped to the run's dat numbering through ``datSkl.map`` once and
-    shared by both families."""
+    shared by both families.  The neighbor multiset is element-only, so
+    the stored fingerprint transfers across structures (DESIGN 5.2)."""
 
-    if not spec.fingerprints:
+    # The preferred recipe applies to every environment; the entry's
+    #   own fingerprints (if any) ride along as non-preferred overrides.
+    declarations = list(characterization) + list(spec.fingerprints)
+    if not declarations:
         return []
 
     # atom_site is a skeleton index; the run's structure and descriptor
@@ -965,7 +983,7 @@ def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
     #   declaration needs it -- a loen-only entry never touches it -- and
     #   then only once, sized to the largest cutoff those declarations
     #   request (each matcher trims to its own sub_spec cutoff).
-    python_decls = [declaration for declaration in spec.fingerprints
+    python_decls = [declaration for declaration in declarations
                     if not MATCHERS[declaration.method]().needs_loen_run]
     structure = None
     if python_decls:
@@ -986,7 +1004,7 @@ def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
                 f"{dat_atom} is {structure_element!r}; numbering desync")
 
     records = []
-    for declaration in spec.fingerprints:
+    for declaration in declarations:
         matcher = MATCHERS[declaration.method]()
         if matcher.needs_loen_run:
             payload = harvest_loen_fingerprint(
@@ -1294,6 +1312,25 @@ def assemble_entry_label(reference_id: str, element: str,
             f"-t{type_number}-a{atom_site}")
 
 
+def compose_auto_description(source_description: str | None,
+                             reference_id: str, element: str,
+                             species: int, atom_site: int) -> str:
+    """Compose an entry's description when the customization omits one
+    (DESIGN 5.7): the reference solid's ``source_description``,
+    qualified by the harvested site's species and 1-based
+    ``atom_site``, so an auto-discovered environment still carries
+    readable prose rather than an empty field.  When the solid has no
+    ``source_description`` either, fall back to the bare species/site
+    identity plus the ``reference_id`` that produced it."""
+
+    symbol = element.capitalize()
+    qualifier = f"{symbol} species {species}, site {atom_site}"
+    if source_description:
+        base = source_description.rstrip().rstrip(".")
+        return f"{base} ({qualifier})."
+    return f"{qualifier}, from reference solid {reference_id}."
+
+
 def make_imago_provenance(commit: str, timestamp: str,
                           ref: ReferenceSolid, atom_site: int,
                           scf_iterations) -> dict[str, Any]:
@@ -1384,7 +1421,8 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                              save_config: bool = False,
                              dispatch_fn=dispatch,
                              extract_fn=extract_potential,
-                             identity_fn=read_site_identity_map
+                             identity_fn=read_site_identity_map,
+                             fingerprint_fn=harvest_fingerprints
                              ) -> list[dict[str, Any]]:
     """The three-phase producer (DESIGN 5.7; PSEUDOCODE 11.4):
     *build* a single combined flight, *dispatch* it through
@@ -1401,12 +1439,14 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     ``save_config`` records the resolved cluster choices beside the
     run.  ``force`` bypasses the run-reuse cache (DESIGN 6.2.5).
 
-    ``dispatch_fn``, ``extract_fn``, and ``identity_fn`` are
-    injected (defaulting to the real kaleidoscope dispatch, the real
-    scfV reader, and the real ``datSkl.map`` reader) so the
+    ``dispatch_fn``, ``extract_fn``, ``identity_fn``, and
+    ``fingerprint_fn`` are injected (defaulting to the real
+    kaleidoscope dispatch, the real scfV reader, the real
+    ``datSkl.map`` reader, and the real fingerprint harvest) so the
     orchestration can be unit-tested with the toolchain seam mocked:
-    end-to-end dispatch, the per-site ``scfV`` read, and the
-    site-identity read all need a live Imago run (C74)."""
+    end-to-end dispatch, the per-site ``scfV`` read, the site-identity
+    read, and the fingerprint harvest (which needs the run's expanded
+    structure and loen descriptor) all need a live Imago run (C74)."""
 
     # Pass the matcher registry so the loader enforces rule 9: every
     #   declared fingerprint method must be a registered matcher (C54).
@@ -1487,35 +1527,71 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             make_run_log_entry(ref, unit, result_toml))
         scf_iterations = result_toml.get("scf_iterations")
 
-        # The site-identity map (datSkl.map) is read at most once per
-        # converged solid, and only if some entry needs a derived
-        # label -- entries that pin an explicit label never touch it.
+        # The site-identity map (datSkl.map) gives every site its
+        # (element, species, type).  It is read once per converged
+        # solid -- the harvest needs it to derive labels and
+        # descriptions and to cross-check each customization's element.
         site_identity: dict[int, tuple[str, int, int]] | None = None
 
+        # Each manifest customization annotates one environment of this
+        # solid (DESIGN 5.7).  In the interim build it must pin its
+        # representative atom_site; the automatic per-environment
+        # discovery (C88) that would fill site-less customizations is
+        # not built yet.
         for spec in ref.entries:
-            elem_key = spec.element.lower()
+            if spec.atom_site is None:
+                # INTERIM (C88): a site-less customization needs the
+                #   environment auto-discovery of the Phase-B storage
+                #   model, which is not built, so it harvests nothing.
+                continue
+            if site_identity is None:
+                site_identity = identity_fn(result_toml)
+            site_element, species, type_number = (
+                site_identity[spec.atom_site])
+
+            # element: an explicit customization element is cross-
+            #   checked against the site; omitted, it is taken from the
+            #   site identity the run discovered (DESIGN 5.7 rule 3).
+            if spec.element is not None:
+                if spec.element.lower() != site_element.lower():
+                    raise ValueError(
+                        f"{ref.reference_id}: customization names "
+                        f"element {spec.element!r} but site "
+                        f"{spec.atom_site} is {site_element!r} in the "
+                        f"converged run")
+                element = spec.element
+            else:
+                element = site_element
+
+            elem_key = element.lower()
             if elem_key not in databases:
                 continue        # filtered out by --element
             coefficients, alphas = extract_fn(
                 result_toml, spec.atom_site)
 
-            # The label is the curator's explicit override when given,
-            # else derived from the run's site identity (DESIGN 5.2.1).
+            # label: the curator's explicit override when given, else
+            #   derived from the run's site identity (DESIGN 5.2.1).
             if spec.label is not None:
                 label = spec.label
             else:
-                if site_identity is None:
-                    site_identity = identity_fn(result_toml)
-                _elem, species, type_number = (
-                    site_identity[spec.atom_site])
                 label = assemble_entry_label(
-                    ref.reference_id, spec.element, species,
+                    ref.reference_id, element, species,
                     type_number, spec.atom_site)
+
+            # description: the explicit override when given, else
+            #   auto-composed from the solid's source_description,
+            #   qualified by the site's species and number (DESIGN 5.7).
+            if spec.description is not None:
+                description = spec.description
+            else:
+                description = compose_auto_description(
+                    ref.source_description, ref.reference_id,
+                    element, species, spec.atom_site)
 
             new_entry = ipdb.PotentialEntry(
                 label=label,
                 default=spec.default,
-                description=spec.description,
+                description=description,
                 num_gaussians=len(coefficients),
                 alpha_min=min(alphas),
                 alpha_max=max(alphas),
@@ -1529,12 +1605,18 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                 provenance=make_imago_provenance(
                     imago_commit, timestamp, ref, spec.atom_site,
                     scf_iterations),
-                fingerprints=harvest_fingerprints(
-                    flight, ref, spec, result_toml))
+                # Every environment harvests the database-wide
+                #   [characterization] recipe (preferred) plus any
+                #   per-entry override (non-preferred).
+                fingerprints=fingerprint_fn(
+                    flight, ref, spec, result_toml,
+                    manifest.characterization))
             database = databases[elem_key]
-            # Replace any prior entry with the same label (manifest
-            # rule 6 makes the only possible prior the same entry
-            # from a previous run).
+            # REGENERATE cleared every prior entry, and within one run
+            #   labels are unique (manifest rule 6; derived labels by
+            #   construction), so replacing by label only collapses a
+            #   same-run duplicate -- the interim insert_or_merge
+            #   (PSEUDOCODE 11.4) before the C88 dedup lands.
             database.potentials = [
                 entry for entry in database.potentials
                 if entry.label != label]

@@ -3793,13 +3793,17 @@ function buildInitialPotentials(manifest_path,
                 nuclear_alpha   = pot1.nuclear_alpha,
                 covalent_radius = pot1.covalent_radius,
                 potentials      = [])
-        # Drop and rebuild the isolated entry so
-        # atomSCF refreshes always propagate.
-        db.potentials = [e for e in db.potentials
-                         if e.label != "isolated"]
-        db.potentials.insert(0,
+        # REGENERATE (DESIGN 5.7): drop EVERY prior entry -- the
+        # isolated baseline and all previously harvested solid
+        # entries alike -- and reseed from one fresh isolated
+        # baseline, so the file is a pure function of the current
+        # pot1/coeff1 and the manifest: no entry from a dropped
+        # solid lingers, and re-running never inflates a dedup
+        # entry's multiplicity/model_count.  The harvest phase
+        # (below) appends this run's solid entries.
+        db.potentials = [
             build_isolated_entry(elem, imago_commit,
-                timestamp, manifest))
+                timestamp, manifest)]
         databases[elem] = db
 
     # Step 1b: per reference solid, materialize the
