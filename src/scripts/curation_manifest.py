@@ -32,7 +32,7 @@ SCF and harvest details are filled in.
 import os
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import initial_potential_db as ipdb
@@ -146,9 +146,14 @@ class ReferenceSolid:
     ``kpoint_integration`` are the (basis, functional, integration)
     sub-model the reference run uses; together they select the
     predictor sub-model (DESIGN 7.6) and are recorded on every
-    produced entry's context.  All four are *required* in the
-    manifest (rule 2): nothing the producer emits depends on an
-    implicit default (VISION Principles 5 and 11).
+    produced entry's context.  These five run settings -- the
+    sub-model triple plus ``kpoint_spec`` and ``scf_threshold`` --
+    are *optional* per solid: an omitted one (``None`` here)
+    inherits the manifest's top-level ``[defaults]`` block (DESIGN
+    5.7).  The loader requires each to be *resolvable* -- present
+    here or in ``[defaults]`` -- and the producer resolves them
+    after load (:func:`resolve_run_settings`), so nothing it emits
+    depends on an implicit default (VISION Principles 5 and 11).
 
     ``source_description`` is an optional one-line, structure-level
     description of the solid (the hint cod_fish reads from the CIF).
@@ -160,14 +165,14 @@ class ReferenceSolid:
 
     reference_id: str
     system_type: str
-    basis: str
-    functional: str
-    kpoint_integration: str
-    kpoint_spec: dict[str, Any]
-    scf_threshold: float
-    cod_id: int | None
-    cod_revision: str | None
-    structure_path: str | None
+    basis: str | None = None
+    functional: str | None = None
+    kpoint_integration: str | None = None
+    kpoint_spec: dict[str, Any] | None = None
+    scf_threshold: float | None = None
+    cod_id: int | None = None
+    cod_revision: str | None = None
+    structure_path: str | None = None
     source_description: str | None = None
     entries: list[ReferenceEntry] = field(default_factory=list)
 
@@ -189,14 +194,104 @@ class CurationManifest:
     declaration here (manifest rule 2), so a loaded manifest always
     carries a recipe; the field defaults to an empty list only for
     a manifest assembled in memory before its recipe is set.
+
+    ``defaults`` is the optional top-level ``[defaults]`` block:
+    the shared run settings (``basis``, ``functional``,
+    ``kpoint_integration``, ``kpoint_spec``, ``scf_threshold``) a
+    solid inherits when it omits them (DESIGN 5.7).  Empty when the
+    manifest names every setting on every solid.
     """
 
     schema_version: int
     manifest_path: str
     characterization: list[ManifestFingerprint] = field(
         default_factory=list)
+    defaults: dict[str, Any] = field(default_factory=dict)
     reference_solids: list[ReferenceSolid] = field(
         default_factory=list)
+
+
+# ============================================================
+#  Shared defaults + run-setting resolution (DESIGN 5.7)
+#
+#  cod_fish and expand_manifest source the default recipe and
+#  [defaults] run settings from here, so the values live in one
+#  place and cannot drift between the two authoring tools.
+# ============================================================
+
+DEFAULT_BASIS = "fb"
+DEFAULT_FUNCTIONAL = "wigner"
+DEFAULT_KPOINT_INTEGRATION = "gaussian"
+DEFAULT_SCF_THRESHOLD = 1.0e-6
+DEFAULT_REDUCE_SUB_SPEC = {
+    "level": 2, "thick": 0.5, "cutoff": 5.0, "tolerance": 0.05}
+DEFAULT_BISPECTRUM_SUB_SPEC = {
+    "twoj1": 8, "twoj2": 8, "cutoff": 9.0}
+
+# The five run settings that may live in the top-level [defaults]
+#   block and be inherited per solid (DESIGN 5.7).  system_type is
+#   NOT among them: it is structure metadata, named per solid.
+RUN_SETTING_KEYS = ("basis", "functional", "kpoint_integration",
+                    "kpoint_spec", "scf_threshold")
+
+
+def default_run_settings() -> dict[str, Any]:
+    """The shared ``[defaults]`` run settings the authoring tools
+    emit (DESIGN 5.7): the full basis, the Wigner functional,
+    Gaussian k-point integration, no fixed k-point density (the
+    producer predicts and verifies it), and the 1e-6 SCF
+    threshold."""
+
+    return {
+        "basis": DEFAULT_BASIS,
+        "functional": DEFAULT_FUNCTIONAL,
+        "kpoint_integration": DEFAULT_KPOINT_INTEGRATION,
+        "kpoint_spec": {},
+        "scf_threshold": DEFAULT_SCF_THRESHOLD,
+    }
+
+
+def default_characterization() -> list[ManifestFingerprint]:
+    """The canonical database-wide preferred recipe (DESIGN 5.7):
+    the settled reduce and bispectrum sub-specs, each its family's
+    single preferred record.  The authoring tools stamp this into
+    the ``[characterization]`` block so the file loads (the block is
+    required, manifest rule 2) and the consumer has one preferred
+    descriptor per family to match against (5.6.5 step 2).  A curator
+    who wants a different recipe edits the emitted block."""
+
+    return [
+        ManifestFingerprint(
+            method="reduce",
+            sub_spec=dict(DEFAULT_REDUCE_SUB_SPEC), preferred=True),
+        ManifestFingerprint(
+            method="bispectrum",
+            sub_spec=dict(DEFAULT_BISPECTRUM_SUB_SPEC),
+            preferred=True)]
+
+
+def resolve_run_settings(solid: ReferenceSolid,
+                         defaults: dict[str, Any]) -> ReferenceSolid:
+    """Return a copy of ``solid`` with every run setting filled in
+    (DESIGN 5.7): a setting the solid left ``None`` inherits the
+    matching ``[defaults]`` value.  The producer resolves each solid
+    once after load so the rest of the pipeline reads fully-populated
+    settings, while the library keeps solids sparse so the writer can
+    emit the compact ``[defaults]``-plus-overrides form.  Every
+    setting is assumed resolvable, which :func:`load_manifest_v2`
+    guarantees (rule 2)."""
+
+    def pick(key: str) -> Any:
+        own = getattr(solid, key)
+        return own if own is not None else defaults.get(key)
+
+    return replace(
+        solid,
+        basis=pick("basis"),
+        functional=pick("functional"),
+        kpoint_integration=pick("kpoint_integration"),
+        kpoint_spec=pick("kpoint_spec"),
+        scf_threshold=pick("scf_threshold"))
 
 
 # ============================================================
@@ -353,6 +448,16 @@ def load_manifest_v2(path: str,
              "database-wide preferred recipe the consumer matches "
              "against)")
 
+    # ----- The optional [defaults] block: the shared run settings
+    # a solid inherits when it omits them (DESIGN 5.7).  Only the
+    # five run-setting keys are meaningful here; any other key is
+    # ignored.  Solids stay sparse (a missing setting is None); the
+    # producer resolves each one against these defaults after load
+    # (resolve_run_settings).
+    raw_defaults = {key: raw["defaults"][key]
+                    for key in RUN_SETTING_KEYS
+                    if key in raw.get("defaults", {})}
+
     seen_ref_ids: set[str] = set()
     seen_element_label: set[tuple[str, str]] = set()
     # elem -> count of default=true customizations (rule 7 load
@@ -363,18 +468,24 @@ def load_manifest_v2(path: str,
     reference_solids: list[ReferenceSolid] = []
 
     for ref in raw.get("reference_solid", []):
-        # ----- Rule 2: required per-solid fields.  The sub-model
-        # triple (basis, functional, kpoint_integration) and
-        # system_type are required alongside the run settings:
-        # they select the guidance sub-model and land on every
-        # produced entry, so nothing emitted rides on an implicit
-        # default (VISION Principles 5 and 11).
-        for field_name in ("reference_id", "system_type", "basis",
-                           "functional", "kpoint_integration",
-                           "kpoint_spec", "scf_threshold"):
+        # ----- Rule 2: required per-solid fields.  reference_id and
+        # system_type are always named per solid.  The five run
+        # settings may be named here or inherited from [defaults]
+        # (DESIGN 5.7), but each must be RESOLVABLE one way or the
+        # other -- they select the guidance sub-model and land on
+        # every produced entry, so nothing emitted rides on an
+        # implicit default (VISION Principles 5 and 11).
+        for field_name in ("reference_id", "system_type"):
             _require(field_name in ref, path,
                      f"manifest rule 2: [[reference_solid]] "
                      f"missing field: {field_name}")
+        for field_name in RUN_SETTING_KEYS:
+            _require(field_name in ref or field_name in raw_defaults,
+                     path,
+                     f"manifest rule 2: [[reference_solid "
+                     f"{ref.get('reference_id', '?')}]] run setting "
+                     f"{field_name} is not resolvable (absent here "
+                     f"and from [defaults])")
 
         rid = ref["reference_id"]
 
@@ -518,14 +629,18 @@ def load_manifest_v2(path: str,
                 description=entry.get("description"),
                 fingerprints=fingerprints))
 
+        # Solids stay SPARSE: a run setting the solid omits is left
+        #   None here and inherited from [defaults] when the producer
+        #   resolves the solid (resolve_run_settings).
         reference_solids.append(ReferenceSolid(
             reference_id=rid,
             system_type=ref["system_type"],
-            basis=ref["basis"],
-            functional=ref["functional"],
-            kpoint_integration=ref["kpoint_integration"],
-            kpoint_spec=dict(ref["kpoint_spec"]),
-            scf_threshold=ref["scf_threshold"],
+            basis=ref.get("basis"),
+            functional=ref.get("functional"),
+            kpoint_integration=ref.get("kpoint_integration"),
+            kpoint_spec=(dict(ref["kpoint_spec"])
+                         if "kpoint_spec" in ref else None),
+            scf_threshold=ref.get("scf_threshold"),
             cod_id=ref.get("cod_id"),
             cod_revision=ref.get("cod_revision"),
             structure_path=ref.get("structure_path"),
@@ -549,6 +664,7 @@ def load_manifest_v2(path: str,
         schema_version=raw["schema_version"],
         manifest_path=os.path.abspath(path),
         characterization=characterization,
+        defaults=raw_defaults,
         reference_solids=reference_solids)
 
 
@@ -780,8 +896,9 @@ def format_manifest(manifest: CurationManifest) -> str:
     The emitted file round-trips through :func:`load_manifest_v2`:
     the manifest it yields equals the one written here.  The
     database-wide ``[characterization]`` recipe is emitted first
-    (after ``schema_version``), then each ``[[reference_solid]]``
-    emits its scalar fields and inline ``kpoint_spec``, then its
+    (after ``schema_version``), then the optional ``[defaults]``
+    run settings, then each ``[[reference_solid]]`` emits its
+    scalar fields and any run settings it overrides, then its
     ``[[reference_solid.entry]]`` sub-tables, each followed by its
     ``[[reference_solid.entry.fingerprint]]`` sub-tables -- the
     order TOML requires (a table's own keys before any of its
@@ -811,6 +928,16 @@ def format_manifest(manifest: CurationManifest) -> str:
             lines.append(_field("method", fingerprint.method))
             lines.append(_field("sub_spec", fingerprint.sub_spec))
 
+    # The shared run settings (DESIGN 5.7), emitted as a top-level
+    #   [defaults] table after the recipe.  Each solid below names
+    #   only the settings it overrides; the rest inherit from here.
+    if manifest.defaults:
+        lines.append("")
+        lines.append("[defaults]")
+        for key in RUN_SETTING_KEYS:
+            if key in manifest.defaults:
+                lines.append(_field(key, manifest.defaults[key]))
+
     for solid in manifest.reference_solids:
         lines.append("")
         lines.append("[[reference_solid]]")
@@ -824,12 +951,20 @@ def format_manifest(manifest: CurationManifest) -> str:
         else:
             lines.append(
                 _field("structure_path", solid.structure_path))
-        lines.append(_field("basis", solid.basis))
-        lines.append(_field("functional", solid.functional))
-        lines.append(
-            _field("kpoint_integration", solid.kpoint_integration))
-        lines.append(_field("kpoint_spec", solid.kpoint_spec))
-        lines.append(_field("scf_threshold", solid.scf_threshold))
+        # Run settings are emitted only when this solid overrides
+        #   them; an omitted (None) one inherits from [defaults].
+        if solid.basis is not None:
+            lines.append(_field("basis", solid.basis))
+        if solid.functional is not None:
+            lines.append(_field("functional", solid.functional))
+        if solid.kpoint_integration is not None:
+            lines.append(_field("kpoint_integration",
+                                solid.kpoint_integration))
+        if solid.kpoint_spec is not None:
+            lines.append(_field("kpoint_spec", solid.kpoint_spec))
+        if solid.scf_threshold is not None:
+            lines.append(
+                _field("scf_threshold", solid.scf_threshold))
         if solid.source_description is not None:
             lines.append(_field("source_description",
                                 solid.source_description))

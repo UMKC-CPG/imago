@@ -19,6 +19,9 @@ from curation_manifest import (
     format_manifest,
     write_manifest,
     load_manifest_v2,
+    default_run_settings,
+    default_characterization,
+    resolve_run_settings,
 )
 
 pytestmark = pytest.mark.unit
@@ -73,16 +76,19 @@ def _si_solid(**overrides) -> ReferenceSolid:
     return ReferenceSolid(**base)
 
 
-def _manifest(*solids, characterization=None) -> CurationManifest:
+def _manifest(*solids, characterization=None,
+              defaults=None) -> CurationManifest:
     """Wrap reference solids in a manifest, defaulting to the
     standard preferred recipe so every round-trip exercises the
-    [characterization] block unless a test overrides it."""
+    [characterization] block unless a test overrides it.
+    ``defaults`` populates the optional [defaults] run settings."""
 
     return CurationManifest(
         schema_version=2, manifest_path="(in memory)",
         characterization=(characterization
                           if characterization is not None
                           else _characterization()),
+        defaults=defaults if defaults is not None else {},
         reference_solids=list(solids))
 
 
@@ -285,3 +291,92 @@ def test_description_with_special_characters_round_trips(tmp_path):
     loaded = _write_and_load(_manifest(solid), tmp_path)
     assert loaded.reference_solids[0].entries[0].description == \
         'Si "diamond"\tphase'
+
+
+# ==============================================================
+#  [defaults] block + run-setting resolution (DESIGN 5.7)
+# ==============================================================
+
+_DEFAULTS = {
+    "basis": "fb", "functional": "wigner",
+    "kpoint_integration": "gaussian",
+    "kpoint_spec": {"shift": [0.0, 0.0, 0.0]},
+    "scf_threshold": 1.0e-6}
+
+
+def _sparse_si(**overrides) -> ReferenceSolid:
+    """A Si solid that inherits every run setting (all None),
+    unless an override pins one."""
+    sparse = dict(basis=None, functional=None,
+                  kpoint_integration=None, kpoint_spec=None,
+                  scf_threshold=None)
+    sparse.update(overrides)
+    return _si_solid(**sparse)
+
+
+def test_defaults_block_round_trips(tmp_path):
+    # A [defaults] block plus a solid that inherits every run
+    #   setting round-trips: the loaded solid stays sparse (None
+    #   where inherited) and the [defaults] survive.
+    original = _sparse_si()
+    loaded = _write_and_load(
+        _manifest(original, defaults=dict(_DEFAULTS)), tmp_path)
+    assert loaded.defaults == _DEFAULTS
+    assert loaded.reference_solids == [original]
+    assert loaded.reference_solids[0].basis is None
+
+
+def test_writer_omits_inherited_settings():
+    # The emitted TOML carries a [defaults] table and the solid
+    #   names none of the inherited run settings.
+    text = format_manifest(
+        _manifest(_sparse_si(), defaults=dict(_DEFAULTS)))
+    assert "[defaults]" in text
+    solid_block = text.split("[[reference_solid]]", 1)[1]
+    for key in ("basis", "functional", "kpoint_integration",
+                "kpoint_spec", "scf_threshold"):
+        assert key not in solid_block
+
+
+def test_per_solid_override_is_emitted(tmp_path):
+    # A solid that overrides one setting keeps just that one; the
+    #   rest still inherit (stay None).
+    loaded = _write_and_load(
+        _manifest(_sparse_si(basis="eb"),
+                  defaults=dict(_DEFAULTS)), tmp_path)
+    solid = loaded.reference_solids[0]
+    assert solid.basis == "eb"
+    assert solid.functional is None
+
+
+def test_resolve_run_settings_fills_from_defaults():
+    # An inherited setting resolves from [defaults]; an override
+    #   survives resolution.
+    resolved = resolve_run_settings(_sparse_si(basis="eb"), _DEFAULTS)
+    assert resolved.basis == "eb"
+    assert resolved.functional == "wigner"
+    assert resolved.kpoint_spec == {"shift": [0.0, 0.0, 0.0]}
+    assert resolved.scf_threshold == 1.0e-6
+
+
+def test_unresolvable_setting_raises(tmp_path):
+    # A solid that omits a setting with no [defaults] for it is a
+    #   hard error (rule 2): the value is not resolvable.
+    partial = dict(_DEFAULTS)
+    del partial["scf_threshold"]
+    with pytest.raises(ValueError, match="not resolvable"):
+        _write_and_load(
+            _manifest(_sparse_si(), defaults=partial), tmp_path)
+
+
+def test_default_helpers_match_authoring_values():
+    # The shared defaults the authoring tools emit (DESIGN 5.7).
+    settings = default_run_settings()
+    assert settings["basis"] == "fb"
+    assert settings["functional"] == "wigner"
+    assert settings["kpoint_integration"] == "gaussian"
+    assert settings["kpoint_spec"] == {}
+    assert settings["scf_threshold"] == 1.0e-6
+    recipe = default_characterization()
+    assert [fp.method for fp in recipe] == ["reduce", "bispectrum"]
+    assert all(fp.preferred for fp in recipe)
