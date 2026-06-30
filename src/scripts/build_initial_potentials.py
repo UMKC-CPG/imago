@@ -375,27 +375,28 @@ def refresh_isolated_entries(pdb_root: str,
                              commit: str, timestamp: str,
                              elements: list[str] | None = None
                              ) -> dict[str, ipdb.ElementDatabase]:
-    """Step 1 of the pipeline: reset every element database to a
-    fresh isolated baseline (the REGENERATE model, DESIGN 5.7).
+    """Step 1 of the pipeline: load each element database and
+    refresh only its isolated baseline (the incremental model,
+    DESIGN 5.7).
 
     For each element (all element directories under ``pdb_root``,
     or just ``elements`` when given), load the existing
-    ``s_gaussian_pot.toml`` if present or create a fresh
+    ``s_gaussian_pot.toml`` if present -- **preserving every
+    environment harvested by earlier runs** -- or create a fresh
     :class:`initial_potential_db.ElementDatabase` from the
-    element's ``pot1`` scalars, then **discard all of its prior
-    entries** and seed it with a single ``"isolated"`` entry rebuilt
-    from the current pot1/coeff1.  The harvest phase appends this
-    run's solid entries afterward, so the produced file is a pure
-    function of the current pot1/coeff1 and the manifest -- no entry
-    from a removed solid lingers, and re-running cannot double-count
-    a dedup entry's multiplicity.  Returns the in-memory databases
-    keyed by element directory name; the caller saves them (see
+    element's ``pot1`` scalars.  Then refresh only the ``"isolated"``
+    entry from the current pot1/coeff1 (so atomSCF changes
+    propagate), leaving all harvested entries untouched.  The harvest
+    phase inserts-or-skips this run's solids on top, so the database
+    grows incrementally and re-running an unchanged manifest moves
+    nothing (DESIGN 5.2.3).  Returns the in-memory databases keyed by
+    element directory name; the caller saves them (see
     :func:`save_databases`).
 
-    Implements PSEUDOCODE 11.4 step 1.  The existing-file load
-    passes ``known_methods=None`` (rule 9 is skipped) because the
-    matcher registry is not threaded in here; the loaded entries are
-    dropped regardless, so the file is rebuilt rather than edited.
+    Implements PSEUDOCODE 11.4 step 1.  The existing-file load passes
+    ``known_methods=None`` (rule 9 is skipped) because the matcher
+    registry is not threaded in here; the harvested fingerprints were
+    validated when the file was first written.
     """
 
     if elements is None:
@@ -417,17 +418,20 @@ def refresh_isolated_entries(pdb_root: str,
                 covalent_radius=pot.covalent_radius,
                 potentials=[])
 
-        # REGENERATE (DESIGN 5.7): drop *every* prior entry -- the
-        # isolated baseline and all previously harvested solid
-        # entries alike -- and start the file from a single fresh
-        # isolated baseline.  Rebuilding from scratch each run keeps
-        # the database a pure function of the current pot1/coeff1 and
-        # the manifest: a solid dropped from the manifest leaves no
-        # orphan, and re-running never inflates the dedup
-        # multiplicity/model_count of an entry (DESIGN 5.2.3).  The
-        # harvest phase then appends this run's solid entries.
-        database.potentials = [build_isolated_entry(
-            pdb_root, elem, commit, timestamp, manifest)]
+        # INCREMENTAL (DESIGN 5.7): keep every harvested entry the
+        # loaded file already holds -- there is no reset -- and
+        # refresh only the "isolated" baseline from the current
+        # pot1/coeff1 (so atomSCF changes propagate): drop the old
+        # isolated entry by label and append the fresh one.  The
+        # harvest phase then inserts-or-skips this run's solids on
+        # top; re-running an unchanged manifest moves nothing because
+        # skip-on-match drops every duplicate (DESIGN 5.2.3).
+        fresh_isolated = build_isolated_entry(
+            pdb_root, elem, commit, timestamp, manifest)
+        database.potentials = [
+            entry for entry in database.potentials
+            if entry.label != "isolated"]
+        database.potentials.append(fresh_isolated)
         databases[elem] = database
 
     return databases
@@ -1485,6 +1489,93 @@ def discover_environments(result_toml: dict, ref: ReferenceSolid,
     return environments
 
 
+def _preferred_bispectrum(entry: ipdb.PotentialEntry):
+    """Return ``entry``'s preferred bispectrum fingerprint record,
+    or None when it carries no bispectrum descriptor.
+
+    The dedup keys on the database-wide ``[characterization]``
+    bispectrum -- the transferable descriptor every harvested entry
+    shares (DESIGN 5.2.3).  Per-entry overrides are non-preferred
+    and never key the dedup, and the isolated baseline carries no
+    fingerprints at all, so this returns None for it."""
+
+    for fingerprint in entry.fingerprints:
+        if fingerprint.method == "bispectrum" and fingerprint.preferred:
+            return fingerprint
+    return None
+
+
+def find_bispectrum_duplicate(database: ipdb.ElementDatabase,
+                              new_entry: ipdb.PotentialEntry,
+                              similarity_floor: float | None = None
+                              ) -> ipdb.PotentialEntry | None:
+    """Return the stored entry whose bispectrum descriptor matches
+    ``new_entry``'s within the similarity floor, or None (DESIGN
+    5.2.3).
+
+    The dedup keys on the preferred bispectrum descriptor at its
+    ``sub_spec`` -- the transferable one every harvested entry
+    carries.  An entry with no preferred bispectrum record (the
+    isolated baseline, or a recipe with no bispectrum) has no key,
+    so it never matches and is always treated as novel.  The
+    comparison is the same L2 match the consumer uses
+    (``BispecMatcher.match_distance``, DESIGN 5.6.5), and the floor
+    defaults to the matcher's ``default_similarity_floor`` -- the
+    producer-side mirror of the consumer's floor (DESIGN 5.2.3,
+    TODO C61).  When several stored entries match, the nearest is
+    returned."""
+
+    matcher = MATCHERS["bispectrum"]()
+    new_record = _preferred_bispectrum(new_entry)
+    if new_record is None:
+        return None
+    new_vector = matcher.extract_query_vector(new_record.payload)
+    floor = (similarity_floor if similarity_floor is not None
+             else matcher.default_similarity_floor)
+
+    nearest_entry = None
+    nearest_distance = None
+    for entry in database.potentials:
+        try:
+            stored = ipdb.find_fingerprint(
+                entry, "bispectrum", new_record.sub_spec)
+        except KeyError:
+            continue        # not comparable at this sub_spec
+        distance = matcher.match_distance(
+            new_vector, matcher.extract_query_vector(stored.payload))
+        if distance <= floor and (nearest_distance is None
+                                  or distance < nearest_distance):
+            nearest_entry, nearest_distance = entry, distance
+    return nearest_entry
+
+
+def insert_or_skip(database: ipdb.ElementDatabase,
+                   new_entry: ipdb.PotentialEntry,
+                   similarity_floor: float | None = None) -> None:
+    """Insert ``new_entry`` into ``database`` or skip it as a
+    duplicate (DESIGN 5.2.3 insert-or-skip).
+
+    An entry whose label already exists is replaced in place: that
+    is a re-harvested solid (same derived label) or a curator
+    customization whose explicit label names an entry to override.
+    Otherwise the bispectrum dedup decides: a new environment whose
+    descriptor matches a stored one within the similarity floor is
+    SKIPPED (the first representative's potential stands), and a
+    genuinely novel environment is appended.  The leaner model
+    stores nothing extra on a skip -- no counts, no merge;
+    reconciling duplicates into a statistical mean is the deferred
+    C103 upgrade (DESIGN 5.2.3)."""
+
+    for index, entry in enumerate(database.potentials):
+        if entry.label == new_entry.label:
+            database.potentials[index] = new_entry
+            return
+    if find_bispectrum_duplicate(
+            database, new_entry, similarity_floor) is None:
+        database.potentials.append(new_entry)
+    # else: a stored entry already covers this environment; skip it.
+
+
 def make_imago_provenance(commit: str, timestamp: str,
                           ref: ReferenceSolid, atom_site: int,
                           scf_iterations) -> dict[str, Any]:
@@ -1719,14 +1810,11 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                 fingerprints=fingerprint_fn(
                     flight, ref, env.atom_site, env.overrides,
                     result_toml, manifest.characterization))
-            database = databases[elem_key]
-            # INTERIM (C88): cross-run bispectrum dedup (insert-or-
-            #   skip) is not built yet, so replace-by-label collapses
-            #   only a same-run label collision; a new label appends.
-            database.potentials = [
-                entry for entry in database.potentials
-                if entry.label != env.label]
-            database.potentials.append(new_entry)
+            # Insert-or-skip (DESIGN 5.2.3): replace a same-label
+            #   entry (a re-harvested solid or a curator override),
+            #   skip a bispectrum duplicate (the stored representative
+            #   stands), or append a genuinely novel environment.
+            insert_or_skip(databases[elem_key], new_entry)
 
     # ----- Phase 3b: guidance contribution.  The same converged
     # grid points feed the historical-guidance dataspace staging,

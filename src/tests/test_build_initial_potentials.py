@@ -1017,12 +1017,12 @@ class TestRefreshIsolatedEntries:
         assert ipdb.baseline(reloaded).label == "isolated"
         assert ipdb.default_entry(reloaded).label == "isolated"
 
-    def test_regenerate_drops_prior_curated_entries(self, tmp_path):
-        # REGENERATE (DESIGN 5.7): the refresh resets each element file
-        # to a single fresh isolated baseline, dropping any previously
-        # harvested solid entries; the harvest phase re-adds this run's
-        # entries afterward.  So a prior default_solid does NOT survive
-        # the refresh -- the file is rebuilt, not edited.
+    def test_refresh_preserves_prior_harvested_entries(self, tmp_path):
+        # INCREMENTAL (DESIGN 5.7): the refresh loads each element file
+        # and refreshes only its isolated baseline, PRESERVING every
+        # previously harvested entry; the harvest phase inserts-or-skips
+        # this run's solids on top.  So a prior default_solid survives
+        # the refresh -- the file grows, it is not rebuilt.
         root = str(tmp_path)
         _make_element(root, "au",
                       [1.0, 2.0, 3.0], [0.15, 1.5, 1.0e8])
@@ -1046,18 +1046,20 @@ class TestRefreshIsolatedEntries:
         dbs = refresh_isolated_entries(
             root, _manifest_curating_au(), "new", "now")
         db = dbs["au"]
-        # Only the fresh isolated baseline remains; the prior
-        #   default_solid was dropped (the harvest re-adds it).
-        assert [e.label for e in db.potentials] == ["isolated"]
-        # That baseline was rebuilt from current pot1/coeff1 (3 terms,
-        #   not the seed's 1) with the new commit.
+        # The prior default_solid is preserved; the isolated baseline
+        #   is refreshed in place.
+        labels = [e.label for e in db.potentials]
+        assert "default_solid" in labels and "isolated" in labels
+        # The refreshed baseline was rebuilt from current pot1/coeff1
+        #   (3 terms, not the seed's 1) with the new commit.
         iso = ipdb.lookup(db, "isolated")
         assert iso.num_gaussians == 3
         assert iso.provenance["commit"] == "new"
-        # is_isolated_default_for(au) is False because the manifest
-        #   curates Au's default (re-added at harvest), so the rebuilt
-        #   baseline is not the default at this refresh stage.
-        assert iso.default is False
+        # The preserved default_solid keeps its old potential and
+        #   provenance untouched.
+        kept = ipdb.lookup(db, "default_solid")
+        assert kept.coefficients == [0.5]
+        assert kept.provenance["commit"] == "old"
 
 
 # ============================================================
@@ -1518,6 +1520,87 @@ def test_discover_environments_pinned_site_absent_raises():
     identity = _identity({1: ("si", 1, 1)})
     with pytest.raises(ValueError):
         bip.discover_environments({}, ref, identity_fn=identity)
+
+
+# ---- insert_or_skip / find_bispectrum_duplicate (B2) ---------
+
+_BISPEC_SUBSPEC = {"twoj1": 6, "twoj2": 4, "cutoff": 9.0}
+
+
+def _entry(label, vector, *, default=False):
+    """A PotentialEntry carrying one preferred bispectrum
+    fingerprint with the given descriptor vector."""
+    return ipdb.PotentialEntry(
+        label=label, default=default, description="d",
+        num_gaussians=1, alpha_min=0.15, alpha_max=0.15,
+        coefficients=[1.0], coefficient_std=[0.0], alphas=[0.15],
+        provenance={"source": "Imago"},
+        fingerprints=[ipdb.FingerprintRecord(
+            method="bispectrum", sub_spec=dict(_BISPEC_SUBSPEC),
+            preferred=True, payload={"values": list(vector)})])
+
+
+def _db_with(*entries):
+    db = ipdb.ElementDatabase(2, "Si", 14.0, 20.0, 1.0)
+    db.potentials.extend(entries)
+    return db
+
+
+def test_find_bispectrum_duplicate_within_floor():
+    # A stored entry within the floor (0.10) of the new entry's
+    #   descriptor is reported as the duplicate.
+    db = _db_with(_entry("a", [0.0, 0.0, 0.0]))
+    new = _entry("b", [0.0, 0.0, 0.05])          # L2 = 0.05
+    dup = bip.find_bispectrum_duplicate(db, new)
+    assert dup is not None and dup.label == "a"
+
+
+def test_find_bispectrum_duplicate_beyond_floor_is_none():
+    db = _db_with(_entry("a", [0.0, 0.0, 0.0]))
+    new = _entry("b", [0.0, 0.0, 0.5])           # L2 = 0.5 > floor
+    assert bip.find_bispectrum_duplicate(db, new) is None
+
+
+def test_find_bispectrum_duplicate_returns_nearest():
+    db = _db_with(_entry("near", [0.0, 0.0, 0.02]),
+                  _entry("far", [0.0, 0.0, 0.09]))
+    new = _entry("b", [0.0, 0.0, 0.0])
+    assert bip.find_bispectrum_duplicate(db, new).label == "near"
+
+
+def test_find_bispectrum_duplicate_ignores_keyless_entries():
+    # The isolated baseline (no bispectrum) is never a match target,
+    #   and a new entry without a bispectrum key never matches.
+    iso = ipdb.PotentialEntry(
+        "isolated", True, "iso", 1, 0.15, 0.15,
+        [1.0], [0.0], [0.15], {"source": "atomSCF"})
+    assert bip.find_bispectrum_duplicate(
+        _db_with(iso), _entry("b", [0.0, 0.0, 0.0])) is None
+    assert bip.find_bispectrum_duplicate(
+        _db_with(_entry("a", [0.0, 0.0, 0.0])), iso) is None
+
+
+def test_insert_or_skip_appends_novel():
+    db = _db_with(_entry("a", [0.0, 0.0, 0.0]))
+    bip.insert_or_skip(db, _entry("b", [1.0, 0.0, 0.0]))
+    assert [e.label for e in db.potentials] == ["a", "b"]
+
+
+def test_insert_or_skip_skips_bispectrum_duplicate():
+    db = _db_with(_entry("a", [0.0, 0.0, 0.0]))
+    bip.insert_or_skip(db, _entry("b", [0.0, 0.0, 0.03]))
+    # b duplicates a within the floor, so it is dropped; a stands.
+    assert [e.label for e in db.potentials] == ["a"]
+
+
+def test_insert_or_skip_replaces_same_label():
+    # A same label (a re-harvested solid or a curator override)
+    #   replaces in place, ahead of the bispectrum dedup.
+    db = _db_with(_entry("a", [0.0, 0.0, 0.0]))
+    bip.insert_or_skip(db, _entry("a", [5.0, 5.0, 5.0]))
+    assert [e.label for e in db.potentials] == ["a"]
+    assert ipdb.lookup(db, "a").fingerprints[0].payload == {
+        "values": [5.0, 5.0, 5.0]}
 
 
 def test_materialize_structure_resolves_local_path(tmp_path):
