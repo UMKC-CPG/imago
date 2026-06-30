@@ -2046,6 +2046,28 @@ shipped.
   the reader/emitter (5.5 / PSEUDOCODE 11.1-11.2), and
   the harvest (5.7); the merge asserts equal alpha SETS
   before averaging.  CODE; DESIGN 5.2.3; PSEUDOCODE 11.4.
+- [ ] C104. Manifest `[defaults]` hoist + cod_fish complete
+  manifest (DESIGN 5.7; ARCH 8.5).  Design DONE (this commit).
+  Code work: (a) curation_manifest.py: add a top-level
+  `[defaults]` block holding the five shared run settings
+  (`basis`, `functional`, `kpoint_integration`, `kpoint_spec`,
+  `scf_threshold`); make those per-solid fields optional; the
+  reader parses `[defaults]` and RESOLVES each solid's omitted
+  setting from it (so the producer reads fully-populated solids
+  unchanged), validating that every setting is resolvable
+  (rule 2); the writer emits a `[defaults]` block and per-solid
+  settings only when they differ from the default.  Move the
+  default-value constants, `default_run_settings()`,
+  `default_characterization()`, and the customization-comment
+  template into curation_manifest.py as the shared source.
+  (b) cod_fish.py: emit a complete, runnable manifest by default
+  (the recipe + `[defaults]` + stubs, values from the shared
+  library), with `--sketch-only` for the bare stubs.
+  (c) expand_manifest.py: read the sketch from stdin when no
+  file is named; emit the `[defaults]` block instead of
+  repeating settings per solid; source defaults from the shared
+  library.  `system_type` stays per-solid (structure metadata,
+  not defaulted).  CODE; DESIGN 5.7; ARCH 8.5.
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 

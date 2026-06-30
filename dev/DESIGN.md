@@ -3911,36 +3911,46 @@ a parsed manifest becomes, the strict reader
 reader `load_structure_sources`, and the writer
 `format_manifest` -- lives in its own neutral leaf
 library, `curation_manifest.py`, so the producer and
-the authoring tool share one definition: the
-producer imports it to *run* a manifest,
-`expand_manifest.py` imports it to *write* one, and
-the library itself depends only on the lower
-libraries it validates against
+the authoring tools share one definition: the
+producer imports it to *run* a manifest, while
+`cod_fish.py` and `expand_manifest.py` import it to
+*write* one (and to source the default recipe and run
+settings), and the library itself depends only on the
+lower libraries it validates against
 (`initial_potential_db`, `guidance_db`).  A curator
-does not hand-write a complete manifest from
-nothing: `cod_fish.py` discovers and pins structures
-and prints a complete sketch -- a `schema_version`
-header plus one `[[reference_solid]]` stub per
-structure, each with a `reference_id` auto-derived
-from the CIF metadata
-(`<formula>_<symbol>_<number>_<year>`);
-`expand_manifest.py` reads that sketch and fills in
-the database-wide `[characterization]` recipe and
-each solid's run settings; entry customizations are
-optional, added interactively or left for the
-curator to write by hand.  Each sketch stub also
-carries discovery hints cod_fish read from the CIF.
-The composition (``elements``) is a non-schema hint
-the producer ignores and the finished manifest
-omits; the ``source_description`` is persisted as a
+does not hand-write a complete manifest from nothing:
+`cod_fish.py` discovers and pins structures from COD
+and, by default, prints a *complete, runnable*
+manifest -- a `schema_version` header, the shared
+`[characterization]` recipe and `[defaults]` run
+settings (their values taken from the shared library,
+not hardcoded in cod_fish), and one
+`[[reference_solid]]` stub per structure, each with a
+`reference_id` auto-derived from the CIF metadata
+(`<formula>_<symbol>_<number>_<year>`).  Its
+`--sketch-only` mode instead prints the bare stubs
+(no recipe, no defaults), for the cases that still
+want `expand_manifest.py`: a manifest of local
+(non-COD) structures, a non-default recipe, or
+interactive per-structure customization.
+`expand_manifest.py` reads such a sketch -- from a
+file, or from standard input when none is named -- and
+fills in the `[characterization]` recipe and the
+`[defaults]` run settings (the same shared-library
+values); entry customizations are optional, added
+interactively or left for the curator to write by
+hand.  Each sketch stub also carries discovery hints
+cod_fish read from the CIF.  The composition
+(``elements``) is a non-schema hint the producer
+ignores and the finished manifest omits; the
+``source_description`` is persisted as a
 `reference_solid` field, from which the harvest
-composes each environment's description (5.2.1).  `cod_fish.py` stays a pure
-discovery tool and never writes a manifest.  The writer emits
-human-readable TOML -- shortest round-trippable
-floats, inline `sub_spec` tables in their authored
-order, `label` only when present and `preferred`
-only when true -- and its output round-trips through
-`load_manifest_v2`.
+composes each environment's description (5.2.1).  The
+writer emits human-readable TOML -- shortest
+round-trippable floats, inline `sub_spec` tables in
+their authored order, `label` only when present and
+`preferred` only when true -- and its output
+round-trips through `load_manifest_v2`.
 
 **Reproducibility (layered).**
 `build_initial_potentials.py` reproducibility is
@@ -4026,6 +4036,16 @@ schema_version = 2
   sub_spec = { level = 2, thick = 0.5, cutoff = 5.0,
                tolerance = 0.05 }
 
+# The run settings shared by every reference solid -- declared
+# once here and inherited by each [[reference_solid]] that does
+# not override them (validation rule 2).
+[defaults]
+kpoint_spec        = { density = 60.0, shift = [0.0, 0.0, 0.0] }
+scf_threshold      = 1.0e-6
+basis              = "fb"
+functional         = "wigner"
+kpoint_integration = "linear-tetrahedral"
+
 [[reference_solid]]
 reference_id          = "au_fcc"
 system_type           = "crystalline"
@@ -4034,11 +4054,9 @@ system_type           = "crystalline"
 cod_id                = 9008463
 cod_revision          = "2023-04-12"
 # structure_path      = "au_fcc.skel"     # alternative form
-kpoint_spec           = { density = 60.0, shift = [0.0, 0.0, 0.0] }
-scf_threshold         = 1.0e-6
-basis                 = "fb"
-functional            = "wigner"
-kpoint_integration    = "linear-tetrahedral"
+# Run settings inherit from [defaults]; name any of kpoint_spec /
+# scf_threshold / basis / functional / kpoint_integration here
+# only to override this one solid's value.
 source_description    = "Au in fcc bulk (Fm-3m), COD 9008463."
 
   # Entries are OPTIONAL customizations on the auto-harvested
@@ -4066,7 +4084,11 @@ source_description    = "Au in fcc bulk (Fm-3m), COD 9008463."
 # ... another solid ...
 ```
 
-**Per-solid fields.**
+**Per-solid fields.**  The five run settings -- `kpoint_spec`,
+`scf_threshold`, `basis`, `functional`, `kpoint_integration` --
+may be given per solid or omitted to inherit the `[defaults]`
+block (below); each must be *resolvable* one way or the other
+(rule 2).  The rest are per solid.
 
 - `reference_id` (string): stable, human-readable identifier for
   the reference solid.  Used as the kaleidoscope flight/run stable
@@ -4203,6 +4225,21 @@ between elements.  Every harvested environment computes these
 fingerprints, and the producer stamps the preferred flag onto
 each matching record in the per-element files.
 
+**The `[defaults]` block (shared run settings).**  The five run
+settings -- `kpoint_spec`, `scf_threshold`, `basis`,
+`functional`, `kpoint_integration` -- are typically identical
+across a manifest's solids, so they may be declared once in a
+top-level `[defaults]` block and inherited by every
+`[[reference_solid]]`.  A solid may still name any of them
+itself to override its own value; an omitted setting resolves to
+the `[defaults]` value.  The block is *optional*: a manifest that
+spells out all five on every solid needs none.  Each setting must
+be *resolvable* for every solid -- present on the solid or in
+`[defaults]` -- or the load is refused (rule 2).  Nothing the
+producer emits depends on an implicit default (VISION Principles
+5 and 11): the value is always written down, just possibly once
+for the whole manifest rather than once per solid.
+
 **Per-entry fingerprint declarations
 (`[[reference_solid.entry.fingerprint]]`).**  A per-entry
 declaration is a *rare override*: it asks the producer to
@@ -4258,19 +4295,22 @@ file (5.2):
 
 1. `schema_version == 2`.
 2. Every `[[reference_solid]]` carries `reference_id`,
-   `system_type`, `basis`, `functional`, `kpoint_integration`,
-   `kpoint_spec`, `scf_threshold`, and *exactly one* of
+   `system_type`, and *exactly one* of
    `{(cod_id, cod_revision), structure_path}` (see rule 4 for
    details).  `system_type` must be one of the four allowed
    values `{"crystalline", "amorphous", "nanostructure",
    "molecular"}`; any other value is a hard error, since the
    guidance predictor (DESIGN 7) switches its sub-model on it and
-   the produced entry records it for forensics.  `basis`,
-   `functional`, and `kpoint_integration` are likewise required:
-   they select the predictor sub-model (DESIGN 7.6) and are
-   recorded on every produced entry's context, so nothing the
-   producer emits depends on an implicit default (VISION
-   Principles 5 and 11).  A top-level `[characterization]` block
+   the produced entry records it for forensics.  The five run
+   settings -- `basis`, `functional`, `kpoint_integration`,
+   `kpoint_spec`, `scf_threshold` -- must each be *resolvable*
+   for the solid: present on the solid itself or supplied by the
+   top-level `[defaults]` block.  They select the predictor
+   sub-model (DESIGN 7.6) and are recorded on every produced
+   entry's context, so nothing the producer emits depends on an
+   implicit default (VISION Principles 5 and 11) -- the value is
+   always written down, once per solid or once in `[defaults]`.
+   A top-level `[characterization]` block
    declaring at least one fingerprint is required (rule 10): it
    sets the database-wide preferred recipe, so a manifest without
    one is refused rather than silently producing a database with

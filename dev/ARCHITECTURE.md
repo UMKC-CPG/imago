@@ -878,19 +878,28 @@ error, no silent fallback to another revision).
 
 **Manifest authoring.**  A complete manifest is not
 hand-written from scratch.  `cod_fish.py` (9.5) discovers and
-pins structures and prints a complete sketch -- a `schema_version`
-header plus `[[reference_solid]]` stubs whose `reference_id` is
-auto-derived from each CIF's metadata -- so `cod_fish.py pin <ids>
-> sketch.toml` writes it in one step; `expand_manifest.py`
-reads the sketch and fills in the database-wide
-`[characterization]` recipe and the shared method defaults, then
-writes the finished manifest (per-structure customizations are
-optional -- added interactively or by hand).  The producer reads
-only that finished manifest, and `cod_fish.py` never writes one.  The manifest schema -- the
-dataclasses, the strict and relaxed readers, and the writer --
+pins structures from COD and, by default, prints a *complete,
+runnable* manifest -- a `schema_version` header, the shared
+`[characterization]` recipe and `[defaults]` run settings, and
+one `[[reference_solid]]` stub per structure whose `reference_id`
+is auto-derived from each CIF's metadata -- so `cod_fish.py pin
+<ids> > manifest.toml` is the whole authoring step for the common
+COD case; the recipe and default values come from the shared
+library, not hardcoded in cod_fish.  Its `--sketch-only` mode
+prints the bare stubs instead, for the cases that still want
+`expand_manifest.py`: local (non-COD) structures, a non-default
+recipe, or interactive per-structure customization.
+`expand_manifest.py` reads such a sketch (from a file, or from
+standard input when none is named) and fills in the
+`[characterization]` recipe and `[defaults]` run settings -- the
+same shared-library values -- writing the finished manifest
+(per-structure customizations optional, added interactively or by
+hand).  The producer reads only a finished manifest.  The schema
+-- the dataclasses, the strict and relaxed readers, and the
+writer plus its default-recipe and default-run-setting helpers --
 lives in the shared leaf library `curation_manifest.py`, imported
-by both `expand_manifest.py` (to write a manifest) and the
-producer (to read one), so the two cannot drift.  The relaxed
+by both authoring tools (to write a manifest) and the producer
+(to read one), so they cannot drift.  The relaxed
 reader (`load_structure_sources`) also backs the producer's
 `--materialize-only` pre-flight, which fetches and converts every
 reference structure before the run and harvest fields are filled
@@ -983,11 +992,13 @@ The curation-manifest schema -- its dataclasses, the strict
 `load_manifest_v2` and relaxed `load_structure_sources` readers,
 and the `format_manifest` writer -- is likewise encapsulated in a
 small leaf library, `src/scripts/curation_manifest.py`, imported
-by both the producer and the authoring tool; it depends only on
+by the producer and both authoring tools; it depends only on
 the lower libraries it validates against (`initial_potential_db`,
-`guidance_db`).  New scripts: `curation_manifest.py` (the schema
-library) and `expand_manifest.py` (the sketch-to-manifest
-authoring tool, 8.5).
+`guidance_db`) and carries the shared default-recipe and
+default-run-setting helpers the authoring tools emit.  New
+scripts: `curation_manifest.py` (the schema library) and
+`expand_manifest.py` (the sketch-to-manifest authoring tool,
+8.5); `cod_fish.py` gains complete-manifest emission (8.5).
 
 Fortran: no changes for the Phase-1 chain or the Phase-2
 base chain.  Imago consumes the same input file format;
