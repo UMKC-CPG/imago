@@ -1040,7 +1040,8 @@ class TestRefreshIsolatedEntries:
             {"source": "Imago", "commit": "old",
              "generated_at": "old", "reference_id": "au_fcc",
              "atom_site": 1, "kpoint_spec": "k",
-             "scf_threshold": 1e-6, "scf_iterations": 9}))
+             "scf_threshold": 1e-6, "scf_iterations": 9,
+             "type_assignment": "symmetry"}))
         ipdb.save(seed, element_path(root, "au"))
 
         dbs = refresh_isolated_entries(
@@ -1601,6 +1602,15 @@ def test_insert_or_skip_replaces_same_label():
     assert [e.label for e in db.potentials] == ["a"]
     assert ipdb.lookup(db, "a").fingerprints[0].payload == {
         "values": [5.0, 5.0, 5.0]}
+
+
+def test_make_imago_provenance_records_symmetry_type_assignment():
+    # The producer assigns types crystallographically, so every
+    #   harvested entry records type_assignment="symmetry"; from it
+    #   the native/witness role is derived (DESIGN 5.2.2), and both
+    #   reduce and bispectrum are (exact) witnesses for these runs.
+    prov = bip.make_imago_provenance("sha", "ts", _ref(), 1, 7)
+    assert prov["type_assignment"] == "symmetry"
 
 
 def test_materialize_structure_resolves_local_path(tmp_path):

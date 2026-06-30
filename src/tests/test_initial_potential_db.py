@@ -101,6 +101,7 @@ def _imago_provenance() -> dict:
         "kpoint_spec": "12 12 12 0 0 0",
         "scf_threshold": 1.0e-6,
         "scf_iterations": 28,
+        "type_assignment": "symmetry",
     }
 
 
@@ -399,7 +400,7 @@ class TestRule3RequiredFieldsPresent:
         path = _path_for(tmp_path, "Au")
         save(_valid_db("Au"), path)
         text = open(path).read().replace(
-            "scf_iterations = 28\n", "", 1)
+            "scf_iterations  = 28\n", "", 1)
         _write_toml(path, text)
         with pytest.raises(ValueError) as excinfo:
             load(path)
@@ -407,6 +408,20 @@ class TestRule3RequiredFieldsPresent:
         assert "default_solid" in msg
         assert "Imago provenance" in msg
         assert "scf_iterations" in msg
+
+    def test_missing_type_assignment_raises(self, tmp_path):
+        # type_assignment is a required Imago provenance field
+        # (DESIGN 5.2.2): each fingerprint's native/witness role
+        # is derived from it, so a missing value is a hard error.
+        path = _path_for(tmp_path, "Au")
+        save(_valid_db("Au"), path)
+        text = open(path).read().replace(
+            "type_assignment = \"symmetry\"\n", "", 1)
+        _write_toml(path, text)
+        with pytest.raises(
+                ValueError,
+                match="missing required field: type_assignment"):
+            load(path)
 
     def test_invalid_provenance_source_raises(self, tmp_path):
         path = _path_for(tmp_path, "Au")
@@ -654,10 +669,10 @@ class TestEmitterFormat:
         save(_valid_db("Au"), path)
         text = open(path).read()
         # The default_solid provenance carries the extras, the
-        # widest of which is now "scf_iterations" (14 chars).
+        # widest of which is now "type_assignment" (15 chars).
         # That key sets the alignment width for the block, so
-        # "source" (6 chars) needs 8 spaces of padding.
-        assert ("source         = \"Imago\"\n"
+        # "source" (6 chars) needs 9 spaces of padding.
+        assert ("source          = \"Imago\"\n"
                 in text)
         # The atomSCF provenance has only base keys, so the
         # alignment width is just "generated_at" (12 chars).
@@ -829,6 +844,7 @@ class TestRoundTrip:
             "kpoint_spec": {"density": 60.0,
                             "shift": [0.0, 0.0, 0.0]},
             "scf_threshold": 1.0e-6, "scf_iterations": 7,
+            "type_assignment": "symmetry",
             "system_type": "crystalline",
         }
         db = ElementDatabase(

@@ -1586,7 +1586,17 @@ def make_imago_provenance(commit: str, timestamp: str,
     entry (``reference_id``, ``atom_site``, ``kpoint_spec``,
     ``scf_threshold``, ``scf_iterations``) so the 5.8 validation
     harness can re-run the originating SCF, plus ``system_type``
-    recorded for forensics (5.7 rule 2)."""
+    recorded for forensics (5.7 rule 2).
+
+    ``type_assignment`` names the scheme that drew the run's
+    species/type partition; from it each fingerprint's native vs
+    witness role is derived (DESIGN 5.2.2: method M is native iff
+    M == type_assignment).  The producer assigns types
+    crystallographically for the references it currently handles,
+    so every harvested entry is ``"symmetry"``-assigned and both
+    its reduce and bispectrum fingerprints are (exact) witnesses;
+    the bispectrum-assigned path for disordered references is
+    deferred."""
 
     return {
         "source": "Imago",
@@ -1594,6 +1604,7 @@ def make_imago_provenance(commit: str, timestamp: str,
         "generated_at": timestamp,
         "reference_id": ref.reference_id,
         "system_type": ref.system_type,
+        "type_assignment": "symmetry",
         "atom_site": atom_site,
         "kpoint_spec": dict(ref.kpoint_spec),
         "scf_threshold": ref.scf_threshold,

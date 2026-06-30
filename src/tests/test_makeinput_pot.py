@@ -65,6 +65,7 @@ def _imago_provenance() -> dict:
         "kpoint_spec": "12 12 12 0 0 0",
         "scf_threshold": 1.0e-6,
         "scf_iterations": 28,
+        "type_assignment": "symmetry",
     }
 
 
