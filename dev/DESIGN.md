@@ -2397,38 +2397,17 @@ declares.
                            geometric series.
                            Informational.
   coefficients     array   Length = num_gaussians.  The
-                           entry's potential, as the
-                           per-coefficient *mean* over
-                           every atom that deduped into
-                           this environment (5.2.3).  For
-                           a multiplicity-1 entry, just
-                           that atom's harvested
-                           potential.  All merged atoms
-                           share one set of alphas, so
-                           the mean is taken
-                           coefficient-by-coefficient.
-  coefficient_std  array   Length = num_gaussians.  Per-
-                           coefficient standard deviation
-                           across the merged atoms -- the
-                           spread of potentials that
-                           mapped to this one environment
-                           (5.2.3).  Zero at multiplicity
-                           1.  Records how faithfully the
-                           assigning fingerprint predicts
-                           the potential.
-  multiplicity     int     Atoms, across all reference
-                           models, that deduped into this
-                           environment (5.2.3).  Default
-                           1.  A frequency / sample
-                           weight, not a correctness
-                           field.
-  model_count      int     Distinct reference solids that
-                           contributed an atom here.
-                           Default 1.  Independent
-                           corroboration: an environment
-                           seen in many models is more
-                           transferable than one seen many
-                           times in a single model.
+                           entry's potential: the
+                           harvested potential of the
+                           first representative atom that
+                           mapped to this environment,
+                           stored verbatim (5.2.3).  A
+                           statistical mean over every
+                           mapped atom -- with its
+                           per-coefficient spread, an atom
+                           multiplicity, and a model count
+                           -- is a deferred refinement
+                           (5.2.3, "Deferred").
   alphas           array   Length = num_gaussians.
                            Authoritative explicit alpha
                            values per basis function
@@ -2441,9 +2420,10 @@ declares.
                            every atom of an element shares
                            one set of alphas, so all
                            entries in a file carry
-                           identical alphas; the merge
-                           (5.2.3) asserts this equality
-                           before averaging coefficients.
+                           identical alphas.  (The deferred
+                           statistical merge of 5.2.3 would
+                           assert this equality before
+                           averaging coefficients.)
 
 **Per-entry fingerprint records, under
 `[[potential.fingerprint]]` (optional, may repeat):**
@@ -2582,9 +2562,7 @@ fingerprint.
    error with the file path, the entry label (when
    the missing field is per-entry), and the field
    name in the message.
-4. `len(coefficients) == len(alphas) ==
-   len(coefficient_std) == num_gaussians`.  `multiplicity`
-   and `model_count` are each `>= 1` (default 1).
+4. `len(coefficients) == len(alphas) == num_gaussians`.
 5. Labels must be unique within the file.
 6. At least one entry with `label = "isolated"` is
    required.  The legacy baseline must always be
@@ -2626,7 +2604,8 @@ fingerprint.
     single per-element file; the loader trusts the
     producer to have written a consistent database, in
     keeping with VISION Principle 5 (the database is
-    regenerated from the manifest, never hand-edited).
+    produced from the manifest(s) by the producer, never
+    hand-edited).
 
 #### 5.2.1 Label naming
 
@@ -2841,22 +2820,29 @@ lower-dimensional than the atom count and **saturates**:
 once the chemistry is covered, a new model of the same
 material contributes almost no new environments.
 
-**Dedup on insert, weight by multiplicity.**  Harvesting
-is therefore an *insert-or-merge*.  When a harvested
-environment duplicates one already stored, the producer
-does not append a new entry; it folds the new atom into
-the existing one and advances two counts: a
-**multiplicity** of atoms (how many, across all models,
-have collapsed into this environment) and a **model
-count** (how many *distinct* reference solids
-contributed).  The two answer different questions -- atom
-multiplicity is the natural frequency a learned predictor
-(5.2.4) wants as a sample weight; model count measures
-independent corroboration, an environment seen in five
-models being more transferable than one seen
-five-thousand times in one.  The database grows with
-environment *diversity*, which is sub-linear in atoms and
-plateaus as the space fills in.
+**Dedup on insert, skip duplicates.**  Harvesting is
+therefore an *insert-or-skip*.  When a harvested
+environment matches one already stored, the producer does
+not append a second entry and does not alter the existing
+one: the first representative's potential stands and the
+duplicate is dropped.  When the environment is new to the
+database, it is appended.  The database therefore grows
+with environment *diversity* -- sub-linear in atoms, and
+saturating once the chemistry is covered -- rather than
+with the atom count.
+
+**Skip-on-match makes the build idempotent.**  Because a
+match is skipped, re-running an unchanged manifest moves
+nothing: every environment it would harvest is already
+present.  The producer grows the database incrementally --
+load the existing per-element file, harvest only this
+batch's solids, append the environments new to it, and
+write the file back -- so several manifests can accrete
+into one database without any count drifting, because
+nothing is accumulated on a match (5.7).  What this leaner
+model gives up -- corroboration counts, a statistical mean
+across duplicates, removal of a solid, and exact wholesale
+rebuild -- is recorded under "Deferred" below.
 The dedup tolerance is the producer-side mirror of the
 consumer-side similarity floor (5.6.5, TODO C61): the
 consumer asks "is this query close enough to a stored
@@ -2867,12 +2853,11 @@ uses.
 
 **Dedup subsumes the symmetry gate.**  No special case is
 needed for crystals.  A symmetry-assigned type's atoms are
-identical, so they dedup to a single entry automatically
-(multiplicity equal to the type's size) -- exactly "one
-representative per type."  A disordered type's atoms vary,
-so they dedup to however many genuinely distinct
-environments exist, generally far fewer than the atom
-count.  The crystalline case is just the degenerate
+identical, so they dedup to a single entry automatically --
+exactly "one representative per type."  A disordered type's
+atoms vary, so they dedup to however many genuinely
+distinct environments exist, generally far fewer than the
+atom count.  The crystalline case is just the degenerate
 collapse of the same rule.
 
 **Dedup keys on bispectrum, not all methods.**  Merging
@@ -2882,7 +2867,7 @@ bispectrum for a disordered one -- defines the distinct
 environments, so symmetry-equivalent or bispectrum-
 equivalent atoms already collapse to one representative.
 *Across* runs, where the per-element database actually
-accumulates, the merge keys on the **bispectrum**
+accumulates, the dedup keys on the **bispectrum**
 descriptor at the preferred `sub_spec`: it is the
 transferable one every entry carries (native for a
 disordered reference, witness for an ordered one, 5.2.2),
@@ -2890,51 +2875,30 @@ whereas symmetry equivalence has no meaning between two
 different structures.  Bispectrum subsumes the within-run
 symmetry collapse too, since symmetry-equivalent atoms
 carry identical bispectrum fingerprints.  Reduce never
-gates the merge -- it rides along only as a tolerated-
+gates the dedup -- it rides along only as a tolerated-
 imprecise witness; keying on all methods would let reduce
 split entries bispectrum considers identical, constraining
 the entry count, the opposite of treating reduce as a
-droppable column.  So the merge asks one question, "are
+droppable column.  So the dedup asks one question, "are
 these the same environment under bispectrum?", and the
 surviving entry's reduce witness is one representative's,
 accepted as approximate (5.2.2).
 
-**Merging potentials: mean and spread.**  Two atoms that
-dedup into one environment still carry *different*
-harvested coefficients -- the fingerprint characterizes
-geometry, but the converged potential can differ in
-detail.  The merge stores the order-independent
-**mean**: the per-coefficient average over every atom
-folded into the entry.  Order independence is the
-principle the consumer's representative already obeys
-(5.6.5) -- singling out one atom would make the stored
-potential depend on harvest order -- and the mean
-averages out fit noise across corroborating atoms.
-Averaging coefficient-by-coefficient is well-defined only
-because all atoms of an element share one set of alphas;
-the merge **asserts the two entries' alpha sets are
-equal** before averaging and treats a mismatch as
-non-mergeable.  (It cannot arise in the present regime,
-where the alpha set is a per-element constant, but the
-assertion guards a future where alphas vary per
-environment.)
-
-Alongside the mean, the merge tracks the per-coefficient
-**standard deviation** -- the spread of potentials that
-collapsed into this environment.  It is maintained online,
-one atom at a time, by a running mean-and-variance update,
-so no raw potentials are retained and the cost is a fixed
-handful of numbers per entry regardless of multiplicity.
-The spread is the empirical test of the database's
-founding premise, that near-identical fingerprints carry
-near-identical potentials: a small spread says the
-assigning fingerprint is a faithful proxy for the
-potential and the mean is trustworthy; a large spread
-says the descriptor, or its tolerance, is collapsing
-potentials that genuinely differ, and is the signal to
-tighten the tolerance or distrust the entry.  The same
-number gives the consumer a per-entry confidence and the
-learned predictor (5.2.4) a variance to weight by.
+**The representative's potential is kept as-is.**  Two
+atoms that dedup into one environment can still carry
+*slightly different* harvested coefficients -- the
+fingerprint characterizes geometry, but the converged
+potential can differ in detail.  The leaner model does not
+reconcile them: the entry's `coefficients` are the
+harvested potential of the *first* atom that mapped to the
+environment, stored verbatim.  This matches the consumer,
+which already imports a single representative's potential
+(5.6.5), so the lookup needs no averaging to work.
+Averaging every mapped atom's potential into a mean, and
+reporting the spread of those potentials as a confidence,
+is a worthwhile refinement -- but it requires keeping
+per-solid statistics, and is deferred (see "Deferred"
+below).
 
 **Search cost.**  Controlling the entry count via dedup is
 the first-order fix.  Beyond it, the search is already
@@ -3002,8 +2966,10 @@ atom's environment, so that the starting guess becomes the
 *answer* and the SCF iteration is shortened or skipped.
 This is a *different* consumer from the nearest-neighbour
 lookup, and it reshapes none of the above -- it *wants*
-exactly the deduplicated, weighted, coverage-oriented
-corpus the dedup model produces:
+exactly the deduplicated, coverage-oriented corpus the
+dedup model produces (and, once 5.2.3's deferred
+statistical merge lands, the per-environment weights it
+adds):
 
 - At inference the network pays no per-query search cost;
   the lookup is amortized into its weights.  So the search
@@ -3013,9 +2979,10 @@ corpus the dedup model produces:
   over-represented environments (a network trained on raw
   per-atom data would be dominated by bulk-like sites and
   under-learn the rare defect environments that matter
-  most).  A deduplicated set with multiplicity available
-  as a *sample weight* -- rather than baked in as
-  duplication -- is the correct corpus.
+  most).  A deduplicated set -- with the atom multiplicity
+  of 5.2.3's deferred statistical merge available as a
+  *sample weight* rather than baked in as duplication -- is
+  the correct corpus.
 - It may eventually want a *richer* descriptor than the
   coarse lookup key (possibly the raw local environment),
   so the fidelity retained per stored environment is worth
@@ -3029,25 +2996,65 @@ become a committed goal rather than a possibility, it
 should be promoted to a VISION-level objective; it is
 recorded here as the dataspace's intended trajectory.
 
-**Schema implications (deferred to implementation).**  The
-native/witness model adds the `type_assignment` provenance
-field (already listed in 5.2's provenance table), and the
-dedup model adds four per-entry fields -- a
-`multiplicity` of atoms and a `model_count` (5.2.3), both
-default 1, and a per-coefficient `coefficient_std`
-companion to the mean coefficients -- threaded through
-5.2, 5.4, 5.5, and 5.7.  The per-atom-pairing safeguard costs nothing
-until normalization, when the origin label is carried onto
-split records.  As an implementation status: the present
-producer -- the C60 harvest -- emits none of
-`type_assignment`, `multiplicity`, `model_count`, or
-`coefficient_std` and writes one entry per declared site,
-so the loader does not yet enforce them; the schema above
-specifies the target.  The insert-or-merge harvest with
-mean/spread accumulation, the assigning-method dedup rule,
-and the validation that enforces the new fields are
-scheduled work (TODO C88), not part of the current
-bispectrum half.
+**Deferred: the statistical merge and exact rebuild.**
+The leaner skip-on-match model keeps one representative per
+environment and nothing more.  A later revisit (TODO C103)
+may upgrade it to a *statistical merge* that folds every
+atom mapping to an environment into the stored entry,
+adding:
+
+- a per-coefficient **mean** in place of the lone
+  representative (averaging out fit noise across
+  corroborating atoms) and a per-coefficient **standard
+  deviation** for the spread of potentials that collapsed
+  into the environment.  That spread is the empirical test
+  of the database's founding premise that near-identical
+  fingerprints carry near-identical potentials: a small
+  spread says the assigning fingerprint is a faithful
+  proxy for the potential and the mean is trustworthy; a
+  large spread says the descriptor, or its tolerance, is
+  collapsing potentials that genuinely differ, and is the
+  signal to tighten the tolerance or distrust the entry.
+  The same number gives the consumer a per-entry
+  confidence and the learned predictor (5.2.4) a variance
+  to weight by;
+- an atom **multiplicity** (how many atoms, across all
+  models, mapped here -- the natural sample weight a
+  learned predictor wants) and a **model_count** (how many
+  distinct reference solids contributed), which measures
+  independent corroboration: an environment seen in five
+  models is more transferable than one seen five-thousand
+  times in a single model;
+- the machinery that keeps both order-free and
+  re-runnable: one small **contribution record per
+  reference solid** (its `reference_id`, its `atom_count`,
+  and the per-coefficient `coeff_sum` and `coeff_sumsq` of
+  its atoms' potentials), from which the mean, spread, and
+  counts are *derived*.  Keying the fold on the
+  contributing solid is what lets the upgrade stay
+  idempotent while also gaining the two properties
+  skip-on-match gives up -- **removal** of a solid (drop
+  its record, re-derive) and an **exact wholesale rebuild**
+  to a byte-identical file.  Because coefficient-by-
+  coefficient averaging is well-defined only on one shared
+  set of alphas, the merge would assert the two entries'
+  alpha sets are equal before combining (in the present
+  regime the alpha set is a per-element constant, so the
+  assertion only guards a future where alphas vary per
+  environment).
+
+**Implementation status.**  The minimal build (TODO C88)
+loads the existing per-element file, harvests one
+representative per distinct environment keyed on the
+bispectrum descriptor at the preferred `sub_spec` (5.2.2),
+and inserts-or-skips into it; it records the
+`type_assignment` provenance field (5.2) so each
+fingerprint's native/witness role is known, but none of
+the statistical fields above.  The present interim
+producer -- the C60 harvest -- predates even that: it
+writes one entry per declared site and does not yet dedup.
+The schema in 5.2 specifies the minimal target; the
+statistical merge is the C103 follow-up.
 
 ### 5.3 Sketch (gold, two entries with fingerprints)
 
@@ -3278,9 +3285,9 @@ the same `ElementDatabase` as input, it produces
 byte-identical output bytes.  Emitter determinism is
 non-negotiable because it cleanly separates
 "formatting changed" from "numbers changed" in any
-diff of a regenerated file.  It does **not** imply
+diff of a produced file.  It does **not** imply
 file-level byte-identity across pipeline runs: the
-regeneration pipeline (5.7) refreshes provenance
+build pipeline (5.7) refreshes provenance
 timestamps every run, and SCF / fit numerical drift
 (floating-point accumulation order, threading,
 external library versions, and development changes
@@ -3777,7 +3784,7 @@ element file's top-level `nuclear_z`, `nuclear_alpha`,
 of the manifest, the fingerprint records, or the
 matcher — it sees only the resolved per-type numbers.
 
-### 5.7 Regeneration Pipeline Algorithm
+### 5.7 Build Pipeline Algorithm
 
 **Purpose of `build_initial_potentials.py`.**  This
 is the script that **produces** the augmented
@@ -3798,17 +3805,25 @@ decides *what* to compute, while kaleidoscope owns
 
 **The curation manifest -- what it is, what it
 contains, why.**  The pipeline's primary input is
-a single human-readable file: the **curation
-manifest**.  It declares *which solids, which atom
-sites, under which labels, with which SCF
-settings*.  Its job is threefold:
+a human-readable **curation manifest**.  It
+declares *which solids, under which labels, with
+which SCF settings*.  A build may take more than
+one manifest -- each is a batch of reference
+solids, and the curated set is their union (the
+database grows incrementally, 5.2.3) -- so no
+single file need ever list every solid.  A
+manifest's job is threefold:
 
 1. **Declare the curation set.**  The manifest
    *is* the curation strategy made explicit.
    Adding a reference solid means adding a
-   manifest entry; removing one means removing
-   an entry; reviewing the curation set means
-   reading the manifest.
+   manifest entry and running the producer;
+   reviewing the curation set means reading the
+   manifest(s).  (Removing a solid from the
+   database is a deferred capability, 5.2.3 --
+   dropping its manifest entry stops re-adding
+   it but does not retract what it already
+   contributed.)
 2. **Tell the pipeline what to harvest.**  The
    harvest is automatic -- one representative per
    distinct environment (5.2.2, 5.2.3) -- so the
@@ -3829,20 +3844,30 @@ curation set inside the pipeline script and rules
 out folder-of-files conventions that lose
 metadata.  The manifest is the smallest piece of
 structured data that closes the gap: every
-curation choice captured in one version-controlled
-file alongside the structure files it points at,
-so the regeneration becomes a deterministic
-function of (manifest, structure files, Imago
-build).
+curation choice captured in version-controlled
+files alongside the structure files they point
+at, so growing the database stays a scripted
+operation on (manifests, structure files, Imago
+build), not a hand-edit.  (An *exact* wholesale
+rebuild from those inputs is a deferred
+capability, 5.2.3; the leaner build grows the
+database in place and treats the database file
+itself as the artifact to keep.)
 
-To keep that function pure, the producer **regenerates**
-rather than edits: each run resets every affected element
-file to a single fresh `"isolated"` baseline (rebuilt from
-the current `pot1`/`coeff1`), discarding all previously
-harvested solid entries, then re-harvests from the manifest.
-A solid dropped from the manifest therefore leaves no orphan
-entry behind, and re-running cannot double-count a dedup
-entry's `multiplicity`/`model_count` (5.2.3).
+The producer grows the database with an *idempotent*
+insert-or-skip (5.2.3): it loads each affected element
+file that already exists (seeding a fresh `"isolated"`
+baseline from the current `pot1`/`coeff1` only when no
+file is there yet), harvests this run's solids, appends
+the environments new to the file, and skips those already
+present.  Re-running an unchanged manifest therefore moves
+nothing, and a manifest of new solids folds in only their
+new environments -- so the build is safe to repeat and
+safe to extend, one batch at a time, without any count
+drifting.  What it does *not* do is reconcile a duplicate
+(the first representative stands) or retract a solid; a
+statistical merge across duplicates, removal, and an exact
+wholesale rebuild are the deferred upgrade of 5.2.3.
 
 **What it contains** (per the schema sketched
 below): a database-wide `[characterization]`
@@ -3940,8 +3965,8 @@ the inputs can actually support:
   Development changes to the SCF or fit code that
   legitimately produce better-converged potentials
   are expected and welcome -- the database is a
-  regeneratable build artifact, not an archival
-  hand-curated table.
+  build artifact the producer grows, not an
+  archival hand-curated table.
 - **Provenance metadata (free).**  Timestamps,
   commits, and similar fields refresh on every run
   and are exempt from any reproducibility
@@ -3958,9 +3983,10 @@ the inputs can actually support:
   around that prediction.  When the dataspace cannot predict for a
   solid (too few neighbors), the producer falls back to the wide
   default grid defined in the flight builder (DESIGN 6.2.8).
-- The existing `share/atomicPDB/` tree (for `pot1` and `coeff1`
-  reads when refreshing each element's `"isolated"` baseline
-  entry).
+- The existing `share/atomicPDB/` tree -- the `pot1` and `coeff1`
+  files (read when refreshing each element's `"isolated"` baseline
+  entry) and any existing `s_gaussian_pot.toml` (loaded so the
+  build grows it incrementally rather than replacing it, 5.2.3).
 - An Imago build location.  The producer does not invoke it
   directly; kaleidoscope drives it through the wingbeat seam when
   dispatching the verification flights (and the follow-on
@@ -4396,9 +4422,13 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
 
 1. Load and validate the manifest (the rules above).
 2. For every element with a directory in `share/atomicPDB/`,
-   refresh (or create) the `"isolated"` entry of that element's
-   `s_gaussian_pot.toml` directly from the current `pot1` and
-   `coeff1` files.  Guarantees the baseline is always present
+   load the element's existing `s_gaussian_pot.toml` if it is
+   present (preserving every environment harvested by earlier
+   runs), or start a new in-memory database if it is not; then
+   refresh (or create) its `"isolated"` entry directly from the
+   current `pot1` and `coeff1` files.  Loading rather than
+   resetting is what makes the build incremental (5.2.3);
+   refreshing the baseline guarantees it is always present
    (rule 6 of 5.2) and tracks any changes in atomSCF output.
 3. **Build.**  For each `[[reference_solid]]` in the manifest:
    a. `materialize_structure(ref)` → a local structure file
@@ -4483,18 +4513,16 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
            addresses this environment; otherwise `label` is
            derived and `description` auto-composed (5.2.1), and
            `default = false`.  Carry the run-supplied numerical
-           fields (the harvested coefficients seeding the mean,
-           5.2.3), the provenance (recording the solid's
-           `system_type` for forensics, per rule 2), and the
-           `FingerprintRecord` list from step ii.
-      iv.  Insert-or-merge the entry into the in-memory
+           fields (the harvested coefficients, 5.2.3), the
+           provenance (recording the solid's `system_type` for
+           forensics, per rule 2), and the `FingerprintRecord`
+           list from step ii.
+      iv.  Insert-or-skip the entry into the in-memory
            `ElementDatabase` for its element (5.2.3).  If the
            environment duplicates one already present under the
-           dedup rule, fold it in -- average the coefficients
-           (asserting equal alpha sets), update the
-           per-coefficient standard deviation, and advance
-           `multiplicity` and `model_count`; otherwise append it.
-           An explicit customization `label` naming an existing entry
+           dedup rule, skip it -- the stored representative
+           stands; otherwise append it.  An explicit
+           customization `label` naming an existing entry
            replaces it.
    d. **Guidance contribution.**  Harvest the same converged grid
       point into the historical guidance dataspace's staging area
@@ -4521,7 +4549,7 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
   warm-cache hit.
 - `--manifest PATH`: alternate manifest location (default:
   `share/atomicBDB/manifest.toml`).
-- `--element ELEM`: restrict regeneration to a single element's
+- `--element ELEM`: restrict the build to a single element's
   `s_gaussian_pot.toml`.  Reference solids whose entries
   contribute only to other elements are still dispatched (so the
   run-reuse cache is warmed and a follow-up run without
@@ -8806,7 +8834,7 @@ as harvested entries.  They are written directly to
 v2, `guidance_migrate.py` reads every v1 entry, applies
 the v1 -> v2 transformation, and writes the v2 form back
 in place.  Old entries are not discarded.  Parallel to
-the DESIGN 5.7 regeneration discipline.
+the DESIGN 5.7 build discipline.
 
 ### 7.10 Open Design Questions
 

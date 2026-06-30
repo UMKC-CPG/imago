@@ -151,7 +151,7 @@
   schema and validation rules (5.2), in-memory
   representation (5.4), deterministic hand-formatted
   emitter (5.5), lookup with isolated/legacy fallback
-  (5.6), layered-reproducibility regeneration pipeline
+  (5.6), layered-reproducibility build pipeline
   (5.7), and 20%-iteration-reduction validation harness
   (5.8) (DESIGN 5; VISION Goal 3; ARCHITECTURE 8)
 - [x] D8. Finalize curation manifest schema.  Done 2026-05-11.
@@ -449,7 +449,7 @@
   database: TOML reader with six-rule validation
   (11.1), deterministic hand-formatted emitter (11.2),
   makeinput.py lookup with fallback chain (11.3),
-  regeneration pipeline (11.4), and validation harness
+  build pipeline (11.4), and validation harness
   (11.5) (PSEUDOCODE 11, DESIGN 5)
 - [x] P5. Write Phase-2 pseudocode for the matcher
   protocol and the new selection path: matcher base
@@ -1742,7 +1742,7 @@ shipped.
   fingerprint recipe lifted to a `[characterization]` block
   (C101).  The per-entry witness path above is the interim
   crystalline-only implementation; it is superseded by C101
-  plus the C88 bispectrum-keyed insert-or-merge.
+  plus the C88 bispectrum-keyed insert-or-skip.
 - [x] C93. Revise the design chain to DECOUPLE the
   fingerprint-based initial-potential pick from the grouping
   scheme.  Decision 2026-06-17: precedence 2 (the environment
@@ -1972,30 +1972,32 @@ shipped.
   harvest: compute *both* registered methods (native +
   witness) for every harvested environment -- reduce
   is free given the structure, a bispectrum loen pass
-  is cheap next to the SCF.  (c) Add the per-entry
-  dedup fields -- `multiplicity` (atoms), `model_count`
-  (distinct solids), and a per-coefficient
-  `coefficient_std`, with `coefficients` becoming a
-  running mean -- and thread them through the field
-  list + validation (5.2), the `PotentialEntry`
-  dataclass (5.4), the emitter (5.5), and the harvest
-  (5.7).  (d) Make the harvest an *insert-or-merge*
-  keyed on the **bispectrum** descriptor at the
-  preferred sub_spec (the transferable one every entry
-  carries -- NOT a conservative all-methods union and
-  NOT symmetry, which cannot compare across structures;
-  5.2.3): a duplicate folds in by averaging the
-  coefficients (asserting equal alpha SETS first),
-  updating `coefficient_std` via a running Welford
-  step, and advancing `multiplicity` and `model_count`;
-  a novel environment appends.  The dedup tolerance is
-  the producer-side mirror of C61's similarity floor.
-  Optional: carry the origin label onto records so the
-  per-atom cross-method pairing survives normalization.
-  Lands after the Phase-2 base chain (C53-C61); the
+  is cheap next to the SCF.  (c) Make the build
+  INCREMENTAL: load each existing per-element file (or
+  seed an empty one), refresh only the `"isolated"`
+  baseline, and append this run's harvest -- never
+  reset -- so several manifests accrete into one
+  database (DESIGN 5.7).  (d) Make the harvest an
+  *insert-or-skip* keyed on the **bispectrum**
+  descriptor at the preferred sub_spec (the
+  transferable one every entry carries -- NOT a
+  conservative all-methods union and NOT symmetry,
+  which cannot compare across structures; 5.2.3): a
+  duplicate is SKIPPED (the first representative's
+  potential stands), a novel environment appends.  The
+  dedup tolerance is the producer-side mirror of C61's
+  similarity floor.  The leaner model stores NOTHING
+  extra per entry -- no counts, no spread, no
+  contributor list; `coefficients` is the
+  representative's potential verbatim.  Optional: carry
+  the origin label onto records so the per-atom cross-
+  method pairing survives normalization.  Lands after
+  the Phase-2 base chain (C53-C61); the
   bundled->normalized (potential pool + per-method
   index) migration and the learned-predictor training
-  pipeline are separate, later items this sets up.
+  pipeline are separate, later items this sets up.  The
+  statistical merge (mean/spread/counts) is the
+  deferred C103 upgrade.
 - [ ] C101. Manifest characterization + customization model +
   auto-harvest (DESIGN 5.2.1/5.2.2/5.7).  Recast the
   manifest and harvest from "one entry per declared atom
@@ -2019,9 +2021,31 @@ shipped.
   species/site when no customization supplies one.
   (c) expand_manifest.py: emit the `[characterization]`
   block and per-solid settings; entry customizations optional.
-  Pairs with C88 (the insert-or-merge the auto-harvest
+  Pairs with C88 (the insert-or-skip the auto-harvest
   feeds) and reframes the C60 per-entry witness path.
   CODE; DESIGN 5.2.1/5.2.2/5.7; PSEUDOCODE 11.4; ARCH 8.5.
+- [ ] C103. Statistical merge + exact rebuild (deferred
+  upgrade of C88's skip-on-match; DESIGN 5.2.3
+  "Deferred").  Replace insert-or-skip with a merge that
+  folds EVERY atom mapping to an environment into the
+  stored entry, adding: (a) per-coefficient `coefficients`
+  as a running **mean** plus a per-coefficient
+  `coefficient_std` spread (the empirical test of the
+  fingerprint's fidelity, and a per-entry confidence /
+  predictor variance, 5.2.4); (b) an atom `multiplicity`
+  (sample weight) and a `model_count` (distinct-solid
+  corroboration); (c) one **contribution record per
+  reference solid** (`reference_id`, `atom_count`,
+  `coeff_sum`, `coeff_sumsq`) as the order-free source of
+  truth the summaries derive from -- which also unlocks
+  **removal** of a solid (drop its record, re-derive) and
+  an **exact wholesale rebuild** to a byte-identical
+  file, the two properties skip-on-match gives up.
+  Thread the new fields through the field list +
+  validation (5.2), the `PotentialEntry` dataclass (5.4),
+  the reader/emitter (5.5 / PSEUDOCODE 11.1-11.2), and
+  the harvest (5.7); the merge asserts equal alpha SETS
+  before averaging.  CODE; DESIGN 5.2.3; PSEUDOCODE 11.4.
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 

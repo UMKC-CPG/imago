@@ -644,7 +644,7 @@ The third active prong (VISION Goal 3) augments today's
 isolated-atom potential database with potentials extracted
 from converged Imago runs on curated reference solids. This
 section covers on-disk layout, file format, the lookup path
-through `makeinput.py`, the regeneration pipeline, and the
+through `makeinput.py`, the build pipeline, and the
 validation harness. Algorithmic details (interpolation across
 nearby labels, environment-descriptor computation) are
 deferred to DESIGN.
@@ -897,8 +897,9 @@ reference structure before the run and harvest fields are filled
 in.
 
 Outputs:
-- Regenerated augmented database file in each affected
-  `share/atomicPDB/<element>/` directory.
+- Updated augmented database file in each affected
+  `share/atomicPDB/<element>/` directory (grown in place;
+  see the Incremental property below).
 - A guidance contribution.  The same converged grid point that
   feeds a potential entry is also harvested into the historical
   guidance dataspace's staging area (section 10), so every
@@ -921,12 +922,17 @@ Properties:
   to perturb the numbers.  Provenance metadata (e.g.,
   `generated_at` timestamps) refreshes on each run
   and is exempt from any reproducibility guarantee.
-- **Incremental.** Reusing kaleidoscope's run-reuse
-  cache (9.6), an ordinary regeneration re-runs SCF
-  only for reference solids whose structure, options,
-  or build identity changed; adding harvest
-  declarations to an unchanged solid re-runs only the
-  harvest.
+- **Incremental, on two levels.** The *database* grows
+  in place: the producer loads each existing per-element
+  file, appends the environments new to it, and skips
+  those already present (DESIGN 5.2.3), so several
+  manifests accrete into one database and re-running an
+  unchanged manifest changes nothing.  The *compute* is
+  incremental too: reusing kaleidoscope's run-reuse cache
+  (9.6), a run re-executes SCF only for reference solids
+  whose structure, options, or build identity changed,
+  and adding harvest declarations to an unchanged solid
+  re-runs only the harvest.
 - **Scriptable.** Invokable from CI or a developer
   workstation without manual intervention.
 
@@ -2149,11 +2155,15 @@ src/scripts/
   The auto-promotion rule lets a 500-entry seed flight
   promote ~80% of entries unattended, with the curator
   reviewing only the ~20% outliers.
-- Unlike the initial-potential DB, there is no manifest
-  of reference solids that drives full regeneration:
-  the dataspace grows monotonically with use.  Old
-  entries are not deleted on schema bumps; a migration
-  tool (`guidance_migrate.py`) rewrites them in place.
+- Both databases grow incrementally and in place (the
+  initial-potential DB does too, DESIGN 5.2.3); the
+  difference is what gates the growth.  The
+  initial-potential DB grows only from a curated manifest
+  of reference solids, whereas the dataspace grows
+  monotonically from *any* successful flight, with no
+  curation manifest in the loop.  Old entries are not
+  deleted on schema bumps; a migration tool
+  (`guidance_migrate.py`) rewrites them in place.
 
 The **seed flight** (TODO C75) is what populates the
 initial dataspace.  It is a one-time stratified sweep

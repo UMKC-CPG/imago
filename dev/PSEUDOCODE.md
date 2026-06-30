@@ -2153,7 +2153,7 @@ other type tables are unchanged.
 Five algorithms support the augmented initial-potential
 database: the TOML reader (11.1), the hand-formatted
 emitter (11.2), the runtime lookup invoked from
-`makeinput.py` (11.3), the regeneration pipeline
+`makeinput.py` (11.3), the build pipeline
 (11.4), and the validation harness (11.5). All live in
 Python under `src/scripts/`. The Fortran side does not
 change.
@@ -2231,34 +2231,19 @@ function load(path, known_methods = None):
         for f in ("default", "description",
                   "num_gaussians", "alpha_min",
                   "alpha_max", "coefficients",
-                  "coefficient_std", "alphas",
-                  "provenance"):
+                  "alphas", "provenance"):
             require(f in entry_dict, path, lbl,
                 "missing field: " + f)
 
-        # Length consistency (rule 4).  coefficient_std
-        # is a required per-coefficient array, so it is
-        # length-checked alongside coefficients and alphas.
+        # Length consistency (rule 4): coefficients and
+        # alphas are per-coefficient arrays of length
+        # num_gaussians.
         n = entry_dict["num_gaussians"]
         require(len(entry_dict["coefficients"]) == n
-                and len(entry_dict["alphas"]) == n
-                and len(entry_dict["coefficient_std"])
-                    == n,
+                and len(entry_dict["alphas"]) == n,
             path, lbl,
-            "coefficients/alphas/coefficient_std"
-            + " length != num_gaussians")
-
-        # multiplicity and model_count are OPTIONAL and
-        # default to 1 (DESIGN 5.2 rule 4): a freshly
-        # harvested entry, or a hand-trimmed file, need
-        # not spell them out.  The emitter always writes
-        # them, so a regenerated file is self-describing.
-        # When present each must be a positive integer.
-        multiplicity = entry_dict.get("multiplicity", 1)
-        model_count  = entry_dict.get("model_count", 1)
-        require(multiplicity >= 1 and model_count >= 1,
-            path, lbl,
-            "multiplicity and model_count must be >= 1")
+            "coefficients/alphas length"
+            + " != num_gaussians")
 
         # Label uniqueness (rule 5)
         require(lbl not in seen_labels, path,
@@ -2334,10 +2319,6 @@ function load(path, known_methods = None):
             alpha_min     = entry_dict["alpha_min"],
             alpha_max     = entry_dict["alpha_max"],
             coefficients  = entry_dict["coefficients"],
-            coefficient_std =
-                entry_dict["coefficient_std"],
-            multiplicity  = multiplicity,
-            model_count   = model_count,
             alphas        = entry_dict["alphas"],
             provenance    = entry_dict["provenance"],
             fingerprints  = fingerprints))
@@ -2439,7 +2420,7 @@ per-block `=` alignment.  At the pipeline level
 (11.4), file-level byte-identity across runs is not
 promised: provenance timestamps refresh, and SCF /
 fit numerical drift can perturb the numbers
-themselves.  Any real diff between two regenerations
+themselves.  Any real diff between two builds
 isolates such changes from formatting noise.
 
 ```
@@ -2464,13 +2445,10 @@ function save(db, path):
         # `description` (matches DESIGN 5.3 sketch).
         body_keys = ["label", "default", "description",
                      "num_gaussians", "alpha_min",
-                     "alpha_max", "multiplicity",
-                     "model_count"]
+                     "alpha_max"]
         # Width spans body keys plus the array keys
         # so the array openers align with the rest.
-        # coefficient_std rides with the other arrays.
         align_keys = body_keys + ["coefficients",
-                                  "coefficient_std",
                                   "alphas"]
         width = max(len(k) for k in align_keys)
 
@@ -2480,11 +2458,6 @@ function save(db, path):
         out.append(format_array_open(
             "coefficients", width))
         for x in entry.coefficients:
-            out.append("   " + fmt_float(x) + ",")
-        out.append("]")
-        out.append(format_array_open(
-            "coefficient_std", width))
-        for x in entry.coefficient_std:
             out.append("   " + fmt_float(x) + ",")
         out.append("]")
         out.append(format_array_open(
@@ -2709,7 +2682,7 @@ and 8) emits it via the legacy `pot1`/`coeff1` path, with
 no library entry consulted.  There is no schema-v1 case
 to consider here -- the reader rejects any
 `schema_version != 2` (DESIGN 5.2), and the producer
-(11.4) regenerates every on-disk file as v2, so a loaded
+(11.4) writes every on-disk file as v2, so a loaded
 database is always v2 and always carries a `default` tag.
 
 The reduced entry pick is the fingerprint-disabled
@@ -3101,7 +3074,7 @@ function noteCoverage(db, elem, path):
         + " in " + path + "; its species will use the"
         + " default potential.  To enable a fingerprint"
         + " match, add a fingerprint declaration to the"
-        + " curation manifest and regenerate the database"
+        + " curation manifest and re-run the producer"
         + " (DESIGN 5.7).")
 ```
 
@@ -3713,17 +3686,18 @@ function first_environment_matcher(methods):
 
 ---
 
-### 11.4 Regeneration Pipeline (DESIGN 5.7, schema v2)
+### 11.4 Build Pipeline (DESIGN 5.7, schema v2)
 
-Reproducible rebuild of all affected
+Incremental build of the affected
 `s_gaussian_pot.toml` files (see DESIGN 5.7 for the
 layered reproducibility contract: bit-level emitter,
 precision-level numerics, free metadata).  The
 producer is a **kaleidoscope client**: it runs no SCF
 itself.  It works in three phases -- *build*,
-*dispatch*, *harvest*.  The build phase always rebuilds
-the "isolated" entries from current `pot1`/`coeff1`
-files (so atomSCF changes propagate), then, per
+*dispatch*, *harvest*.  The build phase loads each
+existing database and refreshes its "isolated" entry
+from current `pot1`/`coeff1` files (so atomSCF changes
+propagate), then, per
 reference solid, materializes the structure, asks the
 guidance predictor for a verification grid
 (`build_kpoint_convergence`, 15.6), and emits one `CalcUnit`
@@ -3735,7 +3709,7 @@ phase picks each solid's converged grid point, then for
 each distinct environment the run discovered takes one
 representative, extracts its potential, computes the
 database-wide `[characterization]` fingerprints (plus any
-rare per-entry override), and insert-or-merges the result
+rare per-entry override), and insert-or-skips the result
 into the per-element database (DESIGN 5.2.3), contributing
 the same converged point back to the guidance dataspace.
 
@@ -3793,17 +3767,22 @@ function buildInitialPotentials(manifest_path,
                 nuclear_alpha   = pot1.nuclear_alpha,
                 covalent_radius = pot1.covalent_radius,
                 potentials      = [])
-        # REGENERATE (DESIGN 5.7): drop EVERY prior entry -- the
-        # isolated baseline and all previously harvested solid
-        # entries alike -- and reseed from one fresh isolated
-        # baseline, so the file is a pure function of the current
-        # pot1/coeff1 and the manifest: no entry from a dropped
-        # solid lingers, and re-running never inflates a dedup
-        # entry's multiplicity/model_count.  The harvest phase
-        # (below) appends this run's solid entries.
-        db.potentials = [
-            build_isolated_entry(elem, imago_commit,
-                timestamp, manifest)]
+        # INCREMENTAL (DESIGN 5.7): the existing database was
+        # loaded above (or started empty), so every environment
+        # harvested by earlier runs is preserved -- there is no
+        # reset.  Refresh only the "isolated" baseline from the
+        # current pot1/coeff1 (so atomSCF changes propagate):
+        # drop the old isolated entry by label and append the
+        # fresh one, leaving all harvested entries untouched.
+        # The harvest phase (below) then inserts-or-skips this
+        # run's solids on top; re-running an unchanged manifest
+        # moves nothing, because every duplicate is skipped
+        # (5.2.3), so no count can inflate.
+        iso = build_isolated_entry(elem, imago_commit,
+            timestamp, manifest)
+        db.potentials = [p for p in db.potentials
+                         if p.label != "isolated"]
+        db.potentials.append(iso)
         databases[elem] = db
 
     # Step 1b: per reference solid, materialize the
@@ -3930,11 +3909,11 @@ function buildInitialPotentials(manifest_path,
         # auto-composed from ref.source_description.
         #
         # INTERIM (C88): environment auto-discovery and the
-        # insert_or_merge dedup are the C88 storage model
+        # insert_or_skip dedup are the C88 storage model
         # and are not built yet.  The present build is the
         # C60 witness path: discover_environments returns
         # exactly the solid's customization-pinned entries and
-        # insert_or_merge degrades to append-or-replace-by-
+        # insert_or_skip degrades to append-or-replace-by-
         # label.  The loop is written in its target shape.
         for env in discover_environments(converged, ref):
             elem = env.element
@@ -3961,14 +3940,14 @@ function buildInitialPotentials(manifest_path,
                 num_gaussians = len(coeffs),
                 alpha_min     = min(alphas),
                 alpha_max     = max(alphas),
-                # First insert seeds the running mean with
-                # this potential, a zero standard deviation,
-                # and unit counts; insert_or_merge updates
-                # all four on a duplicate (DESIGN 5.2.3).
+                # The entry stores this representative's
+                # harvested potential verbatim (DESIGN
+                # 5.2.3): no mean, spread, or counts -- the
+                # leaner skip-on-match model keeps one
+                # representative per environment and nothing
+                # more.  insert_or_skip appends it when the
+                # environment is new and drops it on a match.
                 coefficients    = coeffs,
-                coefficient_std = zeros(len(coeffs)),
-                multiplicity    = 1,
-                model_count     = 1,
                 alphas          = alphas,
                 # Provenance records ref.system_type for
                 # forensics (DESIGN 5.7 rule 2).
@@ -3977,7 +3956,7 @@ function buildInitialPotentials(manifest_path,
                     ref, env.atom_site,
                     converged.iterations),
                 fingerprints  = fingerprints)
-            insert_or_merge(databases[elem], new, ref)
+            insert_or_skip(databases[elem], new, ref)
 
     # Step 3b: guidance contribution.  The same
     # converged grid points feed the historical guidance
@@ -4036,42 +4015,36 @@ function discover_environments(converged, ref):
     return envs
 
 
-function insert_or_merge(db, new, ref):
+function insert_or_skip(db, new, ref):
     # DESIGN 5.2.3: the per-element database stores DISTINCT
-    # ENVIRONMENTS, not atoms.  An explicit customization label
-    # replaces by label first; otherwise dedup keys on the
-    # BISPECTRUM descriptor at the preferred sub_spec -- the
-    # transferable one every entry carries (native or
-    # witness, 5.2.2).  Symmetry has no meaning across
-    # structures and reduce is the disposable witness, so
-    # neither gates the merge.
+    # ENVIRONMENTS, not atoms.  An explicit customization
+    # label replaces by label first; otherwise the dedup
+    # LOCATES a match on the BISPECTRUM descriptor at the
+    # preferred sub_spec -- the transferable one every entry
+    # carries (native or witness, 5.2.2); symmetry has no
+    # meaning across structures and reduce is the disposable
+    # witness, so neither gates the dedup.  A match is
+    # SKIPPED (the stored representative stands); a new
+    # environment is appended.  Skipping is what makes the
+    # build idempotent: re-running an unchanged manifest finds
+    # every environment already present and moves nothing.
     if new.label is not None:
         existing = find_by_label(db, new.label)
         if existing is not None:
             replace(db, existing, new)
             return
-    # INTERIM (C88): the fingerprint dedup-merge is not
-    # built.  The present build appends (the C60 witness
-    # path); duplicates are not yet folded.
+    # INTERIM (C88): the fingerprint dedup is not built yet.
+    # The present build appends (the C60 witness path);
+    # duplicates are not yet detected.
     dup = find_bispectrum_duplicate(db, new)        # C88
     if dup is None:
         db.potentials.append(new)
-        return
-    # Fold in (C88): require equal alpha SETS -- coefficient-
-    # wise averaging is meaningful only on one shared set of
-    # alphas (5.2.3) -- then advance the running mean and
-    # per-coefficient standard deviation (Welford) and the
-    # counts.  model_count rises only for a solid not yet
-    # represented in this entry.
-    require(alpha_sets_equal(dup.alphas, new.alphas), db,
-        "insert_or_merge: alpha sets differ; cannot"
-        + " average coefficients (label "
-        + str(new.label) + ")")
-    welford_update(dup, new.coefficients)    # mean + std
-    dup.multiplicity = dup.multiplicity + 1
-    if ref.reference_id not in dup.contributing_solids:
-        dup.contributing_solids.add(ref.reference_id)
-        dup.model_count = dup.model_count + 1
+    # else: a duplicate environment is already stored, so skip
+    # `new` entirely -- the first representative's potential
+    # is kept (DESIGN 5.2.3).  Reconciling duplicates into a
+    # statistical mean (with the spread, counts, and the
+    # alpha-set-equality assertion that averaging needs) is
+    # the deferred upgrade (TODO C103).
 
 
 function load_manifest_v2(path):
@@ -4514,8 +4487,8 @@ function build_isolated_entry(elem, commit, ts,
     # baseline is the FALLBACK default and the per-
     # element database always has exactly one
     # default-tagged entry (rule 7 of 5.2).  As a
-    # single observed potential it seeds the running
-    # mean with a zero spread and unit counts.
+    # It stores the single atomSCF potential verbatim,
+    # like any other environment (DESIGN 5.2.3).
     pot1   = read_pot1(elem)
     coeff1 = read_coeff1(elem)
     return PotentialEntry(
@@ -4528,9 +4501,6 @@ function build_isolated_entry(elem, commit, ts,
         alpha_min     = pot1.alpha_min,
         alpha_max     = pot1.alpha_max,
         coefficients    = coeff1.coefficients,
-        coefficient_std = zeros(pot1.num_gaussians),
-        multiplicity    = 1,
-        model_count     = 1,
         alphas          = coeff1.alphas,
         provenance    = {
             "source"       : "atomSCF",
