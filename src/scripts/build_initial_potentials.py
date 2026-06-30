@@ -341,11 +341,10 @@ def build_isolated_entry(pdb_root: str, elem: str, commit: str,
         num_gaussians=pot.num_gaussians,
         alpha_min=pot.alpha_min,
         alpha_max=pot.alpha_max,
+        # The isolated baseline stores the single atomSCF
+        # potential verbatim, like any other environment
+        # (DESIGN 5.2.3).
         coefficients=coefficients,
-        # A single observed potential: the running mean is just
-        # this potential, its spread is zero, and the dedup
-        # counts start at 1 (DESIGN 5.2.3).
-        coefficient_std=[0.0] * pot.num_gaussians,
         alphas=alphas,
         provenance={
             "source": "atomSCF",
@@ -1793,13 +1792,10 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                 num_gaussians=len(coefficients),
                 alpha_min=min(alphas),
                 alpha_max=max(alphas),
-                coefficients=coefficients,
                 # The entry keeps this representative's harvested
-                # potential; a zero spread fills the column the
-                # current schema still carries.  The insert-or-skip of
-                # the B phase (C88) keeps the first representative on a
-                # duplicate (DESIGN 5.2.3).
-                coefficient_std=[0.0] * len(coefficients),
+                # potential verbatim; insert_or_skip keeps the first
+                # representative on a duplicate (DESIGN 5.2.3).
+                coefficients=coefficients,
                 alphas=alphas,
                 provenance=make_imago_provenance(
                     imago_commit, timestamp, ref, env.atom_site,

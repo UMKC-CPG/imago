@@ -1031,12 +1031,12 @@ class TestRefreshIsolatedEntries:
         seed = ipdb.ElementDatabase(2, "Au", 79.0, 20.0, 1.0)
         seed.potentials.append(ipdb.PotentialEntry(
             "isolated", False, "old iso", 1, 0.15, 1.0e8,
-            [9.0], [0.0], [0.15],
+            [9.0], [0.15],
             {"source": "atomSCF", "commit": "old",
              "generated_at": "old"}))
         seed.potentials.append(ipdb.PotentialEntry(
             "default_solid", True, "Au bulk", 1, 0.15, 1.0e8,
-            [0.5], [0.0], [0.15],
+            [0.5], [0.15],
             {"source": "Imago", "commit": "old",
              "generated_at": "old", "reference_id": "au_fcc",
              "atom_site": 1, "kpoint_spec": "k",
@@ -1533,7 +1533,7 @@ def _entry(label, vector, *, default=False):
     return ipdb.PotentialEntry(
         label=label, default=default, description="d",
         num_gaussians=1, alpha_min=0.15, alpha_max=0.15,
-        coefficients=[1.0], coefficient_std=[0.0], alphas=[0.15],
+        coefficients=[1.0], alphas=[0.15],
         provenance={"source": "Imago"},
         fingerprints=[ipdb.FingerprintRecord(
             method="bispectrum", sub_spec=dict(_BISPEC_SUBSPEC),
@@ -1573,7 +1573,7 @@ def test_find_bispectrum_duplicate_ignores_keyless_entries():
     #   and a new entry without a bispectrum key never matches.
     iso = ipdb.PotentialEntry(
         "isolated", True, "iso", 1, 0.15, 0.15,
-        [1.0], [0.0], [0.15], {"source": "atomSCF"})
+        [1.0], [0.15], {"source": "atomSCF"})
     assert bip.find_bispectrum_duplicate(
         _db_with(iso), _entry("b", [0.0, 0.0, 0.0])) is None
     assert bip.find_bispectrum_duplicate(

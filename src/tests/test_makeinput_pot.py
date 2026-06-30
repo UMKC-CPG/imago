@@ -89,7 +89,6 @@ def _au_db() -> ElementDatabase:
         alpha_min     = 1.5e-1,
         alpha_max     = 1.0e+8,
         coefficients    = [1.0, -2.5, 3.0],
-        coefficient_std = [0.0, 0.0, 0.0],
         alphas          = [1.5e-1, 1.5e+0, 1.0e+8],
         provenance      = _atomscf_provenance(),
     ))
@@ -101,7 +100,6 @@ def _au_db() -> ElementDatabase:
         alpha_min     = 1.5e-1,
         alpha_max     = 1.0e+8,
         coefficients    = [0.1, 0.2, 0.3],
-        coefficient_std = [0.0, 0.0, 0.0],
         alphas          = [1.5e-1, 1.5e+0, 1.0e+8],
         provenance      = _imago_provenance(),
     ))
@@ -181,7 +179,7 @@ def _reduce_entry(label, default, neighbor, distance,
     return PotentialEntry(
         label=label, default=default, description="d",
         num_gaussians=1, alpha_min=1.0, alpha_max=1.0,
-        coefficients=[1.0], coefficient_std=[0.0], alphas=[1.0],
+        coefficients=[1.0], alphas=[1.0],
         provenance=_imago_provenance(), fingerprints=[record])
 
 
@@ -200,7 +198,7 @@ def _bispec_entry(label, default, values, preferred=False):
     return PotentialEntry(
         label=label, default=default, description="d",
         num_gaussians=1, alpha_min=1.0, alpha_max=1.0,
-        coefficients=[1.0], coefficient_std=[0.0], alphas=[1.0],
+        coefficients=[1.0], alphas=[1.0],
         provenance=_imago_provenance(), fingerprints=[record])
 
 

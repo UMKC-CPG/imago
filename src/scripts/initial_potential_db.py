@@ -64,9 +64,8 @@ PotentialEntry
     Dataclass holding one labeled potential entry: ``label``,
     ``default``, ``description``, ``num_gaussians``,
     ``alpha_min``, ``alpha_max``, ``coefficients`` (the
-    per-coefficient mean), ``coefficient_std``, ``alphas``,
-    ``provenance``, the dedup counts ``multiplicity`` and
-    ``model_count``, and the (possibly empty) list of
+    representative atom's harvested potential), ``alphas``,
+    ``provenance``, and the (possibly empty) list of
     :class:`FingerprintRecord` objects attached to the entry.
 
 ElementDatabase
@@ -212,18 +211,14 @@ class PotentialEntry:
     fingerprints participates only in literal-label and
     default-tag selection, never in environment-scheme matching.
 
-    The dedup-storage fields (DESIGN 5.2.3) record that one
-    stored entry summarizes many atoms that share an
-    environment.  ``coefficients`` is the per-coefficient *mean*
-    over every atom merged into the entry, and
-    ``coefficient_std`` is the matching per-coefficient standard
-    deviation -- the spread of those atoms' potentials, zero for
-    a single-atom entry.  ``multiplicity`` counts the atoms
-    merged in, and ``model_count`` counts the distinct reference
-    solids that contributed -- a frequency weight and an
-    independent-corroboration measure, respectively.  Both
-    default to 1, the value for a freshly harvested,
-    not-yet-merged entry.
+    The ``coefficients`` and ``alphas`` arrays hold the entry's
+    potential: the harvested potential of the representative atom
+    for this environment, stored verbatim (DESIGN 5.2.3).  The
+    database stores one representative per distinct environment;
+    a statistical mean across every atom that maps to the
+    environment -- with its per-coefficient spread and the atom
+    and model counts -- is a deferred refinement (DESIGN 5.2.3
+    "Deferred", TODO C103).
     """
 
     label: str
@@ -233,11 +228,8 @@ class PotentialEntry:
     alpha_min: float
     alpha_max: float
     coefficients: list[float]
-    coefficient_std: list[float]
     alphas: list[float]
     provenance: dict[str, Any]
-    multiplicity: int = 1
-    model_count: int = 1
     fingerprints: list[FingerprintRecord] = field(
         default_factory=list)
 
@@ -288,10 +280,8 @@ def load(path: str,
     3. Every required field is present, at both the top level
        and inside each ``[[potential]]`` block -- including the
        new per-entry ``default`` flag.
-    4. ``len(coefficients) == len(alphas) ==
-       len(coefficient_std) == num_gaussians`` for every entry,
-       and the dedup counts ``multiplicity`` and ``model_count``
-       (each optional, defaulting to 1) are ``>= 1``.
+    4. ``len(coefficients) == len(alphas) == num_gaussians``
+       for every entry.
     5. Labels are unique within the file.
     6. At least one entry carries ``label == "isolated"`` --
        the legacy baseline must always be present so that the
@@ -393,8 +383,7 @@ def load(path: str,
     preferred_count_by_method: dict[str, int] = {}
     entry_required = (
         "default", "description", "num_gaussians", "alpha_min",
-        "alpha_max", "coefficients", "coefficient_std", "alphas",
-        "provenance",
+        "alpha_max", "coefficients", "alphas", "provenance",
     )
 
     for entry_dict in raw.get("potential", []):
@@ -416,32 +405,15 @@ def load(path: str,
 
         # Rule 4: length consistency between the declared
         # num_gaussians and the per-coefficient arrays.
-        # coefficient_std is a required array (DESIGN 5.2.3), so
-        # it is length-checked alongside coefficients and alphas.
         n_gauss = entry_dict["num_gaussians"]
         coeffs = entry_dict["coefficients"]
         alphas = entry_dict["alphas"]
-        coeff_std = entry_dict["coefficient_std"]
-        if (len(coeffs) != n_gauss or len(alphas) != n_gauss
-                or len(coeff_std) != n_gauss):
+        if len(coeffs) != n_gauss or len(alphas) != n_gauss:
             raise ValueError(
                 f"{path}: [[potential]] '{label}': coefficients/"
-                f"alphas/coefficient_std length "
-                f"({len(coeffs)}/{len(alphas)}/{len(coeff_std)}) "
-                f"does not match num_gaussians ({n_gauss})")
-
-        # multiplicity and model_count are optional and default
-        # to 1 (DESIGN 5.2.3): a freshly harvested entry, or a
-        # hand-trimmed file, need not spell them out.  The
-        # emitter always writes them, so a regenerated file is
-        # self-describing.  Each, when present, must be >= 1.
-        multiplicity = entry_dict.get("multiplicity", 1)
-        model_count = entry_dict.get("model_count", 1)
-        if multiplicity < 1 or model_count < 1:
-            raise ValueError(
-                f"{path}: [[potential]] '{label}': multiplicity "
-                f"and model_count must be >= 1 (got "
-                f"{multiplicity}/{model_count})")
+                f"alphas length "
+                f"({len(coeffs)}/{len(alphas)}) does not match "
+                f"num_gaussians ({n_gauss})")
 
         # Rule 5: labels must be unique within the file.
         if label in seen_labels:
@@ -537,11 +509,8 @@ def load(path: str,
             alpha_min       = entry_dict["alpha_min"],
             alpha_max       = entry_dict["alpha_max"],
             coefficients    = list(coeffs),
-            coefficient_std = list(coeff_std),
             alphas          = list(alphas),
             provenance      = dict(entry_dict["provenance"]),
-            multiplicity    = multiplicity,
-            model_count     = model_count,
             fingerprints    = fingerprints,
         ))
 
@@ -850,13 +819,12 @@ def save(db: ElementDatabase, path: str) -> None:
     # the DESIGN 5.3 gold sketch.
     body_keys = [
         "label", "default", "description", "num_gaussians",
-        "alpha_min", "alpha_max", "multiplicity", "model_count",
+        "alpha_min", "alpha_max",
     ]
     # The "=" alignment width spans the scalar body keys and the
     # array keys, so every array opener aligns with the rest of
-    # the entry's body.  coefficient_std rides with the arrays.
-    align_keys = body_keys + [
-        "coefficients", "coefficient_std", "alphas"]
+    # the entry's body.
+    align_keys = body_keys + ["coefficients", "alphas"]
     body_width = max(len(k) for k in align_keys)
 
     for entry in db.potentials:
@@ -868,8 +836,6 @@ def save(db: ElementDatabase, path: str) -> None:
             "num_gaussians": entry.num_gaussians,
             "alpha_min":     entry.alpha_min,
             "alpha_max":     entry.alpha_max,
-            "multiplicity":  entry.multiplicity,
-            "model_count":   entry.model_count,
         }
         for key in body_keys:
             lines.append(_format_kv(
@@ -878,12 +844,6 @@ def save(db: ElementDatabase, path: str) -> None:
         lines.append(_format_array_open(
             "coefficients", body_width))
         for value in entry.coefficients:
-            lines.append("   " + _fmt_float(value) + ",")
-        lines.append("]")
-
-        lines.append(_format_array_open(
-            "coefficient_std", body_width))
-        for value in entry.coefficient_std:
             lines.append("   " + _fmt_float(value) + ",")
         lines.append("]")
 
