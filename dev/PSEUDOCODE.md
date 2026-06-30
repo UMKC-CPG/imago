@@ -3908,13 +3908,12 @@ function buildInitialPotentials(manifest_path,
         # 5.6.5) and label / description are derived /
         # auto-composed from ref.source_description.
         #
-        # INTERIM (C88): environment auto-discovery and the
-        # insert_or_skip dedup are the C88 storage model
-        # and are not built yet.  The present build is the
-        # C60 witness path: discover_environments returns
-        # exactly the solid's customization-pinned entries and
-        # insert_or_skip degrades to append-or-replace-by-
-        # label.  The loop is written in its target shape.
+        # INTERIM (C88): environment auto-discovery is built
+        # (discover_environments below partitions the run by
+        # (element, species, type) and yields one representative
+        # per group, with customizations layered on); the
+        # cross-run insert_or_skip dedup is not, so it still
+        # degrades to append-or-replace-by-label.
         for env in discover_environments(converged, ref):
             elem = env.element
             if elem not in databases:
@@ -3987,31 +3986,63 @@ function buildInitialPotentials(manifest_path,
 
 
 function discover_environments(converged, ref):
-    # DESIGN 5.7 target: yield one record per DISTINCT
-    # ENVIRONMENT in the converged run.  Each carries the
-    # representative atom_site, its element, and the label /
-    # default / description a customization supplied -- else a
-    # derived label, default=false, and a description
-    # auto-composed from ref.source_description qualified by
-    # the site's species and type (DESIGN 5.2.1).
+    # DESIGN 5.7 / 5.2.3: yield one record per DISTINCT
+    # ENVIRONMENT in the converged run.  The run's site-identity
+    # map (datSkl.map) partitions every atom by
+    # (element, species, type); atoms sharing that key are
+    # equivalent under the assigning method (symmetry for a
+    # crystalline reference) and carry the same potential, so
+    # one representative speaks for the whole group.  The
+    # representative is order-independent -- the lowest skeleton
+    # index in the group (DESIGN 5.6.5).
     #
-    # INTERIM (C88): auto-discovery is not built.  The
-    # present build yields exactly ref.entries -- the
-    # customization-pinned sites of the C60 witness path -- so a
-    # solid with no entries harvests nothing yet.  When C88
-    # lands this reads the run's species partition, takes
-    # one order-independent representative per environment
-    # (DESIGN 5.6.5), then layers any matching customization on
-    # top, keyed by the customization's representative atom_site.
-    envs = []
+    # A customization annotates the environment that contains
+    # its pinned atom_site, supplying the curator's label /
+    # default / description / fingerprint overrides and the
+    # representative site to harvest; an auto-discovered
+    # environment derives its label, takes default=false, and
+    # auto-composes its description from ref.source_description.
+    # A site-less customization cannot yet be matched and is
+    # skipped (INTERIM C88; matching by label is later work).
+    site_identity = read_site_identity_map(converged)
+    sites_by_env = {}
+    for skeleton_atom, key in site_identity.items():
+        sites_by_env.setdefault(key, []).append(skeleton_atom)
+
+    # Map each pinned customization to its environment; two on
+    # one environment is ambiguous and is an error.
+    custom_by_env = {}
     for spec in ref.entries:
+        if spec.atom_site is None:
+            continue
+        require(spec.atom_site in site_identity, ...)
+        key = site_identity[spec.atom_site]
+        require(key not in custom_by_env, ...)
+        custom_by_env[key] = spec
+
+    envs = []
+    for key in sorted(sites_by_env):
+        (site_element, species, type_number) = key
+        spec = custom_by_env.get(key)
+        atom_site = (spec.atom_site if spec and spec.atom_site
+                     else min(sites_by_env[key]))
+        element = resolve_element(spec, site_element)   # cross-check
+        label = (spec.label if spec and spec.label
+                 else assemble_entry_label(ref.reference_id,
+                     element, species, type_number, atom_site))
+        description = (spec.description if spec and spec.description
+                       else compose_auto_description(
+                           ref.source_description, ref.reference_id,
+                           element, species, atom_site))
         envs.append(Environment(
-            element     = spec.element,
-            atom_site   = spec.atom_site,
-            label       = spec.label,       # may be None
-            default     = spec.default,
-            description = spec.description,
-            overrides   = spec.fingerprints))
+            element     = element,
+            atom_site   = atom_site,
+            species     = species,
+            type_number = type_number,
+            label       = label,
+            default     = spec.default if spec else false,
+            description = description,
+            overrides   = spec.fingerprints if spec else []))
     return envs
 
 

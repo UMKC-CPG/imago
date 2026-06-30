@@ -758,7 +758,8 @@ def test_harvest_fingerprints_recipe_and_override(tmp_path):
         fingerprints=[ManifestFingerprint(
             method="bispectrum", sub_spec=override_spec)])
     records = harvest_fingerprints(
-        flight, _ref(), spec, result_toml, characterization)
+        flight, _ref(), spec.atom_site, spec.fingerprints,
+        result_toml, characterization)
 
     assert len(records) == 2
     # The [characterization] record comes first and is preferred; the
@@ -1234,7 +1235,9 @@ def test_harvest_fingerprints_no_declarations_is_empty():
     entry = _ref().entries[0]
     assert entry.fingerprints == []
     # Empty recipe and no per-entry override -> nothing to harvest.
-    assert harvest_fingerprints(None, _ref(), entry, {}, []) == []
+    assert harvest_fingerprints(
+        None, _ref(), entry.atom_site, entry.fingerprints,
+        {}, []) == []
 
 
 def _fake_two_atom_structure():
@@ -1292,7 +1295,9 @@ def test_harvest_fingerprints_reduce(tmp_path, monkeypatch):
         element="Si", atom_site=1, label="t", default=True,
         description="d", fingerprints=[_REDUCE_DECL])
     # An empty recipe, so only the per-entry override is harvested.
-    records = harvest_fingerprints(None, _ref(), spec, result_toml, [])
+    records = harvest_fingerprints(
+        None, _ref(), spec.atom_site, spec.fingerprints,
+        result_toml, [])
 
     assert len(records) == 1
     record = records[0]
@@ -1348,7 +1353,9 @@ def test_harvest_fingerprints_loen_side(tmp_path):
         description="d",
         fingerprints=[ManifestFingerprint(
             method="bispectrum", sub_spec=sub_spec)])
-    records = harvest_fingerprints(flight, _ref(), spec, result_toml, [])
+    records = harvest_fingerprints(
+        flight, _ref(), spec.atom_site, spec.fingerprints,
+        result_toml, [])
 
     assert len(records) == 1
     assert records[0].method == "bispectrum"
@@ -1379,7 +1386,9 @@ def test_harvest_fingerprints_loen_guards_numbering_desync(tmp_path):
         fingerprints=[ManifestFingerprint(
             method="bispectrum", sub_spec=sub_spec)])
     with pytest.raises(ValueError):
-        harvest_fingerprints(flight, _ref(), spec, result_toml, [])
+        harvest_fingerprints(
+            flight, _ref(), spec.atom_site, spec.fingerprints,
+            result_toml, [])
 
 
 def test_harvest_fingerprints_guards_numbering_desync(
@@ -1400,7 +1409,115 @@ def test_harvest_fingerprints_guards_numbering_desync(
         element="Au", atom_site=1, label="t", default=True,
         description="d", fingerprints=[_REDUCE_DECL])
     with pytest.raises(ValueError):
-        harvest_fingerprints(None, _ref(), spec, result_toml, [])
+        harvest_fingerprints(
+            None, _ref(), spec.atom_site, spec.fingerprints,
+            result_toml, [])
+
+
+# ---- discover_environments (B1: one rep per distinct env) ----
+
+def _identity(mapping):
+    """A datSkl.map reader stub returning the given
+    {skeleton: (element, species, type)} for any result_toml."""
+    return lambda result_toml: dict(mapping)
+
+
+def test_discover_environments_one_rep_per_type():
+    # Four sites span two distinct (element, species, type) groups:
+    #   sites 1 & 3 are Si type 1; sites 2 & 4 are Si type 2.
+    #   Discovery yields one representative per group -- the lowest
+    #   skeleton index -- regardless of the map's row order.
+    ref = _ref(entries=[])
+    identity = _identity({3: ("si", 1, 1), 1: ("si", 1, 1),
+                          4: ("si", 1, 2), 2: ("si", 1, 2)})
+    envs = bip.discover_environments({}, ref, identity_fn=identity)
+
+    assert [(e.atom_site, e.type_number) for e in envs] == [
+        (1, 1), (2, 2)]
+    # An auto-discovered environment is not default, carries no
+    #   overrides, and derives its label + a non-empty description.
+    assert all(e.default is False and e.overrides == []
+               for e in envs)
+    assert envs[0].label == "au_fcc-si1-t1-a1"
+    assert envs[0].description != ""
+
+
+def test_discover_environments_layers_pinned_customization():
+    # A customization pins site 4 (Si type 2) and supplies a label,
+    #   default flag, description, and a fingerprint override; the
+    #   discovered environment uses that site as its representative
+    #   and layers the rest on, while the other group stays auto.
+    override = ManifestFingerprint(
+        method="reduce",
+        sub_spec={"level": 1, "thick": 0.1, "cutoff": 5.0,
+                  "tolerance": 0.05})
+    ref = _ref(entries=[ReferenceEntry(
+        element="Si", atom_site=4, label="picked", default=True,
+        description="custom", fingerprints=[override])])
+    identity = _identity({1: ("si", 1, 1), 2: ("si", 1, 1),
+                          3: ("si", 1, 2), 4: ("si", 1, 2)})
+    envs = bip.discover_environments({}, ref, identity_fn=identity)
+
+    by_type = {e.type_number: e for e in envs}
+    # The type-1 group is auto-discovered (rep = lowest site 1).
+    assert by_type[1].atom_site == 1
+    assert by_type[1].default is False
+    # The type-2 group takes the curator's pinned site and overrides.
+    assert by_type[2].atom_site == 4
+    assert by_type[2].label == "picked"
+    assert by_type[2].default is True
+    assert by_type[2].description == "custom"
+    assert by_type[2].overrides == [override]
+
+
+def test_discover_environments_skips_site_less_customization():
+    # A site-less customization cannot yet be matched to an
+    #   environment, so it is ignored; discovery still yields the
+    #   run's environments unannotated (interim limitation).
+    ref = _ref(entries=[ReferenceEntry(
+        element=None, atom_site=None, label="floating",
+        default=True, description="x")])
+    identity = _identity({1: ("si", 1, 1)})
+    envs = bip.discover_environments({}, ref, identity_fn=identity)
+
+    assert len(envs) == 1
+    assert envs[0].label == "au_fcc-si1-t1-a1"
+    assert envs[0].default is False
+
+
+def test_discover_environments_element_mismatch_raises():
+    # A customization naming an element that disagrees with its
+    #   pinned site is a hard error.
+    ref = _ref(entries=[ReferenceEntry(
+        element="O", atom_site=1, label=None, default=False,
+        description=None)])
+    identity = _identity({1: ("si", 1, 1)})
+    with pytest.raises(ValueError):
+        bip.discover_environments({}, ref, identity_fn=identity)
+
+
+def test_discover_environments_two_customizations_one_env_raises():
+    # Two customizations pinning sites in the same environment is
+    #   ambiguous and refused.
+    ref = _ref(entries=[
+        ReferenceEntry(element="Si", atom_site=1, label="a",
+                       default=False, description=None),
+        ReferenceEntry(element="Si", atom_site=2, label="b",
+                       default=False, description=None)])
+    identity = _identity({1: ("si", 1, 1), 2: ("si", 1, 1)})
+    with pytest.raises(ValueError):
+        bip.discover_environments({}, ref, identity_fn=identity)
+
+
+def test_discover_environments_pinned_site_absent_raises():
+    # A customization pinning a site the converged run does not
+    #   contain is a hard error.
+    ref = _ref(entries=[ReferenceEntry(
+        element="Si", atom_site=9, label=None, default=False,
+        description=None)])
+    identity = _identity({1: ("si", 1, 1)})
+    with pytest.raises(ValueError):
+        bip.discover_environments({}, ref, identity_fn=identity)
 
 
 def test_materialize_structure_resolves_local_path(tmp_path):

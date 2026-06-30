@@ -938,7 +938,8 @@ def read_skeleton_to_dat_map(result_toml: dict
 
 
 def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
-                         spec: ReferenceEntry, result_toml: dict,
+                         atom_site: int, overrides: list,
+                         result_toml: dict,
                          characterization: list) -> list:
     """Build the ``FingerprintRecord`` list for one environment
     (PSEUDOCODE 11.4 ``harvestFingerprints``).
@@ -968,7 +969,7 @@ def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
 
     # The preferred recipe applies to every environment; the entry's
     #   own fingerprints (if any) ride along as non-preferred overrides.
-    declarations = list(characterization) + list(spec.fingerprints)
+    declarations = list(characterization) + list(overrides)
     if not declarations:
         return []
 
@@ -977,7 +978,7 @@ def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
     #   reuse the (dat row, element) for every declaration.  The element
     #   is the cross-check both families guard against.
     skeleton_to_dat = read_skeleton_to_dat_map(result_toml)
-    dat_atom, map_element = skeleton_to_dat[spec.atom_site]
+    dat_atom, map_element = skeleton_to_dat[atom_site]
 
     # The expanded structure is read only when a Python-side
     #   declaration needs it -- a loen-only entry never touches it -- and
@@ -999,7 +1000,7 @@ def harvest_fingerprints(flight: Flight, ref: ReferenceSolid,
         structure_element = structure.atom_element_name[dat_atom]
         if structure_element.lower() != map_element.lower():
             raise ValueError(
-                f"site {spec.atom_site}: datSkl.map names element "
+                f"site {atom_site}: datSkl.map names element "
                 f"{map_element!r} but the expanded structure row "
                 f"{dat_atom} is {structure_element!r}; numbering desync")
 
@@ -1331,6 +1332,159 @@ def compose_auto_description(source_description: str | None,
     return f"{qualifier}, from reference solid {reference_id}."
 
 
+@dataclass(frozen=True)
+class Environment:
+    """One distinct local environment discovered in a converged
+    reference run (PSEUDOCODE 11.4 ``discover_environments``).
+
+    The per-element database stores *distinct environments, not
+    atoms* (DESIGN 5.2.3), so the harvest visits one representative
+    site per environment rather than every atom.  Within one
+    crystalline run the assigning partition is the potential *type*:
+    all atoms sharing an ``(element, species, type)`` are
+    symmetry-equivalent and carry the same converged potential, so a
+    single representative speaks for the whole group.
+
+    Fields:
+      ``element``     -- the site's element symbol.
+      ``atom_site``   -- skeleton index of the representative site,
+                         whose potential and fingerprints are
+                         harvested.
+      ``species``     -- OLCAO species number (used in the label).
+      ``type_number`` -- potential-type number (used in the label).
+      ``label``       -- the entry label: a curator customization's
+                         explicit label, else the derived
+                         ``<ref_id>-<elem><species>-t<type>-a<site>``
+                         (DESIGN 5.2.1).
+      ``default``     -- whether this is the element's default entry
+                         (a customization's flag, else False).
+      ``description`` -- the entry description: a customization's
+                         text, else auto-composed from the solid's
+                         ``source_description`` (DESIGN 5.7).
+      ``overrides``   -- the customization's per-entry fingerprint
+                         declarations (non-preferred overrides), or
+                         an empty list for an auto-discovered
+                         environment."""
+
+    element: str
+    atom_site: int
+    species: int
+    type_number: int
+    label: str
+    default: bool
+    description: str
+    overrides: list
+
+
+def discover_environments(result_toml: dict, ref: ReferenceSolid,
+                          *, identity_fn=read_site_identity_map
+                          ) -> list[Environment]:
+    """Yield one :class:`Environment` per distinct environment in a
+    converged run (PSEUDOCODE 11.4; DESIGN 5.7 / 5.2.3).
+
+    The run's site-identity map (``datSkl.map``) partitions every
+    atom by ``(element, species, type)``.  Atoms sharing that key are
+    equivalent under the run's assigning method (symmetry for a
+    crystalline reference), so the harvest keeps one representative
+    per group rather than one entry per atom.  The representative is
+    chosen order-independently -- the lowest skeleton index in the
+    group -- so the discovered set never depends on the map's row
+    order (DESIGN 5.6.5).
+
+    A manifest customization annotates the environment that contains
+    its pinned ``atom_site``, supplying the curator's label, default
+    flag, description, fingerprint overrides, and the representative
+    site to harvest.  A *site-less* customization cannot yet be
+    matched to an environment and is skipped (an interim limitation;
+    matching by label or element is later work).
+
+    ``identity_fn`` is injected so the orchestration can be tested
+    with the ``datSkl.map`` reader mocked."""
+
+    site_identity = identity_fn(result_toml)
+
+    # Partition the run's atoms by environment key.  Sorting the keys
+    #   below makes the discovered order deterministic regardless of
+    #   the map's row order.
+    sites_by_env: dict[tuple[str, int, int], list[int]] = {}
+    for skeleton_atom, identity in site_identity.items():
+        sites_by_env.setdefault(identity, []).append(skeleton_atom)
+
+    # Match each site-pinned customization to the environment it
+    #   annotates.  Two customizations on one environment is
+    #   ambiguous (which label/default wins?), so it is a hard error.
+    custom_by_env: dict[tuple[str, int, int], ReferenceEntry] = {}
+    for spec in ref.entries:
+        if spec.atom_site is None:
+            continue        # site-less: not yet matchable (interim)
+        if spec.atom_site not in site_identity:
+            raise ValueError(
+                f"{ref.reference_id}: customization pins site "
+                f"{spec.atom_site}, which the converged run does "
+                f"not contain")
+        key = site_identity[spec.atom_site]
+        if key in custom_by_env:
+            raise ValueError(
+                f"{ref.reference_id}: two customizations annotate "
+                f"the same environment {key}; at most one is allowed")
+        custom_by_env[key] = spec
+
+    environments: list[Environment] = []
+    for key in sorted(sites_by_env):
+        site_element, species, type_number = key
+        spec = custom_by_env.get(key)
+
+        # The representative site: the curator's pinned site when a
+        #   customization names one, else the order-independent
+        #   lowest skeleton index in the group.
+        if spec is not None and spec.atom_site is not None:
+            atom_site = spec.atom_site
+        else:
+            atom_site = min(sites_by_env[key])
+
+        # element: an explicit customization element is cross-checked
+        #   against the site; omitted, it is the site's own element
+        #   the run discovered (DESIGN 5.7 rule 3).
+        if spec is not None and spec.element is not None:
+            if spec.element.lower() != site_element.lower():
+                raise ValueError(
+                    f"{ref.reference_id}: customization names element "
+                    f"{spec.element!r} but site {atom_site} is "
+                    f"{site_element!r} in the converged run")
+            element = spec.element
+        else:
+            element = site_element
+
+        # label: the curator's explicit override, else derived from
+        #   the run's site identity (DESIGN 5.2.1).
+        if spec is not None and spec.label is not None:
+            label = spec.label
+        else:
+            label = assemble_entry_label(
+                ref.reference_id, element, species,
+                type_number, atom_site)
+
+        # description: the explicit override, else auto-composed from
+        #   the solid's source_description (DESIGN 5.7).
+        if spec is not None and spec.description is not None:
+            description = spec.description
+        else:
+            description = compose_auto_description(
+                ref.source_description, ref.reference_id,
+                element, species, atom_site)
+
+        default = spec.default if spec is not None else False
+        overrides = (list(spec.fingerprints)
+                     if spec is not None else [])
+
+        environments.append(Environment(
+            element=element, atom_site=atom_site, species=species,
+            type_number=type_number, label=label, default=default,
+            description=description, overrides=overrides))
+
+    return environments
+
+
 def make_imago_provenance(commit: str, timestamp: str,
                           ref: ReferenceSolid, atom_site: int,
                           scf_iterations) -> dict[str, Any]:
@@ -1527,99 +1681,51 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             make_run_log_entry(ref, unit, result_toml))
         scf_iterations = result_toml.get("scf_iterations")
 
-        # The site-identity map (datSkl.map) gives every site its
-        # (element, species, type).  It is read once per converged
-        # solid -- the harvest needs it to derive labels and
-        # descriptions and to cross-check each customization's element.
-        site_identity: dict[int, tuple[str, int, int]] | None = None
-
-        # Each manifest customization annotates one environment of this
-        # solid (DESIGN 5.7).  In the interim build it must pin its
-        # representative atom_site; the automatic per-environment
-        # discovery (C88) that would fill site-less customizations is
-        # not built yet.
-        for spec in ref.entries:
-            if spec.atom_site is None:
-                # INTERIM (C88): a site-less customization needs the
-                #   environment auto-discovery of the Phase-B storage
-                #   model, which is not built, so it harvests nothing.
-                continue
-            if site_identity is None:
-                site_identity = identity_fn(result_toml)
-            site_element, species, type_number = (
-                site_identity[spec.atom_site])
-
-            # element: an explicit customization element is cross-
-            #   checked against the site; omitted, it is taken from the
-            #   site identity the run discovered (DESIGN 5.7 rule 3).
-            if spec.element is not None:
-                if spec.element.lower() != site_element.lower():
-                    raise ValueError(
-                        f"{ref.reference_id}: customization names "
-                        f"element {spec.element!r} but site "
-                        f"{spec.atom_site} is {site_element!r} in the "
-                        f"converged run")
-                element = spec.element
-            else:
-                element = site_element
-
-            elem_key = element.lower()
+        # Discover one representative per distinct environment in the
+        #   converged run (DESIGN 5.2.3 / 5.7).  Each carries its
+        #   resolved label, default flag, description, and fingerprint
+        #   overrides, with any site-pinned customization already
+        #   layered on; the harvest only extracts the potential and
+        #   inserts the entry.
+        for env in discover_environments(
+                result_toml, ref, identity_fn=identity_fn):
+            elem_key = env.element.lower()
             if elem_key not in databases:
                 continue        # filtered out by --element
             coefficients, alphas = extract_fn(
-                result_toml, spec.atom_site)
-
-            # label: the curator's explicit override when given, else
-            #   derived from the run's site identity (DESIGN 5.2.1).
-            if spec.label is not None:
-                label = spec.label
-            else:
-                label = assemble_entry_label(
-                    ref.reference_id, element, species,
-                    type_number, spec.atom_site)
-
-            # description: the explicit override when given, else
-            #   auto-composed from the solid's source_description,
-            #   qualified by the site's species and number (DESIGN 5.7).
-            if spec.description is not None:
-                description = spec.description
-            else:
-                description = compose_auto_description(
-                    ref.source_description, ref.reference_id,
-                    element, species, spec.atom_site)
+                result_toml, env.atom_site)
 
             new_entry = ipdb.PotentialEntry(
-                label=label,
-                default=spec.default,
-                description=description,
+                label=env.label,
+                default=env.default,
+                description=env.description,
                 num_gaussians=len(coefficients),
                 alpha_min=min(alphas),
                 alpha_max=max(alphas),
                 coefficients=coefficients,
-                # A freshly harvested atom seeds the running mean
-                # with its own potential, a zero spread, and unit
-                # dedup counts; the insert-or-merge of the B phase
-                # (C88) updates all four on a duplicate.
+                # The entry keeps this representative's harvested
+                # potential; a zero spread fills the column the
+                # current schema still carries.  The insert-or-skip of
+                # the B phase (C88) keeps the first representative on a
+                # duplicate (DESIGN 5.2.3).
                 coefficient_std=[0.0] * len(coefficients),
                 alphas=alphas,
                 provenance=make_imago_provenance(
-                    imago_commit, timestamp, ref, spec.atom_site,
+                    imago_commit, timestamp, ref, env.atom_site,
                     scf_iterations),
                 # Every environment harvests the database-wide
                 #   [characterization] recipe (preferred) plus any
                 #   per-entry override (non-preferred).
                 fingerprints=fingerprint_fn(
-                    flight, ref, spec, result_toml,
-                    manifest.characterization))
+                    flight, ref, env.atom_site, env.overrides,
+                    result_toml, manifest.characterization))
             database = databases[elem_key]
-            # REGENERATE cleared every prior entry, and within one run
-            #   labels are unique (manifest rule 6; derived labels by
-            #   construction), so replacing by label only collapses a
-            #   same-run duplicate -- the interim insert_or_merge
-            #   (PSEUDOCODE 11.4) before the C88 dedup lands.
+            # INTERIM (C88): cross-run bispectrum dedup (insert-or-
+            #   skip) is not built yet, so replace-by-label collapses
+            #   only a same-run label collision; a new label appends.
             database.potentials = [
                 entry for entry in database.potentials
-                if entry.label != label]
+                if entry.label != env.label]
             database.potentials.append(new_entry)
 
     # ----- Phase 3b: guidance contribution.  The same converged
