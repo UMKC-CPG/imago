@@ -117,7 +117,7 @@ import guidance_harvest
 #   names it runs a manifest with (DESIGN 5.7).
 from curation_manifest import (
     ReferenceEntry, ReferenceSolid, CurationManifest,
-    load_manifest_v2, load_structure_sources)
+    load_manifest_v2, load_structure_sources, resolve_run_settings)
 from kaleidoscope import CalcUnit, Flight, SweepRecord, dispatch
 from kaleidoscope.builders.kpoint_convergence import (
     build_kpoint_convergence, standard_key_fields)
@@ -1665,6 +1665,26 @@ def write_run_log(path: str, imago_commit: str, timestamp: str,
 #  The producer pipeline (DESIGN 5.7; PSEUDOCODE 11.4)
 # ============================================================
 
+def apply_manifest_defaults(manifest: CurationManifest) -> None:
+    """Fold the top-level ``[defaults]`` block into each reference
+    solid, in place, so the rest of the producer reads one fully
+    resolved run setting per field (``basis``, ``functional``,
+    ``kpoint_integration``, ``kpoint_spec``, ``scf_threshold``) and
+    never has to consult the shared defaults again (DESIGN 5.7).
+
+    A solid that names its own value keeps it; a solid that omits a
+    setting inherits the manifest default.  The loader already proved
+    every setting is resolvable for every solid (manifest rule 2), so
+    after this pass no run-setting field is left ``None`` -- the
+    downstream ``refresh_isolated_entries`` call and the two per-solid
+    loops can treat every setting as present.
+    """
+
+    manifest.reference_solids = [
+        resolve_run_settings(solid, manifest.defaults)
+        for solid in manifest.reference_solids]
+
+
 def build_initial_potentials(manifest_path: str, pdb_root: str,
                              data_root: str, *, force: bool = False,
                              single_element: str | None = None,
@@ -1707,6 +1727,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     #   declared fingerprint method must be a registered matcher (C54).
     manifest = load_manifest_v2(
         manifest_path, known_methods=set(MATCHERS))
+    apply_manifest_defaults(manifest)
     manifest_dir = os.path.dirname(manifest.manifest_path)
     guidance_root = os.path.join(data_root, "historicalGuidanceDB")
     dataspace = guidance_db.load(guidance_root)

@@ -54,6 +54,7 @@ from build_initial_potentials import (
     make_run_log_entry,
     make_nonconverged_log_entry,
     write_run_log,
+    apply_manifest_defaults,
     build_initial_potentials,
 )
 import build_initial_potentials as bip
@@ -2239,6 +2240,167 @@ def test_build_initial_potentials_derives_label_at_harvest(
                          known_methods=None)
     entry = ipdb.lookup(database, "au_fcc-au1-t1-a1")
     assert entry.default is True
+    assert entry.coefficients == [0.5, 0.3]
+    assert entry.provenance["reference_id"] == "au_fcc"
+
+
+# ================================================================
+#  The [defaults] hoist (DESIGN 5.7; C104) -- shared run settings
+#  live once in a top-level [defaults] block and a solid inherits
+#  any it omits.  The producer folds them into each solid up front
+#  (apply_manifest_defaults) so the rest of the run reads one fully
+#  resolved setting per field.
+# ================================================================
+
+# Two cod-sourced solids sharing a [defaults] block: au_fcc names
+#   no run settings (inherits every one), cu_fcc overrides only the
+#   functional (keeping the other four inherited).  Different
+#   elements keep the per-element label rule (rule 6) trivial.
+_DEFAULTS_TWO_SOLID_MANIFEST = (
+    "schema_version = 2\n\n"
+    + _CHAR_BLOCK +
+    "\n[defaults]\n"
+    "basis = \"fb\"\n"
+    "functional = \"wigner\"\n"
+    "kpoint_integration = \"linear-tetrahedral\"\n"
+    "kpoint_spec = { density = 60.0, shift = [0.0, 0.0, 0.0] }\n"
+    "scf_threshold = 1.0e-6\n\n"
+    "[[reference_solid]]\n"
+    "reference_id = \"au_fcc\"\n"
+    "system_type = \"crystalline\"\n"
+    "cod_id = 9008463\n"
+    "cod_revision = \"2023-04-12\"\n\n"
+    "[[reference_solid]]\n"
+    "reference_id = \"cu_fcc\"\n"
+    "system_type = \"crystalline\"\n"
+    "functional = \"pz-lda\"\n"
+    "cod_id = 9008468\n"
+    "cod_revision = \"2023-04-12\"\n")
+
+
+def test_apply_manifest_defaults_inherits_and_overrides(tmp_path):
+    """apply_manifest_defaults folds the [defaults] block into each
+    solid: a solid that omits a setting inherits the default, and a
+    solid that names its own value keeps it.  After the pass, every
+    run-setting field is populated on every solid (no None left)."""
+
+    path = _write(tmp_path, _DEFAULTS_TWO_SOLID_MANIFEST)
+    manifest = load_manifest_v2(path)
+    # Before resolution the sparse solids carry None where they
+    #   omitted a setting -- au_fcc omits all five.
+    au_before = manifest.reference_solids[0]
+    assert au_before.basis is None
+    assert au_before.functional is None
+
+    apply_manifest_defaults(manifest)
+
+    au_fcc, cu_fcc = manifest.reference_solids
+    # au_fcc inherited every shared setting verbatim.
+    assert au_fcc.basis == "fb"
+    assert au_fcc.functional == "wigner"
+    assert au_fcc.kpoint_integration == "linear-tetrahedral"
+    assert au_fcc.kpoint_spec == {"density": 60.0,
+                                  "shift": [0.0, 0.0, 0.0]}
+    assert au_fcc.scf_threshold == 1.0e-6
+    # cu_fcc kept its own functional but inherited the rest.
+    assert cu_fcc.functional == "pz-lda"
+    assert cu_fcc.basis == "fb"
+    assert cu_fcc.kpoint_integration == "linear-tetrahedral"
+    assert cu_fcc.scf_threshold == 1.0e-6
+
+
+# A [defaults]-driven variant of the local Au manifest: the solid
+#   names no run settings at all, so the harvest can only succeed if
+#   the producer resolved basis / kpoint_spec / scf_threshold (used
+#   by the builder submodel and pick_converged_unit) from [defaults].
+_AU_DEFAULTS_MANIFEST = (
+    "schema_version = 2\n\n"
+    + _CHAR_BLOCK +
+    "\n[defaults]\n"
+    "basis = \"fb\"\n"
+    "functional = \"wigner\"\n"
+    "kpoint_integration = \"linear-tetrahedral\"\n"
+    "kpoint_spec = { density = 60.0, shift = [0.0, 0.0, 0.0] }\n"
+    "scf_threshold = 1.0e-6\n"
+    """
+[[reference_solid]]
+reference_id = "au_fcc"
+system_type = "crystalline"
+structure_path = "au.skel"
+
+  [[reference_solid.entry]]
+  element = "Au"
+  atom_site = 1
+  label = "default_solid"
+  default = true
+  description = "Au in fcc bulk."
+""")
+
+
+def test_build_initial_potentials_resolves_defaults(
+        tmp_path, monkeypatch):
+    """End-to-end producer run driven by a [defaults] manifest: the
+    solid names no run settings, so the harvest succeeds only because
+    the producer folded the shared [defaults] into it up front.  The
+    curated entry lands with the resolved basis in its provenance."""
+
+    data_root = str(tmp_path)
+    pdb_root = os.path.join(data_root, "atomicPDB")
+    _make_element(pdb_root, "au", [1.0, 2.0, 3.0],
+                  [0.15, 1.5, 1.0e8])
+    (tmp_path / "au.skel").write_text("dummy structure\n")
+    manifest_path = _write(tmp_path, _AU_DEFAULTS_MANIFEST)
+
+    monkeypatch.setattr(
+        bip.guidance_db, "load",
+        lambda root: types.SimpleNamespace(group_table={}))
+
+    def fake_builder(struct, options, dataspace, system_type,
+                     submodel, *, id, center):
+        # The submodel must carry the resolved run settings, not
+        #   None: assert the [defaults] flowed through to the builder.
+        assert submodel["basis"] == "fb"
+        assert submodel["functional"] == "wigner"
+        assert submodel["kpoint_integration"] == "linear-tetrahedral"
+        assert center == 60.0        # kpoint_spec.density resolved
+        units = [CalcUnit(id=id, structure=struct,
+                          calc=(f"kpt-density-{k}",),
+                          options={**options, "kpd": k})
+                 for k in (50, 100, 200)]
+        record = PredictionRecord(
+            policy="verify_around_prediction",
+            predicted_kpoint_density=100.0, confidence=0.9,
+            is_under_trained=False, system_type=system_type,
+            basis=submodel["basis"],
+            functional=submodel["functional"],
+            kpoint_integration=submodel["kpoint_integration"])
+        return Flight(root="", units=units), record
+
+    monkeypatch.setattr(bip, "build_kpoint_convergence",
+                        fake_builder)
+
+    def fake_dispatch(flight, force=False):
+        for unit in flight.units:
+            _write_result(flight.root, unit.id, unit.calc,
+                          energy=0.5)
+
+    monkeypatch.setattr(
+        bip.guidance_harvest, "harvest_flight",
+        lambda ws, db, ds: None)
+
+    build_initial_potentials(
+        manifest_path, pdb_root, data_root,
+        dispatch_fn=fake_dispatch,
+        extract_fn=lambda result, site: ([0.5, 0.3], [1.0, 2.0]),
+        identity_fn=lambda result: {1: ("au", 1, 1)},
+        fingerprint_fn=lambda *args, **kwargs: [])
+
+    # The Au entry harvested -- the run could only reach harvest
+    #   because scf_threshold resolved from [defaults] (1e-6, so the
+    #   flat grid converges at the interior kpt-density-100 point).
+    database = ipdb.load(element_path(pdb_root, "au"),
+                         known_methods=None)
+    entry = ipdb.lookup(database, "default_solid")
     assert entry.coefficients == [0.5, 0.3]
     assert entry.provenance["reference_id"] == "au_fcc"
 
