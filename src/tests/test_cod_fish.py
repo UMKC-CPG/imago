@@ -7,10 +7,14 @@ number, and the strict revision check (with the HTTP layer stubbed so no
 test hits the network).
 """
 
+import tomllib
+import types
+
 import pytest
 
 import cod_fish
 from cod_fish import CodFishError
+from curation_manifest import load_manifest_v2, default_run_settings
 
 
 # A trimmed COD result.php CSV -- a leading comment line (skipped) then a
@@ -229,6 +233,114 @@ class TestManifestFragment:
         assert 'elements = ["Si"]' in fragment
         assert ('source_description = '
                 '"Silicon, I m m a (74), 1993"') in fragment
+
+
+class TestCompleteManifest:
+    """The default ``pin`` output: a complete, runnable manifest built
+    from the shared library and rendered through its writer."""
+
+    _PINNED = [{
+        "id": "9008463", "revision": "291735",
+        "reference_id": "si_fd-3m_227_2010",
+        "elements": ["Si"],
+        "description": "Silicon, F d -3 m (227), 2010"}]
+
+    def test_round_trips_through_the_reader(self, tmp_path):
+        # The strongest check: what pin writes, the producer's reader
+        #   accepts and parses back into the same structure.
+        path = tmp_path / "manifest.toml"
+        path.write_text(cod_fish._complete_manifest(self._PINNED))
+        manifest = load_manifest_v2(str(path))
+        assert len(manifest.reference_solids) == 1
+        solid = manifest.reference_solids[0]
+        assert solid.reference_id == "si_fd-3m_227_2010"
+        assert solid.cod_id == 9008463
+        assert solid.cod_revision == "291735"
+        assert solid.system_type == "crystalline"
+
+    def test_carries_shared_defaults_and_recipe(self, tmp_path):
+        # The [defaults] block and [characterization] recipe come from
+        #   the shared library, so they match what the reader resolves.
+        text = cod_fish._complete_manifest(self._PINNED)
+        raw = tomllib.loads(text)
+        assert raw["defaults"] == default_run_settings()
+        methods = {fingerprint["method"]
+                   for fingerprint in raw["characterization"]["fingerprint"]}
+        assert methods == {"reduce", "bispectrum"}
+
+    def test_omits_sketch_only_cruft(self, tmp_path):
+        # The complete manifest carries no discovery hints and no
+        #   "# fill in" reminder -- those belong to the sketch.
+        text = cod_fish._complete_manifest(self._PINNED)
+        assert "# fill in" not in text
+        assert "elements = " not in text
+
+    def test_cod_id_is_an_integer(self):
+        # pin() may carry the id as text; the schema wants an int, so
+        #   the writer must emit it unquoted.
+        text = cod_fish._complete_manifest(self._PINNED)
+        assert "cod_id = 9008463" in text
+        assert 'cod_id = "9008463"' not in text
+
+    def test_source_description_rides_along(self, tmp_path):
+        path = tmp_path / "manifest.toml"
+        path.write_text(cod_fish._complete_manifest(self._PINNED))
+        solid = load_manifest_v2(str(path)).reference_solids[0]
+        assert solid.source_description == \
+            "Silicon, F d -3 m (227), 2010"
+
+    def test_writes_no_entries(self, tmp_path):
+        # The harvest auto-discovers environments, so a fresh manifest
+        #   carries no [[reference_solid.entry]] customizations.
+        path = tmp_path / "manifest.toml"
+        path.write_text(cod_fish._complete_manifest(self._PINNED))
+        solid = load_manifest_v2(str(path)).reference_solids[0]
+        assert solid.entries == []
+
+    def test_disambiguates_colliding_reference_ids(self, tmp_path):
+        # reference_id uniqueness (rule 5) is shared with the sketch
+        #   via _named_pins, so it holds in the complete manifest too.
+        pinned = [
+            {"id": "1", "revision": "1",
+             "reference_id": "si_p63mmc_194"},
+            {"id": "2", "revision": "2",
+             "reference_id": "si_p63mmc_194"}]
+        path = tmp_path / "manifest.toml"
+        path.write_text(cod_fish._complete_manifest(pinned))
+        names = [solid.reference_id
+                 for solid in load_manifest_v2(str(path)).reference_solids]
+        assert names == ["si_p63mmc_194", "si_p63mmc_194_2"]
+
+
+class TestPinDispatch:
+    """The ``pin`` verb prints the complete manifest by default and the
+    sketch under --sketch-only."""
+
+    _PINNED = [{"id": "9008463", "revision": "291735",
+                "reference_id": "si_fd-3m_227_2010"}]
+
+    def _run(self, monkeypatch, capsys, sketch_only):
+        # Stub pin() so no network is hit; run _run_pin with a minimal
+        #   args stand-in carrying just the two fields it reads.
+        monkeypatch.setattr(cod_fish, "pin",
+                            lambda targets, session_rows=None: self._PINNED)
+        monkeypatch.setattr(cod_fish, "load_session", lambda: [])
+        args = types.SimpleNamespace(targets=["1"],
+                                     sketch_only=sketch_only)
+        assert cod_fish._run_pin(args) == 0
+        return capsys.readouterr().out
+
+    def test_default_prints_complete_manifest(self, monkeypatch,
+                                              capsys):
+        out = self._run(monkeypatch, capsys, sketch_only=False)
+        assert "[defaults]" in out
+        assert "[characterization]" in out
+        assert "# fill in" not in out
+
+    def test_sketch_only_prints_sketch(self, monkeypatch, capsys):
+        out = self._run(monkeypatch, capsys, sketch_only=True)
+        assert "# fill in" in out
+        assert "[defaults]" not in out
 
 
 class TestStoichiometry:

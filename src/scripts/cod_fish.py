@@ -17,8 +17,10 @@ reproducible acquisition:
                 author/text), printing a numbered table and saving the
                 result set so later verbs can refer to rows by index.
 * ``pin``    -- resolve chosen rows (by index, no eight-digit typing) to
-                their current revisions and print a paste-ready manifest
-                fragment -- the bridge from browsing to a pinned pull.
+                their current revisions and print a complete, runnable
+                manifest (or, with ``--sketch-only``, a sketch for
+                expand_manifest to finish) -- the bridge from browsing to
+                a pinned pull.
 * ``rank``   -- advisory triage: when a composition has many entries,
                 annotate and order them by interpretable signals so a
                 student can spot the likely "real" phase.  It narrows the
@@ -48,6 +50,15 @@ import urllib.parse
 from datetime import datetime
 import urllib.request
 from collections import Counter
+
+# The default ``pin`` output is a complete, runnable manifest: it is
+#   built as a CurationManifest and rendered through the shared writer,
+#   so the [defaults] run settings and the [characterization] recipe
+#   come from one place (curation_manifest) and cannot drift from
+#   expand_manifest or the producer (DESIGN 5.7).
+from curation_manifest import (
+    CurationManifest, ReferenceSolid,
+    default_run_settings, default_characterization, format_manifest)
 
 COD_BASE = "https://www.crystallography.net/cod"
 
@@ -593,25 +604,77 @@ def _print_table(candidates):
               f"{(c['c'] or '?'):>7}")
 
 
-def _manifest_fragment(pinned):
-    """Render pinned entries as a ready-to-use sketch manifest.
+def _named_pins(pinned):
+    """Yield ``(reference_id, entry)`` for each pinned structure.
 
-    The output is a complete sketch -- a ``schema_version`` header plus
-    one ``[[reference_solid]]`` stub per pinned structure -- so
-    ``cod_fish.py pin <ids> > sketch.toml`` writes a file the authoring
-    tool (expand_manifest) reads directly.  Each stub's
-    ``reference_id`` is the metadata-derived name from
+    The ``reference_id`` is the metadata-derived name from
     :func:`_auto_reference_id`, falling back to ``cod_<id>`` when the
-    CIF lacked the needed fields; should two stubs reduce to the same
-    name, the later ones get a trailing counter so every reference_id
-    stays unique (manifest rule 5)."""
+    CIF lacked the needed fields; should two structures reduce to the
+    same name, the later ones get a trailing counter so every
+    reference_id stays unique (manifest rule 5).  Both the complete
+    manifest and the sketch name their solids through here, so the two
+    outputs agree on every reference_id."""
 
-    lines = ["schema_version = 2", ""]
     used = {}
     for entry in pinned:
         base = entry.get("reference_id") or f"cod_{entry['id']}"
         used[base] = used.get(base, 0) + 1
         name = base if used[base] == 1 else f"{base}_{used[base]}"
+        yield name, entry
+
+
+def _complete_manifest(pinned):
+    """Render pinned entries as a complete, runnable manifest.
+
+    This is the default ``pin`` output: a finished schema-v2 manifest
+    the producer runs directly, with no hand-editing required.  It
+    carries the shared ``[characterization]`` recipe and ``[defaults]``
+    run settings -- both taken from :mod:`curation_manifest`, so they
+    match what expand_manifest emits and what the producer resolves
+    (DESIGN 5.7) -- plus one ``[[reference_solid]]`` per pinned
+    structure.
+
+    No ``[[reference_solid.entry]]`` customizations are written: the
+    harvest auto-discovers one representative per distinct environment
+    and falls back to each element's ``"isolated"`` baseline for its
+    default (DESIGN 5.2.3), so a curator adds an entry only to override
+    that.  The CIF-derived ``source_description`` rides along on each
+    solid, and the whole manifest round-trips through
+    :func:`curation_manifest.load_manifest_v2`."""
+
+    solids = []
+    for name, entry in _named_pins(pinned):
+        solids.append(ReferenceSolid(
+            reference_id=name,
+            system_type="crystalline",
+            # cod_id is a schema integer; pin() may carry it as text.
+            cod_id=int(entry["id"]),
+            cod_revision=entry["revision"],
+            source_description=entry.get("description") or None))
+    manifest = CurationManifest(
+        schema_version=2, manifest_path="",
+        characterization=default_characterization(),
+        defaults=default_run_settings(),
+        reference_solids=solids)
+    return format_manifest(manifest)
+
+
+def _manifest_fragment(pinned):
+    """Render pinned entries as a sketch manifest (the --sketch-only
+    output).
+
+    Unlike the complete manifest, this is a minimal starting point for
+    the authoring tool (expand_manifest): a ``schema_version`` header
+    plus one ``[[reference_solid]]`` stub per pinned structure, each
+    carrying the CIF-derived discovery hints (``elements`` and a
+    ``source_description``) and a reminder of the run settings expand
+    will stamp in.  ``cod_fish.py pin <ids> --sketch-only > sketch.toml``
+    writes a file expand reads directly.  Solids are named through
+    :func:`_named_pins`, so the sketch and the complete manifest agree
+    on every reference_id (manifest rule 5)."""
+
+    lines = ["schema_version = 2", ""]
+    for name, entry in _named_pins(pinned):
         lines.append("[[reference_solid]]")
         lines.append(f'reference_id = "{name}"')
         lines.append('system_type = "crystalline"')
@@ -685,14 +748,19 @@ def _run_search(args, with_rank):
 
 def _run_pin(args):
     """Run the ``pin`` verb: resolve chosen rows to pinned revisions
-    and print a manifest fragment."""
+    and print a manifest.  By default this is a complete, runnable
+    manifest; ``--sketch-only`` prints the sketch for expand_manifest
+    to finish instead."""
 
     if not args.targets:
         raise CodFishError(
             "pin needs at least one row index or COD id, e.g. "
             "`cod_fish.py pin 1 3`")
     pinned = pin(args.targets, session_rows=load_session())
-    print(_manifest_fragment(pinned))
+    if args.sketch_only:
+        print(_manifest_fragment(pinned))
+    else:
+        print(_complete_manifest(pinned))
     return 0
 
 
@@ -717,7 +785,8 @@ def _build_parser():
         "the candidates\n"
         "  pin     resolve chosen rows (by index or id) to pinned "
         "revisions and\n"
-        "          print a manifest fragment")
+        "          print a complete manifest (--sketch-only for a "
+        "sketch to expand)")
     epilog_text = (
         "Examples:\n"
         "  cod_fish.py search --elements Si\n"
@@ -788,6 +857,13 @@ def _build_parser():
         "-o", "--output", default=None, metavar="PATH",
         help="get: output CIF path.  Default: <cod_id>.cif in the "
              "current directory.")
+    # Sketch-vs-complete manifest (pin).
+    parser.add_argument(
+        "--sketch-only", action="store_true", default=False,
+        help="pin: print a minimal sketch (structure stubs plus "
+             "element and description hints) for expand_manifest to "
+             "finish, instead of the default complete, runnable "
+             "manifest.  Default: off (complete manifest).")
     return parser
 
 
