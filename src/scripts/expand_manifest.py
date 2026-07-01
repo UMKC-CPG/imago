@@ -3,45 +3,58 @@
 
 This is the authoring step between ``cod_fish`` and
 ``build_initial_potentials`` (DESIGN 5.7).  ``cod_fish`` discovers and
-pins structures from the Crystallography Open Database and prints
-sketch ``[[reference_solid]]`` stubs -- each carrying only the
-structure's identity (``reference_id``, ``system_type``) and source
-(``cod_id`` + ``cod_revision``, or ``structure_path``).  The curator
-collects those stubs into a sketch file.  This tool reads that sketch
-and fills in the rest of the manifest the producer needs: the
-database-wide fingerprint recipe (the ``[characterization]`` block),
-the shared method defaults (basis, functional, k-point integration,
-SCF threshold), and any per-structure customizations (overrides on
-the environments the harvest auto-discovers).
+pins structures from the Crystallography Open Database; with
+``--sketch-only`` it prints ``[[reference_solid]]`` stubs -- each
+carrying only the structure's identity (``reference_id``,
+``system_type``) and source (``cod_id`` + ``cod_revision``, or
+``structure_path``), plus optional discovery hints.  This tool reads
+that sketch (from a file, or from standard input as a pipe) and fills
+in the rest of the manifest the producer needs: the database-wide
+fingerprint recipe (the ``[characterization]`` block), the shared run
+settings (basis, functional, k-point integration, SCF threshold) as a
+single top-level ``[defaults]`` block that every solid inherits, and
+any per-structure customizations (overrides on the environments the
+harvest auto-discovers).
 
-``cod_fish`` stays a pure discovery tool and never writes a manifest;
-this tool owns the sketch-to-manifest expansion, and the producer only
-reads the finished manifest.  Both this tool and the producer share
-one schema definition by importing ``curation_manifest``.
+For a straightforward set of crystals ``cod_fish`` already emits a
+complete, runnable manifest on its own; this tool exists for the cases
+that need more -- local (non-COD) structures, a non-default recipe or
+run settings, or interactively authored per-structure customizations.
+
+``cod_fish`` and this tool and the producer all share one schema
+definition, and the same shared defaults, by importing
+``curation_manifest``, so nothing drifts between them.
 
 Two modes:
 
 * Interactive (``-i``) walks each sketched structure and prompts for
-  the shared defaults once and then the optional per-structure
+  the shared settings once and then the optional per-structure
   customizations, offering a sensible default at every step.  The
   database-wide fingerprint recipe is set automatically, so it writes
   a complete, immediately loadable manifest.  Because the prompts use
-  standard output, interactive mode requires an output file (``-o``).
-* Mechanical (the default) stamps the shared defaults and the
-  database-wide recipe onto every sketched structure and emits the
-  result with a commented copy-and-edit template for the optional
+  standard input and output, interactive mode needs a sketch file
+  argument and an output file (``-o``).
+* Mechanical (the default) sets the shared settings once in a
+  ``[defaults]`` block and the database-wide recipe once, carries each
+  sketched structure through as a sparse solid, and emits the result
+  with a commented copy-and-edit template for the optional
   per-structure customizations, which the curator fills in by hand.
-  Without ``-o`` it prints to standard output, so the result can be
-  reviewed or redirected.
+  It reads the sketch from a file or, when none is named, from
+  standard input; without ``-o`` it prints to standard output, so the
+  result can be reviewed, redirected, or piped straight from
+  ``cod_fish``.
 
-The k-point density is deliberately left out of every emitted
-``kpoint_spec``: the producer predicts a starting density and verifies
-it by a convergence sweep, so pinning a density here would only
-override that.
+The k-point density is deliberately left out of the emitted
+``[defaults]`` ``kpoint_spec``: the producer predicts a starting
+density and verifies it by a convergence sweep, so pinning a density
+here would only override that.
 """
 
 import argparse
+import contextlib
+import os
 import sys
+import tempfile
 import tomllib
 from datetime import datetime
 
@@ -49,56 +62,29 @@ from curation_manifest import (
     CurationManifest,
     ReferenceSolid,
     ReferenceEntry,
-    ManifestFingerprint,
     load_structure_sources,
     format_manifest,
     write_manifest,
+    default_characterization,
 )
+# system_type is the one authoring vocabulary the manifest schema
+#   itself validates (via curation_manifest's loader), so it is sourced
+#   from its canonical owner rather than duplicated here; the canonical
+#   reduce + bispectrum recipe and the [defaults] run settings likewise
+#   come from curation_manifest, so nothing drifts between the two
+#   authoring tools (DESIGN 5.7).
+from guidance_db import VALID_SYSTEM_TYPES
 
-
-# The settled canonical fingerprint sub-specs (the Si seed defaults).
-#   These make up the database-wide preferred recipe -- the
-#   ``[characterization]`` block (DESIGN 5.7) -- one sub_spec per
-#   method, applied to every harvested environment.  The reduce
-#   descriptor is a pure-Python shell code; the bispectrum descriptor
-#   needs a per-structure loen run but discriminates disordered
-#   environments far better.
-DEFAULT_REDUCE_SUB_SPEC = {
-    "level": 2, "thick": 0.5, "cutoff": 5.0, "tolerance": 0.05}
-DEFAULT_BISPECTRUM_SUB_SPEC = {
-    "twoj1": 8, "twoj2": 8, "cutoff": 9.0}
-
-
-def default_characterization() -> list[ManifestFingerprint]:
-    """The canonical database-wide preferred recipe (DESIGN 5.7): the
-    settled reduce and bispectrum sub-specs, each the family's single
-    preferred record.  Both authoring modes stamp this into the
-    manifest's ``[characterization]`` block so the file loads (the
-    block is required, manifest rule 2) and the consumer has one
-    preferred descriptor per family to match against (5.6.5 step 2).
-    A curator who wants a different recipe edits the emitted block;
-    the recipe is a constant of the whole database, not a per-entry
-    choice, so it is set once here rather than prompted per entry."""
-
-    return [
-        ManifestFingerprint(
-            method="reduce",
-            sub_spec=dict(DEFAULT_REDUCE_SUB_SPEC), preferred=True),
-        ManifestFingerprint(
-            method="bispectrum",
-            sub_spec=dict(DEFAULT_BISPECTRUM_SUB_SPEC),
-            preferred=True)]
 
 # Human-readable vocabularies, used in help text and interactive
 #   menus.  The producer translates these names into each tool's coded
 #   form; an unrecognised name is caught later by the producer, so the
-#   menus are guidance rather than a hard gate here.
+#   menus are guidance rather than a hard gate here.  (system_type is
+#   not here -- it is imported from its schema owner above.)
 VALID_FUNCTIONALS = (
     "wigner", "ceperley-alder", "hedin-lundqvist", "pbe")
 VALID_INTEGRATIONS = ("gaussian", "linear-tetrahedral")
 VALID_BASES = ("mb", "fb", "eb")
-VALID_SYSTEM_TYPES = (
-    "crystalline", "amorphous", "nanostructure", "molecular")
 
 
 # A commented copy-and-edit template appended to mechanical-mode
@@ -163,63 +149,81 @@ def load_sketch_hints(path: str) -> dict[str, dict]:
     return hints
 
 
-def stamp_shared_defaults(source: ReferenceSolid, *, basis: str,
-                          functional: str, kpoint_integration: str,
-                          scf_threshold: float,
-                          system_type_default: str
-                          ) -> ReferenceSolid:
+def shared_defaults(*, basis: str, functional: str,
+                    kpoint_integration: str,
+                    scf_threshold: float) -> dict:
+    """Build the top-level ``[defaults]`` run-settings dict expand
+    emits once (DESIGN 5.7), so each solid stays sparse and inherits
+    the shared settings rather than repeating all five.
+
+    ``kpoint_spec`` is left empty (no fixed density) so the producer
+    predicts a starting density and verifies it by a convergence
+    sweep; pinning one here would only override that.  ``system_type``
+    is deliberately not among these five -- it is an intrinsic
+    structure property, named per solid, not a shared run setting."""
+
+    return {
+        "basis": basis,
+        "functional": functional,
+        "kpoint_integration": kpoint_integration,
+        "kpoint_spec": {},
+        "scf_threshold": scf_threshold,
+    }
+
+
+def sparse_solid(source: ReferenceSolid, system_type: str, *,
+                 entries: list[ReferenceEntry] | None = None
+                 ) -> ReferenceSolid:
     """Return a reference solid that copies ``source``'s identity and
-    structure source and adds the shared method defaults.
+    structure source and resolves its ``system_type``, leaving every
+    run setting unset (``None``) so it inherits the top-level
+    ``[defaults]`` block (DESIGN 5.7).
 
     ``source`` is one structure stub from the sketch (as
     :func:`curation_manifest.load_structure_sources` yields it), so it
-    carries a ``reference_id`` and exactly one structure source but
-    placeholder run fields.  ``system_type`` is taken from the sketch
-    when it named one, else the supplied default.  The ``kpoint_spec``
-    is left empty (no density) so the producer predicts and verifies
-    it.  The ``source_description`` cod_fish read from the CIF is
-    persisted onto the solid (DESIGN 5.7), so the harvest can compose
-    each environment's auto-description from it.  Entries are carried
-    through unchanged -- the caller fills them (interactively or by
-    hand)."""
+    carries a ``reference_id`` and exactly one structure source.
+    ``system_type`` is the already-resolved value (from the sketch
+    when it named one, else the shared default).  The
+    ``source_description`` cod_fish read from the CIF rides along, so
+    the harvest can compose each environment's auto-description from
+    it.  ``entries`` are the per-structure customizations -- empty in
+    mechanical mode, filled by the interactive walk."""
 
     return ReferenceSolid(
         reference_id=source.reference_id,
-        system_type=source.system_type or system_type_default,
-        basis=basis,
-        functional=functional,
-        kpoint_integration=kpoint_integration,
-        kpoint_spec={},
-        scf_threshold=scf_threshold,
+        system_type=system_type,
         cod_id=source.cod_id,
         cod_revision=source.cod_revision,
         structure_path=source.structure_path,
         source_description=source.source_description,
-        entries=list(source.entries))
+        entries=list(entries) if entries else [])
 
 
 def build_mechanical(sources: list[ReferenceSolid], *, basis: str,
                      functional: str, kpoint_integration: str,
                      scf_threshold: float,
                      system_type_default: str) -> CurationManifest:
-    """Stamp the shared defaults and the database-wide
-    ``[characterization]`` recipe onto every sketched structure,
-    leaving the per-structure customizations empty for the curator.
-    The result is a structurally valid (loadable) manifest -- the
-    required recipe block is present (manifest rule 2) -- that simply
-    harvests every environment with the default descriptions until
-    customizations are added."""
+    """Set the shared defaults once in a ``[defaults]`` block and the
+    database-wide ``[characterization]`` recipe once, then carry every
+    sketched structure through as a sparse solid (identity, structure
+    source, and system_type only), leaving the per-structure
+    customizations empty for the curator.  The result is a
+    structurally valid (loadable) manifest -- the required recipe
+    block is present (manifest rule 2) and every solid's run settings
+    resolve from ``[defaults]`` -- that simply harvests every
+    environment with the default descriptions until customizations are
+    added."""
 
     solids = [
-        stamp_shared_defaults(
-            source, basis=basis, functional=functional,
-            kpoint_integration=kpoint_integration,
-            scf_threshold=scf_threshold,
-            system_type_default=system_type_default)
+        sparse_solid(source, source.system_type or system_type_default)
         for source in sources]
     return CurationManifest(
         schema_version=2, manifest_path="(generated)",
         characterization=default_characterization(),
+        defaults=shared_defaults(
+            basis=basis, functional=functional,
+            kpoint_integration=kpoint_integration,
+            scf_threshold=scf_threshold),
         reference_solids=solids)
 
 
@@ -340,23 +344,20 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
                 ask, f"add another entry for {source.reference_id}?",
                 False)
 
-        solids.append(stamp_shared_defaults(
-            ReferenceSolid(
-                reference_id=source.reference_id,
-                system_type=system_type, basis="", functional="",
-                kpoint_integration="", kpoint_spec={},
-                scf_threshold=0.0, cod_id=source.cod_id,
-                cod_revision=source.cod_revision,
-                structure_path=source.structure_path,
-                entries=entries),
-            basis=basis, functional=functional,
-            kpoint_integration=kpoint_integration,
-            scf_threshold=scf_threshold,
-            system_type_default=system_type))
+        # The solid stays sparse: its run settings inherit the shared
+        #   [defaults] block below (DESIGN 5.7).  system_type is the
+        #   per-structure answer, and the sketch's source_description
+        #   rides along via sparse_solid.
+        solids.append(sparse_solid(source, system_type,
+                                   entries=entries))
 
     return CurationManifest(
         schema_version=2, manifest_path="(generated)",
         characterization=default_characterization(),
+        defaults=shared_defaults(
+            basis=basis, functional=functional,
+            kpoint_integration=kpoint_integration,
+            scf_threshold=scf_threshold),
         reference_solids=solids)
 
 
@@ -366,6 +367,33 @@ def _input_ask(prompt: str, default: str) -> str:
 
     raw = input(f"{prompt} [{default}]: ").strip()
     return raw if raw else default
+
+
+@contextlib.contextmanager
+def sketch_path(named: str | None):
+    """Yield a filesystem path to the sketch to read.
+
+    With a named file, yield it unchanged.  With none, capture
+    standard input to a temporary file and yield that path -- so
+    ``cod_fish.py pin ... --sketch-only | expand_manifest.py`` works
+    as a pipe.  stdin is captured to a real file rather than streamed
+    because the sketch readers (:func:`load_structure_sources`,
+    :func:`load_sketch_hints`) validate and parse a path, and
+    interactive mode reads the sketch twice (structures, then hints).
+    The temporary file is removed on exit."""
+
+    if named:
+        yield named
+        return
+    data = sys.stdin.buffer.read()
+    handle = tempfile.NamedTemporaryFile(
+        mode="wb", suffix=".toml", delete=False)
+    try:
+        handle.write(data)
+        handle.close()
+        yield handle.name
+    finally:
+        os.unlink(handle.name)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -381,10 +409,13 @@ def _build_parser() -> argparse.ArgumentParser:
             "method defaults and the per-structure harvest "
             "curation."))
     parser.add_argument(
-        "sketch", metavar="SKETCH",
+        "sketch", metavar="SKETCH", nargs="?", default=None,
         help="the sketch manifest: a schema-version-2 file carrying "
              "only the structure stubs (reference_id, system_type, "
-             "and one structure source per solid).  Required.")
+             "and one structure source per solid).  Default: read the "
+             "sketch from standard input, so `cod_fish.py pin ... "
+             "--sketch-only | expand_manifest.py` works as a pipe "
+             "(interactive mode still needs a file argument).")
     parser.add_argument(
         "-o", "--output", default=None, metavar="PATH",
         help="write the manifest to PATH.  Default: print to "
@@ -426,7 +457,14 @@ def main(argv=None) -> int:
     """Entry point for the ``expand_manifest.py`` command line."""
 
     args = _build_parser().parse_args(argv)
-    sources = load_structure_sources(args.sketch)
+
+    # Interactive prompts read standard input, so the sketch cannot
+    #   also be piped in: interactive mode needs a named sketch file.
+    if args.interactive and not args.sketch:
+        _build_parser().error(
+            "--interactive needs a SKETCH file argument (its prompts "
+            "read standard input, so the sketch cannot also be piped "
+            "in)")
 
     shared = dict(
         basis=args.basis, functional=args.functional,
@@ -434,27 +472,32 @@ def main(argv=None) -> int:
         scf_threshold=args.scf_threshold,
         system_type_default=args.system_type)
 
-    if args.interactive:
-        if not args.output:
-            _build_parser().error(
-                "--interactive requires -o/--output (its prompts "
-                "use standard output)")
-        hints = load_sketch_hints(args.sketch)
-        manifest = build_interactive(
-            sources, _input_ask, hints=hints, **shared)
-        write_manifest(manifest, args.output)
-        print(f"expand_manifest: wrote {len(sources)} reference "
-              f"solids to {args.output}", file=sys.stderr)
-        return 0
+    # Read the sketch from the named file, or from standard input when
+    #   none was given (captured to a temp path the readers can parse).
+    with sketch_path(args.sketch) as path:
+        sources = load_structure_sources(path)
 
-    manifest = build_mechanical(sources, **shared)
-    text = format_manifest(manifest) + "\n" + ENTRY_TEMPLATE
-    if args.output:
-        with open(args.output, "w") as handle:
-            handle.write(text)
-    else:
-        sys.stdout.write(text)
-    return 0
+        if args.interactive:
+            if not args.output:
+                _build_parser().error(
+                    "--interactive requires -o/--output (its prompts "
+                    "use standard output)")
+            hints = load_sketch_hints(path)
+            manifest = build_interactive(
+                sources, _input_ask, hints=hints, **shared)
+            write_manifest(manifest, args.output)
+            print(f"expand_manifest: wrote {len(sources)} reference "
+                  f"solids to {args.output}", file=sys.stderr)
+            return 0
+
+        manifest = build_mechanical(sources, **shared)
+        text = format_manifest(manifest) + "\n" + ENTRY_TEMPLATE
+        if args.output:
+            with open(args.output, "w") as handle:
+                handle.write(text)
+        else:
+            sys.stdout.write(text)
+        return 0
 
 
 def record_command():

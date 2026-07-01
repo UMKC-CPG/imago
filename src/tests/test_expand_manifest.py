@@ -1,18 +1,21 @@
 """Tests for expand_manifest, the sketch-to-manifest authoring tool.
 
-The pure builders (:func:`stamp_shared_defaults`, :func:`build_
-mechanical`, :func:`build_interactive`) are exercised directly; the
-interactive flow is driven by an injected scripted ``ask`` rather than
-real prompts, so it is fully deterministic.  The central guarantee is
-that what either mode produces reads back through
-``load_manifest_v2``.
+The pure builders (:func:`sparse_solid`, :func:`build_mechanical`,
+:func:`build_interactive`) are exercised directly; the interactive
+flow is driven by an injected scripted ``ask`` rather than real
+prompts, so it is fully deterministic.  The central guarantee is that
+what either mode produces reads back through ``load_manifest_v2``.
 """
+
+import io
+import types
 
 import pytest
 
 import expand_manifest as em
 from expand_manifest import (
-    stamp_shared_defaults,
+    sparse_solid,
+    shared_defaults,
     build_mechanical,
     build_interactive,
 )
@@ -62,55 +65,90 @@ _SHARED = dict(
 
 
 # ==============================================================
-#  stamp_shared_defaults
+#  sparse_solid / shared_defaults
 # ==============================================================
 
-def test_stamp_fills_run_settings_and_keeps_source(tmp_path):
+def test_sparse_solid_keeps_source_and_omits_run_settings(tmp_path):
     source = load_structure_sources(_write_sketch(tmp_path))[0]
-    solid = stamp_shared_defaults(source, **_SHARED)
+    solid = sparse_solid(source, "crystalline")
     assert solid.reference_id == "si_diamond"
     assert solid.cod_id == 2104737
     assert solid.cod_revision == "201401"
-    assert solid.basis == "fb"
-    assert solid.functional == "wigner"
-    assert solid.kpoint_integration == "gaussian"
-    assert solid.scf_threshold == pytest.approx(1.0e-6)
-    assert solid.system_type == "crystalline"   # from the sketch
-    # k-density is left to predict-then-verify; entries unfilled.
-    assert solid.kpoint_spec == {}
+    assert solid.system_type == "crystalline"
+    # Every run setting is left unset, so the solid inherits the
+    #   top-level [defaults] block rather than repeating them.
+    assert solid.basis is None
+    assert solid.functional is None
+    assert solid.kpoint_integration is None
+    assert solid.kpoint_spec is None
+    assert solid.scf_threshold is None
     assert solid.entries == []
 
 
-def test_stamp_uses_system_type_default_when_sketch_blank(tmp_path):
+def test_shared_defaults_is_the_five_run_settings():
+    defaults = shared_defaults(
+        basis="fb", functional="wigner",
+        kpoint_integration="gaussian", scf_threshold=1.0e-6)
+    assert defaults["basis"] == "fb"
+    assert defaults["functional"] == "wigner"
+    assert defaults["kpoint_integration"] == "gaussian"
+    assert defaults["scf_threshold"] == pytest.approx(1.0e-6)
+    # k-density is left to predict-then-verify (empty kpoint_spec),
+    #   and system_type is not a shared run setting.
+    assert defaults["kpoint_spec"] == {}
+    assert "system_type" not in defaults
+
+
+def test_mechanical_uses_system_type_default_when_sketch_blank(
+        tmp_path):
     # A sketch with no system_type falls back to the supplied default.
     sketch = ('schema_version = 2\n\n[[reference_solid]]\n'
               'reference_id = "x"\nstructure_path = "x.skl"\n')
-    source = load_structure_sources(_write_sketch(tmp_path, sketch))[0]
-    solid = stamp_shared_defaults(
-        source, **{**_SHARED, "system_type_default": "amorphous"})
-    assert solid.system_type == "amorphous"
+    sources = load_structure_sources(_write_sketch(tmp_path, sketch))
+    manifest = build_mechanical(
+        sources, **{**_SHARED, "system_type_default": "amorphous"})
+    assert manifest.reference_solids[0].system_type == "amorphous"
 
 
 # ==============================================================
 #  Mechanical mode
 # ==============================================================
 
-def test_mechanical_stamps_defaults_and_loads(tmp_path):
+def test_mechanical_emits_defaults_and_loads(tmp_path):
     sources = load_structure_sources(_write_sketch(tmp_path))
     manifest = build_mechanical(sources, **_SHARED)
     out = tmp_path / "manifest.toml"
     from curation_manifest import format_manifest
     out.write_text(format_manifest(manifest) + "\n" + em.ENTRY_TEMPLATE)
-    # The stamped manifest carries the required [characterization]
-    #   recipe, so it loads with no entries (the harvest fills them).
+    # The manifest carries the required [characterization] recipe and
+    #   a [defaults] block, so it loads with no entries (the harvest
+    #   fills them) and every solid's run settings resolve from
+    #   [defaults] rather than being repeated per solid.
     loaded = load_manifest_v2(str(out))
+    assert loaded.defaults["basis"] == "fb"
+    assert loaded.defaults["functional"] == "wigner"
+    assert loaded.defaults["kpoint_integration"] == "gaussian"
+    assert loaded.defaults["scf_threshold"] == pytest.approx(1.0e-6)
     solid = loaded.reference_solids[0]
-    assert solid.basis == "fb"
-    assert solid.functional == "wigner"
+    # The solid stays sparse: it names no run settings of its own.
+    assert solid.basis is None
+    assert solid.functional is None
     assert solid.entries == []
     methods = {fp.method for fp in loaded.characterization}
     assert methods == {"reduce", "bispectrum"}
     assert all(fp.preferred for fp in loaded.characterization)
+
+
+def test_mechanical_output_has_defaults_block_not_per_solid(tmp_path):
+    # The shared run settings appear once in [defaults], not repeated
+    #   inside the [[reference_solid]] table.
+    from curation_manifest import format_manifest
+    sources = load_structure_sources(_write_sketch(tmp_path))
+    text = format_manifest(build_mechanical(sources, **_SHARED))
+    before, _, after = text.partition("[[reference_solid]]")
+    assert "[defaults]" in before
+    assert "basis = " in before
+    assert "basis = " not in after
 
 
 def test_mechanical_output_carries_fill_in_template():
@@ -139,9 +177,12 @@ def test_interactive_builds_complete_manifest(tmp_path):
     manifest = build_interactive(
         sources, _scripted(answers), **_SHARED)
 
+    # The shared settings live once in [defaults]; the solid stays
+    #   sparse and inherits them.
+    assert manifest.defaults["basis"] == "fb"
+    assert manifest.defaults["scf_threshold"] == pytest.approx(1.0e-6)
     solid = manifest.reference_solids[0]
-    assert solid.basis == "fb"
-    assert solid.scf_threshold == pytest.approx(1.0e-6)
+    assert solid.basis is None
     entry = solid.entries[0]
     assert entry.element == "Si"
     assert entry.atom_site == 1
@@ -208,10 +249,10 @@ source_description = "Silicon, I m m a (74), 1993"
 
 def test_source_description_persists_through_expand(tmp_path):
     # The CIF-derived source_description is a persisted reference_solid
-    #   field (DESIGN 5.7): stamp_shared_defaults carries it from the
-    #   sketch onto the finished solid, and it round-trips through the
-    #   strict loader.  (`elements`, by contrast, is a transient hint
-    #   the finished manifest omits.)
+    #   field (DESIGN 5.7): sparse_solid carries it from the sketch onto
+    #   the finished solid, and it round-trips through the strict
+    #   loader.  (`elements`, by contrast, is a transient hint the
+    #   finished manifest omits.)
     sources = load_structure_sources(
         _write_sketch(tmp_path, _HINTED_SKETCH))
     manifest = build_mechanical(sources, **_SHARED)
@@ -274,10 +315,52 @@ def test_main_mechanical_writes_loadable_manifest(tmp_path):
     rc = em.main([sketch, "-o", str(out)])
     assert rc == 0
     loaded = load_manifest_v2(str(out))
-    assert loaded.reference_solids[0].functional == "wigner"
+    # The shared functional lives in [defaults]; the solid is sparse.
+    assert loaded.defaults["functional"] == "wigner"
+    assert loaded.reference_solids[0].functional is None
 
 
 def test_main_interactive_requires_output(tmp_path):
     sketch = _write_sketch(tmp_path)
     with pytest.raises(SystemExit):
         em.main([sketch, "-i"])
+
+
+def test_main_reads_sketch_from_stdin(tmp_path, monkeypatch):
+    # No sketch argument: expand reads the sketch from standard input,
+    #   so `cod_fish.py pin ... --sketch-only | expand_manifest.py`
+    #   works as a pipe.  The emitted manifest still loads.
+    monkeypatch.setattr(
+        "sys.stdin",
+        types.SimpleNamespace(buffer=io.BytesIO(_SKETCH.encode())))
+    out = tmp_path / "out.toml"
+    rc = em.main(["-o", str(out)])
+    assert rc == 0
+    loaded = load_manifest_v2(str(out))
+    assert loaded.reference_solids[0].reference_id == "si_diamond"
+    assert loaded.defaults["functional"] == "wigner"
+
+
+def test_main_interactive_requires_sketch_file(tmp_path):
+    # Interactive prompts read standard input, so the sketch cannot
+    #   also be piped in: interactive mode with no SKETCH argument is
+    #   a hard error rather than an attempt to read both from stdin.
+    with pytest.raises(SystemExit):
+        em.main(["-i", "-o", str(tmp_path / "out.toml")])
+
+
+def test_main_mechanical_prints_to_stdout(tmp_path, monkeypatch, capsys):
+    # The pipe's output half: sketch on stdin, no -o, so the finished
+    #   manifest goes to standard output -- ready to redirect or pipe
+    #   onward.  It round-trips through the strict loader.
+    monkeypatch.setattr(
+        "sys.stdin",
+        types.SimpleNamespace(buffer=io.BytesIO(_SKETCH.encode())))
+    rc = em.main([])
+    assert rc == 0
+    printed = capsys.readouterr().out
+    out = tmp_path / "piped.toml"
+    out.write_text(printed)
+    loaded = load_manifest_v2(str(out))
+    assert loaded.reference_solids[0].reference_id == "si_diamond"
+    assert loaded.defaults["basis"] == "fb"
