@@ -833,7 +833,8 @@ def _loen_calc_tag(method: str, sub_spec: dict[str, Any]) -> str:
 
 
 def build_loen_units(ref: ReferenceSolid, struct_path: str,
-                     options: dict[str, Any]) -> list:
+                     options: dict[str, Any],
+                     characterization: list) -> list:
     """Structure-only ``imago -loen -scf no`` units, one per distinct
     Fortran-side fingerprint declaration (PSEUDOCODE 11.4; DESIGN 5.10
     producer half).
@@ -848,46 +849,64 @@ def build_loen_units(ref: ReferenceSolid, struct_path: str,
     sub_spec (the same mapping the makegroups grouping flow uses, so the
     descriptors are comparable, DESIGN 5.10.5).
 
+    The declarations built here must be exactly the set the harvest will
+    read, or a harvested fingerprint would find no dispatched run.  The
+    harvest (:func:`harvest_fingerprints`) reads the database-wide
+    ``[characterization]`` recipe PLUS each entry's own overrides, so
+    this build side unions the same two sources: the ``characterization``
+    list (the preferred recipe, applied to every environment) and every
+    entry's ``fingerprints`` (rare per-entry overrides).  A Si default
+    manifest puts its bispectrum in ``[characterization]`` with no
+    per-entry overrides, so omitting the recipe here would build no loen
+    unit at all and the harvest would fail on a missing descriptor.
+
     One run serves every site that shares a (method, sub_spec): the
-    descriptor table holds one row per atom, so declarations are
-    de-duplicated by their calc tag and at most one unit is built per
-    distinct tag.  Each unit is tagged ``kind="fingerprint"`` so the
-    convergence harvest (:func:`pick_converged_unit`, which keeps only
-    ``"convergence"``) ignores it and only the fingerprint harvest reads
-    its descriptor.  Python-side (reduce) declarations need no unit --
-    they are computed in process during the harvest -- so they are
+    descriptor table holds one row per atom, so declarations across both
+    sources are de-duplicated by their calc tag and at most one unit is
+    built per distinct tag.  Each unit is tagged ``kind="fingerprint"``
+    so the convergence harvest (:func:`pick_converged_unit`, which keeps
+    only ``"convergence"``) ignores it and only the fingerprint harvest
+    reads its descriptor.  Python-side (reduce) declarations need no unit
+    -- they are computed in process during the harvest -- so they are
     skipped here.
 
     ``options`` is the solid's ``make_producer_options`` dict; the loen
     overrides are layered on a copy so the convergence units are
     untouched."""
 
+    # Mirror the harvest's declaration stream (recipe first, then each
+    #   entry's overrides) so every Fortran-side fingerprint the harvest
+    #   will read has a dispatched run; the calc-tag dedup below collapses
+    #   any (method, sub_spec) shared across the two sources.
+    declarations = list(characterization)
+    for entry in ref.entries:
+        declarations.extend(entry.fingerprints)
+
     units = []
     seen_tags: set[str] = set()
-    for entry in ref.entries:
-        for declaration in entry.fingerprints:
-            matcher = MATCHERS[declaration.method]()
-            if not matcher.needs_loen_run:
-                continue            # Python-side: harvested in process.
-            calc_tag = _loen_calc_tag(
-                declaration.method, declaration.sub_spec)
-            if calc_tag in seen_tags:
-                continue            # One run already covers this sub_spec.
-            seen_tags.add(calc_tag)
+    for declaration in declarations:
+        matcher = MATCHERS[declaration.method]()
+        if not matcher.needs_loen_run:
+            continue            # Python-side: harvested in process.
+        calc_tag = _loen_calc_tag(
+            declaration.method, declaration.sub_spec)
+        if calc_tag in seen_tags:
+            continue            # One run already covers this sub_spec.
+        seen_tags.add(calc_tag)
 
-            loen_options = dict(options)
-            loen_options["job"] = "loen"
-            loen_options["scf_basis"] = "no"
-            loen_options["loeninput"] = makegroups.loen_input_values(
-                matcher, declaration.sub_spec)
-            units.append(CalcUnit(
-                id=ref.reference_id,
-                structure=struct_path,
-                options=loen_options,
-                calc=(calc_tag,),
-                kind="fingerprint",
-                key_fields=standard_key_fields(
-                    struct_path, loen_options)))
+        loen_options = dict(options)
+        loen_options["job"] = "loen"
+        loen_options["scf_basis"] = "no"
+        loen_options["loeninput"] = makegroups.loen_input_values(
+            matcher, declaration.sub_spec)
+        units.append(CalcUnit(
+            id=ref.reference_id,
+            structure=struct_path,
+            options=loen_options,
+            calc=(calc_tag,),
+            kind="fingerprint",
+            key_fields=standard_key_fields(
+                struct_path, loen_options)))
     return units
 
 
@@ -1767,7 +1786,8 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             id=ref.reference_id,
             center=ref.kpoint_spec.get("density"))
         all_units.extend(flight_i.units)
-        all_units.extend(build_loen_units(ref, struct, options))
+        all_units.extend(build_loen_units(
+            ref, struct, options, manifest.characterization))
         # Store the plain dict (metadata must be TOML-serializable).
         predictions[ref.reference_id] = asdict(record_i)
 

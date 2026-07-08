@@ -1189,7 +1189,8 @@ def test_build_loen_units_skips_python_side():
     # Python-side (reduce) declarations need no dispatched unit -- they
     #   are computed in process during the harvest -- and the default
     #   entry declares no fingerprints at all, so nothing is built.
-    assert build_loen_units(_ref(), "au.skel", {}) == []
+    #   An empty [characterization] recipe adds nothing either.
+    assert build_loen_units(_ref(), "au.skel", {}, []) == []
 
 
 def test_build_loen_units_builds_one_run_per_subspec():
@@ -1207,7 +1208,7 @@ def test_build_loen_units_builds_one_run_per_subspec():
                        default=False, description="d",
                        fingerprints=[_BISPEC_DECL])])
     options = {"xccode": 100, "imago_commit": "abc", "converg": 1.0e-6}
-    units = build_loen_units(ref, "si.skel", options)
+    units = build_loen_units(ref, "si.skel", options, [])
 
     assert len(units) == 1
     unit = units[0]
@@ -1222,6 +1223,45 @@ def test_build_loen_units_builds_one_run_per_subspec():
     assert unit.calc == ("loen-bispectrum-cutoff_9-twoj1_4-twoj2_4",)
     # The base build options survive on the copy (not mutated away).
     assert unit.options["xccode"] == 100
+
+
+def test_build_loen_units_covers_characterization_recipe():
+    """The database-wide ``[characterization]`` recipe must build its
+    own loen unit even when no entry declares a per-entry fingerprint.
+
+    This is the seed-manifest case (Si defaults): bispectrum lives in
+    ``[characterization]`` and the entries carry no overrides.  The
+    harvest reads that recipe (:func:`harvest_fingerprints`), so a build
+    that only looked at ``entry.fingerprints`` would dispatch no loen run
+    and the harvest would fail on a missing descriptor.  One unit is
+    built, tagged for the recipe's sub_spec."""
+    ref = _ref(entries=[
+        ReferenceEntry(element="Si", atom_site=1, label="a",
+                       default=True, description="d",
+                       fingerprints=[])])
+    options = {"xccode": 100, "imago_commit": "abc", "converg": 1.0e-6}
+    units = build_loen_units(ref, "si.skel", options, [_BISPEC_DECL])
+
+    assert len(units) == 1
+    assert units[0].kind == "fingerprint"
+    assert units[0].options["job"] == "loen"
+    assert units[0].calc == (
+        "loen-bispectrum-cutoff_9-twoj1_4-twoj2_4",)
+
+
+def test_build_loen_units_dedups_recipe_and_override():
+    """A per-entry override that repeats the recipe's (method, sub_spec)
+    collapses to a single loen unit -- one descriptor table serves both,
+    so the calc-tag dedup spans the characterization and per-entry
+    sources, not just within each."""
+    ref = _ref(entries=[
+        ReferenceEntry(element="Si", atom_site=1, label="a",
+                       default=True, description="d",
+                       fingerprints=[_BISPEC_DECL])])
+    options = {"xccode": 100, "imago_commit": "abc", "converg": 1.0e-6}
+    units = build_loen_units(ref, "si.skel", options, [_BISPEC_DECL])
+
+    assert len(units) == 1
 
 
 def test_sub_spec_slug_is_slug_safe_and_ordered():
