@@ -6018,8 +6018,11 @@ existing `is_cached_v2` (DESIGN 5.7) and generalizing it:
 
 - **Scalar fields** -- written verbatim into
   `cache_key.toml` as TOML and compared field-by-field
-  (the producer's `kpoint_spec`, `scf_threshold`,
-  `imago_commit`).
+  (the producer's `scf_threshold` and `imago_commit`;
+  the swept k-density is not among them -- each k-point
+  grid is its own unit with its own calc tag and run
+  directory, 6.2.4, so the run-dir path already keeps
+  them distinct).
 - **Key files** -- declared by name in `key_fields`;
   compared by **byte-comparison against the copy already
   staged in the run directory**.  For the producer this
