@@ -2511,3 +2511,56 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
         str(tmp_path), dispatch_fn=fake_dispatch, force=True)
     assert seen["parsl_config"] is None
     assert seen["force"] is True
+
+
+# ==============================================================
+#  C113: submit the orchestrator as its own batch job (6.2.11)
+# ==============================================================
+
+def test_submit_orchestrator_batch_writes_and_submits(
+        tmp_path, monkeypatch):
+    """submit_orchestrator_batch writes the sbatch script from the
+    site's orchestrator block and returns the SLURM job id sbatch
+    reports; the batch command re-runs the producer WITHOUT --submit
+    (structures already materialized on the login node)."""
+    site = {
+        "account": "rulisp-lab",
+        "worker_init": ["module load imago", "source venv/bin/act"],
+        "extra_scheduler_options": [],
+        "orchestrator": {"cores": 2, "memory": "8G",
+                         "walltime": "24:00:00"},
+    }
+    monkeypatch.setattr(bip, "load_site_config", lambda profile: site)
+    monkeypatch.setattr(
+        bip, "resolve_choices",
+        lambda s, cli: {"dispatch": "slurm-per-job",
+                        "partition": "general", "nodes": 1,
+                        "walltime": "02:00:00"})
+    monkeypatch.setattr(
+        bip.sys, "argv",
+        ["build_initial_potentials.py", "--manifest", "m.toml",
+         "--dispatch", "slurm-per-job", "--submit"])
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["script"] = open(cmd[1]).read()
+        return types.SimpleNamespace(
+            stdout="Submitted batch job 12345\n")
+
+    monkeypatch.setattr(bip.subprocess, "run", fake_run)
+    args = types.SimpleNamespace(
+        profile=None, dispatch="slurm-per-job", partition=None,
+        nodes=None, walltime=None)
+
+    job_id = bip.submit_orchestrator_batch(args, str(tmp_path))
+
+    assert job_id == "12345"
+    assert captured["cmd"][0] == "sbatch"
+    # The script sizes the driver from the orchestrator block and
+    #   re-runs the producer with --dispatch but NOT --submit.
+    assert "#SBATCH --cpus-per-task=2" in captured["script"]
+    assert "--dispatch slurm-per-job" in captured["script"]
+    assert "--submit" not in captured["script"]
+    assert "--manifest m.toml" in captured["script"]

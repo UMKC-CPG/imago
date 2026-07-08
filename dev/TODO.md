@@ -2312,7 +2312,7 @@ imports its neighbours from `$IMAGO_BIN`).
   (per-atom eV SPREAD, not variance).  333 tests pass across the
   affected suites.
 
-- [ ] C113. Let the producer/orchestrator run as its own batch
+- [x] C113. Let the producer/orchestrator run as its own batch
   job, with a separate orchestrator resource block.  Motivation:
   the driver now does real per-unit prepare work (a makeinput
   build, plus a fast `imago -loen` when assignment needs it, once
@@ -2333,6 +2333,19 @@ imports its neighbours from `$IMAGO_BIN`).
   move prepare-and-hit-test onto dispatched worker units (a hit
   then costs a cheap worker slot instead of being decided
   driver-local).  DESIGN 6.2.11.  CODE.
+  DONE: clusterrc gains a grouped `orchestrator` block (cores /
+  memory / walltime) -- the driver job class, distinct from the
+  per-worker sizing (ARCH 9.4 note added; two job classes, not one
+  per builder); `cluster_config.build_orchestrator_sbatch` renders
+  the sbatch script (one node, the orchestrator shape, account +
+  partition, worker_init, then the command);
+  `build_initial_potentials --submit` materializes on the login node
+  then submits a batch job that re-runs the producer minus --submit
+  (structures already cached).  Tests cover the generator, the
+  clusterrc block, and the submit path (sbatch mocked).  The
+  deferred prepare-on-workers sub-item stays deferred.  Actual
+  sbatch submission + running-as-batch-job is validated by a live
+  cluster run (rides with C75).
 
 - [ ] C114. Sync the PSEUDOCODE writer to the shipped `[defaults]`
   manifest.  Surfaced 2026-07-08 during the seed-run refinement

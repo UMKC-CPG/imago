@@ -70,6 +70,8 @@ def _filled_site(**overrides):
         "omp_proc_bind": None, "gpus_per_node": 0,
         "queue_overrides": {}, "profiles": {},
         "extra_scheduler_options": [],
+        "orchestrator": {"cores": 2, "memory": "8G",
+                         "walltime": "24:00:00"},
     }
     site.update(overrides)
     return site
@@ -419,3 +421,54 @@ def test_write_resolved_dispatch_records_the_choices(tmp_path):
     assert data["partition"] == "general"
     assert data["nodes"] == 2
     assert data["profile"] == "hpc2"
+
+
+# ----------------------------------------------------------------
+#  The orchestrator's own batch job (DESIGN 6.2.11)
+# ----------------------------------------------------------------
+
+def test_build_orchestrator_sbatch_header_and_body():
+    """The orchestrator sbatch script requests one node with the
+    site's orchestrator resource shape, sets account/partition, runs
+    the worker_init bring-up, then the producer command."""
+    site = _filled_site(account="rulisp-lab")
+    choices = {"dispatch": "slurm-per-job", "partition": "general",
+               "nodes": 1, "walltime": "02:00:00"}
+    command = ("python build_initial_potentials.py "
+               "--dispatch slurm-per-job")
+    script = cc.build_orchestrator_sbatch(site, choices, command)
+
+    assert script.startswith("#!/bin/bash")
+    assert "#SBATCH --job-name=imago-orchestrator" in script
+    assert "#SBATCH --account=rulisp-lab" in script
+    assert "#SBATCH --partition=general" in script
+    assert "#SBATCH --nodes=1" in script
+    assert "#SBATCH --cpus-per-task=2" in script        # orch cores
+    assert "#SBATCH --mem=8G" in script                 # orch memory
+    # The orchestrator's own walltime wins over the run's choice.
+    assert "#SBATCH --time=24:00:00" in script
+    # worker_init runs before the command.
+    assert "module load imago" in script
+    assert script.rstrip().endswith(command)
+
+
+def test_build_orchestrator_sbatch_walltime_falls_back_to_choice():
+    """With no orchestrator walltime, the resolved run walltime is
+    used so the driver job always has a time limit."""
+    site = _filled_site(orchestrator={"cores": 1})
+    choices = {"dispatch": "slurm-per-job", "partition": "gpu",
+               "nodes": 1, "walltime": "06:00:00"}
+    script = cc.build_orchestrator_sbatch(site, choices, "run")
+    assert "#SBATCH --time=06:00:00" in script
+    # No memory line when the orchestrator names none.
+    assert "--mem=" not in script
+
+
+def test_build_orchestrator_sbatch_omits_account_when_unset():
+    """A site with no account emits no --account directive rather
+    than an empty one."""
+    site = _filled_site(account=None)
+    choices = {"dispatch": "slurm-per-job", "partition": "general",
+               "nodes": 1, "walltime": "02:00:00"}
+    script = cc.build_orchestrator_sbatch(site, choices, "run")
+    assert "--account" not in script

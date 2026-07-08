@@ -1595,6 +1595,27 @@ How those layers are settled -- the rc-file home, the CLI choices,
 the right-sizing deferral, and the generator's home -- is recorded
 in DESIGN 6.2.11, resolving the questions once gathered in 9.8.
 
+**The resource-control file is about the cluster, plus a bounded
+set of job-class defaults.**  Most of the per-site file is cluster
+fact -- the queues, account, per-node cores and memory capacity,
+and the environment bring-up -- true no matter what runs.  The
+remaining settings size a *job*, and there are only two job
+CLASSES on the cluster, not one per builder: a **worker** (a
+single calculation) and an **orchestrator** (a driver that
+prepares units and fans them out to workers, DESIGN 6.2.11).  A
+future producer that runs as a driver is an instance of the
+orchestrator class -- it reuses the one orchestrator shape,
+overriding on the command line if it differs -- so the file grows
+by job class (bounded), never by orchestrator instance.  Each
+class carries a single site-default resource shape (the worker
+sizing, and a small `orchestrator` group), overridable per run.
+These hand-set shapes are transitional: as the resource-and-cost
+dataspace (section 11) learns to predict a job's memory and
+walltime from its problem size, the per-job *requests* migrate out
+of the file toward prediction, leaving it closer to pure cluster
+fact -- which is why per-node memory is a capacity ceiling, not a
+request.
+
 ### 9.5 Structure acquisition: cod_fish.py + cif2skl.py
 
 Structure acquisition is a front-end, separate from the

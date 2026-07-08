@@ -175,6 +175,23 @@ def parameters_and_defaults():
         #   final escape hatch for anything the schema above does not
         #   name, so a power user is never blocked.
         "extra_scheduler_options": [],
+
+        # The orchestrator job class (DESIGN 6.2.11): the resources
+        #   the DRIVER process itself asks for when it is wrapped in
+        #   its own batch job -- distinct from the per-worker sizing
+        #   above.  The driver is ONE process that prepares units and
+        #   fans the calculations out to worker jobs, so under a
+        #   fan-out dispatch shape it is modest (a core or two,
+        #   little memory, a walltime long enough to outlast the
+        #   flight).  A single site-default shape shared by every
+        #   orchestrator; a run overrides it on the command line, and
+        #   under --dispatch local (the driver runs the SCFs itself)
+        #   it should be sized compute-heavy instead.
+        "orchestrator": {
+            "cores":    2,
+            "memory":   "8G",
+            "walltime": "24:00:00",
+        },
     }
 
     return settings

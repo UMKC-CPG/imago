@@ -434,3 +434,51 @@ def write_resolved_dispatch(run_dir, choices, profile):
             handle.write(toml_line("profile", profile))
         for key in ("dispatch", "partition", "nodes", "walltime"):
             handle.write(toml_line(key, choices[key]))
+
+
+# ----------------------------------------------------------------
+#  The orchestrator's own batch job (DESIGN 6.2.11)
+# ----------------------------------------------------------------
+
+def build_orchestrator_sbatch(site, choices, command):
+    """Build the text of an ``sbatch`` script that runs the producer
+    (the orchestrator/driver) as its own batch job (DESIGN 6.2.11).
+
+    The driver is a single process, so the header requests one node
+    with the site's ``orchestrator`` resource shape -- a distinct job
+    class from the per-worker sizing (ARCHITECTURE 9.4).  Under a
+    fan-out dispatch it is modest (a core or two); under
+    ``--dispatch local`` (the driver runs the SCFs in process) the
+    curator sizes that block compute-heavy instead.  ``account``
+    comes from the site and ``partition`` from the resolved choices;
+    the ``worker_init`` bring-up runs first so the batch job finds
+    imago, then ``command`` -- the producer re-invoked with
+    ``--dispatch`` and no ``--submit``, structures already
+    materialized -- runs.
+
+    ``command`` is the already-quoted command line to execute.
+    Returns the script text; the caller writes and submits it.
+    """
+    orchestrator = site.get("orchestrator", {})
+    cores = orchestrator.get("cores", 1)
+    memory = orchestrator.get("memory")
+    walltime = orchestrator.get("walltime") or choices["walltime"]
+
+    lines = ["#!/bin/bash", "#SBATCH --job-name=imago-orchestrator"]
+    if site.get("account"):
+        lines.append(f"#SBATCH --account={site['account']}")
+    lines.append(f"#SBATCH --partition={choices['partition']}")
+    lines.append("#SBATCH --nodes=1")
+    lines.append(f"#SBATCH --cpus-per-task={cores}")
+    if memory:
+        lines.append(f"#SBATCH --mem={memory}")
+    lines.append(f"#SBATCH --time={walltime}")
+    for directive in site.get("extra_scheduler_options", []):
+        lines.append(f"#SBATCH {directive}")
+
+    lines.append("")
+    lines.extend(site["worker_init"])
+    lines.append("")
+    lines.append(command)
+    lines.append("")
+    return "\n".join(lines)

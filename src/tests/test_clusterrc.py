@@ -56,6 +56,16 @@ def test_every_tier_key_is_present_with_a_usable_default():
         assert settings[key] is None
 
 
+def test_orchestrator_block_ships_with_a_modest_default_shape():
+    """The orchestrator job class (DESIGN 6.2.11) ships as a small
+    grouped block -- the driver's own resources (cores / memory /
+    walltime), distinct from the per-worker sizing and modest under
+    a fan-out dispatch."""
+    orchestrator = clusterrc.parameters_and_defaults()["orchestrator"]
+    assert orchestrator == {
+        "cores": 2, "memory": "8G", "walltime": "24:00:00"}
+
+
 def test_module_is_pure_data_no_cli_machinery():
     """The file is data only: it exposes parameters_and_defaults but
     none of the probe/CLI machinery, which now lives in

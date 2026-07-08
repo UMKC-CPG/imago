@@ -101,6 +101,7 @@ This file is being built incrementally (C48):
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -122,7 +123,8 @@ from kaleidoscope import CalcUnit, Flight, SweepRecord, dispatch
 from kaleidoscope.builders.kpoint_convergence import (
     build_kpoint_convergence, standard_key_fields)
 from kaleidoscope.cluster_config import (
-    resolve_dispatch, write_resolved_dispatch)
+    resolve_dispatch, write_resolved_dispatch,
+    load_site_config, resolve_choices, build_orchestrator_sbatch)
 from kaleidoscope.workspace import read_status, toml_line
 # The Phase-2 matcher registry (ARCHITECTURE 8.9) lives in the neutral
 #   matchers module; the fingerprint harvest dispatches reduce
@@ -1986,6 +1988,37 @@ def _print_materialize_report(report: list[dict[str, Any]]) -> None:
           f"fetched and converted")
 
 
+def submit_orchestrator_batch(args, data_root: str) -> str:
+    """Materialize-then-submit (DESIGN 6.2.11): build the
+    orchestrator's sbatch script and submit it, returning the SLURM
+    job id.
+
+    Called after the login-node materialize pre-flight has fetched
+    every structure into the shared cache.  The batch job re-invokes
+    this producer with the SAME arguments minus ``--submit``, so it
+    runs the full build under ``--dispatch`` with the structures
+    already materialized (no network on the compute node).  The
+    driver's own resources come from the site's ``orchestrator``
+    block (ARCHITECTURE 9.4), sized to the dispatch shape.
+    """
+    site = load_site_config(args.profile)
+    choices = resolve_choices(site, args)
+    # Re-run this producer in the batch job, dropping --submit so the
+    #   batch invocation runs the build itself (not another submit).
+    inner = [item for item in sys.argv if item != "--submit"]
+    command = " ".join(
+        shlex.quote(item) for item in [sys.executable, *inner])
+    script_text = build_orchestrator_sbatch(site, choices, command)
+    script_path = os.path.join(data_root, "orchestrator.sbatch")
+    with open(script_path, "w") as handle:
+        handle.write(script_text)
+    completed = subprocess.run(
+        ["sbatch", script_path],
+        capture_output=True, text=True, check=True)
+    # sbatch prints "Submitted batch job <id>".
+    return completed.stdout.strip().split()[-1]
+
+
 def main(argv=None) -> int:
     """CLI entry point: run the producer over a curation manifest
     (DESIGN 5.7).  ``--element`` restricts the run to one element's
@@ -1997,7 +2030,9 @@ def main(argv=None) -> int:
     tuning a cluster dispatch and ``--save-config`` recording the
     resolved choices (DESIGN 6.2.11).  ``--materialize-only`` runs
     just the structure fetch-and-convert pre-flight (no SCF),
-    optionally redirecting the output with ``--materialize-dir``."""
+    optionally redirecting the output with ``--materialize-dir``.
+    ``--submit`` materializes on the login node and then submits the
+    producer as its own batch job (DESIGN 6.2.11)."""
 
     parser = argparse.ArgumentParser(
         description="Build the augmented initial-potential database "
@@ -2058,6 +2093,13 @@ def main(argv=None) -> int:
              "fetched CIFs and converted skeletons into (default: "
              "the shared structure cache beside the databases, which "
              "a later full build reuses)")
+    parser.add_argument(
+        "--submit", action="store_true",
+        help="materialize structures on the login node, then submit "
+             "the producer as its OWN batch job that runs the build "
+             "under --dispatch (DESIGN 6.2.11); the driver job's "
+             "resources come from the clusterrc 'orchestrator' block "
+             "(default: run the build in this process)")
     args = parser.parse_args(argv)
 
     if not args.pdb_root:
@@ -2065,6 +2107,9 @@ def main(argv=None) -> int:
     if args.materialize_dir and not args.materialize_only:
         parser.error("--materialize-dir applies only with "
                      "--materialize-only")
+    if args.submit and args.materialize_only:
+        parser.error("--submit and --materialize-only are mutually "
+                     "exclusive modes")
     data_root = os.path.dirname(args.pdb_root.rstrip("/"))
 
     # The pre-flight short-circuits before any SCF dispatch: it only
@@ -2076,6 +2121,24 @@ def main(argv=None) -> int:
             cache_dir=args.materialize_dir)
         _print_materialize_report(report)
         return 0 if all(row["ok"] for row in report) else 1
+
+    # Materialize-then-submit (DESIGN 6.2.11): the orchestrator runs
+    #   as its own batch job.  Fetch every structure on the login
+    #   node first (the only network step -- compute nodes may lack
+    #   internet), then submit a batch job that re-runs this producer
+    #   under --dispatch, reading the materialized cache with no
+    #   further network.
+    if args.submit:
+        report = materialize_only(args.manifest, args.pdb_root)
+        _print_materialize_report(report)
+        if not all(row["ok"] for row in report):
+            print("producer: materialize failed; not submitting the "
+                  "orchestrator batch job")
+            return 1
+        job_id = submit_orchestrator_batch(args, data_root)
+        print("producer: submitted orchestrator batch job "
+              + job_id)
+        return 0
 
     per_run_log = build_initial_potentials(
         args.manifest, args.pdb_root, data_root,
