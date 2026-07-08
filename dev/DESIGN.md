@@ -4046,6 +4046,15 @@ basis              = "fb"
 functional         = "wigner"
 kpoint_integration = "linear-tetrahedral"
 
+# Harvest settings shared by every reference solid.  Unlike the
+# [defaults] run settings above, these do not feed any single
+# calculation -- they govern how the finished runs are read back
+# into the database.  Optional block: a solid inherits these when
+# it does not name its own, and an omitted setting falls back to
+# the producer's built-in value (validation rule 2).
+[harvest]
+kpoint_convergence_threshold = 5.0e-4   # eV/atom; 0.5 meV/atom
+
 [[reference_solid]]
 reference_id          = "au_fcc"
 system_type           = "crystalline"
@@ -4088,7 +4097,11 @@ source_description    = "Au in fcc bulk (Fm-3m), COD 9008463."
 `scf_threshold`, `basis`, `functional`, `kpoint_integration` --
 may be given per solid or omitted to inherit the `[defaults]`
 block (below); each must be *resolvable* one way or the other
-(rule 2).  The rest are per solid.
+(rule 2).  The one harvest setting,
+`kpoint_convergence_threshold`, may likewise be given per solid
+or omitted to inherit the `[harvest]` block -- but it carries a
+built-in default, so unlike the run settings it need not be
+resolvable from the manifest at all.  The rest are per solid.
 
 - `reference_id` (string): stable, human-readable identifier for
   the reference solid.  Used as the kaleidoscope flight/run stable
@@ -4172,6 +4185,19 @@ block (below); each must be *resolvable* one way or the other
   eV).  A bare `"gaussian"` names no width, so makeinput keeps its
   rc-sourced default (no smearing).
 
+The one *harvest* setting a solid may carry is not a run setting
+and resolves against the `[harvest]` block, not `[defaults]`:
+
+- `kpoint_convergence_threshold` (real, units eV/atom): the
+  per-atom energy-flatness tolerance the solid's k-point-density
+  ladder must reach before its converged rung is harvested
+  (DESIGN 7.8).  Given per solid to override just that solid's
+  value, else inherited from the top-level `[harvest]` block,
+  else the producer's built-in default of 5e-4 (0.5 meV/atom).
+  It never enters a calculation -- it is consulted only when the
+  finished runs are read back -- and the resolved value is
+  recorded on each guidance entry the solid contributes.
+
 **Per-entry fields (`[[reference_solid.entry]]`).**  An entry
 is an *optional customization* on an auto-discovered environment, not
 a harvest instruction (5.2.2, 5.2.3).  Every field is optional;
@@ -4239,6 +4265,32 @@ be *resolvable* for every solid -- present on the solid or in
 producer emits depends on an implicit default (VISION Principles
 5 and 11): the value is always written down, just possibly once
 for the whole manifest rather than once per solid.
+
+**The `[harvest]` block (shared harvest settings).**  A separate
+optional block for the settings that govern how finished runs
+are *read back* into the database, as opposed to how the
+calculations are *run*.  Keeping the two apart is deliberate:
+the `[defaults]` settings each feed an individual calculation
+(they become makeinput/imago options baked into the run),
+whereas a harvest setting is consulted only afterward, when the
+producer interprets results that already exist on disk.  In v1
+the block holds a single setting, `kpoint_convergence_threshold`
+(real, units eV/atom): the per-atom energy flatness a solid's
+k-point-density ladder must reach before its converged rung is
+harvested (DESIGN 7.8).  Like the run settings it may be named
+per solid to override just that solid's value, resolving to the
+`[harvest]` block when the solid is silent; unlike them it also
+carries a built-in producer default (5e-4 eV/atom = 0.5 meV per
+atom), so a manifest may omit the block entirely.  The
+*resolved* value -- whether authored or defaulted -- is recorded
+on every guidance entry the run contributes (its
+`metric_threshold`, 7.8), so the threshold actually used stays
+recoverable even when it was never written in the manifest.  The
+`[characterization]` block above is a harvest-configuration
+block in the same spirit (it declares which fingerprints to
+compute at harvest); it stays a sibling of `[harvest]` rather
+than folding in, because it is database-wide and already fully
+specified on its own terms.
 
 **Per-entry fingerprint declarations
 (`[[reference_solid.entry.fingerprint]]`).**  A per-entry
@@ -4310,6 +4362,12 @@ file (5.2):
    entry's context, so nothing the producer emits depends on an
    implicit default (VISION Principles 5 and 11) -- the value is
    always written down, once per solid or once in `[defaults]`.
+   The harvest setting `kpoint_convergence_threshold` is exempt
+   from this resolvability requirement: it carries a built-in
+   producer default (5e-4 eV/atom), so a solid that names neither
+   it nor a `[harvest]` block is not refused -- the default
+   applies and its resolved value is still recorded in provenance
+   (the guidance entry's `metric_threshold`, 7.8).
    A top-level `[characterization]` block
    declaring at least one fingerprint is required (rule 10): it
    sets the database-wide preferred recipe, so a manifest without
@@ -5664,14 +5722,23 @@ surface convergence in `status.toml` *and* stay ignorant
 of what convergence means.
 
 - The **default wingbeat** (`ImagoWingbeat`) drives the 6.1
-  API.  It first **partitions the unit's options** into the
-  makeinput-side and imago-side settings (6.2.10), then builds
-  the run directory with `makeinput.build_run_dir` and runs it
-  with `imago.run_prepared` (or `run_prepared` alone when the
-  inputs are already staged).  It maps the returned
-  `ImagoResult` into a `WingbeatOutcome`: `ok = status in
-  {CONVERGED, NOT_CONVERGED, SKIPPED}` (the binary *ran*),
-  `detail = status.name.lower()`.  It also **persists
+  API.  The driver's prepare step (6.2.5) has already built
+  this unit's inputs into its staging area, so the wingbeat
+  does not build: it **commits the staged inputs** into the
+  run directory and runs them with `imago.run_prepared`.  It
+  STILL **re-applies the unit's imago-side settings** on that
+  run -- it partitions the unit's options (6.2.10) and passes
+  the imago-side ones (`job` / `edge` / `scf_basis`) to
+  `run_prepared`, because those are imago *runtime* options,
+  not baked into the staged `imago.dat`.  A pre-staged
+  directory carries no memory of the job it was built for, so
+  the settings must travel with every invocation -- otherwise
+  a re-dispatched `-loen -scf no` unit, seeing a prepared
+  directory, would silently run a default ground-state SCF in
+  place of its loen job.  It maps the returned `ImagoResult`
+  into a `WingbeatOutcome`: `ok =
+  status in {CONVERGED, NOT_CONVERGED, SKIPPED}` (the binary
+  *ran*), `detail = status.name.lower()`.  It also **persists
   the full `ImagoResult` into the run directory** as
   `result.toml` (6.2.6), so the Imago-native detail
   survives for the client to reload without
@@ -5955,9 +6022,16 @@ existing `is_cached_v2` (DESIGN 5.7) and generalizing it:
   `imago_commit`).
 - **Key files** -- declared by name in `key_fields`;
   compared by **byte-comparison against the copy already
-  staged in the run directory** (the producer's structure
-  file).  This deliberately keeps DESIGN 5.7's
-  "byte-compared structure file copies, no hashing, for
+  staged in the run directory**.  For the producer this
+  file is `structure.dat`: the *resolved* structure
+  makeinput writes, not the raw skeleton.  Keying on
+  makeinput's output is deliberate -- `structure.dat`
+  bakes in every input that changes the result (the
+  type/species assignment, the basis, the functional, the
+  potential choice), so changing any of them misses the
+  cache on its own, with no hand-maintained list of
+  "options that matter" to fall out of date.  This keeps
+  DESIGN 5.7's "byte-compared file copies, no hashing, for
   debuggability" property: a developer can diff the files
   to see *why* a cache missed, which a hash would hide.
 
@@ -5969,6 +6043,38 @@ science; a too-narrow key risks needless re-runs.  This
 mechanism subsumes the producer's bespoke
 `share/atomicBDB/cache/scf/<reference_id>/`; C69 folds
 that producer cache into this one.
+
+**Prepare before the hit-test.**  Because the producer's
+key file is makeinput's output, makeinput must run *before*
+the hit-test can read it.  Once the structure is
+*materialized* -- the network fetch that yields the local
+skeleton (5.7) -- the producer runs makeinput itself, in the
+driver, as a cheap *prepare* step: distinct from that
+materialize step, and named to match the run directory it
+builds (`build_run_dir` prepares, `run_prepared` runs,
+6.2.2).  The prepare step is cheap because makeinput is pure
+Python and, when a solid's species/type assignment needs it,
+adds only a fast `imago -loen` run; the expensive
+ground-state SCF is never part of it.  It produces
+`structure.dat` and the staged inputs; the hit-test then
+byte-compares this freshly built `structure.dat` against the
+prior run's staged copy (the prepare step must not clobber
+that reference before the test -- a PSEUDOCODE detail) and,
+only on a miss, launches the expensive imago SCF.
+Deciding a hit in the driver, from local files, is what
+keeps a re-run cheap: a hit never
+reaches the scheduler, so the surviving misses are the only
+units that cost a calculation.  Seating the key on
+makeinput's output also closes a correctness gap a
+raw-skeleton key leaves open -- a skeleton plus a
+hand-listed set of scalars silently reuses a stale result
+when an unlisted option changes (a functional, a potential),
+whereas that change is already present in `structure.dat`
+and misses the cache on its own.  Running makeinput in the
+driver rather than the worker is also what lets a cached
+unit skip the scheduler entirely; where the driver itself
+runs (a login node or its own batch job) is settled in
+6.2.11.
 
 The boundary with 6.1's checkpointing is clean and worth
 restating: `imago.py` resumes *within* a run directory
@@ -6690,8 +6796,31 @@ Only the core is required; any omitted key uses its default.
   common run needs no per-run options at all.
 - `max_blocks` -- how many allocations the pooled shape may
   grow to when work backs up.
-- `memory_per_node` / `memory_per_worker` -- guards so a run
-  neither overflows memory nor under-requests it.
+- `memory_per_node` / `memory_per_worker` -- two *distinct*
+  memory concepts, deliberately not conflated.  A worker is one
+  calculation, so `memory_per_worker` is the memory ONE
+  calculation needs: it is the *request*, expressed in
+  gigabytes, and it is what the generator spends.
+  `memory_per_node` is a node's *physical capacity*, in
+  megabytes -- what the hardware has, which is what
+  `cluster_probe` can discover from the scheduler.  It is a
+  *ceiling*, never a request: the generator does not spend it.
+  Keeping them apart resolves a naming trap the single-field
+  form fell into -- a field named for node capacity but spent
+  as a per-job request, forcing every block to reserve a whole
+  node's memory.  The `--mem` the generator writes is
+  *derived*, not copied: SLURM's `--mem` is a per-node figure,
+  and a node runs as many calculations at once as it packs
+  workers, so the per-node request is
+  `memory_per_worker x workers_on_the_node` -- one worker's
+  worth under the per-job shape (one calculation per node),
+  the packed worker count under the pooled shape.  This split
+  also opens the forward path: a later automatic
+  memory-estimator will predict a calculation's need per
+  structure and feed `memory_per_worker` directly, while
+  `memory_per_node` stands ready as the capacity ceiling to
+  check that estimate against -- a limit, a warning threshold,
+  or a packing constraint, as the estimator's design settles.
 
 *Advanced and forward-looking (power users; future imago).*
 
@@ -6891,6 +7020,61 @@ workers execute each unit in its
 own run directory on the shared filesystem exactly as the
 local executor does, so a cluster run and a local run share
 one cache.
+
+**Driver location -- login node or its own batch job.**  The
+decisions above settle where each *unit* runs -- the `Config`
+and the dispatch shape.  They leave open where the *driver*
+runs: the orchestrator process that reads the manifest,
+prepares each unit (6.2.5), decides cache hits from local
+files, and submits and awaits the rest.  That driver now does
+real per-unit work before any SCF -- a makeinput build and,
+when a solid's species/type assignment needs it, a fast
+`imago -loen` run, once per unit including cache hits.  At seed
+scale (a handful of solids) this is negligible and the driver
+may run interactively.  At scale it is serial work that would
+occupy a login node's terminal for the whole flight, so the
+driver may itself be wrapped in a scheduler job.
+
+**A separate orchestrator resource block.**  The driver's own
+footprint is sized independently of the per-unit slice
+(`memory_per_worker`, decision 1): the two describe different
+things -- one calculation versus the orchestrator process --
+and conflating them would missize both.  The orchestrator block
+follows the dispatch shape.  Under `slurm-per-job` or `pooled`
+the driver only prepares units and fans the calculations out to
+worker jobs, so it asks for little -- modest memory, a core or
+two, and a walltime long enough to outlast the flight it
+supervises.  Under `local` the driver runs the SCFs itself, in
+process, so its block must be compute-sized.  The block is a
+new site/per-run setting alongside the worker sizing, not a
+reuse of it.
+
+**Materialize on the login node, then submit.**  The one step
+that needs the network is the structure fetch -- the
+materialize pre-flight (`--materialize-only`, the `local`
+opt-out of decision 2).  It runs on the login node first,
+pinning and caching every structure, because compute nodes may
+have no internet.  Only then is the driver's batch job
+submitted.  Inside that job the prepare step (6.2.5) consumes
+the already-fetched skeletons and touches no network, and
+dispatch runs the calculations.  So the single
+network-dependent step is isolated to the login node, up
+front, and nothing downstream depends on a compute node
+reaching COD.
+
+**One flag, and one deferral.**  Which shape the driver's job
+uses is the same per-run `--dispatch` choice (decision 2):
+`local` inside the orchestrator job for seed scale now,
+`slurm-per-job` or `pooled` later -- a flag, not a rewrite.
+One thing is deferred with it.  At seed scale the driver
+prepares every unit serially inside its job, which is exactly
+what keeps a cache hit off the scheduler (6.2.5).  When that
+serial prepare becomes the bottleneck, prepare-and-hit-test
+can itself move onto dispatched worker units -- at the cost
+that a hit then occupies a cheap worker slot rather than being
+decided driver-local.  That transition is a later refinement,
+turned on when the serial cost bites; the driver-in-batch
+model and the orchestrator block are tracked as TODO C113.
 
 ### 6.3 makeinput callable build API
 
@@ -8570,8 +8754,10 @@ information flow stays simple and homogeneous:
   - the SCF total energy (used to pick the converged grid
     point).
   - `scf_threshold` -- the SCF criterion the run converged
-    to, reused as the entry's `metric_threshold` (the v1
-    convention).
+    to, recorded in the entry's context.  It is a distinct
+    criterion from the grid-flatness `metric_threshold`
+    (below): one governs a single SCF run, the other judges
+    energy versus k-density.
 - **the structure `.skl`** -- the *structural facts*: the
   harvest loads it anyway for `compute_signature`, and the
   same load yields `cell_atom_count` (`num_atoms`) and
@@ -8620,13 +8806,21 @@ still passes and the curator can spot it on review).
          total_magnetization, and scf_threshold; read the
          swept k-density out of the CalcUnit's calc tag.
       c. Pick the converged grid point: the smallest
-         k-density at which |E_i - E_{i+1}| <
-         metric_threshold AND |E_i - E_{i-1}| <
-         metric_threshold for i in (1, len(grid)-1).
-         Stricter than the original "single delta below"
-         rule: requires both consecutive-pair deltas to
-         be small, mitigating a single-grid-point
-         numerical fluke.
+         k-density at which the PER-ATOM energy change to
+         both neighbours is below the k-point threshold --
+         |E_i - E_{i+1}| / cell_atom_count <
+         metric_threshold AND |E_i - E_{i-1}| /
+         cell_atom_count < metric_threshold for i in
+         (1, len(grid)-1), the deltas taken in eV.
+         Requiring both consecutive-pair deltas to be
+         small mitigates a single-grid-point numerical
+         fluke.  `metric_threshold` is the k-point
+         convergence threshold in eV/atom, resolved from
+         the solid's `kpoint_convergence_threshold` (its own
+         value, else the manifest `[harvest]` block, else the
+         built-in 0.5 meV/atom = 5e-4 eV/atom default; 5.7) --
+         separate from `scf_threshold`, which governs one SCF
+         run, not the flatness of energy versus k-density.
       d. If no point satisfies the criterion (energy
          still moving at the top of the grid), log a
          warning, tag the flight with
@@ -8672,6 +8866,39 @@ still passes and the curator can spot it on review).
     (converged / skipped / staged path).
 ```
 
+**Two thresholds, not one.**  The grid-flatness
+`metric_threshold` is deliberately separate from the SCF's
+`scf_threshold`.  A single SCF converges its own iteration
+residual to `scf_threshold`; a total energy of order tens of
+hartree, though, cannot flatten to that same figure versus
+k-density -- 1e-6 hartree is ~1e-8 relative, far below real
+k-point sampling noise -- so binding the two lets only
+accidentally-flat structures harvest while genuinely slow
+ones (their energy still moving at the 1e-4 hartree level)
+are reported non-converged even though every SCF converged
+cleanly.  The threshold is *per atom* because the database
+mixes cells of very different size (2 to 16+ atoms), and a
+fixed absolute total-energy tolerance would demand
+ever-tighter relative convergence as the cell grows.
+
+The 0.5 meV/atom default is looser than the textbook
+1 meV/atom, a deliberate choice for a *seed* database.  A
+purely local flatness test cannot both reject a low-density
+false plateau and converge a genuinely slow structure with a
+single threshold: a small high-symmetry cell can sit on a
+plateau flat to a few hundredths of a meV/atom yet a few
+tenths of a meV/atom above its true asymptote, while a larger
+cell only truly flattens at a few tenths of a meV/atom.
+Since a seed potential is a starting point that every
+downstream run re-converges, the choice is to accept a
+modestly loose plateau rather than complicate the detector --
+a threshold near 0.5 meV/atom converges the well-behaved and
+the slow structures alike, while a genuinely pathological
+sweep (an energy swinging by tens of meV/atom across the
+grid) is still correctly left unharvested for the curator.
+Sharpening the detector to tell a false plateau from a true
+asymptote is a deferred refinement, not a v1 concern.
+
 **Promotion** (`guidance_promote.py`):
 
 A curator helper.  Four modes of operation:
@@ -8691,15 +8918,24 @@ A curator helper.  Four modes of operation:
     of the verification grid (not at either endpoint).
     A converged-at-endpoint result is suspicious: the
     grid may not have been wide enough.
-  - The total-energy variance over the top three grid
-    points -- read from the entry's `grid_energies`
-    array (7.2), which is why harvest records it -- is
-    below `metric_threshold * 10` (the converged region
-    is convincingly flat, not just one delta below
-    threshold).  A staging entry that lacks
-    `grid_energies` (a hand-written manual entry) is
-    never auto-promoted on this criterion; it falls to
-    interactive review.
+  - The total-energy spread over the top three grid
+    points -- their maximum minus their minimum, read
+    from the entry's `grid_energies` array (7.2), which
+    is why harvest records it -- is below
+    `metric_threshold * 10` (the converged region is
+    convincingly flat, not just one delta below
+    threshold).  The spread is taken per atom and in
+    eV, the basis `metric_threshold` is expressed in;
+    because `grid_energies` are stored as raw
+    total-cell hartree, the test divides by the cell's
+    atom count and converts, the same normalization
+    `pick_converged` applies (7.8 step c).  A spread --
+    a like-for-like linear quantity -- is used rather
+    than a variance, whose energy-squared units would
+    not match the linear threshold.  A staging entry
+    that lacks `grid_energies` (a hand-written manual
+    entry) is never auto-promoted on this criterion; it
+    falls to interactive review.
   - `gap_ev` and `gap_kind` are consistent
     (`gap_kind == "none"` iff `gap_ev == 0.0`).
   Files failing the rule stay in staging for the

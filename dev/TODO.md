@@ -2068,6 +2068,263 @@ shipped.
   repeating settings per solid; source defaults from the shared
   library.  `system_type` stays per-solid (structure metadata,
   not defaulted).  CODE; DESIGN 5.7; ARCH 8.5.
+- [ ] C105. On-disk potential-file schema migration / version
+  guard (initial_potential_db).  Surfaced 2026-07-01 during the
+  C91 Si seed: the incremental producer loads each existing
+  `share/atomicPDB/<elem>/s_gaussian_pot.toml` through the strict
+  reader, so a file written before a now-required field was added
+  is rejected with a bare `missing required field` ValueError and
+  no recovery but hand-deletion.  The concrete trigger was a
+  pre-B3 `si/s_gaussian_pot.toml` whose Imago provenance predated
+  the required `type_assignment` field (added by C88(a)); deleting
+  the stale file let the producer re-seed and re-harvest cleanly.
+  This is acceptable now while the databases are disposable seed
+  data, but once a curated set accretes across many manifests that
+  we do NOT want to rebuild, an older file must be handled
+  gracefully.  Work: have `initial_potential_db.load()` compare
+  the file's `schema_version` against the current one and EITHER
+  migrate a known-older file forward (fill newly required fields
+  with a documented default, e.g. `type_assignment` from the
+  provenance already present) OR raise a clear, actionable error
+  ("this file predates schema vN; regenerate it with
+  build_initial_potentials.py, or migrate with <tool>") instead of
+  the low-level missing-field message.  Pairs with the guidance /
+  resource dataspaces, which have their own `*_migrate.py` tools
+  (ARCH 10 / 11) -- the initial-potential DB should grow the same
+  story.  CODE; DESIGN 5.2/5.5.
+- [ ] C106. Single-source the producer's fingerprint-declaration
+  set so the build and harvest sides cannot drift (DESIGN
+  5.7/5.10).  Back-burner.  Scenario that surfaced it (2026-07-02,
+  C91 Si seed live run): the producer dispatched every SCF
+  convergence run for a solid, then died at harvest with
+  `FileNotFoundError: no loen descriptor ... the loen run did not
+  complete`.  Root cause was a split source of truth --
+  `harvest_fingerprints` reads the declaration set as
+  `characterization + entry.overrides` (the database-wide recipe
+  plus per-entry overrides), but `build_loen_units` only iterated
+  `entry.fingerprints`.  After the C93/C94 decoupling moved the
+  bispectrum recipe into the database-wide `[characterization]`
+  block (with no per-entry overrides in a Si default manifest),
+  the build side built no loen unit at all, so the harvest read a
+  descriptor that was never dispatched.  The immediate bug is
+  fixed by passing `characterization` into `build_loen_units` and
+  unioning both sources (calc-tag deduped), but nothing ENFORCES
+  that the two sides stay in agreement: a future third path (a new
+  fingerprint family, an override-precedence rule) could
+  reintroduce the same drift.  Work: compute the
+  `(method, sub_spec)` declaration set ONCE (e.g. a
+  `producer_fingerprint_declarations(ref, characterization)`
+  helper) and have BOTH the loen-unit build and the harvest
+  consume that single list, so the build set is the harvest set by
+  construction.  CODE; DESIGN 5.7/5.10.
+- [ ] C107. Fail fast before dispatch when a fingerprint the
+  harvest will read has no dispatched unit (DESIGN 5.10/6.2).
+  Back-burner.  Same scenario as C106: the missing loen unit was
+  not detected until the HARVEST phase, after the producer had
+  already spent minutes of cluster SCF time on all eight solids'
+  convergence sweeps -- the failure was silent-until-harvest.  A
+  cheap pre-dispatch invariant would catch it before any run
+  launches: after assembling `all_units`, assert that every
+  Fortran-side declaration the harvest will read (per solid, over
+  `characterization + overrides`) has a matching loen unit in the
+  flight, and raise a clear error naming the solid and sub_spec if
+  not.  This is a defensive backstop that makes the C106 class of
+  bug loud and free instead of expensive and late; it is worth
+  keeping even after C106 single-sources the declaration set,
+  since it also guards against a unit that was built but dropped
+  during dispatch assembly.  CODE; DESIGN 5.10/6.2.
+
+- [ ] C108. Intermediate-scratch cleanup for the producer (and a
+  reusable cleanup subsystem).  Motivation: the Si seed run
+  (2026-07-02) left 3.7 GB of per-calc scratch under each run
+  directory's `intermediate ->` symlink (roughly 20 MB per calc
+  dir), against only 18 MB of kept home-side artifacts
+  (status/result/scfV/descriptor).  Scratch of this kind fills up
+  fast and is tedious to locate and remove by hand -- and stale
+  units from earlier manifests linger in the shared workspace (the
+  seed run's workspace still held `si_diamond`, `si_fd-3m_227_2010`,
+  and a half-finished `si_p63mmc_194_2018` from prior experiments).
+  Three layers, built in this order:
+    (c) A STANDALONE cleanup script -- the eventual home of the
+        logic: a generic, selective find/remove over intermediate
+        scratch, with options that let the user target what to
+        prune (by workspace, by unit, by calc kind, by age, dry-run
+        preview, keep-the-harvestable-artifacts).  This is the real
+        deliverable and can be written later.
+    (a) Once (c) exists, the build/harvest script gains a
+        `--clean-after` option that simply invokes the standalone
+        script with the known-good options a just-finished harvest
+        can supply (which units harvested, what to keep) -- so the
+        post-harvest cleanup and the standalone tool are one code
+        path, not two.
+    (b) NEAR-TERM, before (c) lands: no cleanup option implies NO
+        cleaning (today's behaviour, unchanged).  A `--tidy-run`
+        option turns on prune-as-you-go, discarding a unit's
+        superseded intermediate scratch as the flight advances.  The
+        pruning ACTION must be written generically -- a
+        builder-supplied policy/hook -- so builders other than the
+        k-point convergence producer can define what "safe to prune
+        now" means for their own units.
+  Level note: this introduces a small cleanup subsystem, so the
+  standalone-script boundary and the generic-pruning-hook belong in
+  ARCHITECTURE/DESIGN before (c) is coded.  CODE + DESIGN.
+
+- [ ] C109. Decide the default cell -- full (conventional) vs
+  primitive -- for the materialized `imago.skl`.  Surfaced by the
+  Si seed run (2026-07-02): a primitive cell has fewer atoms, so a
+  smaller secular equation and a faster SCF, and the harvested
+  quantity is a per-species / per-environment POTENTIAL, which is
+  cell-invariant -- so the choice changes run COST, not the
+  science.  Two wrinkles to work through before picking a default:
+  (1) COD CIFs arrive as the conventional or as-published cell, so
+  going primitive means a symmetry reduction (spglib / ASE
+  `find_primitive`) inside `cif2skl`, and the reference_id <->
+  structure mapping and `datSkl.map` type assignment must stay
+  consistent through that reduction; (2) the `kpt-density-N` sweep
+  metric must be defined so a primitive and a conventional cell
+  receive EQUIVALENT k-meshes -- automatic if the density is a
+  reciprocal-space length target, but not if it is a per-axis
+  count.  Decide the default and whether it becomes a manifest
+  knob.  DESIGN 5.7 (materialize_structure) / ARCH 9.5 (cif2skl).
+
+#### Seed-run refinement -- producer code tasks (design settled)
+
+The four code tasks that follow implement the DESIGN decisions
+taken in the 2026-07 seed-run refinement pass (companions to the
+C108 cleanup and C109 cell-choice design items above).  Each
+DESIGN rung is already written; these are the code that follows
+it.  Reminder: `src/scripts` edits sync to `bin/` (the producer
+imports its neighbours from `$IMAGO_BIN`).
+
+- [ ] C110. Make the default wingbeat re-apply the unit's
+  imago-side settings on every launch.  Motivation: the Si seed
+  run showed a re-dispatched `-loen -scf no` unit run a full
+  ground-state SCF ("SCF after loen").  Root cause: `ImagoWingbeat`
+  (`kaleidoscope/wingbeats.py`) reaches `imago.run_prepared(dir)`
+  with NO settings, so `job` / `edge` / `scf_basis` -- imago
+  *runtime* options that do not live in the staged `imago.dat`
+  (DESIGN 6.2.10) -- are lost.  Fix, per the now-written PSEUDOCODE
+  13.2 (Model A): the wingbeat always rebuilds the imago-side
+  settings from the unit's options (`{k: v for ... if k in
+  imago.OPTION_KEYS}` -> `ScriptSettings.from_options`) and passes
+  them to `run_prepared(dir, settings=...)`.  Under Model A the
+  driver prepares every unit, so the wingbeat has a SINGLE path
+  (commit the staged inputs, then run) -- there is no separate
+  "already prepared" branch to special-case; it always passes
+  settings.  Merges with C111 at the wingbeat (C111 moves the
+  build out to the driver's prepare pass; this makes the surviving
+  run always carry its settings).  DESIGN 6.2.2 / 6.1; PSEUDOCODE
+  13.2.  CODE.
+
+- [ ] C111. Key the run-reuse cache on `structure.dat` and run
+  the prepare step in the driver (Model A).  Motivation: the seed
+  run's "cache" never hit -- every re-run re-executed the SCF for
+  one warm-restart iteration.  Root cause: the k-point convergence
+  builder names its key file `"structure"`
+  (`kaleidoscope/builders/kpoint_convergence.py`,
+  `standard_key_fields` `KeyFile(name="structure", ...)`) but the
+  wingbeat stages it on disk as `imago.skl`, so `cache_key_matches`
+  never finds the file and reports a MISS.  Fix, per the now-written
+  PSEUDOCODE (F2, Model A -- 15.6 / 13.4 / 13.2 and
+  buildInitialPotentials Phase 1b; ARCH 8.5): (a) the key file
+  becomes `structure.dat`, makeinput's *resolved* output, which
+  bakes in the type/species assignment, basis, functional, and
+  potential so an unlisted option cannot silently reuse a stale
+  result; (b) `CalcUnit` gains a `prepared_dir` field; (c) the
+  producer runs a driver-side PREPARE PASS before dispatch
+  (partition the makeinput-side options, `build_run_dir` into a
+  per-unit `prepare/<id>/*calc` staging area SEPARATE from the run
+  dir -- the "must not clobber" rule -- plus a fast `imago -loen`
+  when a solid's species/type assignment needs one), setting
+  `prepared_dir`; (d) define `key_file_source` = the staged copy
+  (`prepared_dir/<name>`) and `key_file_staged` = the run dir's
+  copy, so the domain-agnostic cache core is UNCHANGED (it only
+  byte-compares the two); (e) on a miss the wingbeat commits the
+  staged inputs into the run dir (`commit_prepared_inputs`) and
+  runs `run_prepared` -- no rebuild (merges with C110).  DESIGN
+  6.2.5 / 5.7; ARCH 8.5; PSEUDOCODE 15.6 / 13.2 / 13.4.  CODE.
+
+- [ ] C112. Source the k-point grid-flatness threshold from the
+  manifest `[harvest]` block, per atom, in eV.  Motivation: the
+  seed run reported ia-3 and cmce non-converged though every SCF
+  converged cleanly -- "not all converged."  Root cause:
+  `guidance_harvest.py` reuses `scf_threshold` (1e-6 hartree, ~
+  1e-8 relative) as the grid-flatness `metric_threshold`, far
+  below real k-point sampling noise.  Fix, per DESIGN 7.8: divide
+  each consecutive-pair total-energy delta by `cell_atom_count`
+  (deltas in eV) and compare against `metric_threshold`, now
+  resolved from the solid's `kpoint_convergence_threshold` (its
+  own value, else the manifest `[harvest]` block, else the
+  built-in 5e-4 eV/atom default; DESIGN 5.7).  Retire the
+  `metric_threshold = scf_threshold` v1 convention (its docstring
+  note in `guidance_harvest.py`) and thread the resolved harvest
+  threshold through `pick_converged_unit`
+  (`build_initial_potentials.py`), which today passes
+  `scf_threshold`.  Also: teach the manifest loader to parse and
+  per-solid-resolve `[harvest].kpoint_convergence_threshold`.
+  Storage (Option B, decided 2026-07-08): keep the raw total-cell
+  energies (hartree) in each guidance entry exactly as the run
+  produced them, and do the per-atom eV conversion at every site
+  that compares them against the threshold -- both `pick_converged`
+  and `guidance_promote.py`'s `auto_promote_ok` -- reading
+  `cell_atom_count` from the entry to normalize.  Single-source
+  that conversion so the two comparison sites cannot drift.  While
+  there, fix a pre-existing dimensional mismatch in
+  `auto_promote_ok`: its flatness bar tests a statistical variance
+  (an energy squared) against the plain threshold (an energy), so
+  the two sides do not share dimensions regardless of units --
+  make it a like-for-like comparison (a per-atom eV spread against
+  the per-atom eV threshold).  Resolve target (PSEUDOCODE 11.4,
+  now written): extend the shipped 2-arg `resolve_run_settings`
+  into the 3-arg `resolve_settings(solid, defaults, harvest)`; add
+  a `harvest` field on `CurationManifest` and a
+  `kpoint_convergence_threshold` field on `ReferenceSolid`; and
+  have `apply_manifest_defaults` pass `manifest.harvest` so the
+  harvest arm resolves the solid's own value, else `[harvest]`,
+  else built-in `DEFAULT_KPOINT_CONVERGENCE_THRESHOLD`.
+  DESIGN 7.8 / 5.7.  CODE (+ PSEUDOCODE).
+
+- [ ] C113. Let the producer/orchestrator run as its own batch
+  job, with a separate orchestrator resource block.  Motivation:
+  the driver now does real per-unit prepare work (a makeinput
+  build, plus a fast `imago -loen` when assignment needs it, once
+  per unit including cache hits, C111), which at scale would tie
+  up a login node's terminal for a whole flight.  Fix, per DESIGN
+  6.2.11 ("Driver location"): (a) support wrapping the run in its
+  own `sbatch` job; (b) add a separate orchestrator resource
+  block -- sized to the dispatch shape (tiny when it only fans
+  out to worker jobs, compute-sized under `--dispatch local`) --
+  as a new `clusterrc.py` / per-run setting distinct from
+  `memory_per_worker`; (c) materialize-then-submit: run
+  `--materialize-only` on the login node first (the only
+  network-touching step; compute nodes may lack internet), THEN
+  submit the batch job whose prepare + dispatch touch no network;
+  (d) keep `--dispatch` a per-run flag (`local` for seed scale
+  now, `slurm-per-job` / `slurm-pooled` later).  Deferred
+  sub-item, turned on only when the serial prepare cost bites:
+  move prepare-and-hit-test onto dispatched worker units (a hit
+  then costs a cheap worker slot instead of being decided
+  driver-local).  DESIGN 6.2.11.  CODE.
+
+- [ ] C114. Sync the PSEUDOCODE writer to the shipped `[defaults]`
+  manifest.  Surfaced 2026-07-08 during the seed-run refinement
+  `/refine`: the `[defaults]` block shipped in code (C104 --
+  `curation_manifest.py` resolution and the `expand_manifest` /
+  `cod_fish` writers), and PSEUDOCODE 11.4 (the reader) is now
+  updated to model both `[defaults]` and `[harvest]` resolution,
+  but PSEUDOCODE 11.6 `format_manifest` (the *writer*) still emits
+  every run setting per solid with no `[defaults]` block -- so the
+  writer pseudocode lags its own shipped code.  Work: update
+  `format_manifest` to emit the `[defaults]` block plus the compact
+  per-solid overrides the shipped writer produces, so the read and
+  write sides of the schema library agree in pseudocode as they
+  already do in code.  Open sub-question, decide when C112 lands:
+  whether the authoring tools also emit an explicit `[harvest]`
+  block (making the tolerance visible and editable) or omit it and
+  lean on the built-in default -- the harvest setting is exempt
+  from the write-it-down rule (it has a default and the resolved
+  value is recorded on each guidance entry), so either is valid.
+  PSEUDOCODE 11.6; DESIGN 5.7.
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 

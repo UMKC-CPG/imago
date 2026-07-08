@@ -3735,6 +3735,13 @@ function buildInitialPotentials(manifest_path,
         partition, nodes, walltime, profile,
         save_config):
     manifest     = load_manifest_v2(manifest_path)
+    # Fill each sparse solid from the shared blocks before the
+    #   pipeline reads it (11.4): run settings from [defaults],
+    #   the k-point flatness tolerance from [harvest] or its
+    #   built-in default (DESIGN 5.7).  After this pass every
+    #   setting is populated -- harvest (Phase 3) reads the
+    #   resolved kpoint_convergence_threshold per solid.
+    apply_manifest_defaults(manifest)
     dataspace    = guidance_db.load(
         "share/historicalGuidanceDB/")
     imago_commit = git_sha("HEAD")
@@ -3850,7 +3857,15 @@ function buildInitialPotentials(manifest_path,
         all_units.extend(loen_units)
         # Store the plain dict (as attach_prediction_record
         # does), since metadata must be TOML-serializable.
+        # Stamp the resolved per-atom k-point flatness tolerance
+        # onto it too: the guidance harvest (15.7) judges
+        # convergence from the workspace alone, and this is a
+        # manifest/resolved fact, absent from any run's result.toml
+        # (DESIGN 7.8 / 5.7).
         predictions[ref.reference_id] = as_dict(record_i)
+        predictions[ref.reference_id][
+            "kpoint_convergence_threshold"] = (
+                ref.kpoint_convergence_threshold)
 
     # The combined flight carries every solid's units and
     # stashes the per-solid prediction records in the
@@ -3863,6 +3878,29 @@ function buildInitialPotentials(manifest_path,
             varied_axes = ("kpt-density",),
             fixed_axes  = {}),
         metadata = {"predictions": predictions})
+
+    # ===== Phase 1b: prepare (driver-side) ============
+    # makeinput runs HERE, in the driver, not on a worker
+    # (DESIGN 6.2.5): the cache keys on structure.dat, so it
+    # must exist before the hit-test.  Each unit is staged into
+    # its own `prepare/` area -- SEPARATE from its run dir, so a
+    # prior run's structure.dat survives the byte-compare
+    # untouched (the "must not clobber" rule).  The staged copy
+    # becomes the unit's key-file source (13.4); on a cache hit
+    # the driver decides skip from local files and the unit
+    # never reaches the scheduler.
+    for unit in flight.units:
+        staging = join(workspace, "prepare", unit.id,
+                       *unit.calc)
+        # Only makeinput-side options build the inputs; imago-side
+        #   options are runtime settings the wingbeat applies at
+        #   run_prepared (DESIGN 6.2.10), and imago_commit is a
+        #   cache-only scalar (6.2.5) -- neither belongs here.
+        mk_opts = { k : v for k, v in unit.options.items()
+                    if k not in imago.OPTION_KEYS
+                    and k not in CACHE_ONLY_KEYS }
+        makeinput.build_run_dir(unit.structure, mk_opts, staging)
+        unit.prepared_dir = staging
 
     # ===== Phase 2: dispatch ==========================
     # Turn the dispatch choice into the flight's Config via
@@ -3882,11 +3920,13 @@ function buildInitialPotentials(manifest_path,
     log = []
     for ref in manifest.reference_solids:
         struct = struct_of[ref.reference_id]
-        # Two-sided delta-below-threshold rule (DESIGN
-        # 7.8): the converged grid point's run, or None
-        # if nothing converged.
+        # Two-sided per-atom delta-below-threshold rule
+        # (DESIGN 7.8): the converged grid point's run, or
+        # None if nothing converged.  The tolerance is the
+        # solid's resolved kpoint_convergence_threshold (eV
+        # per atom), NOT its SCF threshold.
         converged = pick_converged_unit(flight, ref,
-            scf_threshold = ref.scf_threshold)
+            metric_threshold = ref.kpoint_convergence_threshold)
         if converged is None:
             # Non-convergence (e.g. at the top of the
             # range): flag it, harvest no potential.
@@ -4123,6 +4163,23 @@ function load_manifest_v2(path):
         "manifest rule 2: a [characterization] block"
         + " declaring at least one fingerprint is required")
 
+    # The optional [defaults] block: shared run settings a solid
+    #   inherits when it omits them (DESIGN 5.7).  Only the five
+    #   run-setting keys are meaningful.  Solids stay sparse here
+    #   (a missing setting is None) and are resolved after load by
+    #   apply_manifest_defaults (below) -- the writer (11.6) needs
+    #   them sparse to emit the compact [defaults]-plus-overrides
+    #   form.
+    raw_defaults = { k : raw["defaults"][k]
+                     for k in RUN_SETTING_KEYS
+                     if k in raw.get("defaults", {}) }
+    # The optional [harvest] block: shared HARVEST settings, read
+    #   back after the runs finish rather than fed into any run
+    #   (DESIGN 5.7).  Its one v1 key, kpoint_convergence_threshold,
+    #   carries a built-in producer default, so the block -- and
+    #   the key -- may be omitted entirely (validated below).
+    raw_harvest = raw.get("harvest", {})
+
     solids               = raw.get("reference_solid",
                                    [])
     seen_ref_ids         = set()
@@ -4132,18 +4189,28 @@ function load_manifest_v2(path):
                                  #   customizations
 
     for ref in solids:
-        # Rule 2: required per-solid fields.  basis,
-        # functional, and kpoint_integration are required
-        # so that nothing the producer emits depends on an
-        # implicit default (VISION Principles 5 and 11);
-        # together with system_type they select the guidance
-        # predictor's sub-model (DESIGN 7.6).
-        for f in ("reference_id", "system_type", "basis",
-                  "functional", "kpoint_integration",
-                  "kpoint_spec", "scf_threshold"):
+        # Rule 2: reference_id and system_type are always named
+        # per solid.  The five run settings may be named here OR
+        # inherited from [defaults], but each must be RESOLVABLE
+        # one way or the other -- together with system_type they
+        # select the guidance predictor's sub-model (DESIGN 7.6)
+        # and land on every produced entry, so nothing emitted
+        # rides on an implicit default (VISION Principles 5, 11).
+        for f in ("reference_id", "system_type"):
             require(f in ref, path,
                 "manifest rule 2: [[reference_solid"
                 + "]] missing field: " + f)
+        for f in RUN_SETTING_KEYS:
+            require(f in ref or f in raw_defaults, path,
+                "manifest rule 2: [[reference_solid "
+                + ref.get("reference_id", "?")
+                + "]] run setting " + f + " not resolvable"
+                + " (absent here and from [defaults])")
+        # The harvest setting kpoint_convergence_threshold is
+        # EXEMPT from this resolvability rule: it carries a
+        # built-in default (5e-4 eV/atom; DESIGN 5.7 / 7.8), so a
+        # solid naming neither it nor a [harvest] block is
+        # accepted -- apply_manifest_defaults supplies the default.
 
         rid = ref["reference_id"]
 
@@ -4269,7 +4336,65 @@ function load_manifest_v2(path):
             + " has " + str(count)
             + " default=true customizations (at most one)")
 
-    return parse_manifest_object(raw)
+    # The manifest object carries the two shared blocks alongside
+    #   the sparse solids -- manifest.defaults (the five run
+    #   settings) and manifest.harvest (the harvest block) -- so
+    #   apply_manifest_defaults can resolve each solid after load.
+    return parse_manifest_object(raw, raw_defaults, raw_harvest)
+
+
+# The five run settings that may live in [defaults] and be
+#   inherited per solid (DESIGN 5.7).  system_type is NOT among
+#   them -- it is structure metadata, always named per solid.
+RUN_SETTING_KEYS = ("basis", "functional",
+    "kpoint_integration", "kpoint_spec", "scf_threshold")
+
+# The producer's built-in k-point flatness tolerance, used when a
+#   solid names neither its own kpoint_convergence_threshold nor a
+#   [harvest] block (DESIGN 5.7 / 7.8).  Per atom, in eV.
+DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 5.0e-4    # 0.5 meV/atom
+
+
+function apply_manifest_defaults(manifest):
+    # Producer-side resolve pass (build_initial_potentials), run
+    #   once after load so the pipeline reads fully-populated
+    #   solids while the library keeps them sparse for the compact
+    #   writer (11.6).  One shared step fills BOTH shared blocks.
+    manifest.reference_solids = [
+        resolve_settings(solid, manifest.defaults,
+                         manifest.harvest)
+        for solid in manifest.reference_solids]
+
+
+function resolve_settings(solid, defaults, harvest):
+    # DESIGN 5.7: return a copy of `solid` with its settings
+    #   filled from the shared blocks.  Precedence is the solid's
+    #   own value first, then the shared block; the harvest setting
+    #   alone falls back further, to a built-in producer default.
+    #
+    # Run settings have NO built-in fallback: the loader already
+    #   proved each one resolvable from the solid or [defaults]
+    #   (rule 2), so pick() never returns None for them.
+    function pick(key):
+        own = getattr(solid, key)
+        return own if own is not None else defaults.get(key)
+
+    # The one harvest setting: solid's own -> [harvest] -> the
+    #   built-in default.  This is the arm C112 adds; the run-
+    #   setting arm above already ships as resolve_run_settings.
+    threshold = solid.kpoint_convergence_threshold
+    if threshold is None:
+        threshold = harvest.get(
+            "kpoint_convergence_threshold",
+            DEFAULT_KPOINT_CONVERGENCE_THRESHOLD)
+
+    return copy_of(solid,
+        basis              = pick("basis"),
+        functional         = pick("functional"),
+        kpoint_integration = pick("kpoint_integration"),
+        kpoint_spec        = pick("kpoint_spec"),
+        scf_threshold      = pick("scf_threshold"),
+        kpoint_convergence_threshold = threshold)
 
 
 function materialize_structure(ref):
@@ -5160,7 +5285,7 @@ dataclass KeyFields:
                      #   e.g. {kpoint_spec, scf_threshold,
                      #   imago_commit}
     files   : list   # logical names of key files to
-                     #   byte-compare, e.g. ["structure"]
+                     #   byte-compare, e.g. ["structure.dat"]
 
 dataclass CalcUnit:
     id          : str          # stable per-structure key
@@ -5170,6 +5295,16 @@ dataclass CalcUnit:
                                #   level; one element per
                                #   varied sweep axis
     structure   : str          # path to an imago.skl
+    prepared_dir: str | None   # per-unit staging dir the
+                               #   driver's prepare step fills
+                               #   with the built inputs
+                               #   (structure.dat, imago.dat...):
+                               #   key_file_source resolves the
+                               #   cache key against it, and the
+                               #   wingbeat commits it into the
+                               #   run dir on a miss (DESIGN
+                               #   6.2.5, Model A).  None until
+                               #   prepared.
     options     : dict         # makeinput options
     wingbeat    : str | None   # wingbeat name; None -> the
                                #   flight default
@@ -5256,22 +5391,28 @@ protocol Wingbeat:
 ```
 class ImagoWingbeat implements Wingbeat:
     function run(unit, wingbeat_dir):
-        # Default wingbeat: drive the §12 API.  The wingbeat
-        # owns the makeinput/imago option split (DESIGN
-        # 6.2.10): route each option to the tool that
-        # recognises it, drop the cache-only build identity,
-        # then build the run dir and run it.
-        mk_opts    = {}
-        imago_opts = {}
-        for key, value in unit.options.items():
-            if key in imago.OPTION_KEYS:      # job, edge,
-                imago_opts[key] = value       #   scf_basis...
-            else if key in CACHE_ONLY_KEYS:   # imago_commit:
-                continue                      #   dropped, 6.2.5
-            else:
-                mk_opts[key] = value          # strict makeinput
-        makeinput.build_run_dir(
-            unit.structure, mk_opts, wingbeat_dir)
+        # Default wingbeat: drive the §12 API.  The driver's
+        # prepare step (15.6, Phase 1b) already built this unit's
+        # inputs into unit.prepared_dir, so the wingbeat does not
+        # rebuild -- it COMMITS the staged inputs into the run dir
+        # and runs them.  Preparing in the driver, not here, is
+        # what lets a cache hit be decided from the staged
+        # structure.dat before the unit reaches a worker (DESIGN
+        # 6.2.5).
+        commit_prepared_inputs(unit.prepared_dir, wingbeat_dir)
+
+        # The imago-side options are RUNTIME settings, NOT baked
+        # into the staged imago.dat (DESIGN 6.2.10): job / edge /
+        # scf_basis must be re-applied on EVERY launch, or a
+        # re-dispatched `-loen -scf no` unit would silently run a
+        # default ground-state SCF in place of its loen job ("SCF
+        # after loen").  So the wingbeat rebuilds the settings
+        # from the unit's options and passes them to run_prepared
+        # (DESIGN 6.2.2 / 6.1); imago_commit is a cache-only
+        # scalar and is not among imago.OPTION_KEYS.
+        imago_opts = { key : value
+                       for key, value in unit.options.items()
+                       if key in imago.OPTION_KEYS }
         settings = ScriptSettings.from_options(imago_opts)
         result = imago.run_prepared(
                      wingbeat_dir, settings = settings)
@@ -5296,9 +5437,23 @@ class ImagoWingbeat implements Wingbeat:
             message = result.message)
 ```
 
+```
+function commit_prepared_inputs(prepared_dir, wingbeat_dir):
+    # Copy the driver-staged inputs (structure.dat, imago.dat,
+    # scfV, kp files -- DESIGN 6.2.5) into the run dir so
+    # run_prepared finds them.  The staging area is transient
+    # (the prepare pass, 15.6, rebuilds it each producer run),
+    # so the commit simply copies from it.
+    for name in list_files(prepared_dir):
+        copy_file(join(prepared_dir, name),
+                  join(wingbeat_dir, name))
+```
+
 An ASE wingbeat (D12) and future adapters implement the
 same protocol; the dispatch core (13.5) never changes
-when one is added.
+when one is added.  `commit_prepared_inputs` is
+ImagoWingbeat's own step; another wingbeat stages its
+inputs however its toolchain requires.
 
 ### 13.3 Workspace paths, ids, status.toml (DESIGN 6.2.4)
 
@@ -5414,6 +5569,27 @@ function write_cache_key(wingbeat_dir, unit):
     write_toml(join(wingbeat_dir, "cache_key.toml"),
         { scalars = unit.key_fields.scalars,
           files   = unit.key_fields.files })
+```
+
+The two resolvers the byte-compare uses.  They keep the core
+oblivious to how a key file is produced: it only asks for the
+unit's *current* copy and the run directory's *prior* copy and
+compares the bytes (DESIGN 6.2.5).
+
+```
+function key_file_source(unit, name):
+    # The unit's CURRENT copy of a key file.  The driver's
+    # prepare step (15.6, Phase 1b) staged the built inputs into
+    # unit.prepared_dir, so the live copy lives there (Model A,
+    # DESIGN 6.2.5); a client that stages its own inputs points
+    # prepared_dir at their directory.
+    return join(unit.prepared_dir, name)
+
+function key_file_staged(wingbeat_dir, name):
+    # The copy already committed to the run directory by a prior
+    # launch (None-safe via the exists() guard in
+    # cache_key_matches).
+    return join(wingbeat_dir, name)
 ```
 
 ### 13.5 Dispatch driver (DESIGN 6.2.3)
@@ -7181,12 +7357,17 @@ function build_kpoint_convergence(structure, options, dataspace,
 
 ```
 function standard_key_fields():
-    # DESIGN 6.2.1: the producer's cache identity -- scalar
-    # scf_threshold + imago_commit, with the
-    # structure file byte-compared.
+    # DESIGN 6.2.5: the producer's cache identity -- the
+    # scalars scf_threshold + imago_commit, plus the resolved
+    # structure file `structure.dat` byte-compared.  The key
+    # file is makeinput's OUTPUT, not the raw skeleton: it
+    # bakes in every input that changes the result (the
+    # type/species assignment, basis, functional, potential),
+    # so any of those changing misses the cache on its own,
+    # with no hand-listed "options that matter" to fall stale.
     return KeyFields(
         scalars = {"scf_threshold", "imago_commit"},
-        files   = ["structure"])
+        files   = ["structure.dat"])
 ```
 
 **Attaching the PredictionRecord without teaching the core
@@ -7250,10 +7431,19 @@ information flow stays simple:
   `cell_volume_per_formula_unit` (the cell volume in Bohr^3,
   formula-unit count Z = 1 in v1).
 
-Two v1 conventions: `metric_threshold = scf_threshold` (the
-same criterion the SCF converged to is reused as the
-grid-flatness threshold), and `imago_commit` falls back to
-`"unknown"` when the producer injected none.  `spin_polarization`
+Three v1 conventions.  The grid-flatness `metric_threshold` is
+the solid's resolved `kpoint_convergence_threshold` -- energy per
+atom, in eV (DESIGN 7.8 / 5.7) -- and rides on the structure's
+prediction record, a manifest/resolved fact absent from any run's
+`result.toml`; it is distinct from the SCF's own `scf_threshold`,
+which stays a per-run context fact.  `grid_energies` are stored
+RAW -- total-cell energies in hartree, exactly as the runs
+produced them -- and every site that compares them against the
+per-atom eV `metric_threshold` normalizes at the point of use
+(`pick_converged` here, `auto_promote_ok` in the promoter); the
+physical values keep the record honest, and `cell_atom_count` is
+recorded alongside for the conversion.  `imago_commit` falls back
+to `"unknown"` when the producer injected none.  `spin_polarization`
 is recorded as `0.0` -- imago surfaces the magnetic *moment*, not
 a polarization, so the predictor keys its spin character on
 `total_magnetization` instead (DESIGN 7.6).
@@ -7329,12 +7519,26 @@ function harvest_flight(workspace_root, db_root, dataspace):
             log(unit_id + ": single point (not staged)")
             continue
 
-        # metric_threshold = the SCF criterion the runs used (the
-        #   v1 convention); it is a per-run fact in result.toml.
-        thr = rts[0]["scf_threshold"]
+        # The k-point flatness tolerance rode in on this
+        #   structure's prediction record (15.6): per atom, in eV,
+        #   the solid's resolved kpoint_convergence_threshold
+        #   (DESIGN 7.8 / 5.7).  The SCF's own criterion is a
+        #   separate per-run fact kept for context below.
+        kpoint_threshold = prediction[
+            "kpoint_convergence_threshold"]
+        scf_threshold    = rts[0]["scf_threshold"]
 
-        # d. Pick the converged grid point (DESIGN 7.8 3c).
-        idx = pick_converged(energies, thr)
+        # The per-atom comparison needs the cell size, so load the
+        #   structure once here; step (f) reuses it for the
+        #   signature and the cell facts.
+        sc = load_skl(grid[0].structure)         # read_input_file
+        cell_atom_count = sc.num_atoms
+
+        # d. Pick the converged grid point (DESIGN 7.8 3c): the
+        #    energies are raw total-cell hartree, so pick_converged
+        #    normalizes each delta to eV per atom before the test.
+        idx = pick_converged(energies, cell_atom_count,
+                             kpoint_threshold)
 
         # e. Non-convergence at the top of the range: tag and
         #    SKIP -- a non-converged sweep earns no entry.
@@ -7348,10 +7552,9 @@ function harvest_flight(workspace_root, db_root, dataspace):
         #    carries it from 7.7; the record is guaranteed present
         #    -- record-less structures were skipped at the loop
         #    top); composition + lattice via compute_signature.
-        #    The SAME loaded structure also supplies the cell facts
-        #    in (g).
+        #    Reuses the structure loaded above (for cell_atom_count),
+        #    which also supplies the cell facts in (g).
         st  = prediction["system_type"]
-        sc  = load_skl(grid[0].structure)        # read_input_file
         sig = compute_signature(sc, st, dataspace.group_table)
 
         # g. Build the rich GuidanceEntry from the three sources.
@@ -7378,16 +7581,18 @@ function harvest_flight(workspace_root, db_root, dataspace):
                 functional = prediction["functional"],
                 kpoint_integration =
                     prediction["kpoint_integration"],
-                scf_threshold = thr,          # result.toml
+                scf_threshold = scf_threshold,  # result.toml
                 cell_atom_count = sc.num_atoms,
                 cell_volume_per_formula_unit =
                     sc.real_cell_volume * ANGSTROM3_TO_BOHR3),
             verification = Verification(
                 grid_values   = tuple(kpds),
-                grid_energies = tuple(energies),  # 7.8 / 7.2
+                grid_energies = tuple(energies),  # raw total-
+                #   cell hartree; consumers normalize per atom
+                #   (Option B; DESIGN 7.8 / 7.2)
                 converged_at  = chosen_kpd,
                 metric        = "total_energy",
-                metric_threshold = thr,
+                metric_threshold = kpoint_threshold,
                 # prediction is guaranteed present (record-less
                 #   structures were skipped at the loop top).
                 predictor_confidence   = prediction["confidence"],
@@ -7414,15 +7619,31 @@ workspace root's basename; both live in
 `kaleidoscope.workspace` alongside `read_flight_toml`.
 
 ```
-function pick_converged(energies, threshold):
+function per_atom_ev(total_energy_hartree, cell_atom_count):
+    # A raw total-cell energy (hartree) expressed as eV per atom
+    # -- the basis the k-point threshold is stated in (DESIGN 7.8
+    # / 5.7, Option B).  HARTREE_TO_EV is the shared hartree->eV
+    # constant.  Single-sourced here so pick_converged and
+    # auto_promote_ok normalize identically and cannot drift.
+    return total_energy_hartree * HARTREE_TO_EV / cell_atom_count
+
+
+function pick_converged(energies, cell_atom_count, threshold):
     # DESIGN 7.8 step 3c: the smallest interior grid index i
     # at which BOTH consecutive-pair energy deltas fall below
-    # threshold.  Two-sided so a single-point fluke does not
+    # `threshold`.  Two-sided so a single-point fluke does not
     # masquerade as convergence.  Returns None if the energy
     # is still moving (no flat interior point).
-    for i in range(1, len(energies) - 1):
-        below_up   = abs(energies[i] - energies[i + 1]) < threshold
-        below_down = abs(energies[i] - energies[i - 1]) < threshold
+    #
+    # `energies` are raw total-cell hartree (Option B) and
+    # `threshold` is per atom in eV, so normalize the whole
+    # ladder to that basis once (per_atom_ev) before comparing.
+    # The per-atom scale keeps a big cell from being held to a
+    # tighter bound than a small one (DESIGN 7.8).
+    e = [per_atom_ev(x, cell_atom_count) for x in energies]
+    for i in range(1, len(e) - 1):
+        below_up   = abs(e[i] - e[i + 1]) < threshold
+        below_down = abs(e[i] - e[i - 1]) < threshold
         if below_up and below_down:
             return i
     return None
@@ -7480,10 +7701,17 @@ function auto_promote_ok(entry):
     if not (0.2 <= position <= 0.8):
         return False
 
-    # 2. Top-three grid points' total-energy variance below
-    #    metric_threshold * 10 (convincingly flat).
-    top3 = v.grid_energies[-3:]
-    if variance(top3) >= v.metric_threshold * 10.0:
+    # 2. Top-three grid points convincingly flat: their SPREAD
+    #    (max - min), per atom in eV, below metric_threshold * 10.
+    #    grid_energies are raw total-cell hartree (Option B), so
+    #    normalize each via the same per_atom_ev helper
+    #    pick_converged uses; cell_atom_count rides on the entry's
+    #    context.  A spread is a like-for-like linear quantity; a
+    #    variance would be an energy squared against a linear
+    #    threshold, so it is deliberately not used (DESIGN 7.8).
+    n = entry.context.cell_atom_count
+    top3 = [per_atom_ev(x, n) for x in v.grid_energies[-3:]]
+    if (max(top3) - min(top3)) >= v.metric_threshold * 10.0:
         return False
 
     # 3. gap_ev / gap_kind consistent.

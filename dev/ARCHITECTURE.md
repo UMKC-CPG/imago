@@ -836,11 +836,87 @@ batch.
 This replaces the earlier shape in which the producer
 ran SCFs through its own driver and kept its own
 per-solid SCF cache.  That bespoke cache is gone:
-kaleidoscope's run-reuse cache (9.6, keyed on the
-structure file plus the makeinput options and build
-identity) subsumes it, so editing an entry
-customization no longer re-triggers SCF -- only the cheap harvest step
+kaleidoscope's run-reuse cache (9.6) subsumes it --
+keyed on `structure.dat`, makeinput's resolved output,
+which bakes in the type/species assignment, basis,
+functional, and potential, plus the build identity
+(the imago commit) -- so editing an entry customization
+no longer re-triggers SCF; only the cheap harvest step
 re-runs.
+
+**Prepare runs in the driver, not the worker.**  Keying
+on `structure.dat` means makeinput must run before the
+hit-test can read it (DESIGN 6.2.5).  So the producer
+prepares each unit itself, in the driver: it runs
+makeinput into a per-unit *staging* area -- separate from
+the run directory, so the prior run's `structure.dat`
+survives untouched for the byte-compare -- and points the
+unit's key-file source at the staged copy.  Kaleidoscope's
+cache core is unchanged: it still byte-compares the unit's
+key-file source against the run directory's copy, knowing
+nothing about makeinput.  The unit carries the staging
+reference as opaque domain data the core round-trips but
+never interprets (Principle 9), exactly as it does the
+prediction record and the makeinput options.  On a cache
+hit the decision is made in the driver from local files,
+so the unit never reaches the scheduler; on a miss the
+wingbeat commits the staged inputs into the run directory
+and runs the prepared directory (no rebuild).  Where the
+driver itself runs -- a login node or its own batch job --
+is settled in DESIGN 6.2.11.
+
+**Open item: decoupling the potential harvest from the
+producer.**  Running the calculations is already a
+separate concern from the producer (kaleidoscope owns
+it, above).  Reading the results back is only *partly*
+separated.  The convergence-detection helper and the
+guidance-staging step already live in a standalone
+script (`guidance_harvest.py`, DESIGN 7.8), which points
+at a finished workspace and produces staged output
+without re-running anything.  The *potential* harvest --
+walking each converged run directory to extract the
+per-environment potential and its fingerprints into the
+per-element database -- is not separated: it runs
+in-process inside `build_initial_potentials.py` (DESIGN
+5.7 step 5).  Giving that harvest the same standalone
+shape (a tool that reads a finished workspace and writes
+or updates the database) would let a finished result set
+be re-read by different or newer harvest tools without
+re-invoking the producer.  This is a genuine
+architecture change, deliberately **not** undertaken
+yet; it is recorded here so the trade-off is visible
+before anyone acts on it.
+
+- *For.*  Re-harvest a finished result set with a new or
+  different tool without touching the producer.  Symmetry
+  with `guidance_harvest.py`, which already demonstrates
+  the standalone-post-processor shape works.  A cleaner
+  split of concerns -- producer = "make the calculations
+  exist and converge," harvester = "read results into a
+  database" -- each testable on its own.  The
+  `[harvest]` manifest block (DESIGN 5.7) is exactly the
+  interface such a standalone harvester would read, so it
+  is already in place.
+- *Against (the stronger case, hence no action yet).*
+  The potential harvest reads far more context than the
+  guidance harvest does -- entry customizations, derived
+  labels, the dedup rule, the `datSkl.map` site mapping,
+  the resolved per-solid settings -- all of which the
+  producer already holds in memory while it dispatches.
+  A standalone harvester must reconstruct every one of
+  those from the workspace plus the manifest, which is
+  real work and a real surface for drift.  And the
+  urgent need it would serve is *already met*: because of
+  the run-reuse cache and the regenerate model (9.6), a
+  producer re-run over a warm workspace skips every
+  calculation and goes straight to harvest, so
+  "re-harvest with a new recipe" works today -- it is
+  simply expressed as re-running the producer, not as a
+  separate tool.  Decoupling is therefore an ergonomics
+  and separation-of-concerns improvement, not a missing
+  capability, and it is not worth the reconstruction cost
+  or the drift risk until a concrete need pushes past
+  the warm-cache path.
 
 Inputs:
 - A curation manifest in TOML, schema v2 (full spec in DESIGN
