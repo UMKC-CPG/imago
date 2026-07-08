@@ -79,9 +79,20 @@ def _filled_site(**overrides):
 #  Layer 1: load_site_config and its required-field guard
 # ----------------------------------------------------------------
 
-def test_load_site_config_reads_shipped_defaults_and_rejects_them():
+def test_load_site_config_reads_shipped_defaults_and_rejects_them(
+        monkeypatch):
     """The shipped clusterrc leaves the required core as None, so a
-    bare load is a ConfigError -- the user must fill the file first."""
+    bare load is a ConfigError -- the user must fill the file first.
+
+    Force the SHIPPED defaults (the ``clusterrc`` module the producer
+    ships) rather than whatever ``clusterrc.py`` happens to sit in
+    the resolution path, so the test does not depend on the caller's
+    environment -- e.g. a filled ``.imago/clusterrc.py`` from a real
+    cluster setup, which would otherwise satisfy the required core
+    and silence the expected error."""
+    import clusterrc
+    monkeypatch.setattr(cc, "_load_clusterrc_module",
+                        lambda: clusterrc)
     with pytest.raises(cc.ConfigError) as excinfo:
         cc.load_site_config()
     assert "partitions" in str(excinfo.value) or \
