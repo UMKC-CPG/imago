@@ -256,17 +256,22 @@ def standard_key_fields(structure, options):
     silently omitted otherwise, so this helper never has to learn
     how the build stamps its own commit (a C78 concern).
 
-    The single key file ``"structure"`` is byte-compared against
-    the staged copy under the run directory; its source is the
-    structure path (the str argument, or a loaded
-    StructureControl's ``imago_skl`` path)."""
+    The single key file ``"structure.dat"`` is byte-compared
+    against the staged copy under the run directory.  It is
+    makeinput's RESOLVED output, not the raw skeleton, so it
+    bakes in every input that changes the result (the type/species
+    assignment, basis, functional, potential); any of those
+    changing misses the cache on its own.  The ``source`` set here
+    is provisional (the skeleton path); the producer's prepare
+    step re-points it at the built ``structure.dat`` before the
+    hit-test (DESIGN 6.2.5, Model A)."""
     source = (structure if isinstance(structure, str)
               else getattr(structure, "imago_skl", "imago.skl"))
     scalars = {name: options[name]
                for name in _KEY_SCALAR_NAMES if name in options}
     return KeyFields(
         scalars=scalars,
-        files=[KeyFile(name="structure", source=source)])
+        files=[KeyFile(name="structure.dat", source=source)])
 
 
 def _load_structure(structure):

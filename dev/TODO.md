@@ -2222,7 +2222,7 @@ imports its neighbours from `$IMAGO_BIN`).
   branch, add `commit_prepared_inputs`) lands with C111.  Test:
   `test_imago_runner_prepared_reapplies_imago_settings`.
 
-- [ ] C111. Key the run-reuse cache on `structure.dat` and run
+- [x] C111. Key the run-reuse cache on `structure.dat` and run
   the prepare step in the driver (Model A).  Motivation: the seed
   run's "cache" never hit -- every re-run re-executed the SCF for
   one warm-restart iteration.  Root cause: the k-point convergence
@@ -2249,6 +2249,15 @@ imports its neighbours from `$IMAGO_BIN`).
   staged inputs into the run dir (`commit_prepared_inputs`) and
   runs `run_prepared` -- no rebuild (merges with C110).  DESIGN
   6.2.5 / 5.7; ARCH 8.5; PSEUDOCODE 15.6 / 13.2 / 13.4.  CODE.
+  DONE: standard_key_fields key file -> `structure.dat`;
+  `CalcUnit.prepared_dir`; a driver-side `prepare_units` pass
+  (Phase 1b) wired via a new `prepare_fn` injectable seam; the
+  wingbeat's `_stage_inputs` (commit prepared / skip if staged /
+  build) + `_commit_prepared_inputs` -- which also lands C110's
+  deferred single-path consolidation.  First reconciled the
+  PSEUDOCODE cache model to the code's `KeyFile(name, source)` and
+  the 13.2 wingbeat to `stage_inputs`.  Tests: producer end-to-end
+  stubs `prepare_fn`; new `test_imago_runner_commits_prepared_inputs`.
 
 - [ ] C112. Source the k-point grid-flatness threshold from the
   manifest `[harvest]` block, per atom, in eV.  Motivation: the

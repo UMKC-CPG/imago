@@ -265,10 +265,11 @@ def test_units_carry_kpd_tag_options_and_key_fields(patched):
         assert unit.wingbeat == "imago"
         assert unit.id == "si"
         # converg (the SCF limit) flows into the cache scalars;
-        #   the structure is the single byte-compared key file.
+        #   structure.dat (makeinput's resolved output) is the
+        #   single byte-compared key file (DESIGN 6.2.5, Model A).
         assert unit.key_fields.scalars["converg"] == 1.0e-6
         assert [f.name for f in unit.key_fields.files] == \
-            ["structure"]
+            ["structure.dat"]
 
 
 def test_sweep_record_varied_axis_and_empty_fixed_axes(patched):

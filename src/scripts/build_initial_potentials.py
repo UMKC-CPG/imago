@@ -1704,6 +1704,51 @@ def apply_manifest_defaults(manifest: CurationManifest) -> None:
         for solid in manifest.reference_solids]
 
 
+def prepare_units(flight: Flight, workspace: str) -> None:
+    """Build every unit's staged inputs in the DRIVER, before
+    dispatch (DESIGN 6.2.5 "Prepare before the hit-test";
+    PSEUDOCODE 11.4 Phase 1b).
+
+    makeinput's resolved output, ``structure.dat``, is the cache
+    key file (:func:`standard_key_fields`), so it must exist before
+    kaleidoscope's hit-test can read it.  Each unit is built into
+    its own per-unit staging directory under
+    ``<workspace>/prepare/<id>/<calc...>`` -- deliberately SEPARATE
+    from the run directory, so a prior run's staged ``structure.dat``
+    is not clobbered before the byte-compare (the "must not clobber"
+    rule).  The unit's ``prepared_dir`` records the staging directory
+    (the wingbeat commits it into the run directory on a cache miss),
+    and the ``structure.dat`` KeyFile's ``source`` is re-pointed at
+    the freshly built copy so the hit-test compares the right file.
+
+    Running makeinput here, in the driver, is also what lets a cache
+    hit be decided from local files: a hit never reaches the
+    scheduler, so the surviving misses are the only units that cost
+    a calculation.
+    """
+
+    # The wingbeat's option split is the single source of truth for
+    #   which keys build the inputs (makeinput) versus ride as imago
+    #   run-time settings; the prepare pass, which replaces the
+    #   wingbeat's own build, reuses it so the two cannot drift.
+    from kaleidoscope.wingbeats import _partition_options
+    import makeinput
+
+    for unit in flight.units:
+        staging = os.path.join(
+            workspace, "prepare", unit.id, *unit.calc)
+        makeinput_options, _ = _partition_options(unit.options)
+        makeinput.build_run_dir(
+            unit.structure, makeinput_options, staging)
+        unit.prepared_dir = staging
+        # Re-point the structure.dat KeyFile source at the freshly
+        #   built copy (standard_key_fields left it provisional).
+        for key_file in unit.key_fields.files:
+            if key_file.name == "structure.dat":
+                key_file.source = os.path.join(
+                    staging, "structure.dat")
+
+
 def build_initial_potentials(manifest_path: str, pdb_root: str,
                              data_root: str, *, force: bool = False,
                              single_element: str | None = None,
@@ -1714,6 +1759,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                              profile: str | None = None,
                              save_config: bool = False,
                              dispatch_fn=dispatch,
+                             prepare_fn=prepare_units,
                              extract_fn=extract_potential,
                              identity_fn=read_site_identity_map,
                              fingerprint_fn=harvest_fingerprints
@@ -1733,11 +1779,12 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     ``save_config`` records the resolved cluster choices beside the
     run.  ``force`` bypasses the run-reuse cache (DESIGN 6.2.5).
 
-    ``dispatch_fn``, ``extract_fn``, ``identity_fn``, and
-    ``fingerprint_fn`` are injected (defaulting to the real
-    kaleidoscope dispatch, the real scfV reader, the real
-    ``datSkl.map`` reader, and the real fingerprint harvest) so the
-    orchestration can be unit-tested with the toolchain seam mocked:
+    ``dispatch_fn``, ``prepare_fn``, ``extract_fn``, ``identity_fn``,
+    and ``fingerprint_fn`` are injected (defaulting to the real
+    kaleidoscope dispatch, the real driver-side prepare pass, the
+    real scfV reader, the real ``datSkl.map`` reader, and the real
+    fingerprint harvest) so the orchestration can be unit-tested
+    with the toolchain seam mocked:
     end-to-end dispatch, the per-site ``scfV`` read, the site-identity
     read, and the fingerprint harvest (which needs the run's expanded
     structure and loen descriptor) all need a live Imago run (C74)."""
@@ -1796,6 +1843,15 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         sweep=SweepRecord(varied_axes=("kpt-density",),
                           fixed_axes={}),
         metadata={"predictions": predictions})
+
+    # ----- Phase 1b: prepare (driver-side).  makeinput runs HERE,
+    # in the driver, not on a worker: the cache keys on
+    # structure.dat (DESIGN 6.2.5), so it must exist before the
+    # hit-test.  Each unit is staged into its own prepare/ area,
+    # separate from its run directory, and the staged structure.dat
+    # becomes the unit's KeyFile source; a cache hit is then decided
+    # from local files and never reaches the scheduler.
+    prepare_fn(flight, workspace)
 
     # ----- Phase 2: dispatch.  Kaleidoscope runs and tracks every
     # unit through the wingbeat seam and its run-reuse cache.  The

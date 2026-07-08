@@ -5732,10 +5732,13 @@ of what convergence means.
   `run_prepared`, because those are imago *runtime* options,
   not baked into the staged `imago.dat`.  A pre-staged
   directory carries no memory of the job it was built for, so
-  the settings must travel with every invocation -- otherwise
-  a re-dispatched `-loen -scf no` unit, seeing a prepared
-  directory, would silently run a default ground-state SCF in
-  place of its loen job.  It maps the returned `ImagoResult`
+  the settings must travel with every invocation.  The job
+  type and the SCF suppression live only in these settings, so
+  if they are dropped imago no longer sees the unit's
+  `-loen -scf no` request and falls back to its default job, a
+  ground-state SCF.  (`-loen -scf no` never runs an SCF itself;
+  the unwanted SCF is purely the dropped-settings fallback.)
+  It maps the returned `ImagoResult`
   into a `WingbeatOutcome`: `ok =
   status in {CONVERGED, NOT_CONVERGED, SKIPPED}` (the binary
   *ran*), `detail = status.name.lower()`.  It also **persists

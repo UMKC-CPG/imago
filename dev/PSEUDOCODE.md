@@ -3901,6 +3901,13 @@ function buildInitialPotentials(manifest_path,
                     and k not in CACHE_ONLY_KEYS }
         makeinput.build_run_dir(unit.structure, mk_opts, staging)
         unit.prepared_dir = staging
+        # Point the cache key file at the freshly built
+        #   structure.dat (13.4): the hit-test byte-compares THIS
+        #   against the run dir's prior copy.  standard_key_fields
+        #   left the source provisional at build time.
+        for key_file in unit.key_fields.files:
+            if key_file.name == "structure.dat":
+                key_file.source = join(staging, "structure.dat")
 
     # ===== Phase 2: dispatch ==========================
     # Turn the dispatch choice into the flight's Config via
@@ -5280,12 +5287,18 @@ all domain harvest is client-side (13.6).
 ### 13.1 Data model and flight.toml (DESIGN 6.2.1)
 
 ```
+dataclass KeyFile:
+    name   : str     # the staged copy's path, relative to the
+                     #   run dir (what a prior run left there)
+    source : str     # the current input byte-compared against
+                     #   that staged copy
+
 dataclass KeyFields:
     scalars : dict   # verbatim-compared identity fields,
-                     #   e.g. {kpoint_spec, scf_threshold,
-                     #   imago_commit}
-    files   : list   # logical names of key files to
-                     #   byte-compare, e.g. ["structure.dat"]
+                     #   e.g. {scf_threshold, imago_commit}
+    files   : list   # KeyFile entries to byte-compare (name +
+                     #   source); naming both keeps the core from
+                     #   guessing how inputs map onto staged files
 
 dataclass CalcUnit:
     id          : str          # stable per-structure key
@@ -5299,12 +5312,12 @@ dataclass CalcUnit:
                                #   driver's prepare step fills
                                #   with the built inputs
                                #   (structure.dat, imago.dat...):
-                               #   key_file_source resolves the
-                               #   cache key against it, and the
-                               #   wingbeat commits it into the
-                               #   run dir on a miss (DESIGN
-                               #   6.2.5, Model A).  None until
-                               #   prepared.
+                               #   the structure.dat KeyFile's
+                               #   source points here for the
+                               #   hit-test, and the wingbeat
+                               #   commits it into the run dir on
+                               #   a miss (DESIGN 6.2.5, Model A).
+                               #   None until prepared.
     options     : dict         # makeinput options
     wingbeat    : str | None   # wingbeat name; None -> the
                                #   flight default
@@ -5391,25 +5404,20 @@ protocol Wingbeat:
 ```
 class ImagoWingbeat implements Wingbeat:
     function run(unit, wingbeat_dir):
-        # Default wingbeat: drive the §12 API.  The driver's
-        # prepare step (15.6, Phase 1b) already built this unit's
-        # inputs into unit.prepared_dir, so the wingbeat does not
-        # rebuild -- it COMMITS the staged inputs into the run dir
-        # and runs them.  Preparing in the driver, not here, is
-        # what lets a cache hit be decided from the staged
-        # structure.dat before the unit reaches a worker (DESIGN
-        # 6.2.5).
-        commit_prepared_inputs(unit.prepared_dir, wingbeat_dir)
-
-        # The imago-side options are RUNTIME settings, NOT baked
-        # into the staged imago.dat (DESIGN 6.2.10): job / edge /
-        # scf_basis must be re-applied on EVERY launch, or a
-        # re-dispatched `-loen -scf no` unit would silently run a
-        # default ground-state SCF in place of its loen job ("SCF
-        # after loen").  So the wingbeat rebuilds the settings
-        # from the unit's options and passes them to run_prepared
-        # (DESIGN 6.2.2 / 6.1); imago_commit is a cache-only
-        # scalar and is not among imago.OPTION_KEYS.
+        # Default wingbeat: drive the §12 API.  First make the run
+        # dir hold runnable inputs (stage_inputs, below), then run
+        # them with the unit's imago-side settings.  Those settings
+        # (job / edge / scf_basis) are RUNTIME options NOT baked
+        # into the staged imago.dat (DESIGN 6.2.10), so they must
+        # be re-applied on EVERY launch.  The job type and the SCF
+        # suppression live only in these settings, so if they are
+        # dropped imago no longer sees the unit's `-loen -scf no`
+        # request and falls back to its DEFAULT job, a ground-state
+        # SCF.  (`-loen -scf no` never runs an SCF itself; the
+        # unwanted SCF is purely the dropped-settings fallback --
+        # the "SCF after loen" the seed run hit.)  imago_commit is
+        # a cache-only scalar, not an imago.OPTION_KEYS member.
+        stage_inputs(unit, wingbeat_dir)
         imago_opts = { key : value
                        for key, value in unit.options.items()
                        if key in imago.OPTION_KEYS }
@@ -5435,6 +5443,34 @@ class ImagoWingbeat implements Wingbeat:
             detail = lower(result.status.name),
             runtime_seconds = result.runtime_seconds,
             message = result.message)
+```
+
+```
+function stage_inputs(unit, wingbeat_dir):
+    # Ensure the run dir holds runnable inputs.  Three cases:
+    #   - the driver's prepare step (15.6) already built them into
+    #     unit.prepared_dir -> COMMIT that staged copy into the run
+    #     dir (the Model-A producer path; DESIGN 6.2.5);
+    #   - the run dir already holds a staged imago.dat -- a re-run
+    #     of a dir a prior launch built -> nothing to do;
+    #   - neither (a client that did not prepare) -> BUILD from the
+    #     unit's structure and makeinput-side options.
+    if unit.prepared_dir is not None:
+        commit_prepared_inputs(unit.prepared_dir, wingbeat_dir)
+    else if not is_prepared(wingbeat_dir):
+        mk_opts = { k : v for k, v in unit.options.items()
+                    if k not in imago.OPTION_KEYS
+                    and k not in CACHE_ONLY_KEYS }
+        makeinput.build_run_dir(unit.structure, mk_opts,
+                                wingbeat_dir)
+
+
+function is_prepared(wingbeat_dir):
+    # A run dir is 'prepared' when it already holds the primary
+    # imago.dat (directly or under inputs/), so run_prepared can
+    # run it as-is without a makeinput build.
+    return exists(join(wingbeat_dir, "imago.dat")) \
+        or exists(join(wingbeat_dir, "inputs", "imago.dat"))
 ```
 
 ```
@@ -5550,47 +5586,34 @@ function cache_key_matches(unit, wingbeat_dir):
     # Scalar fields: verbatim field-by-field compare.
     if saved["scalars"] != unit.key_fields.scalars:
         return False
-    # Key files: byte-compare each declared key file's
-    # current source against the copy already staged in the
-    # run dir.  No hashing -- a developer can diff the files
-    # to see why a cache missed (DESIGN 6.2.5 / 5.7).
-    for logical in unit.key_fields.files:
-        current = key_file_source(unit, logical)
-        staged  = key_file_staged(wingbeat_dir, logical)
+    # Key files: byte-compare each declared key file's current
+    # source against the copy already staged in the run dir under
+    # its name.  No hashing -- a developer can diff the files to
+    # see why a cache missed (DESIGN 6.2.5 / 5.7).
+    for key_file in unit.key_fields.files:
+        staged = join(wingbeat_dir, key_file.name)
         if not exists(staged) \
-           or not files_byte_equal(current, staged):
+           or not files_byte_equal(key_file.source, staged):
             return False
     return True
 ```
 
 ```
 function write_cache_key(wingbeat_dir, unit):
-    # The identity snapshot, written on launch (13.5).
+    # The identity snapshot, written on launch (13.5).  Only the
+    # key-file NAMES are recorded (for inspection); the byte
+    # compare reads the staged files themselves, not this list.
     write_toml(join(wingbeat_dir, "cache_key.toml"),
         { scalars = unit.key_fields.scalars,
-          files   = unit.key_fields.files })
+          files   = [kf.name for kf in unit.key_fields.files] })
 ```
 
-The two resolvers the byte-compare uses.  They keep the core
-oblivious to how a key file is produced: it only asks for the
-unit's *current* copy and the run directory's *prior* copy and
-compares the bytes (DESIGN 6.2.5).
-
-```
-function key_file_source(unit, name):
-    # The unit's CURRENT copy of a key file.  The driver's
-    # prepare step (15.6, Phase 1b) staged the built inputs into
-    # unit.prepared_dir, so the live copy lives there (Model A,
-    # DESIGN 6.2.5); a client that stages its own inputs points
-    # prepared_dir at their directory.
-    return join(unit.prepared_dir, name)
-
-function key_file_staged(wingbeat_dir, name):
-    # The copy already committed to the run directory by a prior
-    # launch (None-safe via the exists() guard in
-    # cache_key_matches).
-    return join(wingbeat_dir, name)
-```
+Each `KeyFile` names both halves the compare needs -- the
+`source` (the current input) and the `name` (the staged copy's
+run-dir path) -- so the core stays oblivious to how a client's
+inputs map onto staged files (DESIGN 6.2.5).  For the producer,
+the driver's prepare step (15.6, Phase 1b) points the
+`structure.dat` KeyFile's `source` at the staged copy it builds.
 
 ### 13.5 Dispatch driver (DESIGN 6.2.3)
 
@@ -7356,18 +7379,32 @@ function build_kpoint_convergence(structure, options, dataspace,
 ```
 
 ```
-function standard_key_fields():
-    # DESIGN 6.2.5: the producer's cache identity -- the
-    # scalars scf_threshold + imago_commit, plus the resolved
-    # structure file `structure.dat` byte-compared.  The key
-    # file is makeinput's OUTPUT, not the raw skeleton: it
-    # bakes in every input that changes the result (the
-    # type/species assignment, basis, functional, potential),
-    # so any of those changing misses the cache on its own,
-    # with no hand-listed "options that matter" to fall stale.
+# The scalar option keys that define the producer's run identity
+#   (DESIGN 6.2.1/6.2.10): `converg` (the SCF convergence limit,
+#   a makeinput option -- the concrete name for DESIGN's
+#   "scf_threshold") and `imago_commit` (the build identity,
+#   producer-injected).  Taken from a unit's options when present.
+KEY_SCALAR_NAMES = ("converg", "imago_commit")
+
+
+function standard_key_fields(structure, options):
+    # DESIGN 6.2.5: the producer's cache identity -- the scalars
+    # taken from `options` (the SCF threshold and imago_commit)
+    # plus one key file, `structure.dat`, byte-compared.  The key
+    # file is makeinput's OUTPUT, not the raw skeleton: it bakes
+    # in every input that changes the result (the type/species
+    # assignment, basis, functional, potential), so any of those
+    # changing misses the cache on its own, with no hand-listed
+    # "options that matter" to fall stale.  The KeyFile `source`
+    # is provisional here (the skeleton `structure`); the driver's
+    # prepare step (15.6, Phase 1b) re-points it at the built
+    # structure.dat once that file exists.
     return KeyFields(
-        scalars = {"scf_threshold", "imago_commit"},
-        files   = ["structure.dat"])
+        scalars = { name : options[name]
+                    for name in KEY_SCALAR_NAMES
+                    if name in options },
+        files   = [KeyFile(name = "structure.dat",
+                           source = structure)])
 ```
 
 **Attaching the PredictionRecord without teaching the core

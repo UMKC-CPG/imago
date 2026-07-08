@@ -2192,6 +2192,7 @@ def test_build_initial_potentials_harvests_curated_entry(
     build_initial_potentials(
         manifest_path, pdb_root, data_root,
         dispatch_fn=fake_dispatch,
+        prepare_fn=lambda flight, workspace: None,
         extract_fn=lambda result, site: ([0.5, 0.3], [1.0, 2.0]),
         # Site 1 is Au (cross-checks the entry's element); the
         #   fingerprint harvest (recipe + override) needs a live run,
@@ -2272,6 +2273,7 @@ def test_build_initial_potentials_derives_label_at_harvest(
     build_initial_potentials(
         manifest_path, pdb_root, data_root,
         dispatch_fn=fake_dispatch,
+        prepare_fn=lambda flight, workspace: None,
         extract_fn=lambda result, site: ([0.5, 0.3], [1.0, 2.0]),
         identity_fn=lambda result: {1: ("au", 1, 1)},
         fingerprint_fn=lambda *args, **kwargs: [])
@@ -2431,6 +2433,7 @@ def test_build_initial_potentials_resolves_defaults(
     build_initial_potentials(
         manifest_path, pdb_root, data_root,
         dispatch_fn=fake_dispatch,
+        prepare_fn=lambda flight, workspace: None,
         extract_fn=lambda result, site: ([0.5, 0.3], [1.0, 2.0]),
         identity_fn=lambda result: {1: ("au", 1, 1)},
         fingerprint_fn=lambda *args, **kwargs: [])

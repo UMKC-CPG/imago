@@ -16,6 +16,7 @@ after import.
 """
 
 import os
+import shutil
 
 from .model import WingbeatOutcome, KaleidoscopeError
 from .workspace import emit_scalar, toml_line
@@ -121,34 +122,19 @@ class ImagoWingbeat(Wingbeat):
         # The imago-side options are RUN-TIME settings (job, edge,
         #   scf_basis, ...) that do NOT live in a staged imago.dat
         #   (DESIGN 6.2.10), so they must be re-applied on EVERY
-        #   launch -- including a re-run of an already-prepared
-        #   directory.  Otherwise a re-dispatched `-loen -scf no`
-        #   unit, seeing a prepared directory, would silently run a
-        #   default ground-state SCF in place of its loen job ("SCF
-        #   after loen").  Build the settings once, up front, and
-        #   pass them on both paths (DESIGN 6.2.2 / 6.1).
-        makeinput_options, imago_options = _partition_options(
-            unit.options)
+        #   launch.  The job type and the SCF suppression live only
+        #   in these settings, so if they are dropped imago no
+        #   longer sees the unit's `-loen -scf no` request and falls
+        #   back to its DEFAULT job -- a ground-state SCF.
+        #   (`-loen -scf no` never runs an SCF itself; the unwanted
+        #   SCF is purely the dropped-settings fallback -- the "SCF
+        #   after loen" the seed run hit.)  Build the settings once
+        #   and pass them however the inputs get staged (6.2.2/6.1).
+        _, imago_options = _partition_options(unit.options)
         settings = imago.ScriptSettings.from_options(imago_options)
 
-        if self._is_prepared(wingbeat_dir):
-            result = imago.run_prepared(
-                wingbeat_dir, settings=settings)
-        else:
-            # The wingbeat owns the makeinput/imago option split
-            #   (DESIGN 6.2.10): a unit carries ONE options dict, but
-            #   makeinput (strict) and imago (lenient) have disjoint
-            #   key vocabularies, so the wingbeat -- the one component
-            #   that drives both tools -- routes each key to the tool
-            #   that recognises it and drops the cache-only build
-            #   identity.  It does NOT defer to imago.run_structure,
-            #   which forwards a SINGLE options dict to both tools and
-            #   so cannot serve their disjoint keys.
-            import makeinput
-            makeinput.build_run_dir(
-                unit.structure, makeinput_options, wingbeat_dir)
-            result = imago.run_prepared(
-                wingbeat_dir, settings=settings)
+        self._stage_inputs(unit, wingbeat_dir)
+        result = imago.run_prepared(wingbeat_dir, settings=settings)
 
         self._persist_result(wingbeat_dir, result)
 
@@ -167,6 +153,54 @@ class ImagoWingbeat(Wingbeat):
             runtime_seconds=result.runtime_seconds,
             message=result.message,
         )
+
+    @staticmethod
+    def _stage_inputs(unit, wingbeat_dir):
+        """Ensure the run directory holds runnable inputs, so
+        ``run_prepared`` can execute them (DESIGN 6.2.5; PSEUDOCODE
+        13.2).  Three cases:
+
+        - the driver's prepare step already built this unit's
+          inputs into ``unit.prepared_dir`` -- commit that staged
+          copy into the run directory (the Model-A producer path);
+        - the run directory already holds a staged ``imago.dat`` --
+          a re-run of a directory a prior launch built -- so there
+          is nothing to do;
+        - neither (a client that did not prepare) -- build the deck
+          from the unit's structure and its makeinput-side options.
+
+        The wingbeat owns the makeinput/imago option split (DESIGN
+        6.2.10) only on the build path: a unit carries ONE options
+        dict, but makeinput (strict) and imago (lenient) have
+        disjoint key vocabularies, so the wingbeat routes each key
+        to the tool that recognises it and drops the cache-only
+        build identity.
+        """
+        if unit.prepared_dir is not None:
+            ImagoWingbeat._commit_prepared_inputs(
+                unit.prepared_dir, wingbeat_dir)
+        elif not ImagoWingbeat._is_prepared(wingbeat_dir):
+            import makeinput
+            makeinput_options, _ = _partition_options(unit.options)
+            makeinput.build_run_dir(
+                unit.structure, makeinput_options, wingbeat_dir)
+
+    @staticmethod
+    def _commit_prepared_inputs(prepared_dir, wingbeat_dir):
+        """Copy the driver-staged inputs (structure.dat, imago.dat,
+        scfV, kp files -- DESIGN 6.2.5) from ``prepared_dir`` into
+        the run directory so ``run_prepared`` finds them.  The
+        staging area is transient (the producer's prepare pass
+        rebuilds it each run), so the commit simply copies from it,
+        merging into any existing run-directory contents."""
+        os.makedirs(wingbeat_dir, exist_ok=True)
+        for name in os.listdir(prepared_dir):
+            source = os.path.join(prepared_dir, name)
+            target = os.path.join(wingbeat_dir, name)
+            if os.path.isdir(source):
+                shutil.copytree(source, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(source, target)
 
     @staticmethod
     def _is_prepared(wingbeat_dir):

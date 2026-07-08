@@ -659,13 +659,13 @@ def test_imago_runner_prepared_detection_under_inputs(tmp_path,
 def test_imago_runner_prepared_reapplies_imago_settings(tmp_path,
                                                         monkeypatch):
     """C110: a re-run of an already-prepared directory must STILL
-    receive the unit's imago-side settings.  The imago run-time
-    options (job / edge / scf_basis) do not live in a staged
-    imago.dat (DESIGN 6.2.10), so without this a re-dispatched
-    ``-loen -scf no`` unit would run a default ground-state SCF in
-    place of its loen job ("SCF after loen").  The prepared path
-    must build the settings from the imago-side options and pass
-    them to run_prepared, exactly as the build path does."""
+    receive the unit's imago-side settings.  The job type and the
+    SCF suppression live only in these settings (not in the staged
+    imago.dat, DESIGN 6.2.10), so if they are dropped imago no
+    longer sees the unit's ``-loen -scf no`` request and falls back
+    to its default job, a ground-state SCF ("SCF after loen").  The
+    prepared path must build the settings from the imago-side
+    options and pass them to run_prepared, as the build path does."""
     import imago
     (tmp_path / "imago.dat").write_text("X\n")   # prepared directory
     captured = {}
@@ -692,6 +692,45 @@ def test_imago_runner_prepared_reapplies_imago_settings(tmp_path,
     assert captured["settings"] is settings_sentinel
     assert captured["imago_options"] == {"job": "loen",
                                          "scf_basis": "no"}
+
+
+def test_imago_runner_commits_prepared_inputs(tmp_path, monkeypatch):
+    """Model A (C111): when the driver prepared the unit's inputs
+    into unit.prepared_dir, the wingbeat COMMITS them into the run
+    dir (no rebuild) and runs the prepared directory.  makeinput is
+    never called on this path, and the imago-side settings are still
+    passed to run_prepared."""
+    import imago
+    import makeinput
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "structure.dat").write_text("STRUCT\n")
+    (staging / "imago.dat").write_text("DECK\n")
+    wingbeat_dir = tmp_path / "run"
+    used = {}
+
+    def fake_run_prepared(wb_dir, settings=None, **kwargs):
+        used["settings"] = settings
+        return _imago_result(imago.RunStatus.CONVERGED)
+
+    def boom_build(*a, **k):
+        used["built"] = True   # must NOT happen on the commit path
+
+    monkeypatch.setattr(imago, "run_prepared", fake_run_prepared)
+    monkeypatch.setattr(makeinput, "build_run_dir", boom_build)
+
+    unit = CalcUnit(id="x", structure="s.skl",
+                    options={"job": "loen", "scf_basis": "no"},
+                    prepared_dir=str(staging))
+    ImagoWingbeat().run(unit, str(wingbeat_dir))
+
+    # The staged inputs were committed into the run dir, the deck
+    #   was NOT rebuilt, and the settings still reached run_prepared.
+    assert (wingbeat_dir / "structure.dat").read_text() == "STRUCT\n"
+    assert (wingbeat_dir / "imago.dat").read_text() == "DECK\n"
+    assert "built" not in used
+    assert used["settings"] is not None
 
 
 def test_partition_options_routes_by_recognised_key_set():

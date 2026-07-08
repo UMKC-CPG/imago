@@ -80,6 +80,14 @@ class CalcUnit:
                       that share a structure id.  Keeping the core
                       ignorant of its meaning honors Principle 9.
     - ``key_fields``: the cache identity (DESIGN 6.2.5).
+    - ``prepared_dir``: the per-unit staging directory the
+                      producer's prepare step fills with the built
+                      inputs (structure.dat, imago.dat, ...), or
+                      None when the unit was not prepared ahead of
+                      dispatch.  The structure.dat KeyFile's source
+                      points here for the hit-test, and the wingbeat
+                      commits it into the run directory on a miss
+                      (DESIGN 6.2.5, Model A).
     """
     id: str
     structure: str
@@ -88,6 +96,7 @@ class CalcUnit:
     wingbeat: Optional[str] = None
     kind: str = "convergence"
     key_fields: KeyFields = field(default_factory=KeyFields)
+    prepared_dir: Optional[str] = None
 
 
 @dataclass
