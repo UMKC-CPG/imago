@@ -236,16 +236,37 @@ def test_scheduler_options_emits_mem_gpu_and_extra_but_not_binding():
     """Memory and GPU become #SBATCH directives and the raw passthrough
     rides along; binding does NOT appear -- it is a launch-time concern
     in the deferred parallel path, not a batch directive."""
-    site = _filled_site(memory_per_node=192000, gpus_per_node=2,
+    site = _filled_site(memory_per_worker=8, gpus_per_node=2,
                         binding="socket",
                         extra_scheduler_options=["#SBATCH --exclusive"])
     # binding alone would trip the serial guard at build time, but
     #   scheduler_options itself must simply never emit a bind line.
     text = cc.scheduler_options(site)
-    assert "#SBATCH --mem=192000" in text
+    # One worker per node (the per-job default) -> the per-worker
+    #   gigabytes ARE the per-node request, emitted with a G suffix.
+    assert "#SBATCH --mem=8G" in text
     assert "#SBATCH --gres=gpu:2" in text
     assert "#SBATCH --exclusive" in text
     assert "bind" not in text.lower()
+
+
+def test_scheduler_options_mem_scales_with_packed_workers():
+    """The per-node --mem is the per-worker request times how many
+    calculations a node packs, so the pooled shape (many workers per
+    node) requests proportionally more than the per-job shape."""
+    site = _filled_site(memory_per_worker=8)
+    # Per-job packing (one calc per node) requests one worker's memory.
+    assert "#SBATCH --mem=8G" in cc.scheduler_options(site)
+    # Pooling four calculations onto a node requests four times as much.
+    assert "#SBATCH --mem=32G" in cc.scheduler_options(
+        site, workers_per_block=4)
+
+
+def test_scheduler_options_ignores_capacity_field():
+    """memory_per_node is a capacity ceiling, never a request: setting it
+    alone (no per-worker request) emits no --mem directive."""
+    text = cc.scheduler_options(_filled_site(memory_per_node=502123))
+    assert "--mem" not in text
 
 
 def test_scheduler_options_empty_when_nothing_applies():

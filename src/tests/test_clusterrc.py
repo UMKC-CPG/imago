@@ -43,12 +43,15 @@ def test_every_tier_key_is_present_with_a_usable_default():
         "threads_per_rank": 1, "gpus_per_node": 0,
         "queue_overrides": {}, "profiles": {},
         "extra_scheduler_options": [],
+        # The per-job memory request ships with a usable default (GB).
+        "memory_per_worker": 10,
     }
     for key, value in expected_defaults.items():
         assert settings[key] == value
-    # The optional-but-unset knobs are present as None.
+    # The optional-but-unset knobs are present as None.  memory_per_node
+    #   (a node's capacity) stays None until the probe or user fills it.
     for key in ("cores_per_node", "workers_per_node",
-                "memory_per_node", "memory_per_worker", "binding",
+                "memory_per_node", "binding",
                 "omp_places", "omp_proc_bind"):
         assert settings[key] is None
 

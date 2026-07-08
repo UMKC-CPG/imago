@@ -115,11 +115,16 @@ def parameters_and_defaults():
         #   backs up (the auto-scaling cap).
         "max_blocks":        1,
 
-        # Memory guards (in megabytes) so a run neither overflows a
-        #   node's memory nor silently under-requests it.  None means
-        #   "let the scheduler apply its own default".
+        # Two distinct memory concepts, kept separate.  "memory_per_node"
+        #   is a node's physical capacity in MEGABYTES -- a ceiling
+        #   reserved for future packing / estimation checks, never spent
+        #   as a request.  "memory_per_worker" is the memory ONE
+        #   calculation needs in GIGABYTES -- the per-job request that
+        #   becomes SLURM's `--mem` (times the workers packed on a node
+        #   under the pooled shape).  None on either means "let the
+        #   scheduler apply its own default".
         "memory_per_node":   None,
-        "memory_per_worker": None,
+        "memory_per_worker": 10,
 
         # ============================================================
         #  Advanced / forward-looking -- power users; future imago.

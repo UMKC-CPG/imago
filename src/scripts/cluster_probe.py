@@ -70,9 +70,11 @@ _SETTINGS = [
     ("max_blocks", 1,
      "Most allocations to grow to at once when work piles up."),
     ("memory_per_node", None,
-     "How much memory one node has, in megabytes."),
-    ("memory_per_worker", None,
-     "How much memory each calculation needs, in megabytes."),
+     "A node's physical memory, in megabytes -- a capacity ceiling "
+     "reserved for future packing / estimation checks, not a request."),
+    ("memory_per_worker", 10,
+     "Memory one calculation needs, in gigabytes -- the per-job "
+     "request that becomes SLURM's --mem."),
     ("launcher", "single",
      "How one calculation starts ('single' = a serial run)."),
     ("ranks_per_worker", 1,

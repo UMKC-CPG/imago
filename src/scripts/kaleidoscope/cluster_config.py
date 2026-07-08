@@ -254,7 +254,7 @@ def make_launcher(site):
         f"Use launcher='single' for now.")
 
 
-def scheduler_options(site):
+def scheduler_options(site, workers_per_block=1):
     """Build the raw ``#SBATCH`` directives the site settings imply.
 
     Assembles the directives that are meaningful for today's serial
@@ -264,6 +264,16 @@ def scheduler_options(site):
     launcher in the deferred parallel path, not as a batch directive,
     so it is not emitted here; see :func:`_require_serial_only`.)
 
+    The memory guard is derived, not copied.  ``memory_per_worker`` is
+    the memory ONE calculation needs (gigabytes -- the per-job request),
+    whereas SLURM's ``--mem`` is a per-NODE figure.  A node runs
+    ``workers_per_block`` calculations at once (one for the per-job
+    shape, the node's packed worker count for the pooled shape), so the
+    node's request is ``memory_per_worker * workers_per_block``
+    gigabytes.  The separate ``memory_per_node`` is deliberately NOT
+    spent here: it records the node's physical capacity and is reserved
+    as a ceiling for future packing / estimation checks, not a request.
+
     Returns
     -------
     str
@@ -271,9 +281,10 @@ def scheduler_options(site):
         to the submit script), or an empty string when none apply.
     """
     directives = []
-    memory_per_node = site.get("memory_per_node")
-    if memory_per_node:
-        directives.append(f"#SBATCH --mem={memory_per_node}")
+    memory_per_worker = site.get("memory_per_worker")
+    if memory_per_worker:
+        node_memory_gb = memory_per_worker * workers_per_block
+        directives.append(f"#SBATCH --mem={node_memory_gb}G")
     gpus_per_node = site.get("gpus_per_node", 0) or 0
     if gpus_per_node > 0:
         directives.append(f"#SBATCH --gres=gpu:{gpus_per_node}")
@@ -296,7 +307,7 @@ def workers_per_node(site):
 
 
 def slurm_provider(site, choices, *, nodes_per_block, init_blocks,
-                   min_blocks, max_blocks):
+                   min_blocks, max_blocks, workers_per_block=1):
     """Build the SLURM provider shared by both cluster shapes.
 
     The two shapes are the *same* provider wiring with different block
@@ -304,6 +315,9 @@ def slurm_provider(site, choices, *, nodes_per_block, init_blocks,
     units.  The worker bring-up script lets a worker find imago; the
     account, partition, and walltime come from the resolved choices;
     the memory, GPU, and CPU knobs ride along as scheduler directives.
+    ``workers_per_block`` is how many calculations a node runs at once,
+    so the per-node memory request scales with it (one for the per-job
+    shape, the packed worker count for the pooled shape).
     """
     _require_serial_only(site)
     from parsl.providers import SlurmProvider
@@ -317,7 +331,7 @@ def slurm_provider(site, choices, *, nodes_per_block, init_blocks,
         max_blocks=max_blocks,
         worker_init="\n".join(site["worker_init"]),
         launcher=make_launcher(site),
-        scheduler_options=scheduler_options(site),
+        scheduler_options=scheduler_options(site, workers_per_block),
     )
 
 
@@ -328,16 +342,20 @@ def build_pooled_config(site, choices):
     grow when work backs up."""
     from parsl.config import Config
     from parsl.executors import HighThroughputExecutor
+    # One node packs this many calculations; the same count sizes both
+    #   the executor's worker cap and the block's per-node memory request.
+    packed_workers = workers_per_node(site)
     provider = slurm_provider(
         site, choices,
         nodes_per_block=choices["nodes"],
         init_blocks=1, min_blocks=1,
-        max_blocks=site.get("max_blocks", 1))
+        max_blocks=site.get("max_blocks", 1),
+        workers_per_block=packed_workers)
     executor = HighThroughputExecutor(
         label="imago-pooled",
         provider=provider,
         cores_per_worker=site["cores_per_worker"],
-        max_workers_per_node=workers_per_node(site))
+        max_workers_per_node=packed_workers)
     return Config(executors=[executor])
 
 
@@ -351,7 +369,8 @@ def build_per_job_config(site, choices):
         site, choices,
         nodes_per_block=1,
         init_blocks=0, min_blocks=0,
-        max_blocks=site.get("max_blocks", 1))
+        max_blocks=site.get("max_blocks", 1),
+        workers_per_block=1)      # one calc per node -> one worker's mem
     executor = HighThroughputExecutor(
         label="imago-per-job",
         provider=provider,
