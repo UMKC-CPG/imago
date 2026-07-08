@@ -21,7 +21,8 @@ from curation_manifest import (
     load_manifest_v2,
     default_run_settings,
     default_characterization,
-    resolve_run_settings,
+    resolve_settings,
+    DEFAULT_KPOINT_CONVERGENCE_THRESHOLD,
 )
 
 pytestmark = pytest.mark.unit
@@ -349,14 +350,32 @@ def test_per_solid_override_is_emitted(tmp_path):
     assert solid.functional is None
 
 
-def test_resolve_run_settings_fills_from_defaults():
-    # An inherited setting resolves from [defaults]; an override
-    #   survives resolution.
-    resolved = resolve_run_settings(_sparse_si(basis="eb"), _DEFAULTS)
+def test_resolve_settings_fills_from_defaults():
+    # An inherited run setting resolves from [defaults]; an override
+    #   survives; the harvest threshold falls back to the built-in
+    #   when neither the solid nor [harvest] names it.
+    resolved = resolve_settings(_sparse_si(basis="eb"), _DEFAULTS, {})
     assert resolved.basis == "eb"
     assert resolved.functional == "wigner"
     assert resolved.kpoint_spec == {"shift": [0.0, 0.0, 0.0]}
     assert resolved.scf_threshold == 1.0e-6
+    assert resolved.kpoint_convergence_threshold == \
+        DEFAULT_KPOINT_CONVERGENCE_THRESHOLD
+
+
+def test_resolve_settings_harvest_threshold_precedence():
+    # The harvest threshold resolves solid's own -> [harvest] block
+    #   -> built-in default, in that order.
+    own = _sparse_si(kpoint_convergence_threshold=1.0e-3)
+    assert resolve_settings(own, _DEFAULTS, {}) \
+        .kpoint_convergence_threshold == 1.0e-3
+    inherited = resolve_settings(
+        _sparse_si(), _DEFAULTS,
+        {"kpoint_convergence_threshold": 2.0e-3})
+    assert inherited.kpoint_convergence_threshold == 2.0e-3
+    built_in = resolve_settings(_sparse_si(), _DEFAULTS, {})
+    assert built_in.kpoint_convergence_threshold == \
+        DEFAULT_KPOINT_CONVERGENCE_THRESHOLD
 
 
 def test_unresolvable_setting_raises(tmp_path):

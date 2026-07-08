@@ -2259,7 +2259,7 @@ imports its neighbours from `$IMAGO_BIN`).
   the 13.2 wingbeat to `stage_inputs`.  Tests: producer end-to-end
   stubs `prepare_fn`; new `test_imago_runner_commits_prepared_inputs`.
 
-- [ ] C112. Source the k-point grid-flatness threshold from the
+- [x] C112. Source the k-point grid-flatness threshold from the
   manifest `[harvest]` block, per atom, in eV.  Motivation: the
   seed run reported ia-3 and cmce non-converged though every SCF
   converged cleanly -- "not all converged."  Root cause:
@@ -2298,6 +2298,19 @@ imports its neighbours from `$IMAGO_BIN`).
   harvest arm resolves the solid's own value, else `[harvest]`,
   else built-in `DEFAULT_KPOINT_CONVERGENCE_THRESHOLD`.
   DESIGN 7.8 / 5.7.  CODE (+ PSEUDOCODE).
+  DONE: `curation_manifest` (DEFAULT_KPOINT_CONVERGENCE_THRESHOLD,
+  HARVEST_SETTING_KEYS, `[harvest]` parse, `ReferenceSolid`.
+  `kpoint_convergence_threshold`, `CurationManifest.harvest`,
+  `resolve_run_settings` -> 3-arg `resolve_settings`);
+  `build_initial_potentials` (`apply_manifest_defaults` 3-arg,
+  prediction-record stamp, `pick_converged_unit` per-atom via a
+  `load_structure` cell-atom-count read); `guidance_harvest`
+  (`per_atom_ev` helper on `HARTREE`, `pick_converged` 3-arg,
+  `_load_structure` -> public `load_structure`, `build_entry` takes
+  the loaded structure + `kpoint_threshold`, scf_threshold guarded
+  as a required context fact); `guidance_promote.auto_promote_ok`
+  (per-atom eV SPREAD, not variance).  333 tests pass across the
+  affected suites.
 
 - [ ] C113. Let the producer/orchestrator run as its own batch
   job, with a separate orchestrator resource block.  Motivation:

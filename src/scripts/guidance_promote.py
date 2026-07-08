@@ -56,25 +56,12 @@ from guidance_db import (
     VALID_SYSTEM_TYPES,
     load_entry,
 )
+from guidance_harvest import per_atom_ev
 
 
 # ==============================================================
 #  The objective acceptance test (DESIGN 7.8 / PSEUDOCODE 15.7)
 # ==============================================================
-
-def _population_variance(values) -> float:
-    """The population variance (mean of squared deviations) of a
-    short sequence.  Fewer than two values are perfectly "flat",
-    so the variance is 0.0 -- which is what the auto-promote
-    flatness test wants for a degenerate top-of-grid."""
-
-    sample = list(values)
-    count = len(sample)
-    if count < 2:
-        return 0.0
-    mean = sum(sample) / count
-    return sum((value - mean) ** 2 for value in sample) / count
-
 
 def auto_promote_ok(entry: GuidanceEntry) -> bool:
     """Return True when ``entry`` clears the objective acceptance
@@ -88,10 +75,14 @@ def auto_promote_ok(entry: GuidanceEntry) -> bool:
        have been too narrow to bracket the true converged point --
        so the converged k-density must sit in [0.2, 0.8] of the
        grid's span.
-    2. **A convincingly flat top of grid.**  The population
-       variance of the top-three grid points' total energies must
-       be below ``metric_threshold * 10`` -- a converged *region*,
-       not just one consecutive delta that dipped below threshold.
+    2. **A convincingly flat top of grid.**  The SPREAD (max minus
+       min) of the top-three grid points' energies, taken per atom
+       and in eV (the basis ``metric_threshold`` uses), must be
+       below ``metric_threshold * 10`` -- a converged *region*, not
+       just one consecutive delta that dipped below threshold.  A
+       spread is a like-for-like linear quantity; a variance would
+       be an energy squared against a linear threshold, so it is
+       deliberately not used (DESIGN 7.8).
     3. **gap_ev / gap_kind consistent.**  ``gap_kind == "none"``
        iff ``gap_ev == 0.0`` (a defense even though the schema's
        rule 6 also enforces it).
@@ -115,9 +106,15 @@ def auto_promote_ok(entry: GuidanceEntry) -> bool:
     if not (0.2 <= position <= 0.8):
         return False
 
-    # 2. Top-three grid points convincingly flat.
-    top_three = verification.grid_energies[-3:]
-    if (_population_variance(top_three)
+    # 2. Top-three grid points convincingly flat.  grid_energies are
+    #    RAW total-cell hartree (Option B), so normalize each to eV
+    #    per atom (the basis metric_threshold uses) via the same
+    #    per_atom_ev helper pick_converged uses, then require their
+    #    SPREAD (max - min) below metric_threshold * 10.
+    atom_count = entry.context.cell_atom_count
+    top_three = [per_atom_ev(energy, atom_count)
+                 for energy in verification.grid_energies[-3:]]
+    if (max(top_three) - min(top_three)
             >= verification.metric_threshold * 10.0):
         return False
 

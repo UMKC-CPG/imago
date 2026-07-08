@@ -2010,7 +2010,14 @@ def _grid_flight(unit_id, kpds):
     return Flight(root="ws", units=units)
 
 
-def test_pick_converged_unit_returns_flat_interior_point(tmp_path):
+def test_pick_converged_unit_returns_flat_interior_point(
+        tmp_path, monkeypatch):
+    # pick_converged_unit loads the structure for cell_atom_count
+    #   (per-atom eV normalization); the fake units carry no real
+    #   .skl, so stub the load with a known atom count.
+    monkeypatch.setattr(
+        bip.guidance_harvest, "load_structure",
+        lambda path: types.SimpleNamespace(num_atoms=2))
     workspace = str(tmp_path)
     flight = _grid_flight("au_fcc", [50, 100, 200])
     flight.root = workspace
@@ -2020,13 +2027,16 @@ def test_pick_converged_unit_returns_flat_interior_point(tmp_path):
         _write_result(workspace, "au_fcc",
                       (f"kpt-density-{k}",), energy=energy)
     unit, result = pick_converged_unit(
-        flight, "au_fcc", workspace, scf_threshold=0.1)
+        flight, "au_fcc", workspace, metric_threshold=0.1)
     assert unit.calc == ("kpt-density-100",)
     assert result["scf_iterations"] == 7
 
 
 def test_pick_converged_unit_none_when_energy_still_moving(
-        tmp_path):
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        bip.guidance_harvest, "load_structure",
+        lambda path: types.SimpleNamespace(num_atoms=2))
     workspace = str(tmp_path)
     flight = _grid_flight("au_fcc", [50, 100, 200])
     flight.root = workspace
@@ -2034,7 +2044,7 @@ def test_pick_converged_unit_none_when_energy_still_moving(
         _write_result(workspace, "au_fcc",
                       (f"kpt-density-{k}",), energy=energy)
     assert pick_converged_unit(
-        flight, "au_fcc", workspace, scf_threshold=0.1) is None
+        flight, "au_fcc", workspace, metric_threshold=0.1) is None
 
 
 def test_pick_converged_unit_none_when_all_units_failed(tmp_path):
@@ -2048,13 +2058,17 @@ def test_pick_converged_unit_none_when_all_units_failed(tmp_path):
     for k in (50, 100, 200):
         _write_failed(workspace, "au_fcc", (f"kpt-density-{k}",))
     assert pick_converged_unit(
-        flight, "au_fcc", workspace, scf_threshold=0.1) is None
+        flight, "au_fcc", workspace, metric_threshold=0.1) is None
 
 
-def test_pick_converged_unit_drops_failed_keeps_completed(tmp_path):
+def test_pick_converged_unit_drops_failed_keeps_completed(
+        tmp_path, monkeypatch):
     """A failed unit is dropped from the grid before its (absent)
     result.toml is read; the convergence rule runs on the survivors
     (DESIGN 6.2.10)."""
+    monkeypatch.setattr(
+        bip.guidance_harvest, "load_structure",
+        lambda path: types.SimpleNamespace(num_atoms=2))
     workspace = str(tmp_path)
     flight = _grid_flight("au_fcc", [50, 100, 200])
     flight.root = workspace
@@ -2067,7 +2081,7 @@ def test_pick_converged_unit_drops_failed_keeps_completed(tmp_path):
                   energy=0.5)
     # Two survivors, no interior point -> None (not a crash).
     assert pick_converged_unit(
-        flight, "au_fcc", workspace, scf_threshold=0.1) is None
+        flight, "au_fcc", workspace, metric_threshold=0.1) is None
 
 
 def test_pick_converged_unit_single_point_is_the_deliverable(
@@ -2080,7 +2094,7 @@ def test_pick_converged_unit_single_point_is_the_deliverable(
     _write_result(workspace, "au_fcc", ("kpt-density-120",),
                   energy=0.5)
     unit, _ = pick_converged_unit(
-        flight, "au_fcc", workspace, scf_threshold=0.1)
+        flight, "au_fcc", workspace, metric_threshold=0.1)
     assert unit.calc == ("kpt-density-120",)
 
 
@@ -2188,6 +2202,11 @@ def test_build_initial_potentials_harvests_curated_entry(
     monkeypatch.setattr(
         bip.guidance_harvest, "harvest_flight",
         lambda ws, db, ds: harvested.setdefault("called", True))
+    # Phase 3's pick_converged_unit loads the structure for
+    #   cell_atom_count; the fake units carry no real .skl.
+    monkeypatch.setattr(
+        bip.guidance_harvest, "load_structure",
+        lambda path: types.SimpleNamespace(num_atoms=2))
 
     build_initial_potentials(
         manifest_path, pdb_root, data_root,
@@ -2267,6 +2286,9 @@ def test_build_initial_potentials_derives_label_at_harvest(
     monkeypatch.setattr(
         bip.guidance_harvest, "harvest_flight",
         lambda ws, db, ds: None)
+    monkeypatch.setattr(
+        bip.guidance_harvest, "load_structure",
+        lambda path: types.SimpleNamespace(num_atoms=2))
 
     # Inject the site-identity reader: site 1 is Au species 1,
     #   type 1, so the derived label is au_fcc-au1-t1-a1.
@@ -2429,6 +2451,9 @@ def test_build_initial_potentials_resolves_defaults(
     monkeypatch.setattr(
         bip.guidance_harvest, "harvest_flight",
         lambda ws, db, ds: None)
+    monkeypatch.setattr(
+        bip.guidance_harvest, "load_structure",
+        lambda path: types.SimpleNamespace(num_atoms=2))
 
     build_initial_potentials(
         manifest_path, pdb_root, data_root,

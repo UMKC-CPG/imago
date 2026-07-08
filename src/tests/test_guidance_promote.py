@@ -104,15 +104,6 @@ def _count(db_root, area, system_type="crystalline"):
 #  The objective acceptance rule
 # --------------------------------------------------------------
 
-def test_population_variance_short_sequences():
-    """Fewer than two values is perfectly flat (0.0); otherwise
-    the population variance (mean of squared deviations)."""
-    assert gp._population_variance([]) == 0.0
-    assert gp._population_variance([5.0]) == 0.0
-    assert gp._population_variance([1.0, 1.0, 1.0]) == 0.0
-    assert gp._population_variance([1.0, 3.0]) == pytest.approx(1.0)
-
-
 def test_auto_promote_ok_accepts_clean_sweep():
     """A mid-grid convergence, a flat top of grid, and a
     consistent gap clear all three conditions."""
@@ -127,7 +118,7 @@ def test_auto_promote_ok_rejects_endpoint_convergence():
 
 
 def test_auto_promote_ok_rejects_unflat_top_of_grid():
-    """A top-of-grid whose energy variance exceeds
+    """A top-of-grid whose per-atom eV energy SPREAD exceeds
     metric_threshold*10 is not convincingly converged."""
     entry = _make_entry(grid_energies=(3.0, 2.0, 1.0, 3.0, 1.0),
                         metric_threshold=0.01)

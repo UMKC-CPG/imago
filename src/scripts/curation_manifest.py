@@ -152,7 +152,7 @@ class ReferenceSolid:
     inherits the manifest's top-level ``[defaults]`` block (DESIGN
     5.7).  The loader requires each to be *resolvable* -- present
     here or in ``[defaults]`` -- and the producer resolves them
-    after load (:func:`resolve_run_settings`), so nothing it emits
+    after load (:func:`resolve_settings`), so nothing it emits
     depends on an implicit default (VISION Principles 5 and 11).
 
     ``source_description`` is an optional one-line, structure-level
@@ -161,6 +161,15 @@ class ReferenceSolid:
     it, qualified by the species and site it discovers (5.2.1); a
     per-entry ``description`` customization can still replace any
     one by hand.  ``None`` when the curator authored no hint.
+
+    ``kpoint_convergence_threshold`` is the one *harvest* setting a
+    solid may carry (DESIGN 5.7): the per-atom energy-flatness
+    tolerance (eV/atom) its k-point ladder must reach before the
+    converged rung is harvested (DESIGN 7.8).  Unlike the run
+    settings it is not fed into any calculation and it carries a
+    built-in default (:data:`DEFAULT_KPOINT_CONVERGENCE_THRESHOLD`),
+    so it resolves solid -> ``[harvest]`` -> built-in and the
+    manifest may omit it entirely.  ``None`` here until resolved.
     """
 
     reference_id: str
@@ -174,6 +183,7 @@ class ReferenceSolid:
     cod_revision: str | None = None
     structure_path: str | None = None
     source_description: str | None = None
+    kpoint_convergence_threshold: float | None = None
     entries: list[ReferenceEntry] = field(default_factory=list)
 
 
@@ -200,6 +210,13 @@ class CurationManifest:
     ``kpoint_integration``, ``kpoint_spec``, ``scf_threshold``) a
     solid inherits when it omits them (DESIGN 5.7).  Empty when the
     manifest names every setting on every solid.
+
+    ``harvest`` is the optional top-level ``[harvest]`` block: the
+    shared harvest settings (v1: ``kpoint_convergence_threshold``) a
+    solid inherits when it omits its own (DESIGN 5.7).  Unlike the
+    run settings these govern how finished runs are read back, not
+    how they run, and carry built-in defaults, so the block may be
+    omitted entirely (each solid then takes the built-in).
     """
 
     schema_version: int
@@ -207,6 +224,7 @@ class CurationManifest:
     characterization: list[ManifestFingerprint] = field(
         default_factory=list)
     defaults: dict[str, Any] = field(default_factory=dict)
+    harvest: dict[str, Any] = field(default_factory=dict)
     reference_solids: list[ReferenceSolid] = field(
         default_factory=list)
 
@@ -228,11 +246,24 @@ DEFAULT_REDUCE_SUB_SPEC = {
 DEFAULT_BISPECTRUM_SUB_SPEC = {
     "twoj1": 8, "twoj2": 8, "cutoff": 9.0}
 
+# The producer's built-in k-point flatness tolerance, used when a
+#   solid names neither its own kpoint_convergence_threshold nor a
+#   [harvest] block (DESIGN 5.7 / 7.8).  Per atom, in eV
+#   (5e-4 = 0.5 meV/atom).  Unlike the run settings this has a
+#   resolve-time fallback, so the [harvest] block -- and the key --
+#   may be omitted entirely.
+DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 5.0e-4
+
 # The five run settings that may live in the top-level [defaults]
 #   block and be inherited per solid (DESIGN 5.7).  system_type is
 #   NOT among them: it is structure metadata, named per solid.
 RUN_SETTING_KEYS = ("basis", "functional", "kpoint_integration",
                     "kpoint_spec", "scf_threshold")
+
+# The harvest settings that may live in the top-level [harvest]
+#   block (DESIGN 5.7).  Unlike the run settings these govern how
+#   finished runs are READ BACK, not how they run; v1 holds one.
+HARVEST_SETTING_KEYS = ("kpoint_convergence_threshold",)
 
 
 def default_run_settings() -> dict[str, Any]:
@@ -270,20 +301,32 @@ def default_characterization() -> list[ManifestFingerprint]:
             preferred=True)]
 
 
-def resolve_run_settings(solid: ReferenceSolid,
-                         defaults: dict[str, Any]) -> ReferenceSolid:
-    """Return a copy of ``solid`` with every run setting filled in
-    (DESIGN 5.7): a setting the solid left ``None`` inherits the
-    matching ``[defaults]`` value.  The producer resolves each solid
-    once after load so the rest of the pipeline reads fully-populated
-    settings, while the library keeps solids sparse so the writer can
-    emit the compact ``[defaults]``-plus-overrides form.  Every
-    setting is assumed resolvable, which :func:`load_manifest_v2`
-    guarantees (rule 2)."""
+def resolve_settings(solid: ReferenceSolid,
+                     defaults: dict[str, Any],
+                     harvest: dict[str, Any]) -> ReferenceSolid:
+    """Return a copy of ``solid`` with its settings filled from the
+    shared blocks (DESIGN 5.7).  A run setting the solid left
+    ``None`` inherits the matching ``[defaults]`` value; the one
+    harvest setting, ``kpoint_convergence_threshold``, resolves the
+    solid's own value, else the ``[harvest]`` block, else the
+    built-in :data:`DEFAULT_KPOINT_CONVERGENCE_THRESHOLD`.
+
+    The producer resolves each solid once after load so the rest of
+    the pipeline reads fully-populated settings, while the library
+    keeps solids sparse so the writer can emit the compact
+    ``[defaults]``-plus-overrides form.  Every run setting is assumed
+    resolvable, which :func:`load_manifest_v2` guarantees (rule 2);
+    the harvest setting always resolves via its built-in fallback."""
 
     def pick(key: str) -> Any:
         own = getattr(solid, key)
         return own if own is not None else defaults.get(key)
+
+    threshold = solid.kpoint_convergence_threshold
+    if threshold is None:
+        threshold = harvest.get(
+            "kpoint_convergence_threshold",
+            DEFAULT_KPOINT_CONVERGENCE_THRESHOLD)
 
     return replace(
         solid,
@@ -291,7 +334,8 @@ def resolve_run_settings(solid: ReferenceSolid,
         functional=pick("functional"),
         kpoint_integration=pick("kpoint_integration"),
         kpoint_spec=pick("kpoint_spec"),
-        scf_threshold=pick("scf_threshold"))
+        scf_threshold=pick("scf_threshold"),
+        kpoint_convergence_threshold=threshold)
 
 
 # ============================================================
@@ -453,10 +497,20 @@ def load_manifest_v2(path: str,
     # five run-setting keys are meaningful here; any other key is
     # ignored.  Solids stay sparse (a missing setting is None); the
     # producer resolves each one against these defaults after load
-    # (resolve_run_settings).
+    # (resolve_settings).
     raw_defaults = {key: raw["defaults"][key]
                     for key in RUN_SETTING_KEYS
                     if key in raw.get("defaults", {})}
+
+    # ----- The optional [harvest] block: the shared harvest
+    # settings a solid inherits when it omits its own (DESIGN 5.7).
+    # v1 holds one key.  It is EXEMPT from the resolvability rule
+    # below -- unlike a run setting it carries a built-in default,
+    # so a manifest that names neither it nor a [harvest] block is
+    # accepted and resolve_settings supplies the built-in.
+    raw_harvest = {key: raw["harvest"][key]
+                   for key in HARVEST_SETTING_KEYS
+                   if key in raw.get("harvest", {})}
 
     seen_ref_ids: set[str] = set()
     seen_element_label: set[tuple[str, str]] = set()
@@ -629,9 +683,10 @@ def load_manifest_v2(path: str,
                 description=entry.get("description"),
                 fingerprints=fingerprints))
 
-        # Solids stay SPARSE: a run setting the solid omits is left
-        #   None here and inherited from [defaults] when the producer
-        #   resolves the solid (resolve_run_settings).
+        # Solids stay SPARSE: a setting the solid omits is left None
+        #   here and inherited (run settings from [defaults], the
+        #   harvest setting from [harvest] or its built-in) when the
+        #   producer resolves the solid (resolve_settings).
         reference_solids.append(ReferenceSolid(
             reference_id=rid,
             system_type=ref["system_type"],
@@ -645,6 +700,8 @@ def load_manifest_v2(path: str,
             cod_revision=ref.get("cod_revision"),
             structure_path=ref.get("structure_path"),
             source_description=ref.get("source_description"),
+            kpoint_convergence_threshold=ref.get(
+                "kpoint_convergence_threshold"),
             entries=entries))
 
     # ----- Rule 7 post-loop (load half): at most one default=true
@@ -665,6 +722,7 @@ def load_manifest_v2(path: str,
         manifest_path=os.path.abspath(path),
         characterization=characterization,
         defaults=raw_defaults,
+        harvest=raw_harvest,
         reference_solids=reference_solids)
 
 

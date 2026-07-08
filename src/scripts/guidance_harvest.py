@@ -36,8 +36,9 @@ each with one clear job):
     SCF total energy (for the convergence test and the
     grid-energies array), the measured ``gap_ev`` / ``gap_kind`` /
     ``total_magnetization``, and the ``scf_threshold`` the run used
-    (the entry's ``metric_threshold``).  imago.py writes all of
-    these (the result.toml is self-contained, DESIGN 6.1).
+    (recorded in the entry's context, distinct from the k-point
+    ``metric_threshold``).  imago.py writes all of these (the
+    result.toml is self-contained, DESIGN 6.1).
   * the structure ``.skl`` -- the *structural facts*: the harvest
     must load it anyway to compute the signature
     (composition + lattice family), and the same load yields
@@ -46,16 +47,22 @@ each with one clear job):
 
 The convergence rule (DESIGN 7.8 step 3c) is two-sided: a grid
 point counts as converged only when BOTH its neighbours' total
-energies are within ``metric_threshold`` of it, so a single
-numerical fluke cannot masquerade as a flat region.  A sweep
+energies are within ``metric_threshold`` of it -- PER ATOM and in
+eV, the basis the threshold is stated in -- so a single numerical
+fluke cannot masquerade as a flat region.  A sweep
 whose energy is still moving at the top of the grid earns no
 entry -- it is logged, the flight is tagged
 ``prediction_mismatch``, and the structure is skipped (the user
 widens the grid and re-runs; DESIGN 7.9).
 
-Two v1 conventions, settled with the programmer 2026-05-30:
-  * ``metric_threshold = scf_threshold`` -- the same criterion the
-    SCF converged to is reused as the grid-flatness threshold.
+v1 conventions, settled with the programmer:
+  * The grid-flatness ``metric_threshold`` is the solid's resolved
+    ``kpoint_convergence_threshold`` (per atom, in eV; DESIGN 7.8 /
+    5.7), which rides on the structure's prediction record -- a
+    manifest/resolved fact, absent from result.toml -- and is
+    DISTINCT from the run's own ``scf_threshold``.  ``grid_energies``
+    are stored RAW (total-cell hartree, Option B); every comparison
+    normalizes per atom at the point of use.
   * ``imago_commit`` falls back to ``"unknown"`` when the producer
     did not inject a build identity (the C74 producer wiring will
     supply it; C78 hardens build-identity stamping).
@@ -89,7 +96,7 @@ from guidance_db import (
     save_entry,
     load,
 )
-from structure_control import StructureControl, BOHR_RAD
+from structure_control import StructureControl, BOHR_RAD, HARTREE
 
 
 # Cubic Bohr per cubic Angstrom: the structure stores its lattice
@@ -97,6 +104,18 @@ from structure_control import StructureControl, BOHR_RAD
 #   schema records volumes in Bohr^3, so a cell volume is divided
 #   by BOHR_RAD^3 (BOHR_RAD is the Bohr radius in Angstroms).
 _ANGSTROM3_TO_BOHR3 = 1.0 / (BOHR_RAD ** 3)
+
+
+def per_atom_ev(total_energy_hartree: float,
+                cell_atom_count: int) -> float:
+    """A raw total-cell energy (hartree) expressed as eV per atom
+    -- the basis the k-point flatness threshold is stated in
+    (DESIGN 7.8 / 5.7, Option B).  Single-sourced here so the
+    convergence pick and the auto-promote flatness test normalize
+    identically and cannot drift.  ``HARTREE`` is the hartree->eV
+    factor (structure_control)."""
+
+    return total_energy_hartree * HARTREE / cell_atom_count
 
 # The build-identity stand-in used when the producer injected no
 #   commit (DESIGN 7.8 / C74).  It is non-empty so a harvested
@@ -149,10 +168,16 @@ def swept_value_of(unit, axis: str) -> float:
 #  The two-sided convergence rule (DESIGN 7.8 step 3c)
 # ==============================================================
 
-def pick_converged(energies, threshold):
+def pick_converged(energies, cell_atom_count, threshold):
     """Return the smallest interior grid index whose total energy
     is within ``threshold`` of BOTH neighbours, or ``None`` when
     the energy is still moving (no flat interior point).
+
+    ``energies`` are raw total-cell values in hartree (Option B) and
+    ``threshold`` is per atom, in eV, so the ladder is normalized to
+    that basis once (:func:`per_atom_ev`) before comparing.  The
+    per-atom scale keeps a large cell from being held to a tighter
+    bound than a small one (DESIGN 7.8).
 
     Two-sided by design: requiring both consecutive-pair deltas to
     be small means a single-grid-point numerical dip cannot be
@@ -162,9 +187,13 @@ def pick_converged(energies, threshold):
     may have been too narrow) and is left for the auto-promote
     rule to reject (DESIGN 7.8)."""
 
-    for index in range(1, len(energies) - 1):
-        below_up = abs(energies[index] - energies[index + 1]) < threshold
-        below_down = abs(energies[index] - energies[index - 1]) < threshold
+    per_atom = [per_atom_ev(energy, cell_atom_count)
+                for energy in energies]
+    for index in range(1, len(per_atom) - 1):
+        below_up = abs(
+            per_atom[index] - per_atom[index + 1]) < threshold
+        below_down = abs(
+            per_atom[index] - per_atom[index - 1]) < threshold
         if below_up and below_down:
             return index
     return None
@@ -200,7 +229,7 @@ def tag_prediction_mismatch(workspace_root: str, unit_id: str) -> None:
 #  Building a structure's GuidanceEntry from its sweep
 # ==============================================================
 
-def _load_structure(path: str):
+def load_structure(path: str):
     """Load the structure ``.skl`` into a StructureControl.  Uses
     ``read_input_file`` (not the bare skeleton reader) so the
     element mapping AND the cell geometry -- hence
@@ -240,7 +269,8 @@ def _require_field(result_toml: dict, field: str, unit_id: str):
 
 
 def build_entry(workspace_root, grid, kpds, energies,
-                result_tomls, idx, prediction, dataspace):
+                result_tomls, idx, prediction, dataspace,
+                structure, kpoint_threshold):
     """Assemble the rich :class:`GuidanceEntry` for one converged
     structure sweep (DESIGN 7.8 step 3f; PSEUDOCODE 15.7 step g).
 
@@ -254,19 +284,33 @@ def build_entry(workspace_root, grid, kpds, energies,
     (basis, functional, kpoint_integration) sub-model (DESIGN 6.2.9
     / 7.8 step 3f).  ``harvest_flight`` has already guaranteed it is
     present (a structure with no record is skipped before reaching
-    here), so no None-guards are needed.  The ``entry_id`` is left
-    empty here; :func:`save_entry` fills it with the deterministic
-    slug."""
+    here), so no None-guards are needed.
+
+    ``structure`` is the loaded StructureControl (``harvest_flight``
+    loads it once for ``cell_atom_count`` and passes it in, so it is
+    not reloaded here).  ``kpoint_threshold`` is the resolved
+    per-atom eV flatness tolerance, recorded as the entry's
+    ``metric_threshold`` (DESIGN 7.8) -- distinct from the run's
+    ``scf_threshold``.  The ``entry_id`` is left empty here;
+    :func:`save_entry` fills it with the deterministic slug."""
 
     chosen_result = result_tomls[idx]
     chosen_kpd = kpds[idx]
-    threshold = result_tomls[0].get("scf_threshold")
+    # The SCF threshold is a per-run fact from result.toml, recorded
+    #   in the entry's context; it is SEPARATE from the k-point
+    #   flatness metric_threshold (kpoint_threshold, per atom in eV).
+    #   A converged run must record it (a required context fact), so
+    #   an absent one fails loudly rather than storing None.
+    scf_threshold = result_tomls[0].get("scf_threshold")
+    if scf_threshold is None:
+        raise ValueError(
+            grid[0].id + ": converged run's result.toml carries no "
+            "scf_threshold (a required context fact, DESIGN 5.2)")
 
     # system_type rides on this structure's prediction record (it
     #   carries it from the builder, DESIGN 7.7).
     system_type = prediction["system_type"]
 
-    structure = _load_structure(grid[0].structure)
     signature = compute_signature(
         structure, system_type, dataspace.group_table)
 
@@ -295,17 +339,19 @@ def build_entry(workspace_root, grid, kpds, energies,
         basis=prediction["basis"],
         functional=prediction["functional"],
         kpoint_integration=prediction["kpoint_integration"],
-        scf_threshold=threshold,
+        scf_threshold=scf_threshold,
         cell_atom_count=structure.num_atoms,
         cell_volume_per_formula_unit=(
             structure.real_cell_volume * _ANGSTROM3_TO_BOHR3))
 
     verification = Verification(
         grid_values=tuple(kpds),
+        # grid_energies are RAW total-cell hartree (Option B);
+        #   consumers (auto_promote_ok) normalize per atom.
         grid_energies=tuple(energies),
         converged_at=chosen_kpd,
         metric="total_energy",
-        metric_threshold=threshold,
+        metric_threshold=kpoint_threshold,
         predictor_confidence=prediction["confidence"],
         predictor_neighbor_ids=tuple(
             prediction["neighbor_entry_ids"]))
@@ -428,14 +474,24 @@ def harvest_flight(workspace_root, db_root, dataspace):
                 unit_id + ": single point (not staged)")
             continue
 
-        # d. metric_threshold = the SCF criterion the runs used
-        #    (the v1 convention); pick the converged grid point.
-        threshold = result_tomls[0].get("scf_threshold")
-        if threshold is None:
+        # d. The k-point flatness tolerance rode in on this
+        #    structure's prediction record: per atom, in eV, the
+        #    solid's resolved kpoint_convergence_threshold (DESIGN
+        #    7.8 / 5.7).  It is a manifest/resolved fact, absent from
+        #    result.toml.  Load the structure once (for
+        #    cell_atom_count here, reused by build_entry), then pick
+        #    the converged grid point.
+        kpoint_threshold = prediction.get(
+            "kpoint_convergence_threshold")
+        if kpoint_threshold is None:
             raise ValueError(
-                unit_id + ": result.toml carries no scf_threshold "
-                "(needed as the convergence metric_threshold)")
-        idx = pick_converged(energies, threshold)
+                unit_id + ": prediction record carries no "
+                "kpoint_convergence_threshold (the per-atom k-point "
+                "flatness tolerance the producer resolves and stamps "
+                "on the record, DESIGN 7.8)")
+        structure = load_structure(grid[0].structure)
+        idx = pick_converged(
+            energies, structure.num_atoms, kpoint_threshold)
 
         # e. Energy still moving at the top of the grid: tag the
         #    flight and skip -- a non-converged sweep earns no entry.
@@ -449,7 +505,7 @@ def harvest_flight(workspace_root, db_root, dataspace):
         # f/g. Build the rich entry and stage it.
         entry = build_entry(
             workspace_root, grid, kpds, energies, result_tomls,
-            idx, prediction, dataspace)
+            idx, prediction, dataspace, structure, kpoint_threshold)
         path = save_entry(entry, db_root)
         summaries.append(unit_id + ": staged " + path)
 

@@ -117,7 +117,7 @@ import guidance_harvest
 #   names it runs a manifest with (DESIGN 5.7).
 from curation_manifest import (
     ReferenceEntry, ReferenceSolid, CurationManifest,
-    load_manifest_v2, load_structure_sources, resolve_run_settings)
+    load_manifest_v2, load_structure_sources, resolve_settings)
 from kaleidoscope import CalcUnit, Flight, SweepRecord, dispatch
 from kaleidoscope.builders.kpoint_convergence import (
     build_kpoint_convergence, standard_key_fields)
@@ -1126,7 +1126,8 @@ def _unit_completed(workspace_root: str, unit) -> bool:
 
 
 def pick_converged_unit(flight: Flight, reference_id: str,
-                        workspace_root: str, scf_threshold: float):
+                        workspace_root: str,
+                        metric_threshold: float):
     """Return ``(unit, result_toml)`` for the converged grid point
     of one solid's convergence sweep, or ``None`` when the energy is
     still moving at the top of the grid -- or when nothing ran to
@@ -1135,11 +1136,16 @@ def pick_converged_unit(flight: Flight, reference_id: str,
     Uses the same two-sided delta-below-threshold rule as the
     guidance harvest (DESIGN 7.8 step 3c), reused via
     ``guidance_harvest.pick_converged``: the smallest interior
-    k-density whose total energy is within ``scf_threshold`` of both
-    neighbours.  A single-point grid (a trust-mode run or a
-    single-point curator override) has no interior point to judge,
-    so its lone run IS the deliverable -- the producer trusts the
-    pinned/predicted point and harvests its potential directly.
+    k-density whose total energy is within ``metric_threshold`` of
+    both neighbours, PER ATOM and in eV (the basis the threshold is
+    stated in).  ``metric_threshold`` is the solid's resolved
+    ``kpoint_convergence_threshold``, NOT its SCF threshold; the
+    per-atom normalization needs the cell size, so the structure is
+    loaded once from a completed unit.  A single-point grid (a
+    trust-mode run or a single-point curator override) has no
+    interior point to judge, so its lone run IS the deliverable --
+    the producer trusts the pinned/predicted point and harvests its
+    potential directly.
 
     Only units that ran to completion are considered: a failed or
     result-less unit is treated as non-converged and dropped before
@@ -1169,8 +1175,14 @@ def pick_converged_unit(flight: Flight, reference_id: str,
     if len(completed) == 1:
         return completed[0], results[0]
 
+    # Per-atom normalization needs the cell size (the same structure
+    #   the guidance harvest loads); read it once from a completed
+    #   unit's staged structure.
+    cell_atom_count = guidance_harvest.load_structure(
+        completed[0].structure).num_atoms
     energies = [result["total_energy"] for result in results]
-    index = guidance_harvest.pick_converged(energies, scf_threshold)
+    index = guidance_harvest.pick_converged(
+        energies, cell_atom_count, metric_threshold)
     if index is None:
         return None
     return completed[index], results[index]
@@ -1685,22 +1697,25 @@ def write_run_log(path: str, imago_commit: str, timestamp: str,
 # ============================================================
 
 def apply_manifest_defaults(manifest: CurationManifest) -> None:
-    """Fold the top-level ``[defaults]`` block into each reference
-    solid, in place, so the rest of the producer reads one fully
-    resolved run setting per field (``basis``, ``functional``,
-    ``kpoint_integration``, ``kpoint_spec``, ``scf_threshold``) and
-    never has to consult the shared defaults again (DESIGN 5.7).
+    """Fold the top-level ``[defaults]`` and ``[harvest]`` blocks into
+    each reference solid, in place, so the rest of the producer reads
+    one fully resolved value per field -- the five run settings
+    (``basis``, ``functional``, ``kpoint_integration``,
+    ``kpoint_spec``, ``scf_threshold``) and the harvest setting
+    (``kpoint_convergence_threshold``) -- and never has to consult the
+    shared blocks again (DESIGN 5.7).
 
     A solid that names its own value keeps it; a solid that omits a
-    setting inherits the manifest default.  The loader already proved
-    every setting is resolvable for every solid (manifest rule 2), so
-    after this pass no run-setting field is left ``None`` -- the
-    downstream ``refresh_isolated_entries`` call and the two per-solid
-    loops can treat every setting as present.
+    run setting inherits the ``[defaults]`` value, and the harvest
+    setting inherits ``[harvest]`` or the built-in default.  The
+    loader already proved every run setting is resolvable for every
+    solid (manifest rule 2), so after this pass no field is left
+    ``None`` -- the downstream ``refresh_isolated_entries`` call and
+    the two per-solid loops can treat every setting as present.
     """
 
     manifest.reference_solids = [
-        resolve_run_settings(solid, manifest.defaults)
+        resolve_settings(solid, manifest.defaults, manifest.harvest)
         for solid in manifest.reference_solids]
 
 
@@ -1836,7 +1851,14 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         all_units.extend(build_loen_units(
             ref, struct, options, manifest.characterization))
         # Store the plain dict (metadata must be TOML-serializable).
+        #   Stamp the resolved per-atom k-point flatness tolerance
+        #   onto it too: the guidance harvest judges convergence from
+        #   the workspace alone, and this is a manifest/resolved fact,
+        #   absent from any run's result.toml (DESIGN 7.8 / 5.7).
         predictions[ref.reference_id] = asdict(record_i)
+        predictions[ref.reference_id][
+            "kpoint_convergence_threshold"] = (
+                ref.kpoint_convergence_threshold)
 
     flight = Flight(
         root=workspace, units=all_units,
@@ -1870,7 +1892,8 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     per_run_log: list[dict[str, Any]] = []
     for ref in manifest.reference_solids:
         converged = pick_converged_unit(
-            flight, ref.reference_id, workspace, ref.scf_threshold)
+            flight, ref.reference_id, workspace,
+            ref.kpoint_convergence_threshold)
         if converged is None:
             per_run_log.append(make_nonconverged_log_entry(ref))
             continue

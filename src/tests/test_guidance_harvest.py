@@ -11,7 +11,7 @@ the harvest's own logic is what is under test:
 * ``compute_signature`` -> a fixed Signature (so no elements.dat
   / $IMAGO_DATA is needed), recording the system_type it was
   asked for;
-* ``_load_structure`` -> a tiny stand-in carrying ``num_atoms``
+* ``load_structure`` -> a tiny stand-in carrying ``num_atoms``
   and ``real_cell_volume`` (so no real StructureControl read);
 * ``save_entry`` -> a capture that records the GuidanceEntry and
   returns a stub path (so the byte-deterministic emitter, already
@@ -45,6 +45,7 @@ _DATASPACE = types.SimpleNamespace(group_table={})
 def _make_workspace(tmp_path, kpds, energies, *,
                     gaps=None, kinds=None, mags=None,
                     scf_threshold=1.0, write_scf_threshold=True,
+                    kpoint_convergence_threshold=5.0e-4,
                     write_gap=True, add_loen=False,
                     policy="verify_around_prediction",
                     system_type="crystalline", confidence=0.9,
@@ -81,7 +82,12 @@ def _make_workspace(tmp_path, kpds, energies, *,
             "predicted_kpoint_density": 100.0,
             "is_under_trained": False,
             "basis": "fb", "functional": "gga-pbe",
-            "kpoint_integration": "gaussian-0.1"}}
+            "kpoint_integration": "gaussian-0.1",
+            # The producer stamps the resolved per-atom k-point
+            #   flatness tolerance on the record; the harvest reads
+            #   it as the convergence metric_threshold (DESIGN 7.8).
+            "kpoint_convergence_threshold":
+                kpoint_convergence_threshold}}
     serialize_flight(Flight(root=root, units=units, sweep=sweep,
                             metadata=metadata))
 
@@ -138,7 +144,7 @@ def patched(monkeypatch):
 
     monkeypatch.setattr(gh, "save_entry", fake_save)
     monkeypatch.setattr(gh, "compute_signature", fake_signature)
-    monkeypatch.setattr(gh, "_load_structure", fake_load_structure)
+    monkeypatch.setattr(gh, "load_structure", fake_load_structure)
     return captured
 
 
@@ -174,14 +180,17 @@ def test_swept_value_of_missing_axis_raises():
 
 
 def test_pick_converged_two_sided_and_no_endpoints():
-    """pick_converged needs BOTH neighbour deltas below threshold
-    and never returns an endpoint."""
-    # Flat only on the high side of index 1 -> not converged there;
-    #   index 2 is flat on both sides -> chosen.
+    """pick_converged needs BOTH neighbour PER-ATOM-eV deltas below
+    threshold and never returns an endpoint.  Energies are raw
+    total-cell hartree; with cell_atom_count=1 each delta becomes
+    |dE| * HARTREE eV/atom, so a 1.0 eV/atom threshold tolerates the
+    small tail deltas but not the big step down to 3.0 (DESIGN 7.8)."""
+    # index 1 is flat on the high side but its down-delta to 3.0 is
+    #   huge; index 2 is flat on both sides -> chosen.
     energies = [3.0, 2.0, 1.99, 1.985]
-    assert gh.pick_converged(energies, 0.1) == 2
+    assert gh.pick_converged(energies, 1, 1.0) == 2
     # Still moving everywhere -> None.
-    assert gh.pick_converged([3.0, 2.0, 1.0], 0.1) is None
+    assert gh.pick_converged([3.0, 2.0, 1.0], 1, 1.0) is None
 
 
 # --------------------------------------------------------------
@@ -242,7 +251,9 @@ def test_converged_entry_verification_and_provenance(patched,
     assert v.grid_values == (50, 100, 200)
     assert v.grid_energies == (0.5, 0.5, 0.5)
     assert v.metric == "total_energy"
-    assert v.metric_threshold == 1.0          # == scf_threshold
+    # metric_threshold is the resolved per-atom kpoint tolerance
+    #   from the prediction record, NOT the run's scf_threshold.
+    assert v.metric_threshold == 5.0e-4
     assert v.predictor_confidence == 0.83
     assert v.predictor_neighbor_ids == ("mp-1", "mp-2")
     assert entry.source == "flight"
