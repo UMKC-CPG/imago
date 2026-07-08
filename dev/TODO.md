@@ -2196,7 +2196,7 @@ DESIGN rung is already written; these are the code that follows
 it.  Reminder: `src/scripts` edits sync to `bin/` (the producer
 imports its neighbours from `$IMAGO_BIN`).
 
-- [ ] C110. Make the default wingbeat re-apply the unit's
+- [x] C110. Make the default wingbeat re-apply the unit's
   imago-side settings on every launch.  Motivation: the Si seed
   run showed a re-dispatched `-loen -scf no` unit run a full
   ground-state SCF ("SCF after loen").  Root cause: `ImagoWingbeat`
@@ -2215,6 +2215,12 @@ imports its neighbours from `$IMAGO_BIN`).
   build out to the driver's prepare pass; this makes the surviving
   run always carry its settings).  DESIGN 6.2.2 / 6.1; PSEUDOCODE
   13.2.  CODE.
+  DONE (settings fix): shipped the always-pass-settings half --
+  settings are built once and passed to `run_prepared` on both the
+  prepared and build paths, keeping the current two-path structure.
+  The single-path Model-A consolidation (drop the `_is_prepared`
+  branch, add `commit_prepared_inputs`) lands with C111.  Test:
+  `test_imago_runner_prepared_reapplies_imago_settings`.
 
 - [ ] C111. Key the run-reuse cache on `structure.dat` and run
   the prepare step in the driver (Model A).  Motivation: the seed

@@ -118,8 +118,22 @@ class ImagoWingbeat(Wingbeat):
         #   own runtime environment ($IMAGO_RC etc.) being set.
         import imago
 
+        # The imago-side options are RUN-TIME settings (job, edge,
+        #   scf_basis, ...) that do NOT live in a staged imago.dat
+        #   (DESIGN 6.2.10), so they must be re-applied on EVERY
+        #   launch -- including a re-run of an already-prepared
+        #   directory.  Otherwise a re-dispatched `-loen -scf no`
+        #   unit, seeing a prepared directory, would silently run a
+        #   default ground-state SCF in place of its loen job ("SCF
+        #   after loen").  Build the settings once, up front, and
+        #   pass them on both paths (DESIGN 6.2.2 / 6.1).
+        makeinput_options, imago_options = _partition_options(
+            unit.options)
+        settings = imago.ScriptSettings.from_options(imago_options)
+
         if self._is_prepared(wingbeat_dir):
-            result = imago.run_prepared(wingbeat_dir)
+            result = imago.run_prepared(
+                wingbeat_dir, settings=settings)
         else:
             # The wingbeat owns the makeinput/imago option split
             #   (DESIGN 6.2.10): a unit carries ONE options dict, but
@@ -131,12 +145,8 @@ class ImagoWingbeat(Wingbeat):
             #   which forwards a SINGLE options dict to both tools and
             #   so cannot serve their disjoint keys.
             import makeinput
-            makeinput_options, imago_options = _partition_options(
-                unit.options)
             makeinput.build_run_dir(
                 unit.structure, makeinput_options, wingbeat_dir)
-            settings = imago.ScriptSettings.from_options(
-                imago_options)
             result = imago.run_prepared(
                 wingbeat_dir, settings=settings)
 

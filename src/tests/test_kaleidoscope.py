@@ -656,6 +656,44 @@ def test_imago_runner_prepared_detection_under_inputs(tmp_path,
     assert used == {"prepared": True}
 
 
+def test_imago_runner_prepared_reapplies_imago_settings(tmp_path,
+                                                        monkeypatch):
+    """C110: a re-run of an already-prepared directory must STILL
+    receive the unit's imago-side settings.  The imago run-time
+    options (job / edge / scf_basis) do not live in a staged
+    imago.dat (DESIGN 6.2.10), so without this a re-dispatched
+    ``-loen -scf no`` unit would run a default ground-state SCF in
+    place of its loen job ("SCF after loen").  The prepared path
+    must build the settings from the imago-side options and pass
+    them to run_prepared, exactly as the build path does."""
+    import imago
+    (tmp_path / "imago.dat").write_text("X\n")   # prepared directory
+    captured = {}
+    settings_sentinel = object()
+
+    def fake_from_options(options):
+        captured["imago_options"] = options
+        return settings_sentinel
+
+    def fake_run_prepared(wingbeat_dir, settings=None, **kwargs):
+        captured["settings"] = settings
+        return _imago_result(imago.RunStatus.CONVERGED)
+
+    monkeypatch.setattr(imago.ScriptSettings, "from_options",
+                        fake_from_options)
+    monkeypatch.setattr(imago, "run_prepared", fake_run_prepared)
+
+    unit = CalcUnit(id="x", structure="s.skl",
+                    options={"job": "loen", "scf_basis": "no"})
+    ImagoWingbeat().run(unit, str(tmp_path))
+
+    # The built settings reached run_prepared (not the pre-fix
+    #   None), and they were built from the imago-side options only.
+    assert captured["settings"] is settings_sentinel
+    assert captured["imago_options"] == {"job": "loen",
+                                         "scf_basis": "no"}
+
+
 def test_partition_options_routes_by_recognised_key_set():
     """The wingbeat splits a unit's options three ways (DESIGN
     6.2.10): imago run-time selections go to imago, the cache-only
