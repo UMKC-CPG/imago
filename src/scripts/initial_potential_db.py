@@ -932,9 +932,12 @@ def _emit_fingerprint_block(lines: list[str],
     Implements PSEUDOCODE 11.2 ``emit_fingerprint_block``.  The
     block opens with ``method`` and ``sub_spec`` (in that fixed
     order), optionally followed by ``preferred = true``, then the
-    payload fields in the payload dict's iteration order.  All
-    ``=`` signs align within the block, so the alignment width
-    spans the fixed keys plus every payload key.
+    payload fields in the payload dict's iteration order.  The
+    ``=`` signs of the fixed keys and the scalar/array payload
+    keys align to one shared width; a *dict* payload (the reduce
+    ``shell_code``) is emitted as dotted keys with its own,
+    separate alignment (see below), so it does not widen the
+    block.
 
     The ``preferred`` line is emitted *only* when the record is
     preferred (DESIGN 5.6.5 step 2 / rule 10); a non-preferred
@@ -948,8 +951,12 @@ def _emit_fingerprint_block(lines: list[str],
     * a list of floats becomes a multi-line array, matching the
       ``coefficients``/``alphas`` layout (opener, one indented
       value per line with a trailing comma, closing ``]``);
-    * a dict becomes a single-line inline table (e.g., the
-      reduce matcher's ``shell_code``);
+    * a dict becomes a block of dotted keys (DESIGN 5.2), one
+      ``<key>.<subkey> = <value>`` per line -- e.g. the reduce
+      matcher's ``shell_code.element`` and ``shell_code.levels``.
+      A subkey holding a list of dicts (``shell_code.levels``)
+      becomes a multi-line array of inline tables, one table per
+      line; see :func:`_emit_dotted_table`;
     * any other scalar is rendered like any body scalar.
 
     ``sub_spec`` is always emitted as an inline table; unlike
@@ -968,7 +975,13 @@ def _emit_fingerprint_block(lines: list[str],
     if fp.preferred:
         fixed_keys.append("preferred")
     payload_keys = list(fp.payload.keys())
-    width = max(len(k) for k in fixed_keys + payload_keys)
+    # A dict payload (the reduce ``shell_code``) is emitted as
+    #   dotted keys with its own alignment, so it stays out of the
+    #   shared block width; only scalar and float-array payloads
+    #   (e.g. the bispectrum ``values``) join the fixed keys here.
+    aligned_keys = [k for k in payload_keys
+                    if not isinstance(fp.payload[k], dict)]
+    width = max(len(k) for k in fixed_keys + aligned_keys)
 
     lines.append(
         f"{'method'.ljust(width)} = "
@@ -991,9 +1004,7 @@ def _emit_fingerprint_block(lines: list[str],
                     "   " + _fmt_float(element) + ",")
             lines.append("]")
         elif isinstance(value, dict):
-            lines.append(
-                f"{key.ljust(width)} = "
-                f"{_format_inline_table(value)}")
+            _emit_dotted_table(lines, key, value)
         else:
             lines.append(_format_kv(key, value, width))
 
@@ -1045,6 +1056,67 @@ def _is_float_list(value: Any) -> bool:
     return (isinstance(value, list)
             and len(value) > 0
             and all(isinstance(x, float) for x in value))
+
+
+def _is_table_list(value: Any) -> bool:
+    """True for a non-empty list whose elements are all dicts.
+
+    Such a list is a TOML *array of inline tables* -- the reduce
+    ``shell_code.levels`` payload, one inline table per reduction
+    level.  :func:`_emit_dotted_table` lays these out one table
+    per line rather than as a single scalar array.
+    """
+
+    return (isinstance(value, list)
+            and len(value) > 0
+            and all(isinstance(x, dict) for x in value))
+
+
+def _emit_dotted_table(lines: list[str], key: str,
+                       table: dict[str, Any]) -> None:
+    """Append a payload dict as a block of dotted TOML keys.
+
+    This is the reduce ``shell_code`` layout (DESIGN 5.2): each
+    subkey becomes its own ``<key>.<subkey> = <value>`` line rather
+    than being folded into one inline table, so a deeply structured
+    payload stays readable.  For example::
+
+        shell_code.element = "au"
+        shell_code.levels  = [
+           { distance = 2.88e+00, neighbors = ["au", "au"] },
+        ]
+
+    The dotted keys align to their own shared width (independent of
+    the enclosing fingerprint block).  A subkey's value is rendered
+    by kind: a list of dicts (``levels``) becomes a multi-line array
+    of inline tables, one table per line with a trailing comma; a
+    list of scalars becomes a single-line array; a nested dict
+    becomes an inline table; anything else is a scalar.  Subkeys are
+    emitted in sorted order so equal payloads produce identical
+    bytes (the same determinism rule :func:`_format_inline_table`
+    follows).
+    """
+
+    dotted = {subkey: f"{key}.{subkey}" for subkey in table}
+    width = max(len(label) for label in dotted.values())
+    for subkey in sorted(table):
+        value = table[subkey]
+        label = dotted[subkey].ljust(width)
+        if _is_table_list(value):
+            lines.append(f"{label} = [")
+            for element in value:
+                lines.append(
+                    "   " + _format_inline_table(element) + ",")
+            lines.append("]")
+        elif isinstance(value, list):
+            rhs = "[" + ", ".join(
+                _format_scalar(element) for element in value) + "]"
+            lines.append(f"{label} = {rhs}")
+        elif isinstance(value, dict):
+            lines.append(
+                f"{label} = {_format_inline_table(value)}")
+        else:
+            lines.append(f"{label} = {_format_scalar(value)}")
 
 
 def _format_scalar(value: Any) -> str:

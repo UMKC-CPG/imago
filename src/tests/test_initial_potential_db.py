@@ -1236,6 +1236,70 @@ class TestEmitterFingerprintBlock:
         with open(path_a, "rb") as h_a, open(path_b, "rb") as h_b:
             assert h_a.read() == h_b.read()
 
+    def _db_with_reduce_shell_code(self):
+        # A reduce payload with the FULL shell_code shape (DESIGN
+        #   5.2): a central element plus several reduction levels,
+        #   each an inline table of a shell distance and a neighbor
+        #   element multiset.  The second level is a high-coordination
+        #   12-neighbor shell -- the real Si-diamond case that first
+        #   drove this path -- so option A's one-table-per-line layout
+        #   is exercised on a level that overflows 80 columns.
+        #   Distances are exactly representable (2.5, 4.0) so the
+        #   emitted %.16e text is stable to assert on.
+        db = _valid_db("Au")
+        db.potentials[1].fingerprints = [FingerprintRecord(
+            method    = "reduce",
+            sub_spec  = {"level": 2, "thick": 0.5, "cutoff": 5.0},
+            preferred = True,
+            payload   = {"shell_code": {
+                "element": "au",
+                "levels": [
+                    {"distance": 2.5,
+                     "neighbors": ["au", "au", "au", "au"]},
+                    {"distance": 4.0,
+                     "neighbors": ["au"] * 12},
+                ]}})]
+        return db
+
+    def test_reduce_shell_code_dotted_layout(self, tmp_path):
+        """A reduce shell_code is emitted as dotted keys (DESIGN
+        5.2) -- shell_code.element and shell_code.levels -- with
+        levels a multi-line array of inline tables, not folded into
+        one inline table.  The dotted keys align to their own width
+        (element is 18 chars, so levels gets one pad space)."""
+        path = _path_for(tmp_path, "Au")
+        save(self._db_with_reduce_shell_code(), path)
+        text = open(path).read()
+        assert "shell_code.element = \"au\"\n" in text
+        assert "shell_code.levels  = [\n" in text
+        # Each level is ONE inline table on its own line: keys in
+        #   sorted order (distance before neighbors), the distance a
+        #   %.16e float, the array element closed with a trailing
+        #   comma.
+        assert "{ distance = 2.5000000000000000e+00," in text
+        assert "neighbors = [\"au\", \"au\", \"au\", \"au\"] }," in text
+
+    def test_reduce_shell_code_round_trips(self, tmp_path):
+        """The full multi-level shell_code survives save -> load with
+        floats bit-exact and the neighbor multisets and level order
+        intact -- including the 12-neighbor shell whose emitted line
+        runs past 80 columns."""
+        path = _path_for(tmp_path, "Au")
+        save(self._db_with_reduce_shell_code(), path)
+        reloaded = load(path)
+        entry = lookup(reloaded, "default_solid")
+        fp = find_fingerprint(
+            entry, "reduce",
+            {"level": 2, "thick": 0.5, "cutoff": 5.0})
+        shell = fp.payload["shell_code"]
+        assert shell["element"] == "au"
+        assert len(shell["levels"]) == 2
+        assert shell["levels"][0] == {
+            "distance": 2.5,
+            "neighbors": ["au", "au", "au", "au"]}
+        assert shell["levels"][1]["distance"] == 4.0
+        assert shell["levels"][1]["neighbors"] == ["au"] * 12
+
 
 # ============================================================
 #  Rule 10 -- exactly one preferred record per present method
