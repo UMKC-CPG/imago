@@ -2278,6 +2278,7 @@ function load(path, known_methods = None):
         seen_method_subspec = set()
         methods_on_entry = set()      # rule 10
         preferred_on_entry = {}       # method -> count
+        entry_preferred_subspec = {}  # method -> canon sub_spec
         for fp_dict in entry_dict.get(
                 "fingerprint", []):
             require("method" in fp_dict, path, lbl,
@@ -2313,28 +2314,14 @@ function load(path, known_methods = None):
             # optional and defaults to false: a record
             # nobody flagged is an alternate sub_spec
             # riding along, never the canonical one.
+            # Both halves of the rule are checked below
+            # the loop, per entry, in that order.
             preferred = fp_dict.get("preferred", False)
             methods_on_entry.add(method)
             if preferred:
                 preferred_on_entry[method] = (
                     preferred_on_entry.get(method, 0) + 1)
-                # File-wide: every preferred record of a
-                # method must name the SAME sub_spec.  That
-                # agreement is what the flag MEANS -- it
-                # names the settings the consumer computes
-                # its query with (DESIGN 5.6.5 step 2) --
-                # and two flagged records disagreeing would
-                # leave no canonical answer.
-                if method in preferred_subspec:
-                    require(preferred_subspec[method] == canon,
-                        path, lbl,
-                        "preferred " + method + " records"
-                        + " disagree on sub_spec across the"
-                        + " file; the flag names the"
-                        + " canonical settings, so they must"
-                        + " agree")
-                else:
-                    preferred_subspec[method] = canon
+                entry_preferred_subspec[method] = canon
 
             # Payload = all keys other than method,
             # sub_spec, and preferred.  Matchers validate
@@ -2348,17 +2335,27 @@ function load(path, known_methods = None):
                 preferred = preferred,
                 payload   = payload))
 
-        # Rule 10, per ENTRY (DESIGN 5.2 rule 10).  For each
-        # method present on THIS entry, exactly one of its
-        # records is preferred.  The flag marks this entry's
-        # canonical record for that family: the consumer reads
-        # any one to learn which sub_spec to query at, and the
-        # dedup (5.2.3) asks EACH entry for its own canonical
+        # Rule 10, first half: PER ENTRY.  For each method
+        # present on THIS entry, exactly one of its records is
+        # preferred.  The flag marks this entry's canonical
+        # record for that family: the consumer reads any one to
+        # learn which sub_spec to query at, and the dedup
+        # (5.2.3) asks EACH entry for its own canonical
         # bispectrum -- so every harvested entry flags its own.
         #
         # An entry with no fingerprints (the "isolated"
         # baseline) has no method present and is vacuously
         # exempt: the loop below does not run.
+        #
+        # This is checked BEFORE the file-wide half, and the
+        # order is load-bearing.  Rule 8 already forbids two
+        # records sharing a (method, sub_spec) on one entry, so
+        # two FLAGGED records of one method necessarily differ
+        # in sub_spec.  Were the file-wide agreement checked
+        # first, it would fire on them and blame a disagreement
+        # "across the file" for what is ambiguity within a
+        # single entry.  Each failure gets its own accurate
+        # message this way.
         for method in sorted(methods_on_entry):
             count = preferred_on_entry.get(method, 0)
             require(count == 1, path, lbl,
@@ -2367,6 +2364,27 @@ function load(path, known_methods = None):
                 + " flagged preferred = true; exactly one is"
                 + " required so the entry has an unambiguous"
                 + " canonical record for that family")
+
+        # Rule 10, second half: FILE-WIDE.  Every preferred
+        # record of a method must name the SAME sub_spec.  That
+        # agreement is what the flag MEANS -- it names the
+        # settings the consumer computes its query with (DESIGN
+        # 5.6.5 step 2) -- and two entries flagging different
+        # settings would leave no canonical answer.  The first
+        # entry to flag a method fixes its sub_spec; every later
+        # entry is compared against that.
+        for method in sorted(entry_preferred_subspec):
+            canon = entry_preferred_subspec[method]
+            if method in preferred_subspec:
+                require(preferred_subspec[method] == canon,
+                    path, lbl,
+                    "preferred '" + method + "' records"
+                    + " disagree on sub_spec across the file;"
+                    + " the flag names the canonical settings,"
+                    + " so every preferred record of a method"
+                    + " must share one sub_spec")
+            else:
+                preferred_subspec[method] = canon
 
         db.potentials.append(PotentialEntry(
             label         = lbl,
