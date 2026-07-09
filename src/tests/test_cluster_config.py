@@ -409,6 +409,28 @@ def test_resolve_dispatch_cluster_threads_choices_through(monkeypatch):
                        "nodes": 4, "walltime": "06:00:00"}
 
 
+def test_resolve_dispatch_applies_the_queue_override(monkeypatch):
+    """The overlay reaches a real run: the queue is resolved from the
+    profile-overlaid file, its override applies, and the remaining
+    per-run choices then default from the overlaid site (DESIGN
+    6.2.11, decision 1).  Here the debug queue caps the walltime, and
+    the run named no --walltime, so it inherits the capped one."""
+    site = _filled_site(
+        partitions=["general", "debug"], walltime="12:00:00",
+        queue_overrides={"debug": {"walltime": "00:30:00"}})
+    monkeypatch.setattr(cc, "load_site_config", lambda profile: site)
+    monkeypatch.setattr(cc, "build_dispatch_config",
+                        lambda site, choices: "CONFIG")
+
+    _, choices = cc.resolve_dispatch("slurm-per-job", "debug")
+    assert choices["walltime"] == "00:30:00"
+
+    # The default queue is unaffected by the debug override.
+    _, choices = cc.resolve_dispatch("slurm-per-job")
+    assert choices["partition"] == "general"
+    assert choices["walltime"] == "12:00:00"
+
+
 def test_write_resolved_dispatch_records_the_choices(tmp_path):
     """The reproducible record carries the resolved choices and the
     profile, omits the stable site facts, and round-trips as TOML."""
@@ -472,6 +494,44 @@ def test_build_orchestrator_sbatch_omits_account_when_unset():
                "nodes": 1, "walltime": "02:00:00"}
     script = cc.build_orchestrator_sbatch(site, choices, "run")
     assert "--account" not in script
+
+
+def test_queue_override_overlays_only_the_selected_queue():
+    """A setting may differ by queue.  The selected queue's override
+    applies; overrides for queues this run does not use do not."""
+    site = _filled_site(
+        walltime="01:00:00", memory_per_worker=10,
+        queue_overrides={
+            "debug": {"walltime": "00:30:00"},
+            "bigmem": {"memory_per_worker": 200}})
+    debug = cc.apply_queue_overrides(site, "debug")
+    assert debug["walltime"] == "00:30:00"
+    assert debug["memory_per_worker"] == 10       # bigmem untouched
+
+
+def test_queue_override_absent_leaves_the_site_alone():
+    """A queue with no override yields the site dict unchanged."""
+    site = _filled_site(queue_overrides={"debug": {"nodes": 4}})
+    assert cc.apply_queue_overrides(site, "general") == site
+
+
+def test_queue_override_rejects_an_unknown_setting():
+    """A key naming no known setting is a typo, and a silently
+    ignored typo in a resource request is what this file exists to
+    prevent (DESIGN 6.2.11, decision 1)."""
+    site = _filled_site(
+        queue_overrides={"debug": {"walltim": "00:30:00"}})
+    with pytest.raises(cc.ConfigError, match="unknown setting"):
+        cc.apply_queue_overrides(site, "debug")
+
+
+def test_queue_override_may_not_set_the_selecting_keys():
+    """partitions and profiles choose WHICH overlay applies, so an
+    overlay that rewrote them would refer to itself."""
+    for key, value in (("partitions", ["x"]), ("profiles", {})):
+        site = _filled_site(queue_overrides={"debug": {key: value}})
+        with pytest.raises(cc.ConfigError, match="may not set"):
+            cc.apply_queue_overrides(site, "debug")
 
 
 class _Cli:

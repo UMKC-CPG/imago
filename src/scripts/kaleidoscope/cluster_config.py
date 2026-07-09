@@ -152,6 +152,57 @@ def load_site_config(profile=None):
     return site
 
 
+#: Settings a per-queue override may not set, because they choose
+#:   WHICH overlay applies -- an overlay rewriting them would refer
+#:   to itself (DESIGN 6.2.11, decision 1).
+_OVERLAY_SELECTING_KEYS = ("partitions", "profiles")
+
+
+def apply_queue_overrides(site, partition):
+    """Overlay the selected queue's settings onto the site dict.
+
+    A setting may legitimately differ by queue -- a debug queue with
+    a short walltime cap, a large-memory queue with a different
+    per-node capacity -- so ``queue_overrides`` maps a queue name to
+    the settings that differ there.  This is the third of four
+    overlays (DESIGN 6.2.11, decision 1): built-in defaults, then the
+    named profile, then *this*, then the per-run command-line flags.
+
+    It lives here rather than inside :func:`load_site_config` because
+    it needs to know which queue the run uses, and the queue is
+    itself a per-run choice.  The caller resolves the queue from the
+    profile-overlaid file, applies this, and only then lets the
+    remaining choices take their defaults from the result.
+
+    A file may carry overrides for every queue on the cluster; the
+    ones this run does not use are simply not applied.
+
+    Raises
+    ------
+    ConfigError
+        If an override names a setting that does not exist -- almost
+        always a typo, and a silently ignored typo in a resource
+        request is exactly what this settings file exists to prevent
+        -- or if it tries to set ``partitions`` or ``profiles``.
+    """
+    override = site.get("queue_overrides", {}).get(partition)
+    if not override:
+        return site
+
+    for key in override:
+        if key in _OVERLAY_SELECTING_KEYS:
+            raise ConfigError(
+                f"queue override for {partition!r} may not set "
+                f"{key!r}: it selects which overlay applies.")
+        if key not in site:
+            raise ConfigError(
+                f"queue override for {partition!r} names unknown "
+                f"setting {key!r}; check the spelling against "
+                f"clusterrc.py.")
+
+    return {**site, **override}
+
+
 # ----------------------------------------------------------------
 #  Layer 2: the per-run choices
 # ----------------------------------------------------------------
@@ -462,6 +513,12 @@ def resolve_dispatch(dispatch_shape, partition=None, nodes=None,
     if dispatch_shape == "local":
         return None, None
     site = load_site_config(profile)
+    # The queue decides which per-queue override applies, so resolve
+    #   it first, from the profile-overlaid file, then overlay, then
+    #   let the remaining choices default from the result (DESIGN
+    #   6.2.11, decision 1: defaults -> profile -> queue -> flags).
+    queue = partition or site["partitions"][0]
+    site = apply_queue_overrides(site, queue)
     choices = resolve_choices(site, SimpleNamespace(
         dispatch=dispatch_shape, partition=partition,
         nodes=nodes, walltime=walltime))

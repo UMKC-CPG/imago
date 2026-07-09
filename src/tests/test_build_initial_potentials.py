@@ -2536,11 +2536,6 @@ def test_submit_orchestrator_batch_writes_and_submits(
         lambda s, cli: {"dispatch": "slurm-per-job",
                         "partition": "general", "nodes": 1,
                         "walltime": "02:00:00"})
-    monkeypatch.setattr(
-        bip.sys, "argv",
-        ["build_initial_potentials.py", "--manifest", "m.toml",
-         "--dispatch", "slurm-per-job", "--submit"])
-
     captured = {}
 
     def fake_run(cmd, **kwargs):
@@ -2553,8 +2548,11 @@ def test_submit_orchestrator_batch_writes_and_submits(
     args = types.SimpleNamespace(
         profile=None, dispatch="slurm-per-job", partition=None,
         nodes=None, walltime=None)
+    # The FLAG vector this run parsed -- no program name in it.
+    flags = ["--manifest", "m.toml", "--dispatch", "slurm-per-job",
+             "--submit"]
 
-    job_id = bip.submit_orchestrator_batch(args, str(tmp_path))
+    job_id = bip.submit_orchestrator_batch(flags, args, str(tmp_path))
 
     assert job_id == "12345"
     assert captured["cmd"][0] == "sbatch"
@@ -2564,6 +2562,53 @@ def test_submit_orchestrator_batch_writes_and_submits(
     assert "--dispatch slurm-per-job" in captured["script"]
     assert "--submit" not in captured["script"]
     assert "--manifest m.toml" in captured["script"]
+
+
+def test_submit_ignores_the_process_argv(tmp_path, monkeypatch):
+    """The inner command is built from the FLAG vector this run
+    parsed, never from the process's own arguments.  A library caller
+    driving main(argv) lives in a process whose sys.argv belongs to
+    something else entirely (a test runner, a notebook); reading it
+    would submit a batch job that re-runs that instead of the
+    producer.  The script also names itself by path, so the command
+    is correct however this process was launched."""
+    site = {
+        "account": None, "worker_init": ["module load imago"],
+        "extra_scheduler_options": [],
+        "orchestrator": {"cores": 1, "walltime": "01:00:00"},
+    }
+    monkeypatch.setattr(bip, "load_site_config", lambda profile: site)
+    monkeypatch.setattr(
+        bip, "resolve_choices",
+        lambda s, cli: {"dispatch": "local", "partition": "p",
+                        "nodes": 1, "walltime": "02:00:00"})
+    # The process argv belongs to the test runner, not the producer.
+    monkeypatch.setattr(
+        bip.sys, "argv", ["pytest", "-q", "--some-pytest-flag"])
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["script"] = open(cmd[1]).read()
+        return types.SimpleNamespace(stdout="Submitted batch job 9\n")
+
+    monkeypatch.setattr(bip.subprocess, "run", fake_run)
+    args = types.SimpleNamespace(
+        profile=None, dispatch="local", partition=None, nodes=None,
+        walltime=None, orchestrator_cores=None,
+        orchestrator_memory=None, orchestrator_walltime=None)
+    flags = ["--manifest", "seed.toml", "--dispatch", "local",
+             "--submit"]
+
+    bip.submit_orchestrator_batch(flags, args, str(tmp_path))
+
+    command = captured["script"].strip().splitlines()[-1]
+    assert "--manifest seed.toml" in command
+    assert "build_initial_potentials.py" in command
+    assert "--submit" not in command
+    # Nothing from the surrounding process leaks into the job.
+    assert "pytest" not in command
+    assert "--some-pytest-flag" not in command
 
 
 def test_submit_honors_orchestrator_overrides(tmp_path, monkeypatch):
@@ -2583,11 +2628,6 @@ def test_submit_honors_orchestrator_overrides(tmp_path, monkeypatch):
         bip, "resolve_choices",
         lambda s, cli: {"dispatch": "local", "partition": "general",
                         "nodes": 1, "walltime": "02:00:00"})
-    monkeypatch.setattr(
-        bip.sys, "argv",
-        ["build_initial_potentials.py", "--dispatch", "local",
-         "--orchestrator-memory", "64G", "--submit"])
-
     captured = {}
 
     def fake_run(cmd, **kwargs):
@@ -2603,8 +2643,11 @@ def test_submit_honors_orchestrator_overrides(tmp_path, monkeypatch):
         profile=None, dispatch="local", partition=None, nodes=None,
         walltime=None, orchestrator_cores=None,
         orchestrator_memory="64G", orchestrator_walltime=None)
+    flags = ["--dispatch", "local",
+             "--orchestrator-memory", "64G", "--submit"]
 
-    assert bip.submit_orchestrator_batch(args, str(tmp_path)) == "777"
+    assert bip.submit_orchestrator_batch(
+        flags, args, str(tmp_path)) == "777"
     assert "#SBATCH --mem=64G" in captured["script"]
     # The keys the flag did not name still come from the site block.
     assert "#SBATCH --cpus-per-task=2" in captured["script"]

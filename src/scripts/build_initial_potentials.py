@@ -1989,7 +1989,8 @@ def _print_materialize_report(report: list[dict[str, Any]]) -> None:
           f"fetched and converted")
 
 
-def submit_orchestrator_batch(args, data_root: str) -> str:
+def submit_orchestrator_batch(argv: list[str], args,
+                              data_root: str) -> str:
     """Materialize-then-submit (DESIGN 6.2.11): build the
     orchestrator's sbatch script and submit it, returning the SLURM
     job id.
@@ -2002,6 +2003,14 @@ def submit_orchestrator_batch(args, data_root: str) -> str:
     driver's own resources come from the site's ``orchestrator``
     block (ARCHITECTURE 9.4), sized to the dispatch shape, with any
     ``--orchestrator-*`` flag overriding that block for this run.
+
+    ``argv`` is the flag vector :func:`main` parsed, with no program
+    name in it.  It is threaded in rather than read from the process,
+    because a library caller may drive ``main(argv)`` with a vector
+    that has nothing to do with the process's own arguments -- and
+    reading the process would then submit a batch job that re-runs
+    whatever launched us.  The script names itself by path for the
+    same reason.
     """
     site = load_site_config(args.profile)
     choices = resolve_choices(site, args)
@@ -2010,9 +2019,10 @@ def submit_orchestrator_batch(args, data_root: str) -> str:
     #   batch invocation runs the build itself (not another submit).
     #   The --orchestrator-* flags may ride along untouched: they are
     #   read only when submitting, and the inner run does not submit.
-    inner = [item for item in sys.argv if item != "--submit"]
+    inner = [item for item in argv if item != "--submit"]
     command = " ".join(
-        shlex.quote(item) for item in [sys.executable, *inner])
+        shlex.quote(item) for item in
+        [sys.executable, os.path.abspath(__file__), *inner])
     script_text = build_orchestrator_sbatch(site, choices, command,
                                             orchestrator)
     script_path = os.path.join(data_root, "orchestrator.sbatch")
@@ -2123,7 +2133,12 @@ def main(argv=None) -> int:
              "outlast the flight it supervises (default: the "
              "clusterrc 'orchestrator' block's walltime, else the "
              "run's --walltime)")
-    args = parser.parse_args(argv)
+    # The flag vector this run was given, program name excluded.  It is
+    #   what --submit re-invokes inside the batch job, so it must be the
+    #   vector we actually parsed, not the process's arguments (a
+    #   library caller may drive main(argv) from a different process).
+    flags = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(flags)
 
     if not args.pdb_root:
         parser.error("--pdb-root not given and $IMAGO_DATA is unset")
@@ -2158,7 +2173,7 @@ def main(argv=None) -> int:
             print("producer: materialize failed; not submitting the "
                   "orchestrator batch job")
             return 1
-        job_id = submit_orchestrator_batch(args, data_root)
+        job_id = submit_orchestrator_batch(flags, args, data_root)
         print("producer: submitted orchestrator batch job "
               + job_id)
         return 0
