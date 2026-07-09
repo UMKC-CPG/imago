@@ -6911,6 +6911,31 @@ dataspace of section 8 grows its own.  Making un-overlaid
 settings *unobtainable* is what keeps them honest: the mistake
 is not merely avoided, it cannot be written.
 
+**Every overlay merges per key, at every layer.**  Most
+settings are a single value, and overlaying one simply
+replaces it.  But a setting may itself be a *block* of
+settings -- `orchestrator` is one, holding the driver's
+cores, memory, and walltime -- and there an overlay names
+only the keys it means to change.  The others keep the value
+the layer beneath them gave.  A curator who writes, of the
+debug queue, "the driver needs only two gigabytes there"
+must not thereby lose the driver's core count and time
+limit: they never mentioned those, and would receive not an
+error but two plausible-looking fallbacks in their place.
+
+This is the same rule already stated for the per-run
+`--orchestrator-*` flags below, and it is stated once here
+because it governs all three overlays -- profile, queue, and
+flags alike.  Whole-block replacement silently discards
+facts the curator never meant to touch, and it does so at
+whichever layer is allowed to do it; there is no layer at
+which that is the desirable reading.
+
+The merge goes exactly one level down.  A block of settings
+holds plain values, not further blocks, so a deeper merge
+would have nothing to descend into and would only obscure
+what a given overlay can reach.
+
 Two guards, in keeping with the strict-contract discipline
 the rest of the settings file follows.  A key inside an
 override that names no known setting is a configuration
@@ -7141,7 +7166,11 @@ Three properties of the override, each a deliberate choice:
 - **Per key, not whole block.**  Overriding the memory must
   leave the site's cores and walltime standing.  A
   whole-block replacement would silently discard the site
-  facts the curator never meant to touch.
+  facts the curator never meant to touch.  This is the
+  general overlay rule of decision 1, applied at the last
+  layer: the flags merge into the block the profile and
+  queue overlays have already built, exactly as those two
+  merged into the built-in defaults.
 - **Walltime alone keeps a further fallback.**  An unset
   `cores` or `memory` simply goes unrequested and the
   scheduler applies its own default, which is harmless.  An

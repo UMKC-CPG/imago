@@ -6040,6 +6040,29 @@ function clusterrc.parameters_and_defaults():
 ```
 
 ```
+function merge_settings(base, overlay):
+    # The ONE merge every overlay uses -- profile, queue, and the
+    # per-run flags alike (DESIGN 6.2.11, decision 1).  Per key, and
+    # one level down: when a setting is itself a BLOCK of settings
+    # (`orchestrator` is the only one today), the overlay names only
+    # the keys it means to change and the rest keep the value the
+    # layer beneath gave them.
+    #
+    # Replacing the whole block instead would silently discard facts
+    # the curator never mentioned -- "the driver needs 2G on the
+    # debug queue" would also drop its cores and walltime, and they
+    # would reappear as plausible-looking fallbacks rather than as
+    # an error.  A block holds plain values, never further blocks,
+    # so one level is the whole of the descent.
+    result = copy(base)
+    for key, value in overlay.items():
+        if is_block(base.get(key)) and is_block(value):
+            result[key] = merge(base[key], value)   # one level
+        else:
+            result[key] = value
+    return result
+
+
 function load_site_config(profile=None, partition=None):
     # Reading the settings file and overlaying it are ONE
     #   operation (DESIGN 6.2.11, decision 1).  The loader takes
@@ -6055,7 +6078,7 @@ function load_site_config(profile=None, partition=None):
     # Overlay 1: a named profile (advanced tier), so a user with
     # several clusters selects one by name.
     if profile is not None:
-        site = merge(site, site["profiles"][profile])
+        site = merge_settings(site, site["profiles"][profile])
     # The required core must be present; everything else has a
     # default.  A gap here is a config error raised up front,
     # never a crash mid-flight (the strict-contract discipline
@@ -6101,7 +6124,9 @@ function apply_queue_overrides(site, partition):
             raise ConfigError(
                 "queue override may not set " + key)
 
-    return merge(site, override)
+    # Per key, one level down: a queue that names only the driver's
+    # memory keeps the site's driver cores and walltime.
+    return merge_settings(site, override)
 ```
 
 ```
