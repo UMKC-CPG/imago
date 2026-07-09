@@ -2553,13 +2553,24 @@ function save(db, path):
 function emit_fingerprint_block(out, fp):
     out.append("[[potential.fingerprint]]")
 
-    # method and sub_spec come first, in that order;
-    # the payload keys follow in the payload dict's
-    # iteration order.  Width alignment spans
-    # method/sub_spec plus the payload's scalar and
-    # multi-line keys, so all `=` signs align within
-    # the block.
+    # method and sub_spec come first, in that order,
+    # then `preferred` when the record carries it, then
+    # the payload keys in the payload dict's iteration
+    # order.  Width alignment spans method/sub_spec plus
+    # the payload's scalar and multi-line keys, so all
+    # `=` signs align within the block.
+    #
+    # `preferred` is emitted ONLY when true, and joins the
+    # alignment key set only then: a non-preferred record
+    # omits the line entirely (the flag defaults to false
+    # on read, 11.1) and must not pad the block to a width
+    # it never uses.  It must be emitted, though -- rule 10
+    # is a statement about the FILE, so a flag the emitter
+    # dropped would make every saved database fail its own
+    # loader on the next read.
     fixed_keys   = ["method", "sub_spec"]
+    if fp.preferred:
+        fixed_keys.append("preferred")
     payload_keys = list(fp.payload.keys())
     align_keys   = fixed_keys + payload_keys
     width        = max(len(k) for k in align_keys)
@@ -2569,6 +2580,8 @@ function emit_fingerprint_block(out, fp):
         "sub_spec",
         format_inline_table(fp.sub_spec),
         width))
+    if fp.preferred:
+        out.append(format_kv("preferred", "true", width))
 
     for k in payload_keys:
         v = fp.payload[k]
