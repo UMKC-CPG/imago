@@ -833,15 +833,13 @@ the producer is a *what-to-compute* script, while
 kaleidoscope owns running, caching, and tracking the
 batch.
 
-This replaces the earlier shape in which the producer
-ran SCFs through its own driver and kept its own
-per-solid SCF cache.  That bespoke cache is gone:
-kaleidoscope's run-reuse cache (9.6) subsumes it --
-keyed on `structure.dat`, makeinput's resolved output,
-which bakes in the type/species assignment, basis,
-functional, and potential, plus the build identity
-(the imago commit) -- so editing an entry customization
-no longer re-triggers SCF; only the cheap harvest step
+The producer keeps no cache of its own.  Kaleidoscope's
+run-reuse cache (9.6) serves it, keyed on `structure.dat`
+-- makeinput's resolved output, which bakes in the
+type/species assignment, basis, functional, and
+potential -- plus the build identity (the imago commit).
+Because an entry customization touches none of those, editing
+one re-triggers no SCF: only the cheap harvest step
 re-runs.
 
 **Prepare runs in the driver, not the worker.**  Keying

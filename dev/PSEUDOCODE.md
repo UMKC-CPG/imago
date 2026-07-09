@@ -3713,6 +3713,26 @@ rare per-entry override), and insert-or-skips the result
 into the per-element database (DESIGN 5.2.3), contributing
 the same converged point back to the guidance dataspace.
 
+**The injected-step convention.**  Five of the pipeline's steps
+are taken as *parameters* rather than called by name:
+`prepare_fn`, `dispatch_fn`, `extract_fn`, `identity_fn`, and
+`fingerprint_fn`.  Each defaults to the real thing -- the
+driver-side prepare pass, kaleidoscope's dispatch, the `scfV`
+potential reader, the `datSkl.map` site-identity reader, and the
+fingerprint harvest -- so a production run names none of them and
+reads exactly as the phases above describe.
+
+They exist because every one of those five steps needs a live
+Imago run underneath it, and the producer's *orchestration* is
+what the tests need to exercise: whether the manifest resolves,
+whether one flight is built, whether a converged rung is picked,
+whether the insert-or-skip is idempotent.  Injecting the five
+lets that orchestration be tested end to end with the toolchain
+mocked, and keeps the seam explicit at the signature rather than
+hidden behind patched module globals.  The convention is named
+once here so a reader meets it once rather than five times; the
+pseudocode below calls each step by its plain name.
+
 The v2 manifest reader (`load_manifest_v2` below)
 enforces the validation rules of DESIGN 5.7.
 That reader, the relaxed structure-only reader
@@ -5739,7 +5759,7 @@ Each `KeyFile` names both halves the compare needs -- the
 `source` (the current input) and the `name` (the staged copy's
 run-dir path) -- so the core stays oblivious to how a client's
 inputs map onto staged files (DESIGN 6.2.5).  For the producer,
-the driver's prepare step (15.6, Phase 1b) points the
+the driver's prepare step (11.4, Phase 1b) points the
 `structure.dat` KeyFile's `source` at the staged copy it builds.
 
 ### 13.5 Dispatch driver (DESIGN 6.2.3)
@@ -7549,7 +7569,7 @@ function build_kpoint_convergence(structure, options, dataspace,
     # multi-structure producer supply the shared root when it
     # merges the per-structure flights.
     sc = (structure if is_structure_control(structure)
-          else load_skl(structure))
+          else load_structure(structure))
     query_sig = compute_signature(
         sc, system_type, dataspace.group_table)
 
@@ -7667,7 +7687,7 @@ function standard_key_fields(structure, options):
     # changing misses the cache on its own, with no hand-listed
     # "options that matter" to fall stale.  The KeyFile `source`
     # is provisional here (the skeleton `structure`); the driver's
-    # prepare step (15.6, Phase 1b) re-points it at the built
+    # prepare step (11.4, Phase 1b) re-points it at the built
     # structure.dat once that file exists.
     return KeyFields(
         scalars = { name : options[name]
@@ -7838,7 +7858,7 @@ function harvest_flight(workspace_root, db_root, dataspace):
         # The per-atom comparison needs the cell size, so load the
         #   structure once here; step (f) reuses it for the
         #   signature and the cell facts.
-        sc = load_skl(grid[0].structure)         # read_input_file
+        sc = load_structure(grid[0].structure)   # read_input_file
         cell_atom_count = sc.num_atoms
 
         # d. Pick the converged grid point (DESIGN 7.8 3c): the

@@ -5722,10 +5722,19 @@ surface convergence in `status.toml` *and* stay ignorant
 of what convergence means.
 
 - The **default wingbeat** (`ImagoWingbeat`) drives the 6.1
-  API.  The driver's prepare step (6.2.5) has already built
-  this unit's inputs into its staging area, so the wingbeat
-  does not build: it **commits the staged inputs** into the
-  run directory and runs them with `imago.run_prepared`.  It
+  API.  It first **stages the run directory**, which has three
+  cases because the wingbeat is generic and only *some* clients
+  prepare.  When the unit names a staging area -- the producer,
+  whose driver-side prepare step (6.2.5) already built the
+  inputs there -- the wingbeat does not build: it **commits the
+  staged inputs** into the run directory.  When the run
+  directory already holds staged inputs (a re-launch of a
+  directory a prior run built) there is nothing to do.  Only
+  when neither holds -- a client that never prepared -- does the
+  wingbeat **build** the inputs itself with makeinput, from the
+  unit's structure and its makeinput-side options.  In every
+  case it then runs the prepared directory with
+  `imago.run_prepared`.  It
   STILL **re-applies the unit's imago-side settings** on that
   run -- it partitions the unit's options (6.2.10) and passes
   the imago-side ones (`job` / `edge` / `scf_basis`) to
@@ -6045,10 +6054,8 @@ existing `is_cached_v2` (DESIGN 5.7) and generalizing it:
 in `CalcUnit.key_fields`; only it knows which inputs
 define identity for its calculations.  Kaleidoscope never
 guesses -- a too-broad key risks false hits and wrong
-science; a too-narrow key risks needless re-runs.  This
-mechanism subsumes the producer's bespoke
-`share/atomicBDB/cache/scf/<reference_id>/`; C69 folds
-that producer cache into this one.
+science; a too-narrow key risks needless re-runs.  One cache
+serves every client: the producer keeps no cache of its own.
 
 **Prepare before the hit-test.**  Because the producer's
 key file is makeinput's output, makeinput must run *before*
@@ -7079,8 +7086,7 @@ serial prepare becomes the bottleneck, prepare-and-hit-test
 can itself move onto dispatched worker units -- at the cost
 that a hit then occupies a cheap worker slot rather than being
 decided driver-local.  That transition is a later refinement,
-turned on when the serial cost bites; the driver-in-batch
-model and the orchestrator block are tracked as TODO C113.
+turned on when the serial cost bites.
 
 ### 6.3 makeinput callable build API
 
@@ -8858,7 +8864,16 @@ still passes and the curator can spot it on review).
               auto-promote rule can judge flatness from
               the staged file alone),
               converged_at = chosen k-density,
-              metric/metric_threshold,
+              metric, and metric_threshold -- the
+              resolved kpoint_convergence_threshold,
+              read from this structure's `prediction`
+              record.  That record is the channel: the
+              harvest is a standalone tool pointed at a
+              finished workspace (7.8) and never sees the
+              manifest, so the producer stamps the
+              resolved value onto the record when it
+              builds the flight, exactly as it does
+              system_type and the sub-model,
               predictor_confidence and
               predictor_neighbor_ids from this
               structure's `prediction` record.

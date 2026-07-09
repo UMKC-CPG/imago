@@ -2046,7 +2046,7 @@ shipped.
   the reader/emitter (5.5 / PSEUDOCODE 11.1-11.2), and
   the harvest (5.7); the merge asserts equal alpha SETS
   before averaging.  CODE; DESIGN 5.2.3; PSEUDOCODE 11.4.
-- [ ] C104. Manifest `[defaults]` hoist + cod_fish complete
+- [x] C104. Manifest `[defaults]` hoist + cod_fish complete
   manifest (DESIGN 5.7; ARCH 8.5).  Design DONE (this commit).
   Code work: (a) curation_manifest.py: add a top-level
   `[defaults]` block holding the five shared run settings
@@ -2068,6 +2068,14 @@ shipped.
   repeating settings per solid; source defaults from the shared
   library.  `system_type` stays per-solid (structure metadata,
   not defaulted).  CODE; DESIGN 5.7; ARCH 8.5.
+  DONE: all three sub-items shipped -- `curation_manifest`
+  parses, resolves, and writes `[defaults]`; `cod_fish` emits a
+  complete runnable manifest with `--sketch-only` for bare stubs;
+  `expand_manifest` reads a sketch from stdin and hoists the
+  shared settings via `shared_defaults()` + `sparse_solid()`.
+  The box stayed unchecked past the work because the matching
+  PSEUDOCODE 11.6 sync was still outstanding; that sync is C114,
+  which is now done as well.
 - [ ] C105. On-disk potential-file schema migration / version
   guard (initial_potential_db).  Surfaced 2026-07-01 during the
   C91 Si seed: the incremental producer loads each existing
@@ -2207,14 +2215,18 @@ imports its neighbours from `$IMAGO_BIN`).
   13.2 (Model A): the wingbeat always rebuilds the imago-side
   settings from the unit's options (`{k: v for ... if k in
   imago.OPTION_KEYS}` -> `ScriptSettings.from_options`) and passes
-  them to `run_prepared(dir, settings=...)`.  Under Model A the
-  driver prepares every unit, so the wingbeat has a SINGLE path
-  (commit the staged inputs, then run) -- there is no separate
-  "already prepared" branch to special-case; it always passes
-  settings.  Merges with C111 at the wingbeat (C111 moves the
-  build out to the driver's prepare pass; this makes the surviving
-  run always carry its settings).  DESIGN 6.2.2 / 6.1; PSEUDOCODE
-  13.2.  CODE.
+  them to `run_prepared(dir, settings=...)`.  The plan here
+  assumed Model A would leave the wingbeat a SINGLE path (commit
+  the staged inputs, then run), since the driver prepares every
+  unit.  C111 found otherwise and did not build it: `ImagoWingbeat`
+  is generic, and a client that never prepares arrives with no
+  staging area, so the shipped `_stage_inputs` keeps three cases
+  (commit a staged copy / nothing to do / build with makeinput).
+  Settings are re-applied on every path regardless, which is what
+  this item is actually about.  Merges with C111 at the wingbeat
+  (C111 moves the build out to the driver's prepare pass; this
+  makes the surviving run always carry its settings).  DESIGN
+  6.2.2 / 6.1; PSEUDOCODE 13.2.  CODE.
   DONE (settings fix): shipped the always-pass-settings half --
   settings are built once and passed to `run_prepared` on both the
   prepared and build paths, keeping the current two-path structure.
@@ -2364,7 +2376,7 @@ imports its neighbours from `$IMAGO_BIN`).
   (shipped in 6e8db47, DESIGN + code only) was back-filled into
   13.7 in the same pass.
 
-- [ ] C114. Sync the PSEUDOCODE writer to the shipped `[defaults]`
+- [x] C114. Sync the PSEUDOCODE writer to the shipped `[defaults]`
   manifest.  Surfaced 2026-07-08 during the seed-run refinement
   `/refine`: the `[defaults]` block shipped in code (C104 --
   `curation_manifest.py` resolution and the `expand_manifest` /
@@ -2383,6 +2395,21 @@ imports its neighbours from `$IMAGO_BIN`).
   from the write-it-down rule (it has a default and the resolved
   value is recorded on each guidance entry), so either is valid.
   PSEUDOCODE 11.6; DESIGN 5.7.
+  DONE: PSEUDOCODE 11.6 rewritten against DESIGN 5.7 -- the four
+  top-level blocks each gain a writing counterpart, solids carry
+  only the run settings they override, `preferred` is never
+  serialized (it is structural, recovered from the block a
+  declaration lands in), and `expand_manifest` is re-specified as
+  the `shared_defaults()` + `sparse_solid()` hoist the code
+  actually uses.  The open sub-question is SETTLED: the authoring
+  tools populate no harvest dict and emit no `[harvest]` block
+  (leaning on the built-in default), but a curator-authored block
+  must survive -- and did not.  Writing the pseudocode exposed a
+  live bug: `format_manifest` never emitted `[harvest]` at all, so
+  an authored `kpoint_convergence_threshold` was silently dropped
+  on rewrite and the next load fell back to the built-in, doubling
+  the convergence tolerance with nothing on screen.  Fixed with
+  three tests (one fails as `assert 0.0005 == 0.00025`).
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 
