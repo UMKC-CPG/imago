@@ -4779,75 +4779,172 @@ function benchInitialPotential(benchmark_path):
 
 The *write* side of the schema library
 (`curation_manifest.py`); `load_manifest_v2` (11.4) is the
-*read* side.  `cod_fish` prints sketch `[[reference_solid]]`
-stubs, the curator collects them, and `expand_manifest`
-completes them into a manifest the writer serializes.  The
-writer emits human-readable TOML -- shortest round-trippable
-floats, inline `sub_spec` tables in their authored order,
-`label` only when present and `preferred` only when true --
-and its output round-trips through `load_manifest_v2`.
+*read* side.  `cod_fish` prints a complete manifest (or, with
+`--sketch-only`, bare `[[reference_solid]]` stubs), the curator
+collects them, and `expand_manifest` completes a sketch into a
+manifest the writer serializes.  The writer emits human-readable
+TOML -- shortest round-trippable floats, inline `sub_spec`
+tables in their authored order, and every optional customization
+field only when it is set.
+
+**The round-trip is the writer's contract**: whatever
+`load_manifest_v2` reads, `format_manifest` must write back, or a
+curator's setting silently disappears on the next authoring pass
+(DESIGN 5.7).  This is why the two *shared* blocks are emitted
+whenever they are non-empty, and why the reader's four top-level
+concerns -- `schema_version`, `[characterization]`, `[defaults]`,
+`[harvest]` -- all have a writing counterpart below.
+
+Two things the writer deliberately does NOT emit:
+
+- **A run setting a solid did not name.**  A solid carries a run
+  setting only to *override* `[defaults]`; an unset one is
+  `None` and is left out, so the file stays sparse and the
+  inheritance is visible rather than copied onto every solid.
+- **The `preferred` flag, anywhere.**  Preference is
+  *structural*, recovered from the block a fingerprint
+  declaration lands in: `true` for a `[characterization]`
+  record, `false` for a per-entry one (DESIGN 5.7, rule 11).
+  Writing it as a key would let it contradict its own position.
 
 ```
 function format_manifest(manifest):
     lines = ["schema_version = " + manifest.schema_version]
+
+    # The database-wide preferred recipe: one sub_spec per method,
+    # applied to every harvested environment (rule 11).  Each
+    # method is its own sub-table; no preferred key is written.
+    if manifest.characterization:
+        emit "[characterization]"
+        for fp in manifest.characterization:
+            emit "[[characterization.fingerprint]]"
+            emit method, sub_spec (inline table)
+
+    # The shared RUN settings, inherited by every solid that does
+    # not override them.  Emitted in RUN_SETTING_KEYS order (not
+    # dict order) so the file is stable across authoring tools.
+    if manifest.defaults:
+        emit "[defaults]"
+        for key in RUN_SETTING_KEYS:
+            if key in manifest.defaults:
+                emit key = manifest.defaults[key]
+
+    # The shared HARVEST settings -- how finished runs are read
+    # BACK, as opposed to how they are run (DESIGN 5.7).  Emitted
+    # on the same when-non-empty rule as [defaults]: silent when
+    # the manifest leans on the built-in default, faithful when a
+    # curator wrote one down.  Omitting this block would drop an
+    # authored kpoint_convergence_threshold on every rewrite.
+    if manifest.harvest:
+        emit "[harvest]"
+        for key in HARVEST_SETTING_KEYS:
+            if key in manifest.harvest:
+                emit key = manifest.harvest[key]
+
     for solid in manifest.reference_solids:
         emit "[[reference_solid]]"
         emit reference_id, system_type
+        # Exactly one structure source is set (rule 4).
         if solid.cod_id is not None:
             emit cod_id, cod_revision
         else:
             emit structure_path
-        # A table's scalars (and the inline kpoint_spec)
-        # precede its sub-tables, as TOML requires.
-        emit basis, functional, kpoint_integration,
-             kpoint_spec (inline table), scf_threshold
+        # A table's scalars (and the inline kpoint_spec) precede
+        # its sub-tables, as TOML requires.  Each run setting is
+        # emitted ONLY as an override of [defaults].
+        for key in RUN_SETTING_KEYS:
+            if getattr(solid, key) is not None:
+                emit key = getattr(solid, key)
+        if solid.source_description is not None:
+            emit source_description
+
         for entry in solid.entries:
             emit "[[reference_solid.entry]]"
-            emit element, atom_site, default, description
-            if entry.label is not None: emit label
+            # Every customization field is optional (DESIGN 5.2.2):
+            # emit each only when set, and `default` only when
+            # true, since an absent flag reads as false.
+            if entry.element     is not None: emit element
+            if entry.atom_site   is not None: emit atom_site
+            if entry.default:                 emit default
+            if entry.description is not None: emit description
+            if entry.label       is not None: emit label
+
+            # A per-entry fingerprint is a RARE override: an extra,
+            # NON-preferred sub_spec harvested for this environment
+            # alongside the database-wide preferred recipe above.
             for fp in entry.fingerprints:
                 emit "[[reference_solid.entry.fingerprint]]"
                 emit method, sub_spec (inline table)
-                if fp.preferred: emit "preferred = true"
+
     return join(lines, "\n") + "\n"   # floats via shortest repr
 
 function write_manifest(manifest, path):
     write_file(path, format_manifest(manifest))
 ```
 
-`expand_manifest.py` -- the sketch-to-manifest authoring
-tool -- has two modes that share one stamping step.
+`cod_fish` writes the common COD case straight through this
+emitter: it pairs the shared-library `default_characterization()`
+and `default_run_settings()` with one sparse solid per pinned
+structure, so `cod_fish pin <ids> > manifest.toml` is the whole
+authoring step.  Neither authoring tool populates `harvest`, so
+neither emits a `[harvest]` block -- the harvest setting has a
+built-in default and the resolved value is recorded on every
+guidance entry (DESIGN 5.7), so leaving it unwritten loses
+nothing.  A curator who wants the tolerance visible and editable
+adds the block by hand, and the writer above preserves it.
+
+`expand_manifest.py` -- the sketch-to-manifest authoring tool --
+has two modes.  Both hoist the shared settings into `[defaults]`
+ONCE and leave each solid sparse, rather than stamping five
+settings onto every solid; the two helpers below are what make
+that split explicit.
 
 ```
-function stamp_shared_defaults(source, basis, functional,
-        kpoint_integration, scf_threshold,
-        system_type_default):
-    # Copy the sketch stub's identity + structure source,
-    # add the shared method defaults, leave kpoint_spec empty
-    # (density -> predict-then-verify) and entries to the
-    # caller.  system_type is the sketch's when set, else the
-    # supplied default.
+function shared_defaults(basis, functional,
+                         kpoint_integration, scf_threshold):
+    # The top-level [defaults] run settings, emitted once.
+    # kpoint_spec is left EMPTY: the producer predicts a starting
+    # density and verifies it by a convergence sweep, so pinning a
+    # density here would only override predict-then-verify.
+    # system_type is NOT among these -- it is an intrinsic property
+    # of a structure, named per solid, never a shared run setting.
+    return { "basis"              : basis,
+             "functional"         : functional,
+             "kpoint_integration" : kpoint_integration,
+             "kpoint_spec"        : {},
+             "scf_threshold"      : scf_threshold }
+
+function sparse_solid(source, system_type, entries = []):
+    # Copy the sketch stub's identity and structure source, resolve
+    # its system_type, and leave EVERY run setting unset (None) so
+    # it inherits [defaults].  The source_description cod_fish read
+    # from the CIF rides along, so the harvest can compose each
+    # environment's auto-description from it.
     return ReferenceSolid(
-        reference_id   = source.reference_id,
-        system_type    = source.system_type
-                         or system_type_default,
-        basis = basis, functional = functional,
-        kpoint_integration = kpoint_integration,
-        kpoint_spec = {}, scf_threshold = scf_threshold,
-        cod_id = source.cod_id,
-        cod_revision = source.cod_revision,
-        structure_path = source.structure_path,
-        entries = copy(source.entries))
+        reference_id       = source.reference_id,
+        system_type        = system_type,
+        cod_id             = source.cod_id,
+        cod_revision       = source.cod_revision,
+        structure_path     = source.structure_path,
+        source_description = source.source_description,
+        entries            = copy(entries))
+        # basis / functional / kpoint_integration / kpoint_spec /
+        #   scf_threshold all stay None -> inherited.
 
 function build_mechanical(sources, **shared):
-    # Stamp defaults onto every sketched structure, leaving
-    # entries empty.  The CLI appends a commented fill-in
-    # template; the output is loadable (it just harvests
-    # nothing until entries are added by hand).
+    # Carry every sketched structure through as a sparse solid,
+    # leaving the customizations empty.  The CLI appends a
+    # commented fill-in template.  The result is structurally
+    # valid and loadable -- the recipe block is present and every
+    # run setting resolves from [defaults] (rule 2) -- it simply
+    # harvests every environment with auto-composed descriptions
+    # until customizations are added by hand.
+    solids = [sparse_solid(s, s.system_type or system_type_default)
+              for s in sources]
     return CurationManifest(schema_version = 2,
-        reference_solids =
-            [stamp_shared_defaults(s, **shared)
-             for s in sources])
+        characterization = default_characterization(),
+        defaults         = shared_defaults(**shared),
+        reference_solids = solids)
 
 function build_interactive(sources, ask, **shared):
     # Walk the curator through completing each structure.
@@ -4855,33 +4952,39 @@ function build_interactive(sources, ask, **shared):
     # injecting it (rather than calling input) keeps the flow
     # testable with scripted answers.
     confirm the shared defaults once via ask
-    preferred_seen = empty_set       # (element, method) pairs
+    default_elements = empty_set     # elements already given a
+                                     #   default entry (rule 7)
     solids = []
     for source in sources:
+        announce the structure (a printed header, not a prompt)
         system_type = ask(..., source.system_type or default)
         entries = []
-        while ask_yes_no("add an entry?", default = true):
-            element, atom_site, is_default, description,
+        # The FIRST "add an entry?" defaults to yes; once one is
+        # added, "add another" defaults to no, so pressing Enter
+        # ends this structure rather than looping forever.
+        while ask_yes_no("add an entry?", default = (entries == [])):
+            # Default the element to the structure's composition
+            # (the next not-yet-entered element, so a one-element
+            # solid auto-fills) and the description to the
+            # CIF-derived hint -- both from cod_fish.
+            element, atom_site, description,
                 label  <- ask(...)        # blank label -> None
-            fingerprints = []
-            if ask_yes_no("attach reduce + bispectrum?", true):
-                for (method, sub_spec) in
-                        [("reduce",     DEFAULT_REDUCE_SUB_SPEC),
-                         ("bispectrum", DEFAULT_BISPECTRUM_SUB_SPEC)]:
-                    # Mark preferred the FIRST time each
-                    # (element, method) appears, so rule 10
-                    # (one preferred per family) holds without
-                    # the curator tracking it.
-                    key = (element, method)
-                    preferred = key not in preferred_seen
-                    if preferred: preferred_seen.add(key)
-                    fingerprints.append(ManifestFingerprint(
-                        method, copy(sub_spec), preferred))
+            # Default to yes only until this element has its one
+            # default entry, so accepting the defaults yields
+            # exactly one default per element (rule 7).
+            is_default = ask_yes_no("  default for this element?",
+                default = element not in default_elements)
+            if is_default: default_elements.add(element)
+            # NO per-entry fingerprints are authored here: the
+            # preferred recipe is the database-wide
+            # [characterization] block, set once below, and a
+            # per-entry declaration is a rare hand-edit override.
             entries.append(ReferenceEntry(element, atom_site,
-                is_default, description, label, fingerprints))
-        solids.append(stamp_shared_defaults(
-            source with system_type and entries, **shared))
+                is_default, description, label, fingerprints = []))
+        solids.append(sparse_solid(source, system_type, entries))
     return CurationManifest(schema_version = 2,
+        characterization = default_characterization(),
+        defaults         = shared_defaults(**shared),
         reference_solids = solids)
 ```
 
