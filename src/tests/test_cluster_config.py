@@ -388,8 +388,14 @@ def test_resolve_dispatch_cluster_threads_choices_through(monkeypatch):
     """A cluster shape loads the site, resolves the per-run choices
     against it (the four inputs reaching resolve_choices verbatim), and
     returns the generator's Config alongside those choices."""
-    monkeypatch.setattr(cc, "load_site_config",
-                        lambda profile: {"_profile": profile})
+    loaded = {}
+
+    def fake_load(profile, partition=None):
+        loaded["profile"] = profile
+        loaded["partition"] = partition
+        return {"_profile": profile}
+
+    monkeypatch.setattr(cc, "load_site_config", fake_load)
     captured = {}
 
     def fake_resolve(site, cli):
@@ -407,18 +413,57 @@ def test_resolve_dispatch_cluster_threads_choices_through(monkeypatch):
     assert captured["cli"].dispatch == "slurm-pooled"
     assert choices == {"dispatch": "slurm-pooled", "partition": "gpu",
                        "nodes": 4, "walltime": "06:00:00"}
+    # The queue reaches the loader, which is what makes it overlay.
+    assert loaded == {"profile": "hpc2", "partition": "gpu"}
+
+
+def _clusterrc_returning(settings, monkeypatch):
+    """Point the real loader at a settings dict, so a test exercises
+    load_site_config's own overlay chain rather than stubbing it."""
+    monkeypatch.setattr(
+        cc, "_load_clusterrc_module",
+        lambda: SimpleNamespace(
+            parameters_and_defaults=lambda: dict(settings)))
+
+
+def test_loader_applies_the_queue_override(monkeypatch):
+    """The loader owns every overlay: it takes the queue and returns
+    settings with that queue's override already merged (DESIGN
+    6.2.11).  There is no way to obtain un-overlaid settings, so no
+    reader can forget to overlay."""
+    _clusterrc_returning(_filled_site(
+        partitions=["general", "debug"], walltime="12:00:00",
+        queue_overrides={"debug": {"walltime": "00:30:00"}}),
+        monkeypatch)
+
+    assert cc.load_site_config(partition="debug")["walltime"] \
+        == "00:30:00"
+    # The default queue (first in the list) is unaffected.
+    assert cc.load_site_config()["walltime"] == "12:00:00"
+
+
+def test_loader_re_checks_the_core_after_the_queue_overlay(monkeypatch):
+    """An override may legitimately set worker_init, so the required
+    core is re-checked after the overlay: a queue that empties it is
+    refused rather than yielding a job that brings up no environment."""
+    _clusterrc_returning(_filled_site(
+        partitions=["general", "debug"],
+        queue_overrides={"debug": {"worker_init": []}}), monkeypatch)
+
+    # The default queue is fine; only the debug queue empties it.
+    cc.load_site_config()
+    with pytest.raises(cc.ConfigError, match="worker_init"):
+        cc.load_site_config(partition="debug")
 
 
 def test_resolve_dispatch_applies_the_queue_override(monkeypatch):
-    """The overlay reaches a real run: the queue is resolved from the
-    profile-overlaid file, its override applies, and the remaining
-    per-run choices then default from the overlaid site (DESIGN
-    6.2.11, decision 1).  Here the debug queue caps the walltime, and
-    the run named no --walltime, so it inherits the capped one."""
-    site = _filled_site(
+    """The overlay reaches a real run end to end: the per-run choices
+    default from the overlaid site, so a run that named no --walltime
+    inherits the debug queue's capped one."""
+    _clusterrc_returning(_filled_site(
         partitions=["general", "debug"], walltime="12:00:00",
-        queue_overrides={"debug": {"walltime": "00:30:00"}})
-    monkeypatch.setattr(cc, "load_site_config", lambda profile: site)
+        queue_overrides={"debug": {"walltime": "00:30:00"}}),
+        monkeypatch)
     monkeypatch.setattr(cc, "build_dispatch_config",
                         lambda site, choices: "CONFIG")
 

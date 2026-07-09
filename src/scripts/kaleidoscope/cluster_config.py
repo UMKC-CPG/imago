@@ -108,47 +108,79 @@ def _is_empty(value):
     return False
 
 
-def load_site_config(profile=None):
-    """Load the per-site settings, optionally overlaying a profile.
+def _require_core(site):
+    """Refuse a settings file whose non-discoverable core is unfilled.
 
-    Reads ``clusterrc.parameters_and_defaults()``; if a named profile
-    is requested (the advanced multi-cluster tier) its partial settings
-    are overlaid on the base.  The required core -- the queue list and
-    the worker bring-up commands -- must be present and non-empty; a
-    gap is a :class:`ConfigError` raised here, up front, never a crash
-    mid-flight.
-
-    Parameters
-    ----------
-    profile : str, optional
-        A key into the ``profiles`` mapping; when given, that profile's
-        settings overlay the base dictionary.
-
-    Returns
-    -------
-    dict
-        The fully resolved site settings.
+    A field shipped as None (the unfilled default) or left empty --
+    including a probe starter the user has not completed -- is a
+    configuration error raised up front, never a crash mid-flight.
     """
-    clusterrc = _load_clusterrc_module()
-    site = dict(clusterrc.parameters_and_defaults())
-
-    # A named profile (advanced tier) overlays the base dict, so a user
-    #   with several clusters selects one by name.
-    if profile is not None:
-        profiles = site.get("profiles", {})
-        if profile not in profiles:
-            raise ConfigError(f"unknown cluster profile {profile!r}")
-        site = {**site, **profiles[profile]}
-
-    # The required core must be present.  A field shipped as None (the
-    #   unfilled default) or left empty -- including a probe starter the
-    #   user has not completed -- is a configuration error raised here.
     for name in ("partitions", "worker_init"):
         if _is_empty(site.get(name)):
             raise ConfigError(
                 f"cluster settings file is missing required field "
                 f"{name!r}; fill it in clusterrc.py "
                 f"(generate a starter with cluster_probe.py).")
+
+
+def load_site_config(profile=None, partition=None):
+    """Load the per-site settings, with every overlay already applied.
+
+    Reading the settings file and overlaying it are **one operation**
+    (DESIGN 6.2.11, decision 1), which is why this takes the queue.
+    Three layers resolve here, most general first: the built-in
+    defaults, then the named profile when one is selected, then the
+    override for the queue this run will use.  Only the per-run
+    command-line flags, resolved by the caller, rank above them.
+
+    The single-operation shape is deliberate.  Were the queue overlay
+    a separate step, every reader of this file would have to remember
+    to take it, and a reader that forgot would receive settings that
+    look complete and are quietly wrong -- the cluster-wide walltime
+    where a queue's cap belongs, which a scheduler answers with a
+    rejected or silently truncated job rather than an error naming the
+    cause.  There is more than one reader (the per-unit dispatch, and
+    the driver's own batch submission).  Making un-overlaid settings
+    unobtainable is what keeps them honest.
+
+    Parameters
+    ----------
+    profile : str, optional
+        A key into the ``profiles`` mapping; when given, that profile's
+        settings overlay the base dictionary.
+    partition : str, optional
+        The queue this run uses.  Defaults to the first entry of the
+        (profile-overlaid) ``partitions`` list, matching how
+        :func:`resolve_choices` defaults it.
+
+    Returns
+    -------
+    dict
+        The fully resolved and overlaid site settings.
+    """
+    clusterrc = _load_clusterrc_module()
+    site = dict(clusterrc.parameters_and_defaults())
+
+    # Overlay 1: a named profile (advanced tier) overlays the base
+    #   dict, so a user with several clusters selects one by name.
+    if profile is not None:
+        profiles = site.get("profiles", {})
+        if profile not in profiles:
+            raise ConfigError(f"unknown cluster profile {profile!r}")
+        site = {**site, **profiles[profile]}
+
+    # Checked BEFORE the queue overlay, because picking the default
+    #   queue reads `partitions`.
+    _require_core(site)
+
+    # Overlay 2: the selected queue's own settings.  The queue is a
+    #   per-run choice, defaulting to the first entry of the list.
+    queue = partition or site["partitions"][0]
+    site = apply_queue_overrides(site, queue)
+
+    # An override may legitimately set worker_init, so re-check the
+    #   core it could have emptied.  (It may not set partitions.)
+    _require_core(site)
     return site
 
 
@@ -512,13 +544,10 @@ def resolve_dispatch(dispatch_shape, partition=None, nodes=None,
     """
     if dispatch_shape == "local":
         return None, None
-    site = load_site_config(profile)
-    # The queue decides which per-queue override applies, so resolve
-    #   it first, from the profile-overlaid file, then overlay, then
-    #   let the remaining choices default from the result (DESIGN
-    #   6.2.11, decision 1: defaults -> profile -> queue -> flags).
-    queue = partition or site["partitions"][0]
-    site = apply_queue_overrides(site, queue)
+    # Passing the queue is what makes the loader overlay it; the
+    #   remaining per-run choices then default from the overlaid site
+    #   (DESIGN 6.2.11: defaults -> profile -> queue -> flags).
+    site = load_site_config(profile, partition)
     choices = resolve_choices(site, SimpleNamespace(
         dispatch=dispatch_shape, partition=partition,
         nodes=nodes, walltime=walltime))

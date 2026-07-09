@@ -60,6 +60,7 @@ from build_initial_potentials import (
 import build_initial_potentials as bip
 import initial_potential_db as ipdb
 from kaleidoscope import CalcUnit, Flight
+from kaleidoscope import cluster_config
 from kaleidoscope.builders.kpoint_convergence import PredictionRecord
 
 
@@ -2530,7 +2531,9 @@ def test_submit_orchestrator_batch_writes_and_submits(
         "orchestrator": {"cores": 2, "memory": "8G",
                          "walltime": "24:00:00"},
     }
-    monkeypatch.setattr(bip, "load_site_config", lambda profile: site)
+    monkeypatch.setattr(
+        bip, "load_site_config",
+        lambda profile, partition=None: site)
     monkeypatch.setattr(
         bip, "resolve_choices",
         lambda s, cli: {"dispatch": "slurm-per-job",
@@ -2564,6 +2567,66 @@ def test_submit_orchestrator_batch_writes_and_submits(
     assert "--manifest m.toml" in captured["script"]
 
 
+def test_submit_applies_the_queue_override_to_the_driver_job(
+        tmp_path, monkeypatch):
+    """The driver's OWN batch job is sized from the overlaid site, not
+    the cluster-wide defaults.  A debug queue that caps walltime must
+    cap the driver's job too: asking for 24 hours on a 30-minute queue
+    is rejected or silently truncated by the scheduler, with nothing
+    naming the cause (DESIGN 6.2.11 -- the loader owns every overlay).
+    """
+    real_load = cluster_config.load_site_config
+
+    def fake_clusterrc():
+        return {
+            "partitions": ["general", "debug"],
+            "worker_init": ["module load imago"],
+            "account": None, "walltime": "12:00:00", "nodes": 1,
+            "extra_scheduler_options": [],
+            "default_topology": "slurm-per-job",
+            "orchestrator": {"cores": 2, "memory": "8G",
+                             "walltime": "24:00:00"},
+            "queue_overrides": {"debug": {
+                "walltime": "00:30:00",
+                "orchestrator": {"cores": 1, "memory": "2G",
+                                 "walltime": "00:25:00"},
+                "extra_scheduler_options": ["#SBATCH --exclusive"]}},
+        }
+
+    monkeypatch.setattr(
+        cluster_config, "_load_clusterrc_module",
+        lambda: types.SimpleNamespace(
+            parameters_and_defaults=fake_clusterrc))
+    monkeypatch.setattr(bip, "load_site_config", real_load)
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["script"] = open(cmd[1]).read()
+        return types.SimpleNamespace(stdout="Submitted batch job 5\n")
+
+    monkeypatch.setattr(bip.subprocess, "run", fake_run)
+    args = types.SimpleNamespace(
+        profile=None, dispatch="slurm-per-job", partition="debug",
+        nodes=None, walltime=None, orchestrator_cores=None,
+        orchestrator_memory=None, orchestrator_walltime=None)
+
+    bip.submit_orchestrator_batch(
+        ["--partition", "debug", "--submit"], args, str(tmp_path))
+    script = captured["script"]
+
+    # The debug queue's driver shape, not the cluster-wide one.
+    assert "#SBATCH --partition=debug" in script
+    assert "#SBATCH --cpus-per-task=1" in script
+    assert "#SBATCH --mem=2G" in script
+    assert "#SBATCH --time=00:25:00" in script
+    # The queue's own scheduler directive rides along.
+    assert "#SBATCH --exclusive" in script
+    # None of the cluster-wide defaults leak through.
+    assert "24:00:00" not in script
+    assert "8G" not in script
+
+
 def test_submit_ignores_the_process_argv(tmp_path, monkeypatch):
     """The inner command is built from the FLAG vector this run
     parsed, never from the process's own arguments.  A library caller
@@ -2577,7 +2640,9 @@ def test_submit_ignores_the_process_argv(tmp_path, monkeypatch):
         "extra_scheduler_options": [],
         "orchestrator": {"cores": 1, "walltime": "01:00:00"},
     }
-    monkeypatch.setattr(bip, "load_site_config", lambda profile: site)
+    monkeypatch.setattr(
+        bip, "load_site_config",
+        lambda profile, partition=None: site)
     monkeypatch.setattr(
         bip, "resolve_choices",
         lambda s, cli: {"dispatch": "local", "partition": "p",
@@ -2623,7 +2688,9 @@ def test_submit_honors_orchestrator_overrides(tmp_path, monkeypatch):
         "orchestrator": {"cores": 2, "memory": "8G",
                          "walltime": "24:00:00"},
     }
-    monkeypatch.setattr(bip, "load_site_config", lambda profile: site)
+    monkeypatch.setattr(
+        bip, "load_site_config",
+        lambda profile, partition=None: site)
     monkeypatch.setattr(
         bip, "resolve_choices",
         lambda s, cli: {"dispatch": "local", "partition": "general",

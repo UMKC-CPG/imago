@@ -2012,7 +2012,11 @@ def submit_orchestrator_batch(argv: list[str], args,
     whatever launched us.  The script names itself by path for the
     same reason.
     """
-    site = load_site_config(args.profile)
+    # The driver's own job is sized from the same overlaid site its
+    #   units are, so the queue rides into the loader here too: a
+    #   debug queue that caps walltime caps the driver's job as well
+    #   (DESIGN 6.2.11).
+    site = load_site_config(args.profile, args.partition)
     choices = resolve_choices(site, args)
     orchestrator = resolve_orchestrator(site, args)
     # Re-run this producer in the batch job, dropping --submit so the
