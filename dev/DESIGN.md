@@ -2459,12 +2459,18 @@ record's remaining fields.
                            coexist on the same entry
                            (rule 8).
   preferred  bool          Optional, default false.  Marks
-                           the one record per matcher family
-                           that the consumer's file-dictated
-                           (crystalline) match uses (5.6.5
-                           step 2).  Exactly one record per
-                           present family carries `preferred
-                           = true` (rule 10); the preferred
+                           this entry's canonical record for
+                           a matcher family: the one whose
+                           `sub_spec` names the settings the
+                           consumer's file-dictated
+                           (crystalline) match computes its
+                           query with (5.6.5 step 2), and the
+                           one the dedup keys on (5.2.3).
+                           Scoped to the ENTRY: exactly one
+                           record per family present on that
+                           entry carries `preferred = true`
+                           (rule 10), so every harvested entry
+                           flags its own.  The preferred
                            `sub_spec`
                            for a family is uniform across the
                            whole database (set once in the
@@ -2592,16 +2598,51 @@ fingerprint.
    silent skip, so that a typo in the manifest fails
    loudly rather than quietly omitting the fingerprint
    from the lookup.
-10. For each `method` that appears in the file's
-    fingerprint records, exactly one record carries
-    `preferred = true` -- the record the consumer's
-    file-dictated match uses (5.6.5 step 2).  Zero (a
-    family present but none preferred) or two-or-more
-    preferred for one `method` is a hard error.  The
-    database-wide constraint that all elements' preferred
-    records of a family share one `sub_spec` (manifest
-    rule 11) is cross-file and cannot be checked from a
-    single per-element file; the loader trusts the
+10. The preferred flag is scoped to the **entry**, not to
+    the file.  For each `[[potential]]` and each `method`
+    appearing among *that entry's* fingerprint records,
+    exactly one of them carries `preferred = true`.  Zero
+    (a family present on the entry but none preferred) or
+    two-or-more preferred for one `method` on one entry is
+    a hard error.  An entry carrying no fingerprints at all
+    -- the `"isolated"` baseline -- is exempt, having no
+    family present to prefer.
+
+    Additionally, and across the whole file: every preferred
+    record of a given `method` must share one `sub_spec`.
+    This is what makes the flag *mean* something -- it names
+    the canonical `sub_spec` for that family, the settings
+    the consumer computes its query with (5.6.5 step 2) --
+    and two flagged records of one family disagreeing on
+    settings would leave no canonical answer.
+
+    The per-entry scope is forced by what the flag is for.
+    Fingerprints are comparable only when computed at the
+    same `sub_spec`, so the consumer reads any flagged
+    record of a family to learn *which settings to use*
+    (its payload is never read) and then compares its query
+    against every entry.  The dedup (5.2.3) goes further:
+    it keys on "the transferable descriptor every harvested
+    entry shares," so it asks *each* entry for that entry's
+    canonical bispectrum.  Both readings require every
+    harvested entry to flag its own record, which is exactly
+    what the producer writes (5.7: "the producer stamps the
+    preferred flag onto each matching record").
+
+    A file-wide "exactly one flagged record" rule would say
+    the opposite, and would also make one arbitrary entry
+    load-bearing: these files grow incrementally, entries
+    are merged by the dedup and may one day be removed, and
+    a canonical `sub_spec` recorded on a single entry would
+    vanish with it, leaving every other entry's fingerprints
+    uninterpretable.  Per-entry flagging is self-describing:
+    read one entry alone and you know which of its records
+    is canonical.
+
+    The database-wide constraint that *all elements'*
+    preferred records of a family share one `sub_spec`
+    (manifest rule 11) is cross-file and cannot be checked
+    from a single per-element file; the loader trusts the
     producer to have written a consistent database, in
     keeping with VISION Principle 5 (the database is
     produced from the manifest(s) by the producer, never
