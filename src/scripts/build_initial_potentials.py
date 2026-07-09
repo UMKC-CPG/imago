@@ -124,7 +124,8 @@ from kaleidoscope.builders.kpoint_convergence import (
     build_kpoint_convergence, standard_key_fields)
 from kaleidoscope.cluster_config import (
     resolve_dispatch, write_resolved_dispatch,
-    load_site_config, resolve_choices, build_orchestrator_sbatch)
+    load_site_config, resolve_choices, resolve_orchestrator,
+    build_orchestrator_sbatch)
 from kaleidoscope.workspace import read_status, toml_line
 # The Phase-2 matcher registry (ARCHITECTURE 8.9) lives in the neutral
 #   matchers module; the fingerprint harvest dispatches reduce
@@ -1999,16 +2000,21 @@ def submit_orchestrator_batch(args, data_root: str) -> str:
     runs the full build under ``--dispatch`` with the structures
     already materialized (no network on the compute node).  The
     driver's own resources come from the site's ``orchestrator``
-    block (ARCHITECTURE 9.4), sized to the dispatch shape.
+    block (ARCHITECTURE 9.4), sized to the dispatch shape, with any
+    ``--orchestrator-*`` flag overriding that block for this run.
     """
     site = load_site_config(args.profile)
     choices = resolve_choices(site, args)
+    orchestrator = resolve_orchestrator(site, args)
     # Re-run this producer in the batch job, dropping --submit so the
     #   batch invocation runs the build itself (not another submit).
+    #   The --orchestrator-* flags may ride along untouched: they are
+    #   read only when submitting, and the inner run does not submit.
     inner = [item for item in sys.argv if item != "--submit"]
     command = " ".join(
         shlex.quote(item) for item in [sys.executable, *inner])
-    script_text = build_orchestrator_sbatch(site, choices, command)
+    script_text = build_orchestrator_sbatch(site, choices, command,
+                                            orchestrator)
     script_path = os.path.join(data_root, "orchestrator.sbatch")
     with open(script_path, "w") as handle:
         handle.write(script_text)
@@ -2100,6 +2106,23 @@ def main(argv=None) -> int:
              "under --dispatch (DESIGN 6.2.11); the driver job's "
              "resources come from the clusterrc 'orchestrator' block "
              "(default: run the build in this process)")
+    # The driver's own resources, overriding the site's orchestrator
+    #   block key by key for this run.  Only read when submitting.
+    parser.add_argument(
+        "--orchestrator-cores", type=int, metavar="N",
+        help="cores to request for the --submit driver job "
+             "(default: the clusterrc 'orchestrator' block's cores)")
+    parser.add_argument(
+        "--orchestrator-memory", metavar="SIZE",
+        help="memory to request for the --submit driver job, as a "
+             "scheduler size such as 8G (default: the clusterrc "
+             "'orchestrator' block's memory)")
+    parser.add_argument(
+        "--orchestrator-walltime", metavar="HH:MM:SS",
+        help="time limit for the --submit driver job; it must "
+             "outlast the flight it supervises (default: the "
+             "clusterrc 'orchestrator' block's walltime, else the "
+             "run's --walltime)")
     args = parser.parse_args(argv)
 
     if not args.pdb_root:

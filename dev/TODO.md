@@ -1500,7 +1500,9 @@ keeps the common case branch-free.
   Au fcc) and add its manifest entry; populate the
   first non-trivial "default_solid" potential at
   share/atomicPDB/au/s_gaussian_pot.toml.  Establishes
-  the curation pattern for subsequent elements
+  the curation pattern for subsequent elements.  A curation
+  run of the shipped producer, not new machinery.  CODE;
+  DESIGN 5.7
 - [ ] C50. Implement src/scripts/bench_initial_potential.py
   per PSEUDOCODE 11.5: load benchmark manifest with
   held-out sanity check; run each test system under
@@ -3174,7 +3176,9 @@ on the same data later with no schema change.  Built on P10.
   guidance_db.py (C70) and initial_potential_db.py.  Tests cover
   the rules, emitter determinism, the regressor on curated
   points, registry rejection of unknown keys, and censored-bound
-  handling.  Register in src/scripts/CMakeLists.txt.
+  handling.  Register in src/scripts/CMakeLists.txt.  CODE;
+  DESIGN 8.5/8.6; ARCH 11.  (Needs a PSEUDOCODE section first --
+  section 8 has no pseudocode yet.)
 - [ ] C78. CMake build-system hook emitting build_info.toml at
   configure/install time -- compiler + full flag string +
   detected HDF5 / ScaLAPACK / BLAS / MPI versions and variants
@@ -3228,7 +3232,8 @@ on the same data later with no schema change.  Built on P10.
   small manual + flight-harvested set of observations spanning
   the size range on each available hardware fingerprint, so the
   predictor becomes non-trivial.  Needs cluster time.  Sibling
-  of the C75 convergence seed.
+  of the C75 convergence seed.  A seeding run of shipped tools,
+  not new machinery.  CODE; DESIGN 8.
 - [ ] C83. (future) src/scripts/resource_migrate.py: schema
   migration tool mirroring guidance_migrate.py.  Not day-1
   scope (ARCH 11.6).
@@ -3245,6 +3250,7 @@ on the same data later with no schema change.  Built on P10.
   string), which the wingbeat then copies into `result.toml`
   in place of the echoed value.  Pairs with C78 (build
   identity) and C79 (wingbeat/imago.py capture hooks).
+  CODE (Fortran + wingbeat); DESIGN 7.2; ARCH 11.
 
 ---
 

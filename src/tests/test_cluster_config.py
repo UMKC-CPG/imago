@@ -474,6 +474,81 @@ def test_build_orchestrator_sbatch_omits_account_when_unset():
     assert "--account" not in script
 
 
+class _Cli:
+    """A stand-in for the parsed argparse namespace: any attribute
+    not set reads as None, which is how an unsupplied flag looks."""
+
+    def __init__(self, **flags):
+        self.__dict__.update(flags)
+
+    def __getattr__(self, name):
+        return None
+
+
+def test_resolve_orchestrator_defaults_to_the_site_block():
+    """With no flags, the site's orchestrator block stands."""
+    site = _filled_site()
+    assert cc.resolve_orchestrator(site, _Cli()) == {
+        "cores": 2, "memory": "8G", "walltime": "24:00:00"}
+
+
+def test_resolve_orchestrator_merges_key_by_key():
+    """Overriding one key leaves the site's other keys standing --
+    a whole-block replacement would silently discard site facts the
+    curator never meant to touch (DESIGN 6.2.11)."""
+    site = _filled_site()
+    shape = cc.resolve_orchestrator(
+        site, _Cli(orchestrator_memory="64G"))
+    assert shape == {"cores": 2, "memory": "64G",
+                     "walltime": "24:00:00"}
+
+
+def test_resolve_orchestrator_overrides_every_key():
+    """All three keys are reachable from the command line."""
+    site = _filled_site()
+    shape = cc.resolve_orchestrator(site, _Cli(
+        orchestrator_cores=16, orchestrator_memory="256G",
+        orchestrator_walltime="04:00:00"))
+    assert shape == {"cores": 16, "memory": "256G",
+                     "walltime": "04:00:00"}
+
+
+def test_resolve_orchestrator_survives_a_site_without_the_block():
+    """A settings file predating the orchestrator block yields an
+    empty shape, which the sbatch builder reads as 'unrequested'."""
+    site = _filled_site()
+    del site["orchestrator"]
+    assert cc.resolve_orchestrator(site, _Cli()) == {}
+
+
+def test_orchestrator_override_reaches_the_sbatch_header():
+    """The resolved shape, not the raw site block, sizes the job."""
+    site = _filled_site()
+    choices = {"dispatch": "slurm-per-job", "partition": "general",
+               "nodes": 1, "walltime": "02:00:00"}
+    shape = cc.resolve_orchestrator(site, _Cli(
+        orchestrator_cores=8, orchestrator_walltime="01:30:00"))
+    script = cc.build_orchestrator_sbatch(
+        site, choices, "run", shape)
+    assert "#SBATCH --cpus-per-task=8" in script
+    assert "#SBATCH --time=01:30:00" in script
+    assert "#SBATCH --mem=8G" in script      # site cores untouched
+
+
+def test_worker_walltime_does_not_size_the_driver_job():
+    """--walltime sizes the WORKER class.  A curator shortening it
+    to clear a short queue is speaking about the calculations, not
+    about the process that submits them, so the orchestrator's own
+    walltime continues to govern the driver's job."""
+    site = _filled_site()
+    choices = {"dispatch": "slurm-per-job", "partition": "general",
+               "nodes": 1, "walltime": "00:20:00"}   # --walltime
+    script = cc.build_orchestrator_sbatch(
+        site, choices, "run", cc.resolve_orchestrator(site, _Cli()))
+    assert "#SBATCH --time=24:00:00" in script
+    assert "00:20:00" not in script
+
+
 def test_build_orchestrator_sbatch_copies_passthrough_verbatim():
     """extra_scheduler_options are already complete #SBATCH lines,
     so the orchestrator script copies them verbatim rather than

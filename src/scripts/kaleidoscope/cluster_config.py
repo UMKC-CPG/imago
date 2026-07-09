@@ -181,6 +181,58 @@ def resolve_choices(site, cli):
     }
 
 
+#: The keys of the site's ``orchestrator`` block, each overridable
+#:   per run by an ``--orchestrator-<key>`` command-line option.
+ORCHESTRATOR_KEYS = ("cores", "memory", "walltime")
+
+
+def resolve_orchestrator(site, cli):
+    """Resolve the driver's own resource shape (DESIGN 6.2.11).
+
+    The site's ``orchestrator`` block is a *default* shape, not a
+    fixed one: a run raises or lowers any of its keys from the
+    command line, which is what keeps the settings file bounded --
+    a second orchestrator with different needs overrides the shape
+    for its own run rather than earning a block of its own
+    (ARCHITECTURE 9.4).
+
+    The merge is **per key**.  Overriding the memory leaves the
+    site's cores and walltime standing, where replacing the whole
+    block would silently discard site facts the curator never meant
+    to touch.  A key nobody sets stays absent, and
+    :func:`build_orchestrator_sbatch` decides what absent means:
+    cores and memory simply go unrequested, while walltime falls
+    back once more to the run's resolved ``--walltime`` so a driver
+    job always carries a time limit.
+
+    Note the worker-sizing flags do not reach here.  ``--walltime``
+    and ``--nodes`` size one calculation; a curator shortening
+    ``--walltime`` to clear a short queue is speaking about the
+    calculations, not about the process that submits them.
+
+    Parameters
+    ----------
+    site : dict
+        The loaded per-site settings.
+    cli : object
+        Any object exposing ``orchestrator_cores`` /
+        ``orchestrator_memory`` / ``orchestrator_walltime`` -- the
+        parsed argparse namespace in practice.  A client that
+        exposes none of them gets the site block unchanged.
+
+    Returns
+    -------
+    dict
+        The merged shape, ready for :func:`build_orchestrator_sbatch`.
+    """
+    shape = dict(site.get("orchestrator", {}))
+    for key in ORCHESTRATOR_KEYS:
+        override = getattr(cli, "orchestrator_" + key, None)
+        if override is not None:
+            shape[key] = override
+    return shape
+
+
 # ----------------------------------------------------------------
 #  Assembling the Config
 # ----------------------------------------------------------------
@@ -440,26 +492,35 @@ def write_resolved_dispatch(run_dir, choices, profile):
 #  The orchestrator's own batch job (DESIGN 6.2.11)
 # ----------------------------------------------------------------
 
-def build_orchestrator_sbatch(site, choices, command):
+def build_orchestrator_sbatch(site, choices, command,
+                              orchestrator=None):
     """Build the text of an ``sbatch`` script that runs the producer
     (the orchestrator/driver) as its own batch job (DESIGN 6.2.11).
 
     The driver is a single process, so the header requests one node
-    with the site's ``orchestrator`` resource shape -- a distinct job
-    class from the per-worker sizing (ARCHITECTURE 9.4).  Under a
-    fan-out dispatch it is modest (a core or two); under
-    ``--dispatch local`` (the driver runs the SCFs in process) the
-    curator sizes that block compute-heavy instead.  ``account``
-    comes from the site and ``partition`` from the resolved choices;
-    the ``worker_init`` bring-up runs first so the batch job finds
-    imago, then ``command`` -- the producer re-invoked with
-    ``--dispatch`` and no ``--submit``, structures already
-    materialized -- runs.
+    with the ``orchestrator`` resource shape -- a distinct job class
+    from the per-worker sizing (ARCHITECTURE 9.4).  Under a fan-out
+    dispatch it is modest (a core or two); under ``--dispatch local``
+    the driver runs the SCFs in process, and that run raises the
+    shape with ``--orchestrator-*`` rather than editing the site
+    file.  ``account`` comes from the site and ``partition`` from the
+    resolved choices; the ``worker_init`` bring-up runs first so the
+    batch job finds imago, then ``command`` -- the producer
+    re-invoked with ``--dispatch`` and no ``--submit``, structures
+    already materialized -- runs.
+
+    ``orchestrator`` is the shape :func:`resolve_orchestrator` merged
+    from the site block and this run's flags; a caller that passes
+    none gets the site block alone.  An absent ``cores`` or ``memory``
+    goes unrequested, letting the scheduler apply its own default; an
+    absent ``walltime`` falls back to the run's resolved walltime, so
+    the driver's job always carries a time limit.
 
     ``command`` is the already-quoted command line to execute.
     Returns the script text; the caller writes and submits it.
     """
-    orchestrator = site.get("orchestrator", {})
+    if orchestrator is None:
+        orchestrator = site.get("orchestrator", {})
     cores = orchestrator.get("cores", 1)
     memory = orchestrator.get("memory")
     walltime = orchestrator.get("walltime") or choices["walltime"]

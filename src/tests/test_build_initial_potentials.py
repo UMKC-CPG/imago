@@ -2564,3 +2564,48 @@ def test_submit_orchestrator_batch_writes_and_submits(
     assert "--dispatch slurm-per-job" in captured["script"]
     assert "--submit" not in captured["script"]
     assert "--manifest m.toml" in captured["script"]
+
+
+def test_submit_honors_orchestrator_overrides(tmp_path, monkeypatch):
+    """An --orchestrator-* flag overrides the site block for this
+    run, key by key, and reaches the submitted script's header
+    (DESIGN 6.2.11).  Without it the settings file would have to
+    grow a block per orchestrator (ARCHITECTURE 9.4)."""
+    site = {
+        "account": None,
+        "worker_init": ["module load imago"],
+        "extra_scheduler_options": [],
+        "orchestrator": {"cores": 2, "memory": "8G",
+                         "walltime": "24:00:00"},
+    }
+    monkeypatch.setattr(bip, "load_site_config", lambda profile: site)
+    monkeypatch.setattr(
+        bip, "resolve_choices",
+        lambda s, cli: {"dispatch": "local", "partition": "general",
+                        "nodes": 1, "walltime": "02:00:00"})
+    monkeypatch.setattr(
+        bip.sys, "argv",
+        ["build_initial_potentials.py", "--dispatch", "local",
+         "--orchestrator-memory", "64G", "--submit"])
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["script"] = open(cmd[1]).read()
+        return types.SimpleNamespace(
+            stdout="Submitted batch job 777\n")
+
+    monkeypatch.setattr(bip.subprocess, "run", fake_run)
+    # Under --dispatch local the driver runs the SCFs in process, so
+    #   the curator raises its memory for this run instead of
+    #   editing the site file.
+    args = types.SimpleNamespace(
+        profile=None, dispatch="local", partition=None, nodes=None,
+        walltime=None, orchestrator_cores=None,
+        orchestrator_memory="64G", orchestrator_walltime=None)
+
+    assert bip.submit_orchestrator_batch(args, str(tmp_path)) == "777"
+    assert "#SBATCH --mem=64G" in captured["script"]
+    # The keys the flag did not name still come from the site block.
+    assert "#SBATCH --cpus-per-task=2" in captured["script"]
+    assert "#SBATCH --time=24:00:00" in captured["script"]
