@@ -952,10 +952,14 @@ def format_manifest(manifest: CurationManifest) -> str:
     """Serialize a :class:`CurationManifest` to schema-v2 TOML text.
 
     The emitted file round-trips through :func:`load_manifest_v2`:
-    the manifest it yields equals the one written here.  The
-    database-wide ``[characterization]`` recipe is emitted first
-    (after ``schema_version``), then the optional ``[defaults]``
-    run settings, then each ``[[reference_solid]]`` emits its
+    the manifest it yields equals the one written here.  Every
+    top-level block the reader parses therefore has a counterpart
+    here, or a curator's setting would vanish on the next
+    authoring pass.  The database-wide ``[characterization]``
+    recipe is emitted first (after ``schema_version``), then the
+    optional ``[defaults]`` run settings and the optional
+    ``[harvest]`` harvest settings -- each written only when
+    non-empty -- then each ``[[reference_solid]]`` emits its
     scalar fields and any run settings it overrides, then its
     ``[[reference_solid.entry]]`` sub-tables, each followed by its
     ``[[reference_solid.entry.fingerprint]]`` sub-tables -- the
@@ -995,6 +999,19 @@ def format_manifest(manifest: CurationManifest) -> str:
         for key in RUN_SETTING_KEYS:
             if key in manifest.defaults:
                 lines.append(_field(key, manifest.defaults[key]))
+
+    # The shared harvest settings (DESIGN 5.7): how finished runs
+    #   are read BACK, as opposed to how they are run.  Emitted on
+    #   the same when-non-empty rule as [defaults] above -- silent
+    #   when the manifest leans on the built-in default, faithful
+    #   when a curator wrote a tolerance down.  Omitting it would
+    #   drop an authored kpoint_convergence_threshold on rewrite.
+    if manifest.harvest:
+        lines.append("")
+        lines.append("[harvest]")
+        for key in HARVEST_SETTING_KEYS:
+            if key in manifest.harvest:
+                lines.append(_field(key, manifest.harvest[key]))
 
     for solid in manifest.reference_solids:
         lines.append("")

@@ -78,11 +78,12 @@ def _si_solid(**overrides) -> ReferenceSolid:
 
 
 def _manifest(*solids, characterization=None,
-              defaults=None) -> CurationManifest:
+              defaults=None, harvest=None) -> CurationManifest:
     """Wrap reference solids in a manifest, defaulting to the
     standard preferred recipe so every round-trip exercises the
     [characterization] block unless a test overrides it.
-    ``defaults`` populates the optional [defaults] run settings."""
+    ``defaults`` populates the optional [defaults] run settings and
+    ``harvest`` the optional [harvest] harvest settings."""
 
     return CurationManifest(
         schema_version=2, manifest_path="(in memory)",
@@ -90,6 +91,7 @@ def _manifest(*solids, characterization=None,
                           if characterization is not None
                           else _characterization()),
         defaults=defaults if defaults is not None else {},
+        harvest=harvest if harvest is not None else {},
         reference_solids=list(solids))
 
 
@@ -337,6 +339,41 @@ def test_writer_omits_inherited_settings():
     for key in ("basis", "functional", "kpoint_integration",
                 "kpoint_spec", "scf_threshold"):
         assert key not in solid_block
+
+
+def test_harvest_block_round_trips(tmp_path):
+    # An authored [harvest] block survives a write -> read cycle.
+    #   Without this the writer silently drops a curator's
+    #   tightened tolerance and the next load falls back to the
+    #   built-in default -- a change of the convergence criterion
+    #   nobody asked for (DESIGN 5.7; PSEUDOCODE 11.6).
+    harvest = {"kpoint_convergence_threshold": 2.5e-4}
+    loaded = _write_and_load(
+        _manifest(_sparse_si(), defaults=dict(_DEFAULTS),
+                  harvest=dict(harvest)), tmp_path)
+    assert loaded.harvest == harvest
+
+
+def test_harvest_block_omitted_when_unset():
+    # A manifest that leans on the built-in default names no
+    #   [harvest] block, so the writer emits none -- silent when
+    #   unset, faithful when written down.
+    text = format_manifest(
+        _manifest(_sparse_si(), defaults=dict(_DEFAULTS)))
+    assert "[harvest]" not in text
+
+
+def test_authored_harvest_threshold_reaches_the_solid(tmp_path):
+    # The end the curator actually cares about: a tolerance
+    #   written once in [harvest] resolves onto every solid that
+    #   does not override it, ACROSS a write -> read cycle.
+    loaded = _write_and_load(
+        _manifest(_sparse_si(), defaults=dict(_DEFAULTS),
+                  harvest={"kpoint_convergence_threshold": 2.5e-4}),
+        tmp_path)
+    solid = resolve_settings(loaded.reference_solids[0],
+                             loaded.defaults, loaded.harvest)
+    assert solid.kpoint_convergence_threshold == 2.5e-4
 
 
 def test_per_solid_override_is_emitted(tmp_path):
