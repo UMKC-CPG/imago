@@ -95,6 +95,10 @@ _SETTINGS = [
      "Named setting groups, one per cluster you use."),
     ("extra_scheduler_options", [],
      "Extra raw scheduler directives to add."),
+    ("orchestrator", {"cores": 2, "memory": "8G",
+                      "walltime": "24:00:00"},
+     "Resources for a driver job that prepares work and hands it "
+     "out, as opposed to one that runs a calculation."),
 ]
 
 # The required-core keys: shipped blank, because no scheduler query can

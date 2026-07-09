@@ -472,3 +472,16 @@ def test_build_orchestrator_sbatch_omits_account_when_unset():
                "nodes": 1, "walltime": "02:00:00"}
     script = cc.build_orchestrator_sbatch(site, choices, "run")
     assert "--account" not in script
+
+
+def test_build_orchestrator_sbatch_copies_passthrough_verbatim():
+    """extra_scheduler_options are already complete #SBATCH lines,
+    so the orchestrator script copies them verbatim rather than
+    prefixing a second directive marker onto each."""
+    site = _filled_site(
+        extra_scheduler_options=["#SBATCH --exclusive"])
+    choices = {"dispatch": "slurm-per-job", "partition": "general",
+               "nodes": 1, "walltime": "02:00:00"}
+    script = cc.build_orchestrator_sbatch(site, choices, "run")
+    assert "#SBATCH --exclusive" in script
+    assert "#SBATCH #SBATCH" not in script

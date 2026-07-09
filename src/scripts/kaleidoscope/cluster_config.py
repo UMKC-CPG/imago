@@ -473,8 +473,10 @@ def build_orchestrator_sbatch(site, choices, command):
     if memory:
         lines.append(f"#SBATCH --mem={memory}")
     lines.append(f"#SBATCH --time={walltime}")
-    for directive in site.get("extra_scheduler_options", []):
-        lines.append(f"#SBATCH {directive}")
+    # The passthrough directives are already complete lines (each
+    #   carries its own "#SBATCH"), exactly as scheduler_options
+    #   forwards them to Parsl, so they are copied verbatim.
+    lines.extend(site.get("extra_scheduler_options", []))
 
     lines.append("")
     lines.extend(site["worker_init"])

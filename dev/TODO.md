@@ -2346,6 +2346,23 @@ imports its neighbours from `$IMAGO_BIN`).
   deferred prepare-on-workers sub-item stays deferred.  Actual
   sbatch submission + running-as-batch-job is validated by a live
   cluster run (rides with C75).
+  AMENDED 2026-07-09: C113 originally shipped code with NO
+  PSEUDOCODE above it -- its TODO entry was detailed enough to
+  implement from, so the level was skipped (the trap now named in
+  CLAUDE.md, "Chain Discipline").  A `/refine` caught it.  The
+  back-fill wrote PSEUDOCODE 13.7 (the `orchestrator` block, the
+  derived memory request, `build_orchestrator_sbatch`) and 11.4
+  (`main_submit_mode`), and verifying the code against DESIGN
+  6.2.11 first turned up two defects the original pass had missed:
+  `build_orchestrator_sbatch` prefixed a second `#SBATCH` onto each
+  already-complete `extra_scheduler_options` line, and
+  `cluster_probe._starter_schema` never learned the `orchestrator`
+  key, leaving `test_cluster_probe` RED on `main` since 10c1741
+  (the C113 test run covered only the suites it assumed affected).
+  Both fixed, each with a test; full non-integration suite green
+  (844 passed).  The `memory_per_node` / `memory_per_worker` split
+  (shipped in 6e8db47, DESIGN + code only) was back-filled into
+  13.7 in the same pass.
 
 - [ ] C114. Sync the PSEUDOCODE writer to the shipped `[defaults]`
   manifest.  Surfaced 2026-07-08 during the seed-run refinement
