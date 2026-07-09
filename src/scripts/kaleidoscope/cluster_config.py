@@ -108,6 +108,38 @@ def _is_empty(value):
     return False
 
 
+def merge_settings(base, overlay):
+    """Merge one overlay onto a settings dict, per key, one level down.
+
+    This is the single merge every overlay uses -- the named profile,
+    the per-queue override, and the per-run flags alike (DESIGN
+    6.2.11, decision 1).  Most settings are a single value, and
+    overlaying one simply replaces it.  But a setting may itself be a
+    *block* of settings -- ``orchestrator`` is the only one today,
+    holding the driver's cores, memory, and walltime -- and there the
+    overlay names only the keys it means to change, leaving the rest
+    as the layer beneath gave them.
+
+    Replacing a whole block instead would silently discard facts the
+    curator never mentioned.  A user who writes, of the debug queue,
+    "the driver needs only two gigabytes there" would also lose the
+    driver's core count and time limit, and would get not an error but
+    two plausible-looking fallbacks in their place.
+
+    The descent stops at one level: a block of settings holds plain
+    values, never further blocks, so there is nothing deeper to merge
+    and a deeper rule would only obscure what an overlay can reach.
+    """
+    merged = dict(base)
+    for key, value in overlay.items():
+        beneath = base.get(key)
+        if isinstance(beneath, dict) and isinstance(value, dict):
+            merged[key] = {**beneath, **value}
+        else:
+            merged[key] = value
+    return merged
+
+
 def _require_core(site):
     """Refuse a settings file whose non-discoverable core is unfilled.
 
@@ -167,7 +199,7 @@ def load_site_config(profile=None, partition=None):
         profiles = site.get("profiles", {})
         if profile not in profiles:
             raise ConfigError(f"unknown cluster profile {profile!r}")
-        site = {**site, **profiles[profile]}
+        site = merge_settings(site, profiles[profile])
 
     # Checked BEFORE the queue overlay, because picking the default
     #   queue reads `partitions`.
@@ -232,7 +264,9 @@ def apply_queue_overrides(site, partition):
                 f"setting {key!r}; check the spelling against "
                 f"clusterrc.py.")
 
-    return {**site, **override}
+    # Per key, one level down: a queue naming only the driver's memory
+    #   keeps the site's driver cores and walltime (DESIGN 6.2.11).
+    return merge_settings(site, override)
 
 
 # ----------------------------------------------------------------

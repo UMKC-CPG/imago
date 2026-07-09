@@ -541,6 +541,65 @@ def test_build_orchestrator_sbatch_omits_account_when_unset():
     assert "--account" not in script
 
 
+def test_merge_settings_replaces_plain_values():
+    """A setting that holds a single value is simply replaced."""
+    merged = cc.merge_settings(
+        {"walltime": "12:00:00", "nodes": 1},
+        {"walltime": "00:30:00"})
+    assert merged == {"walltime": "00:30:00", "nodes": 1}
+
+
+def test_merge_settings_descends_one_level_into_a_block():
+    """A setting that is itself a BLOCK of settings merges per key:
+    an overlay names only what it means to change, and the rest keep
+    the value the layer beneath gave (DESIGN 6.2.11, decision 1)."""
+    merged = cc.merge_settings(
+        {"orchestrator": {"cores": 8, "memory": "8G",
+                          "walltime": "24:00:00"}},
+        {"orchestrator": {"memory": "2G"}})
+    assert merged["orchestrator"] == {
+        "cores": 8, "memory": "2G", "walltime": "24:00:00"}
+
+
+def test_merge_settings_stops_at_one_level():
+    """A block holds plain values, never further blocks, so the
+    descent goes exactly one level: a dict nested two deep is
+    replaced, not merged."""
+    merged = cc.merge_settings(
+        {"profiles": {"hpc2": {"nodes": 4, "walltime": "06:00:00"}}},
+        {"profiles": {"hpc2": {"nodes": 8}}})
+    assert merged["profiles"]["hpc2"] == {"nodes": 8}
+
+
+def test_partial_orchestrator_override_keeps_the_other_keys():
+    """The curator's case: 'on the debug queue the driver needs only
+    2G'.  Cores and walltime were never mentioned and must survive --
+    otherwise they reappear as plausible-looking fallbacks (1 core,
+    the run's --walltime) rather than as an error."""
+    site = _filled_site(
+        partitions=["general", "debug"],
+        orchestrator={"cores": 8, "memory": "8G",
+                      "walltime": "24:00:00"},
+        queue_overrides={
+            "debug": {"orchestrator": {"memory": "2G"}}})
+    shape = cc.apply_queue_overrides(site, "debug")["orchestrator"]
+    assert shape == {"cores": 8, "memory": "2G",
+                     "walltime": "24:00:00"}
+
+
+def test_partial_orchestrator_override_via_a_profile(monkeypatch):
+    """The same rule holds at the profile layer, not just the queue
+    layer: one rule, all three overlays."""
+    _clusterrc_returning(_filled_site(
+        orchestrator={"cores": 8, "memory": "8G",
+                      "walltime": "24:00:00"},
+        profiles={"hpc2": {"orchestrator": {"cores": 1}}}),
+        monkeypatch)
+    shape = cc.load_site_config("hpc2")["orchestrator"]
+    assert shape == {"cores": 1, "memory": "8G",
+                     "walltime": "24:00:00"}
+
+
 def test_queue_override_overlays_only_the_selected_queue():
     """A setting may differ by queue.  The selected queue's override
     applies; overrides for queues this run does not use do not."""
