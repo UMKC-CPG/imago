@@ -2413,6 +2413,88 @@ imports its neighbours from `$IMAGO_BIN`).
   the convergence tolerance with nothing on screen.  Fixed with
   three tests (one fails as `assert 0.0005 == 0.00025`).
 
+- [ ] C116. INVESTIGATE: two rungs of a k-density ladder produced
+  bit-identical results.  Observed 2026-07-09 in the first
+  successful end-to-end seed run (orchestrator job 14882026,
+  `si_cmce_64_1999`).  Densities 250 and 300 gave
+  `E(300) - E(250) == 0.0` exactly, an identical `gap_ev` to 16
+  digits, an identical `gs_enrg-fb.dat` checksum, and the same 11
+  SCF iterations.  Their `kp-scf.dat` files differ only in
+  `MIN_KP_LINE_DENSITY` (250 vs 300); `structure.dat` and
+  `imago.dat` are byte-identical, as they should be, since the
+  k-density lives only in `kp-scf.dat`.
+
+  **This item is an investigation, not a fix.**  The obvious
+  reading -- that two requested densities resolve to the same
+  integer per-axis mesh, so the two runs are the same
+  calculation -- is a HYPOTHESIS that has not been verified, and
+  it was the first explanation to come to mind, which is reason
+  enough to distrust it.  Nothing about the resolved mesh was
+  ever read back: imago does not print the per-axis counts or the
+  k-point total anywhere we looked, so "same mesh" is inferred
+  from identical outputs rather than observed.
+
+  Alternatives that have NOT been ruled out, and should be, before
+  any change is proposed:
+  (a) the density-to-mesh map genuinely collapses 250 and 300 for
+      this lattice (15.16 x 9.06 x 9.03 Bohr, `CELL_MODE = full`);
+  (b) `MIN_KP_LINE_DENSITY` is parsed but then ignored, clamped,
+      or saturated somewhere above some value -- note 200 and 400
+      DO differ, which constrains but does not exclude this;
+  (c) the IBZ reduction (8 point ops here) collapses two distinct
+      full meshes onto the same irreducible set;
+  (d) something in the run directory was reused -- a stale dir, a
+      copied input, a cache interaction -- rather than recomputed.
+      The cache keys on `structure.dat` + scalars and NOT on the
+      k-density (DESIGN 6.2.5 says each density is its own run
+      dir), so this is worth checking rather than assuming.
+
+  First step is instrumentation, not code change: get imago to
+  report the resolved per-axis counts and the k-point total it
+  actually computed, then read them off both runs.  That single
+  fact discriminates (a)/(c) from (b)/(d) immediately.
+
+  Why it matters if (a) or (c) holds.  `pick_converged` (DESIGN
+  7.8 step 3c) requires BOTH neighbouring energy deltas to fall
+  below the flatness threshold.  A duplicated rung yields a delta
+  of exactly zero, which satisfies one side for free; three
+  consecutive duplicates would satisfy both and declare
+  convergence at whatever density that is -- a false plateau
+  produced by arithmetic rather than physics.  DESIGN 7.8 reasons
+  carefully about false plateaus but assumes the grid points are
+  distinct calculations.  In this run the left delta was 22
+  meV/atom, so the solid was correctly rejected; the hole was not
+  exercised.
+
+  Note the adjacency: DESIGN 8.2's size signature already wants
+  `kpoint_count`, "number of k-points actually computed."  If that
+  is surfaced for the resource dataspace it also answers this
+  question -- but do NOT let that convenience choose the
+  explanation.  DESIGN 7.8; possibly imago Fortran (cf. C76, C84).
+
+- [ ] C117. Decide the k-point integration scheme for near-metallic
+  reference solids.  Observed 2026-07-09 in the same seed run:
+  `si_cmce_64_1999` (16-atom Cmce cell) is the one solid of eight
+  that did not converge, and its gap oscillates between metal and
+  small-gap semiconductor along the k-density ladder -- 0.328,
+  0.000, 0.294, 0.093, 0.000, 0.093, 0.093, 0.086 eV at densities
+  25 through 400.  The manifest's `[defaults]` set
+  `kpoint_integration = "gaussian"`, and a bare `gaussian` token
+  carries no width, so makeinput applies NO smearing (DESIGN 5.7).
+  With no smearing and a near-zero gap, occupations jump each time
+  a band crosses the Fermi level, which is a plausible source of
+  the 100+ meV/atom energy swings at low density.
+
+  This is a curation question, not a bug: the schema already
+  supports a per-solid override, so `linear-tetrahedral`
+  (parameter-free) or `gaussian-0.1` can be named on this solid
+  alone.  Open: whether the seed manifest should instead default
+  to `linear-tetrahedral`, which DESIGN 5.7 calls the producer's
+  default, and why the Si defaults were settled on `gaussian`.
+  Settle before re-running the seed, since the choice selects the
+  guidance predictor's sub-model and a database must not mix
+  sub-models silently.  DESIGN 5.7 / 7.6; CURATION.
+
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 
 - [ ] C62. Implement the element-aware bispectrum per
