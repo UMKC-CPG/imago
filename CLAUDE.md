@@ -18,6 +18,51 @@ documents live in `dev/`. Read them in order when starting work:
 start a session and `/refine` to check consistency across the
 chain.
 
+## Chain Discipline: No Code Without Pseudocode
+
+The chain runs downward: VISION -> ARCHITECTURE -> DESIGN ->
+PSEUDOCODE -> code. A new feature enters at the top and flows
+down. Each level is the specification for the one below it, and
+each is written before that one exists.
+
+**The gate.** Before editing any file under `src/`, the
+governing PSEUDOCODE section must already exist and must already
+describe the change. If it does not, stop and write it first,
+and say so plainly rather than proceeding and back-filling
+afterward. A back-filled level is not a level: nobody reviewed
+the code against it, so it records what was built rather than
+specifying what should have been.
+
+**Announce the level.** When beginning a coded task, name the
+PSEUDOCODE section that governs it before touching `src/`. Being
+unable to name one is itself the answer -- the pseudocode is
+missing and must be written.
+
+**A detailed TODO entry is not pseudocode.** This is the trap
+that has actually caught us. A task entry that names the
+functions, the files, and the call sequence reads like a
+specification and is detailed enough to code from directly. It
+is not a level of the chain. It is never checked against DESIGN
+by `/refine`, and once its box is ticked it is never read again.
+When a task's plan grows specific enough to implement from, that
+specificity belongs in PSEUDOCODE -- move it there and leave the
+TODO entry pointing at the section.
+
+**Why this matters more than it looks.** The chain is what lets
+a reader who has been away trust the source. Code with a
+pseudocode section above it can be checked against a spec that a
+human agreed to. Code without one can only be checked against
+itself, which is no check at all. Skipping the level costs
+nothing on the day it is skipped and costs the project its
+reviewability forever after.
+
+**The one legitimate upward edit.** Pseudocode may be brought
+into agreement with existing code only where that code has first
+been verified to implement DESIGN faithfully. Anywhere else, a
+disagreement between pseudocode and code means the *code* is
+wrong. Never edit the pseudocode to match code merely because
+the code is already written.
+
 ## Level Awareness
 
 During development conversations, the programmer may shift
