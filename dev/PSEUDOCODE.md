@@ -2217,6 +2217,11 @@ function load(path, known_methods = None):
 
     seen_labels    = set()
     default_count  = 0
+    # File-wide half of rule 10: the canonical sub_spec each
+    # method's preferred records must agree on.  Filled by the
+    # first preferred record of a method, checked against by
+    # every later one.
+    preferred_subspec = {}          # method -> canonical sub_spec
 
     for entry_dict in raw.get("potential", []):
         # Per-entry required fields (rule 3,
@@ -2261,14 +2266,18 @@ function load(path, known_methods = None):
         require_provenance(entry_dict["provenance"],
             path, lbl)
 
-        # Fingerprint sub-blocks (rules 8 and 9).
+        # Fingerprint sub-blocks (rules 8, 9, 10).
         # Each [[potential.fingerprint]] record
         # contributes one FingerprintRecord.  The
         # method/sub_spec pair is unique per entry
         # (rule 8); the method must be known if a
-        # registry was supplied (rule 9).
+        # registry was supplied (rule 9); and the
+        # preferred flag is counted PER ENTRY, per
+        # method (rule 10, below the loop).
         fingerprints = []
         seen_method_subspec = set()
+        methods_on_entry = set()      # rule 10
+        preferred_on_entry = {}       # method -> count
         for fp_dict in entry_dict.get(
                 "fingerprint", []):
             require("method" in fp_dict, path, lbl,
@@ -2300,16 +2309,64 @@ function load(path, known_methods = None):
                     "fingerprint method '" + method
                     + "' not in matcher registry")
 
-            # Payload = all keys other than method
-            # and sub_spec.  Matchers validate their
-            # own payload shape at lookup time.
+            # Rule 10 bookkeeping.  `preferred` is
+            # optional and defaults to false: a record
+            # nobody flagged is an alternate sub_spec
+            # riding along, never the canonical one.
+            preferred = fp_dict.get("preferred", False)
+            methods_on_entry.add(method)
+            if preferred:
+                preferred_on_entry[method] = (
+                    preferred_on_entry.get(method, 0) + 1)
+                # File-wide: every preferred record of a
+                # method must name the SAME sub_spec.  That
+                # agreement is what the flag MEANS -- it
+                # names the settings the consumer computes
+                # its query with (DESIGN 5.6.5 step 2) --
+                # and two flagged records disagreeing would
+                # leave no canonical answer.
+                if method in preferred_subspec:
+                    require(preferred_subspec[method] == canon,
+                        path, lbl,
+                        "preferred " + method + " records"
+                        + " disagree on sub_spec across the"
+                        + " file; the flag names the"
+                        + " canonical settings, so they must"
+                        + " agree")
+                else:
+                    preferred_subspec[method] = canon
+
+            # Payload = all keys other than method,
+            # sub_spec, and preferred.  Matchers validate
+            # their own payload shape at lookup time.
             payload = {k: v for (k, v) in fp_dict
-                       if k not in ("method",
-                                    "sub_spec")}
+                       if k not in ("method", "sub_spec",
+                                    "preferred")}
             fingerprints.append(FingerprintRecord(
-                method   = method,
-                sub_spec = sub_spec,
-                payload  = payload))
+                method    = method,
+                sub_spec  = sub_spec,
+                preferred = preferred,
+                payload   = payload))
+
+        # Rule 10, per ENTRY (DESIGN 5.2 rule 10).  For each
+        # method present on THIS entry, exactly one of its
+        # records is preferred.  The flag marks this entry's
+        # canonical record for that family: the consumer reads
+        # any one to learn which sub_spec to query at, and the
+        # dedup (5.2.3) asks EACH entry for its own canonical
+        # bispectrum -- so every harvested entry flags its own.
+        #
+        # An entry with no fingerprints (the "isolated"
+        # baseline) has no method present and is vacuously
+        # exempt: the loop below does not run.
+        for method in sorted(methods_on_entry):
+            count = preferred_on_entry.get(method, 0)
+            require(count == 1, path, lbl,
+                "method '" + method + "' is present on this"
+                + " entry with " + str(count) + " record(s)"
+                + " flagged preferred = true; exactly one is"
+                + " required so the entry has an unambiguous"
+                + " canonical record for that family")
 
         db.potentials.append(PotentialEntry(
             label         = lbl,
@@ -3359,12 +3416,19 @@ function pickManifestEntry(species_atoms, element, db,
 
 
 function find_preferred(db, method):
-    # Return the FingerprintRecord flagged preferred = true
-    # for `method` in this element's database, or None if the
-    # family is absent.  Per-element rule 10 guarantees
-    # exactly one preferred per present family (None means the
-    # family is absent, never present-but-unpreferred), so the
-    # first hit is it.
+    # Return A FingerprintRecord flagged preferred = true for
+    # `method` in this element's database, or None if the family
+    # is absent from the file entirely.
+    #
+    # Several entries flag their own canonical record (rule 10 is
+    # per entry), so there are as many hits as there are
+    # harvested entries.  Any of them will do, and the first is
+    # the cheapest: the caller reads only `method` and `sub_spec`
+    # off the result -- never the payload -- to learn which
+    # settings to compute its query with, and rule 10's file-wide
+    # half guarantees every preferred record of a method names
+    # the SAME sub_spec.  A None result therefore means "this
+    # family is absent," never "present but unpreferred."
     for entry in db.potentials:
         for fp in entry.fingerprints:
             if fp.method == method and fp.preferred:
