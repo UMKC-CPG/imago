@@ -116,21 +116,38 @@ CANONICAL_GROUP_ORDER = (       # 13 element groups
 CANONICAL_LATTICE_ORDER = (     # 6 Bravais families
     "cubic", "hex", "tet", "ortho", "mono", "tri")
 
-# Predictor tuning knobs (DESIGN 7.6).  Named here so that a
-# post-seed recalibration is a one-file change.  (Consumed by
-# the predictor, added in a later increment of this module.)
-k_min = 3            # below this a sub-model is refused
-k_neighbors = 5      # neighbors used at each k-NN stage
-epsilon = 1.0e-6     # numerical floor on a distance
-w_comp = 1.0         # composition weight in the stage-1 metric
-w_latt = 0.25        # lattice-family weight in the stage-1 metric
-w_gap = 1.0          # gap weight in the stage-2 metric
-w_spin = 0.5         # magnetization weight in the stage-2 metric
-sigma_gap = 1.0      # gap normalization (eV) in the stage-2 metric
-sigma_spin = 0.5     # magnetization normalization (Bohr magnetons
-#                      per atom) in the stage-2 metric
-sigma_gap_ref = 1.0  # gap spread -> confidence_1 reference (eV)
-sigma_kpd_ref = 50.0  # kpd spread -> confidence_2 reference
+# Predictor tuning knobs (DESIGN 7.6 / PSEUDOCODE 15.1).  Named
+# here, in one place, so a post-seed recalibration is a one-file
+# change.
+
+# How many entries a sub-model needs before the predictor will
+#   trust it, and how many neighbors each k-NN stage averages.
+min_submodel_entries = 3
+neighbor_count = 5
+
+# Keeps the inverse-distance weight finite when a neighbor sits
+#   exactly on the query point (distance zero).
+distance_floor = 1.0e-6
+
+# Relative weights of the two terms in each stage's distance.
+#   Stage 1 compares chemistry; stage 2 compares the electronic
+#   character stage 1 predicted.
+composition_weight = 1.0
+lattice_family_weight = 0.25
+gap_weight = 1.0
+magnetization_weight = 0.5
+
+# The physical scale each stage-2 term is measured against, so a
+#   gap difference in eV and a moment difference in Bohr
+#   magnetons per atom become comparable, dimensionless numbers.
+gap_distance_scale = 1.0            # eV
+magnetization_distance_scale = 0.5  # Bohr magnetons per atom
+
+# The spread at which a stage's confidence has fallen to 1/e.  A
+#   tight neighborhood means a trustworthy prediction, so the
+#   spread of the neighbors' values is what confidence measures.
+gap_confidence_scale = 1.0             # eV
+kpoint_density_confidence_scale = 50.0
 
 
 # ============================================================
@@ -1077,7 +1094,7 @@ def select_submodel(pool: list[GuidanceEntry], basis: str,
     -> overall-pool fallback chain (DESIGN 7.6 step 2).  Returns
     ``(entries, is_under_trained)``; ``is_under_trained`` is True
     only when even the whole system_type pool has fewer than
-    :data:`k_min` entries.  The family/pool fallbacks ignore
+    :data:`min_submodel_entries` entries.  The family/pool fallbacks ignore
     basis and integration -- they are the degraded best-effort
     path when no exact sub-model is populous enough."""
 
@@ -1088,7 +1105,7 @@ def select_submodel(pool: list[GuidanceEntry], basis: str,
              and entry.context.functional == functional
              and entry.context.kpoint_integration
              == kpoint_integration]
-    if len(exact) >= k_min:
+    if len(exact) >= min_submodel_entries:
         return exact, False
 
     # 2. The most-populous sub-model within the same functional
@@ -1098,11 +1115,11 @@ def select_submodel(pool: list[GuidanceEntry], basis: str,
               if functional_family(entry.context.functional)
               == family_token]
     best = most_populous_submodel(family)
-    if len(best) >= k_min:
+    if len(best) >= min_submodel_entries:
         return best, False
 
     # 3. The whole system_type pool, settings ignored.
-    if len(pool) >= k_min:
+    if len(pool) >= min_submodel_entries:
         return pool, False
 
     # 4. Too thin everywhere.
@@ -1112,14 +1129,14 @@ def select_submodel(pool: list[GuidanceEntry], basis: str,
 def knn_weights(entries: list[GuidanceEntry],
                 distance_of: Callable[[GuidanceEntry], float]
                 ) -> list[tuple[GuidanceEntry, float]]:
-    """Return the ``k_neighbors`` nearest entries as
+    """Return the ``neighbor_count`` nearest entries as
     ``(entry, weight)`` pairs.  Weights are inverse-distance,
-    ``1 / (d + epsilon)``, normalized to sum to 1.0 -- so an
+    ``1 / (d + distance_floor)``, normalized to sum to 1.0 -- so an
     exact match (d = 0) dominates without dividing by zero."""
 
     scored = sorted(entries, key=distance_of)
-    nearest = scored[:min(k_neighbors, len(scored))]
-    raw = [1.0 / (distance_of(entry) + epsilon) for entry in nearest]
+    nearest = scored[:min(neighbor_count, len(scored))]
+    raw = [1.0 / (distance_of(entry) + distance_floor) for entry in nearest]
     total = sum(raw)
     return [(entry, weight / total)
             for entry, weight in zip(nearest, raw)]
@@ -1171,15 +1188,17 @@ def stage1(query: Signature, entries: list[GuidanceEntry]
     neighbor entry_ids."""
 
     def d1(entry: GuidanceEntry) -> float:
-        comp_sq = sum(
+        composition_sq = sum(
             (a - b) ** 2 for a, b in zip(
                 query.composition_vector,
                 entry.signature.composition_vector))
-        latt_sq = sum(
+        lattice_sq = sum(
             (a - b) ** 2 for a, b in zip(
                 query.lattice_onehot,
                 entry.signature.lattice_onehot))
-        return math.sqrt(w_comp * comp_sq + w_latt * latt_sq / 2.0)
+        return math.sqrt(
+            composition_weight * composition_sq
+            + lattice_family_weight * lattice_sq / 2.0)
 
     neighbors = knn_weights(entries, d1)
     predicted_gap = sum(
@@ -1191,7 +1210,7 @@ def stage1(query: Signature, entries: list[GuidanceEntry]
     variance = sum(
         weight * (entry.measured.gap_ev - predicted_gap) ** 2
         for entry, weight in neighbors)
-    confidence = math.exp(-math.sqrt(variance) / sigma_gap_ref)
+    confidence = math.exp(-math.sqrt(variance) / gap_confidence_scale)
     neighbor_ids = [entry.entry_id for entry, _ in neighbors]
     return predicted_gap, predicted_mag, confidence, neighbor_ids
 
@@ -1208,12 +1227,14 @@ def stage2(predicted_gap: float, predicted_mag: float,
     neighbor ids."""
 
     def d2(entry: GuidanceEntry) -> float:
-        gap_term = (w_gap * (predicted_gap - entry.measured.gap_ev) ** 2
-                    / sigma_gap ** 2)
-        mag_term = (w_spin
-                    * (predicted_mag
-                       - intensive_magnetization(entry)) ** 2
-                    / sigma_spin ** 2)
+        gap_term = (
+            gap_weight
+            * (predicted_gap - entry.measured.gap_ev) ** 2
+            / gap_distance_scale ** 2)
+        mag_term = (
+            magnetization_weight
+            * (predicted_mag - intensive_magnetization(entry)) ** 2
+            / magnetization_distance_scale ** 2)
         return math.sqrt(gap_term + mag_term)
 
     neighbors = knn_weights(entries, d2)
@@ -1223,7 +1244,8 @@ def stage2(predicted_gap: float, predicted_mag: float,
     variance = sum(
         weight * (entry.measured.kpoint_density - predicted_kpd) ** 2
         for entry, weight in neighbors)
-    confidence = math.exp(-math.sqrt(variance) / sigma_kpd_ref)
+    confidence = math.exp(
+        -math.sqrt(variance) / kpoint_density_confidence_scale)
     neighbor_ids = [entry.entry_id for entry, _ in neighbors]
     return predicted_kpd, confidence, neighbor_ids
 

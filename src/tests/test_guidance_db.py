@@ -33,7 +33,7 @@ from guidance_db import (
     format_entry,
     functional_family,
     intensive_magnetization,
-    k_neighbors,
+    neighbor_count,
     knn_weights,
     load,
     load_elemental_groups,
@@ -822,7 +822,8 @@ class TestSubmodelSelection:
         assert len(entries) == 4
 
     def test_under_trained_when_pool_too_thin(self):
-        pool = [_pentry("a"), _pentry("b")]      # 2 < k_min (3)
+        # Two entries, below the three a sub-model needs.
+        pool = [_pentry("a"), _pentry("b")]
         entries, under = select_submodel(
             pool, "fb", "gga-pbe", "gaussian-0.1")
         assert under
@@ -849,7 +850,7 @@ class TestKnnWeights:
         # Distance increases with index; nearest is e0.
         distance = {e: float(i) for i, e in enumerate(entries)}
         pairs = knn_weights(entries, lambda e: distance[e])
-        assert len(pairs) == k_neighbors           # capped at 5
+        assert len(pairs) == neighbor_count           # capped at 5
         assert sum(w for _, w in pairs) == pytest.approx(1.0)
         # Nearest neighbour carries the most weight.
         weights = [w for _, w in pairs]
@@ -960,7 +961,8 @@ class TestPredictEndToEnd:
         assert result.confidence < 1.0
 
     def test_under_trained_thin_crystalline_pool(self):
-        space = _space([_pentry("a"), _pentry("b")])     # 2 < k_min
+        # Two entries, below the three a sub-model needs.
+        space = _space([_pentry("a"), _pentry("b")])
         query = Signature(
             "crystalline", _comp(), "cubic",
             tuple(1.0 if n == "cubic" else 0.0
