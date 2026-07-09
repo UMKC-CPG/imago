@@ -4489,6 +4489,30 @@ function materialize_only(manifest_path, pdb_root,
     return report          # the CLI prints it plus a tally
 
 
+function main_submit_mode(argv, args, data_root):
+    # --submit: run the producer as its OWN batch job (DESIGN
+    # 6.2.11; the sbatch generator is 13.7).  Materialize every
+    # structure HERE, on the login node, because it is the one
+    # step that needs the network and a compute node may have
+    # none.  Only then submit the batch job that re-runs this
+    # producer, which finds every structure already cached.
+    #
+    # A materialize failure STOPS the submission: a batch job
+    # that cannot read its structures would burn a queue slot to
+    # fail, and the curator needs the fetch error, not a job id.
+    report = materialize_only(args.manifest, args.pdb_root)
+    print_materialize_report(report)
+    if not all(row.ok for row in report):
+        return error("materialize failed; not submitting")
+    job_id = submit_orchestrator_batch(argv, args, data_root)
+    print("submitted orchestrator batch job " + job_id)
+    return ok
+
+# --submit and --materialize-only are mutually exclusive: each
+#   names a different stopping point (submit the driver's job
+#   versus stop after the fetch), so the CLI rejects both at once.
+
+
 function harvestFingerprints(flight, ref, env,
         result_toml, characterization):
     # Every environment harvests the database-wide
@@ -5448,7 +5472,7 @@ class ImagoWingbeat implements Wingbeat:
 ```
 function stage_inputs(unit, wingbeat_dir):
     # Ensure the run dir holds runnable inputs.  Three cases:
-    #   - the driver's prepare step (15.6) already built them into
+    #   - the driver's prepare step (11.4) already built them into
     #     unit.prepared_dir -> COMMIT that staged copy into the run
     #     dir (the Model-A producer path; DESIGN 6.2.5);
     #   - the run dir already holds a staged imago.dat -- a re-run
@@ -5478,7 +5502,7 @@ function commit_prepared_inputs(prepared_dir, wingbeat_dir):
     # Copy the driver-staged inputs (structure.dat, imago.dat,
     # scfV, kp files -- DESIGN 6.2.5) into the run dir so
     # run_prepared finds them.  The staging area is transient
-    # (the prepare pass, 15.6, rebuilds it each producer run),
+    # (the prepare pass, 11.4, rebuilds it each producer run),
     # so the commit simply copies from it.
     for name in list_files(prepared_dir):
         copy_file(join(prepared_dir, name),
@@ -5829,6 +5853,14 @@ this code.
 # dict, nothing more.  The two required fields ship as None (a
 # REQUIRED comment marks them); load_site_config refuses an
 # unfilled one.  cluster_probe.py generates a filled starter.
+#
+# Most of the file is cluster FACT (queues, account, per-node
+# capacity, environment bring-up), true no matter what runs.  The
+# rest sizes a job, and there are exactly two job CLASSES: a
+# worker (one calculation, the per-worker keys) and an
+# orchestrator (a driver that prepares units and fans them out,
+# the grouped block at the end).  The file grows by job class,
+# never by builder (ARCHITECTURE 9.4).
 function clusterrc.parameters_and_defaults():
     return {
         # --- Required core (enough to dispatch at all) ---
@@ -5843,8 +5875,16 @@ function clusterrc.parameters_and_defaults():
         "walltime"          : "01:00:00",
         "default_topology"  : "slurm-per-job",
         "max_blocks"        : 1,         # pooled growth cap
+        # Two DISTINCT memory concepts, deliberately not merged.
+        #   memory_per_node is a node's physical capacity, in
+        #   MEGABYTES -- a ceiling held for future packing and
+        #   estimation checks, never spent as a request.
+        #   memory_per_worker is what ONE calculation needs, in
+        #   GIGABYTES -- the figure scheduler_options turns into a
+        #   request.  None on either means "let the scheduler
+        #   apply its own default" (DESIGN 6.2.11).
         "memory_per_node"   : None,
-        "memory_per_worker" : None,
+        "memory_per_worker" : 10,
         # --- Advanced / forward-looking (power users) ---
         "launcher"          : "single",  # MPI/GPU seam later
         "ranks_per_worker"  : 1,         # OpenMP/MPI balance:
@@ -5856,6 +5896,19 @@ function clusterrc.parameters_and_defaults():
         "queue_overrides"   : {},        # per-queue key tweaks
         "profiles"          : {},        # named site profiles
         "extra_scheduler_options" : [],  # raw passthrough
+        # --- The orchestrator job class (DESIGN 6.2.11) ---
+        # The resources the DRIVER process asks for when it is
+        #   wrapped in its own batch job.  ONE shape shared by
+        #   every orchestrator, overridable per run.  Under a
+        #   fan-out dispatch the driver only prepares units and
+        #   submits them, so it is modest; under --dispatch local
+        #   it runs the SCFs in process and the curator sizes this
+        #   block compute-heavy instead.
+        "orchestrator" : {
+            "cores"    : 2,
+            "memory"   : "8G",
+            "walltime" : "24:00:00",     # outlast the flight
+        },
     }
 ```
 
@@ -5916,14 +5969,17 @@ differ in how blocks map to units.
 
 ```
 function slurm_provider(site, choices, nodes_per_block,
-                        init_blocks, min_blocks, max_blocks):
+                        init_blocks, min_blocks, max_blocks,
+                        workers_per_block = 1):
     # Guard the deferred parallel seam first: refuse any parallel
     # knob set away from its serial default (see _require_serial_only).
     _require_serial_only(site)
     # worker_init is the site's bring-up script, so a worker can
     # find imago; account/partition/walltime come from the resolved
     # choices; the memory and GPU knobs ride along as raw scheduler
-    # directives (scheduler_options).
+    # directives (scheduler_options).  workers_per_block is how many
+    # calculations share a node, so the per-node memory request
+    # scales with it.
     return SlurmProvider(
         partition         = choices["partition"],
         account           = site["account"],
@@ -5934,7 +5990,8 @@ function slurm_provider(site, choices, nodes_per_block,
         max_blocks        = max_blocks,
         worker_init       = join_lines(site["worker_init"]),
         launcher          = make_launcher(site),
-        scheduler_options = scheduler_options(site))
+        scheduler_options = scheduler_options(
+                                site, workers_per_block))
 ```
 
 ```
@@ -5942,16 +5999,19 @@ function build_pooled_config(site, choices):
     # One (optionally auto-scaled) allocation; many units stream
     # through its workers.  Size the block by the per-run nodes
     # and the site's per-node worker packing.  max_blocks lets
-    # the pool grow when work backs up.
+    # the pool grow when work backs up.  The SAME packed-worker
+    # count caps the executor and scales the memory request.
+    packed_workers = workers_per_node(site)
     provider = slurm_provider(site, choices,
         nodes_per_block = choices["nodes"],
         init_blocks = 1, min_blocks = 1,
-        max_blocks  = site["max_blocks"])
+        max_blocks  = site["max_blocks"],
+        workers_per_block = packed_workers)
     executor = HighThroughputExecutor(
         label                = "imago-pooled",
         provider             = provider,
         cores_per_worker     = site["cores_per_worker"],
-        max_workers_per_node = workers_per_node(site))
+        max_workers_per_node = packed_workers)
     return Config(executors = [executor])
 ```
 
@@ -5963,7 +6023,8 @@ function build_per_job_config(site, choices):
     provider = slurm_provider(site, choices,
         nodes_per_block = 1,
         init_blocks = 0, min_blocks = 0,
-        max_blocks  = site["max_blocks"])
+        max_blocks  = site["max_blocks"],
+        workers_per_block = 1)      # one calc/node -> one worker's mem
     executor = HighThroughputExecutor(
         label                = "imago-per-job",
         provider             = provider,
@@ -6016,7 +6077,7 @@ function make_launcher(site):
 ```
 
 ```
-function scheduler_options(site):
+function scheduler_options(site, workers_per_block = 1):
     # Assemble the raw scheduler directives the site facts imply --
     # the memory guard and the GPU request, which are allocation-time
     # requests and so belong in #SBATCH -- then append
@@ -6025,8 +6086,18 @@ function scheduler_options(site):
     # a launch-time concern (srun --cpu-bind, OMP_PLACES), applied by
     # the launcher in the deferred parallel path, not a batch
     # directive.  Returns the directives joined into one string.
+    #
+    # The memory guard is DERIVED, not copied.  memory_per_worker is
+    # what one calculation needs, while the scheduler's --mem is a
+    # per-NODE figure, and a node runs workers_per_block calculations
+    # at once (one under the per-job shape, the node's packed worker
+    # count under the pooled shape).  memory_per_node is never spent
+    # here: it is capacity, not a request (DESIGN 6.2.11).
     lines = []
-    if site["memory_per_node"]:   lines.append(mem_line(site))
+    if site["memory_per_worker"]:
+        node_memory_gb = (site["memory_per_worker"]
+                          * workers_per_block)
+        lines.append("#SBATCH --mem=" + node_memory_gb + "G")
     if site["gpus_per_node"] > 0: lines.append(gres_line(site))
     lines.extend(site["extra_scheduler_options"])
     return join_lines(lines)
@@ -6095,6 +6166,102 @@ The run-reuse cache (13.4) is untouched: a worker executes
 each unit in its own run directory on the shared filesystem
 exactly as the in-process local path does, so a cluster run
 and a local run share one cache.
+
+**The driver's own batch job.**  Everything above places each
+*unit*.  It leaves open where the *driver* runs -- the
+orchestrator process that reads the manifest, prepares every
+unit (13.2 / 11.4), decides cache hits from local files, and
+submits and awaits the rest.  Because the driver now does real
+per-unit work before any SCF (a makeinput build, plus a fast
+`imago -loen` when a solid's species assignment needs one, once
+per unit *including cache hits*), at scale it would occupy a
+login node's terminal for the whole flight.  So the driver may
+be wrapped in a scheduler job of its own, sized from the site's
+`orchestrator` block -- a job class distinct from the per-worker
+sizing, because one process that fans work out and one process
+that runs a calculation are different shapes and conflating them
+would missize both (DESIGN 6.2.11; ARCHITECTURE 9.4).
+
+The generator lives in kaleidoscope beside the `Config`
+builders, so every future orchestrator renders its job the same
+way.  Note the `extra_scheduler_options` passthrough: those
+entries are already complete `#SBATCH` lines, exactly as
+`scheduler_options` forwards them to Parsl, so they are copied
+verbatim rather than given a second directive marker.
+
+```
+function build_orchestrator_sbatch(site, choices, command):
+    # The driver is ONE process, so the header asks for one node
+    # with the orchestrator shape.  A missing orchestrator walltime
+    # falls back to the run's resolved walltime, so the driver's
+    # job always carries a time limit.  `command` is the already-
+    # quoted command line the batch job runs.
+    orch     = site.get("orchestrator", {})
+    cores    = orch.get("cores", 1)
+    memory   = orch.get("memory")                 # None -> no --mem
+    walltime = orch.get("walltime") or choices["walltime"]
+
+    lines = ["#!/bin/bash",
+             "#SBATCH --job-name=imago-orchestrator"]
+    if site["account"]:                           # some sites need none
+        lines.append("#SBATCH --account=" + site["account"])
+    lines.append("#SBATCH --partition=" + choices["partition"])
+    lines.append("#SBATCH --nodes=1")
+    lines.append("#SBATCH --cpus-per-task=" + cores)
+    if memory:
+        lines.append("#SBATCH --mem=" + memory)
+    lines.append("#SBATCH --time=" + walltime)
+    lines.extend(site["extra_scheduler_options"])   # already #SBATCH
+
+    # The bring-up runs first so the batch job can find imago, then
+    # the producer command itself.
+    lines.append("")
+    lines.extend(site["worker_init"])
+    lines.append("")
+    lines.append(command)
+    return join_lines(lines)
+```
+
+**Materialize on the login node, then submit.**  The one step
+that needs the network is the structure fetch, because compute
+nodes may have no internet.  So a `--submit` run materializes
+every structure on the login node first, then submits the batch
+job; inside that job the prepare step (11.4) consumes the
+already-fetched skeletons and touches no network.  The batch job
+re-invokes the producer with the same arguments *minus*
+`--submit`, so it runs the build rather than submitting again.
+`--submit` and `--materialize-only` are therefore mutually
+exclusive: each names a different stopping point.
+
+```
+# In build_initial_potentials.py (the client), after the
+# materialize pre-flight has fetched every structure.
+function submit_orchestrator_batch(argv, args, data_root):
+    site    = load_site_config(args.profile)
+    choices = resolve_choices(site, args)
+    # Re-run THIS producer inside the batch job, dropping --submit
+    # so the batch invocation builds instead of resubmitting.
+    inner   = [item for item in argv if item != "--submit"]
+    command = shell_quote_all([interpreter, *inner])
+
+    script_path = join(data_root, "orchestrator.sbatch")
+    write_file(script_path,
+               build_orchestrator_sbatch(site, choices, command))
+    output = run(["sbatch", script_path], check = true)
+    return last_token(output)      # "Submitted batch job <id>"
+```
+
+Which shape the driver's job uses is the same per-run
+`--dispatch` choice: `local` inside the orchestrator job at seed
+scale (the driver runs the SCFs in process, so the orchestrator
+block is sized compute-heavy), `slurm-per-job` or `pooled` later
+-- a flag, not a rewrite.  One thing rides with it, deferred: at
+seed scale the driver prepares every unit serially inside its
+job, which is exactly what keeps a cache hit off the scheduler
+(13.4).  When that serial prepare becomes the bottleneck,
+prepare-and-hit-test can move onto dispatched worker units, at
+the cost that a hit then occupies a cheap worker slot rather
+than being decided driver-local.
 
 The discovery tool `cluster_probe.py` (a SEPARATE program, not
 part of the pure-data clusterrc.py; DESIGN 6.2.11) reads what
