@@ -6021,12 +6021,14 @@ function clusterrc.parameters_and_defaults():
         "extra_scheduler_options" : [],  # raw passthrough
         # --- The orchestrator job class (DESIGN 6.2.11) ---
         # The resources the DRIVER process asks for when it is
-        #   wrapped in its own batch job.  ONE shape shared by
-        #   every orchestrator, overridable per run.  Under a
-        #   fan-out dispatch the driver only prepares units and
-        #   submits them, so it is modest; under --dispatch local
-        #   it runs the SCFs in process and the curator sizes this
-        #   block compute-heavy instead.
+        #   wrapped in its own batch job.  ONE default shape shared
+        #   by every orchestrator, overridden key by key per run
+        #   via --orchestrator-{cores,memory,walltime}
+        #   (resolve_orchestrator, below).  Under a fan-out
+        #   dispatch the driver only prepares units and submits
+        #   them, so it is modest; under --dispatch local it runs
+        #   the SCFs in process, and that run raises the shape on
+        #   the command line rather than editing this file.
         "orchestrator" : {
             "cores"    : 2,
             "memory"   : "8G",
@@ -6062,7 +6064,9 @@ function load_site_config(profile=None):
 # at all.  The flag surface is --dispatch {local, slurm-pooled,
 # slurm-per-job}, --partition, --nodes, --walltime.  This runs
 # only for a cluster shape; the local opt-out skips it (13.7
-# run_flight short-circuits before load_site_config).
+# run_flight short-circuits before load_site_config).  These four
+# size the WORKER job class; the orchestrator's own shape is
+# resolved separately below.
 function resolve_choices(site, cli):
     return {
         "dispatch"  : cli.dispatch  or site["default_topology"],
@@ -6070,6 +6074,39 @@ function resolve_choices(site, cli):
         "nodes"     : cli.nodes     or site["nodes"],
         "walltime"  : cli.walltime  or site["walltime"],
     }
+```
+
+The orchestrator's shape resolves on its own, because it sizes a
+different job class (a driver, not a calculation) and the two
+must not be conflated (DESIGN 6.2.11).  This is what makes the
+single site-default block *bounded*: a second orchestrator with
+different needs overrides the shape for its run rather than
+earning a second block in the settings file (ARCHITECTURE 9.4).
+
+```
+# Layer 2b: the driver's own per-run shape.  The flag surface is
+# --orchestrator-cores, --orchestrator-memory,
+# --orchestrator-walltime (DESIGN 6.2.11, decision 2).  An
+# explicit flag wins over the site's orchestrator block, KEY BY
+# KEY: overriding the memory must leave the site's cores and
+# walltime standing, which a whole-block replacement would
+# silently discard.  A key nobody sets stays absent, and
+# build_orchestrator_sbatch decides what an absent key means --
+# cores and memory simply go unrequested, while walltime falls
+# back once more, to the run's resolved --walltime, so a driver
+# job always carries a time limit.
+#
+# NOTE the worker flags do NOT reach here: --walltime and --nodes
+# size the WORKER class.  A curator shortening --walltime is
+# speaking about the calculations, not about the process that
+# submits them.
+function resolve_orchestrator(site, cli):
+    shape = copy(site["orchestrator"])      # may be {} at a site
+    for key in ("cores", "memory", "walltime"):
+        flag = getattr(cli, "orchestrator_" + key, None)
+        if flag is not None:
+            shape[key] = flag
+    return shape
 ```
 
 ```
@@ -6313,13 +6350,17 @@ entries are already complete `#SBATCH` lines, exactly as
 verbatim rather than given a second directive marker.
 
 ```
-function build_orchestrator_sbatch(site, choices, command):
+function build_orchestrator_sbatch(site, choices, command,
+                                   orchestrator = None):
     # The driver is ONE process, so the header asks for one node
-    # with the orchestrator shape.  A missing orchestrator walltime
-    # falls back to the run's resolved walltime, so the driver's
-    # job always carries a time limit.  `command` is the already-
-    # quoted command line the batch job runs.
-    orch     = site.get("orchestrator", {})
+    # with the orchestrator shape.  `orchestrator` is the shape
+    # resolve_orchestrator merged from the site block and this
+    # run's flags; when a caller passes none, the site block
+    # stands alone.  A missing walltime falls back to the run's
+    # resolved walltime, so the driver's job always carries a
+    # time limit.  `command` is the already-quoted command line
+    # the batch job runs.
+    orch     = orchestrator or site.get("orchestrator", {})
     cores    = orch.get("cores", 1)
     memory   = orch.get("memory")                 # None -> no --mem
     walltime = orch.get("walltime") or choices["walltime"]
@@ -6360,16 +6401,20 @@ exclusive: each names a different stopping point.
 # In build_initial_potentials.py (the client), after the
 # materialize pre-flight has fetched every structure.
 function submit_orchestrator_batch(argv, args, data_root):
-    site    = load_site_config(args.profile)
-    choices = resolve_choices(site, args)
+    site         = load_site_config(args.profile)
+    choices      = resolve_choices(site, args)
+    orchestrator = resolve_orchestrator(site, args)
     # Re-run THIS producer inside the batch job, dropping --submit
-    # so the batch invocation builds instead of resubmitting.
+    # so the batch invocation builds instead of resubmitting.  The
+    # --orchestrator-* flags may ride along harmlessly: they are
+    # read only when submitting, and the inner run does not submit.
     inner   = [item for item in argv if item != "--submit"]
     command = shell_quote_all([interpreter, *inner])
 
     script_path = join(data_root, "orchestrator.sbatch")
     write_file(script_path,
-               build_orchestrator_sbatch(site, choices, command))
+               build_orchestrator_sbatch(site, choices, command,
+                                         orchestrator))
     output = run(["sbatch", script_path], check = true)
     return last_token(output)      # "Submitted batch job <id>"
 ```

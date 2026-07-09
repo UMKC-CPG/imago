@@ -6954,7 +6954,14 @@ optionally saved.**  The client exposes options --
 `--nodes`, `--walltime` -- each defaulting from the site file
 (the dispatch shape from `default_topology`, covered just
 below), so a fully configured site needs no per-run options at
-all.  The everyday path is a single command (captured in the
+all.  These four size the *worker* job class.  A client that
+submits its driver as a batch job exposes three more --
+`--orchestrator-cores`, `--orchestrator-memory`,
+`--orchestrator-walltime` -- which size the *orchestrator*
+class and default from that block of the site file (the
+override rule is set out with the block, below).
+
+The everyday path is a single command (captured in the
 `command` log the scripts already keep); for a reproducible
 record, the client may also write the resolved configuration
 as a human-readable file in the run directory, beside the
@@ -7061,6 +7068,40 @@ supervises.  Under `local` the driver runs the SCFs itself, in
 process, so its block must be compute-sized.  The block is a
 new site/per-run setting alongside the worker sizing, not a
 reuse of it.
+
+**The orchestrator shape is overridable per run, key by key.**
+The site block is a *default* shape, not a fixed one.  A run
+overrides any of its three keys from the command line
+(`--orchestrator-cores`, `--orchestrator-memory`,
+`--orchestrator-walltime`, decision 2), and that is precisely
+what keeps the settings file bounded: a second orchestrator
+whose driver needs more memory -- a future builder, or this
+producer under `--dispatch local`, where the driver runs the
+SCFs itself -- says so for its own run instead of earning a
+second block in the file.  Without the override, the file would
+have to grow one block per orchestrator, which is the shape
+ARCHITECTURE 9.4 rules out.
+
+Three properties of the override, each a deliberate choice:
+
+- **Per key, not whole block.**  Overriding the memory must
+  leave the site's cores and walltime standing.  A
+  whole-block replacement would silently discard the site
+  facts the curator never meant to touch.
+- **Walltime alone keeps a further fallback.**  An unset
+  `cores` or `memory` simply goes unrequested and the
+  scheduler applies its own default, which is harmless.  An
+  unset walltime is not harmless -- a driver job with no time
+  limit is a job that can hang a queue -- so when neither the
+  flag nor the block names one, the driver's job takes the
+  run's resolved `--walltime`.  It always carries a limit.
+- **The worker flags do not reach the driver.**  `--walltime`
+  and `--nodes` size the *worker* job class (decision 2).  A
+  curator shortening `--walltime` to clear a short queue is
+  speaking about the calculations, not about the process that
+  submits them, and the orchestrator's own walltime continues
+  to govern the driver's job unless
+  `--orchestrator-walltime` says otherwise.
 
 **Materialize on the login node, then submit.**  The one step
 that needs the network is the structure fetch -- the
