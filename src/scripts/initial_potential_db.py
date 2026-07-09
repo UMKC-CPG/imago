@@ -373,14 +373,14 @@ def load(path: str,
     # rule 7 (exactly one) after the loop so a "zero" and a
     # "multiple" condition report through the same message.
     default_count = 0
-    # Rule 10 bookkeeping: how many fingerprint records carry
-    # preferred = true for each method seen anywhere in the file.
-    # A method appears as a key here as soon as any record names
-    # it (preferred or not), so after the loop a present method
-    # whose count is not exactly one is a hard error.  Methods
-    # wholly absent from the file never become keys and are thus
-    # exempt from the rule.
-    preferred_count_by_method: dict[str, int] = {}
+    # Rule 10, file-wide half: the canonical sub_spec each method's
+    # preferred records must agree on.  The flag NAMES the settings
+    # the consumer computes its query with (DESIGN 5.6.5 step 2),
+    # so two flagged records of one method disagreeing on sub_spec
+    # would leave no canonical answer.  Filled by the first
+    # preferred record of a method, checked against by every later
+    # one.  (The per-entry half is counted inside the loop.)
+    preferred_subspec_by_method: dict[str, Any] = {}
     entry_required = (
         "default", "description", "num_gaussians", "alpha_min",
         "alpha_max", "coefficients", "alphas", "provenance",
@@ -442,6 +442,14 @@ def load(path: str,
         # registered (rule 9).
         fingerprints: list[FingerprintRecord] = []
         seen_method_subspec: set = set()
+        # Rule 10, per-entry half.  A method becomes "present on
+        #   this entry" as soon as any of its records appears
+        #   (flagged or not); exactly one of them must be flagged.
+        #   An entry with no fingerprints -- the "isolated"
+        #   baseline -- leaves both empty and is exempt.
+        methods_on_entry: set[str] = set()
+        preferred_on_entry: dict[str, int] = {}
+        entry_preferred_subspec: dict[str, Any] = {}
         for fp_dict in entry_dict.get("fingerprint", []):
             if "method" not in fp_dict:
                 raise ValueError(
@@ -477,14 +485,22 @@ def load(path: str,
                     f"fingerprint method {method!r} is not a "
                     f"registered matcher")
 
-            # Rule 10 bookkeeping: register the method (so it is
-            # counted as present) and tally its preferred records.
-            # The flag defaults to false when the curator omits
-            # it, so the common non-preferred record needs no key.
+            # Rule 10 bookkeeping.  The flag defaults to false when
+            #   the curator omits it, so the common non-preferred
+            #   record (an alternate sub_spec riding along) needs
+            #   no key.  The method counts as "present on this
+            #   entry" whether or not any record flags it.
+            #   Both halves of the rule are checked below the
+            #   loop, per entry, in that order.
             preferred = bool(fp_dict.get("preferred", False))
-            preferred_count_by_method.setdefault(method, 0)
+            methods_on_entry.add(method)
             if preferred:
-                preferred_count_by_method[method] += 1
+                preferred_on_entry[method] = (
+                    preferred_on_entry.get(method, 0) + 1)
+                # Canonicalized, so key order and int-vs-float
+                #   spelling do not make two equal specs differ.
+                entry_preferred_subspec[method] = (
+                    canonicalize_sub_spec(sub_spec))
 
             # The payload is every field other than method,
             # sub_spec, and preferred; the owning matcher
@@ -500,6 +516,50 @@ def load(path: str,
                 preferred = preferred,
                 payload   = payload,
             ))
+
+        # ----- Rule 10, first half: PER ENTRY.  For each method
+        # present on THIS entry, exactly one of its records is
+        # flagged.  The flag marks the entry's canonical record for
+        # that family: the consumer reads any one to learn which
+        # sub_spec to query at (DESIGN 5.6.5 step 2), and the dedup
+        # asks EACH entry for its own canonical bispectrum (DESIGN
+        # 5.2.3) -- so every harvested entry flags its own.  An
+        # entry with no fingerprints (the "isolated" baseline) has
+        # no method present and is vacuously exempt.
+        #
+        # Checked BEFORE the file-wide half, and the order is
+        # load-bearing.  Rule 8 already forbids two records sharing
+        # a (method, sub_spec) on one entry, so two FLAGGED records
+        # of one method necessarily differ in sub_spec; were the
+        # file-wide agreement checked first it would fire on them
+        # and blame a disagreement "across the file" for what is
+        # ambiguity within a single entry.
+        for method in sorted(methods_on_entry):
+            count = preferred_on_entry.get(method, 0)
+            if count != 1:
+                raise ValueError(
+                    f"{path}: [[potential]] '{label}': "
+                    f"fingerprint method {method!r} is present on "
+                    f"this entry with {count} record(s) flagged "
+                    f"preferred = true; exactly one is required so "
+                    f"the entry has an unambiguous canonical "
+                    f"record for that family")
+
+        # ----- Rule 10, second half: FILE-WIDE.  Every preferred
+        # record of a method must name the same sub_spec.  The
+        # first entry to flag a method fixes it; every later entry
+        # is compared against that.
+        for method in sorted(entry_preferred_subspec):
+            canonical = entry_preferred_subspec[method]
+            if method not in preferred_subspec_by_method:
+                preferred_subspec_by_method[method] = canonical
+            elif preferred_subspec_by_method[method] != canonical:
+                raise ValueError(
+                    f"{path}: [[potential]] '{label}': preferred "
+                    f"{method!r} records disagree on sub_spec "
+                    f"across the file; the flag names the canonical "
+                    f"settings, so every preferred record of a "
+                    f"method must share one sub_spec")
 
         db.potentials.append(PotentialEntry(
             label           = label,
@@ -538,21 +598,12 @@ def load(path: str,
             f"{path}: expected exactly one [[potential]] with "
             f"default = true; found {default_count}")
 
-    # ----- Rule 10: exactly one preferred fingerprint record per
-    # present method.  The file-dictated selection regime (DESIGN
-    # 5.6.5) matches against the preferred record, so an absent or
-    # ambiguous preference would leave the consumer with no
-    # well-defined representative to compare against.  Sorting the
-    # methods keeps the error message deterministic.
-    for method in sorted(preferred_count_by_method):
-        count = preferred_count_by_method[method]
-        if count != 1:
-            raise ValueError(
-                f"{path}: fingerprint method {method!r} is "
-                f"present but has {count} record(s) flagged "
-                f"preferred = true; exactly one is required so "
-                f"the file-dictated selection regime has an "
-                f"unambiguous representative")
+    # Rule 10 is enforced in two halves, both above: the per-entry
+    #   count inside the entry loop, and the file-wide sub_spec
+    #   agreement as each preferred record is read.  There is no
+    #   file-wide COUNT of preferred records -- the flag is scoped
+    #   to the entry (DESIGN 5.2 rule 10), because every harvested
+    #   entry flags its own canonical record.
 
     return db
 
@@ -693,21 +744,25 @@ def find_preferred(db: ElementDatabase, method: str
 
     Implements PSEUDOCODE 11.3.d ``find_preferred``.  In the
     file-dictated selection regime (DESIGN 5.6.5 step 2) the
-    consumer matches the input structure against the database's
-    single representative record for each candidate method rather
-    than against a command-line-named sub-spec.  This returns that
-    representative: the one fingerprint record (across all entries
-    in the file) whose ``method`` matches and whose ``preferred``
-    flag is set.
+    consumer has no command-line sub-spec, so the database names
+    the settings to query at.  This returns a record carrying
+    them.
+
+    The flag is scoped to the *entry* (DESIGN 5.2 rule 10), so a
+    file with several harvested entries holds several flagged
+    records of a family -- one per entry.  Any of them will do,
+    and the first is the cheapest: the caller reads only
+    ``method`` and ``sub_spec`` off the result, never the payload,
+    and rule 10's file-wide half guarantees every flagged record
+    of a method names the same ``sub_spec``.
 
     Returns ``None`` when the method is wholly absent from the
     file, which the caller reads as "this database offers no
     fingerprints of that family, fall through to the next method
-    or to the default entry".  Because rule 10 guarantees exactly
-    one preferred record per *present* method, a ``None`` result
-    can only mean "family absent", never "present but
-    unpreferred", and the first matching record is necessarily the
-    unique preferred one -- so the scan can stop at the first hit.
+    or to the default entry".  Because rule 10 requires every
+    entry that carries a family to flag exactly one of its records
+    in that family, a ``None`` result can only mean "family
+    absent", never "present but unpreferred".
     """
 
     for entry in db.potentials:

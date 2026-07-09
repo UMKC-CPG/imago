@@ -508,6 +508,118 @@ class TestRule6IsolatedBaselinePresent:
             load(path)
 
 
+class TestRule10PreferredIsPerEntry:
+    """Rule 10: the preferred flag is scoped to the ENTRY, not
+    the file (DESIGN 5.2 rule 10; PSEUDOCODE 11.1).
+
+    The flag names the canonical ``sub_spec`` for a family --
+    the settings the consumer computes its query with -- so
+    every harvested entry flags its own record, and the dedup
+    (DESIGN 5.2.3) asks each entry for its own canonical
+    bispectrum.  File-wide, those flagged records must agree on
+    the sub_spec, or the flag names nothing.
+    """
+
+    def _harvested(self, label: str) -> PotentialEntry:
+        """An entry as the producer writes one: the database-wide
+        [characterization] recipe, one record per method, each
+        flagged preferred."""
+        entry = _default_solid_entry()
+        entry.label = label
+        entry.default = False
+        entry.fingerprints = [
+            _reduce_fingerprint(preferred=True),
+            _bispectrum_fingerprint(preferred=True)]
+        return entry
+
+    def _db_with(self, *entries) -> ElementDatabase:
+        db = ElementDatabase(
+            schema_version=2, element_symbol="Au",
+            nuclear_z=79.0, nuclear_alpha=4.0e-01,
+            covalent_radius=1.0)
+        db.potentials.append(_isolated_entry())
+        default = _default_solid_entry()
+        db.potentials.extend(entries)
+        db.potentials.append(default)
+        return db
+
+    def test_two_harvested_entries_each_flag_their_own(
+            self, tmp_path):
+        """The case the first real producer run hit.  Two
+        environments, each carrying the recipe with preferred set,
+        is what the producer writes -- so the loader must accept
+        it.  A file-wide 'exactly one flagged record' rule
+        rejected every manifest harvesting more than one
+        environment."""
+        path = _path_for(tmp_path, "Au")
+        save(self._db_with(self._harvested("env_a"),
+                           self._harvested("env_b")), path)
+        db = load(path)                       # must not raise
+        flagged = [fp for entry in db.potentials
+                   for fp in entry.fingerprints
+                   if fp.method == "bispectrum" and fp.preferred]
+        assert len(flagged) == 2
+
+    def test_isolated_baseline_carries_no_fingerprints(
+            self, tmp_path):
+        """An entry with no fingerprints has no family present
+        and is vacuously exempt."""
+        path = _path_for(tmp_path, "Au")
+        save(self._db_with(self._harvested("env_a")), path)
+        db = load(path)
+        isolated = [e for e in db.potentials
+                    if e.label == "isolated"][0]
+        assert isolated.fingerprints == []
+
+    def test_two_preferred_of_one_method_on_one_entry_raises(
+            self, tmp_path):
+        """Within an entry the flag must be unambiguous: two
+        flagged bispectrum records leave no canonical record for
+        that family.
+
+        Rule 8 forbids two records sharing a (method, sub_spec) on
+        one entry, so the two flagged ones necessarily differ in
+        sub_spec.  The per-entry half of rule 10 must therefore be
+        checked first, or the file-wide half fires and blames a
+        disagreement 'across the file' for ambiguity inside one
+        entry -- which is why this asserts on the per-entry
+        message, not merely on ValueError."""
+        path = _path_for(tmp_path, "Au")
+        entry = self._harvested("env_a")
+        extra = _bispectrum_fingerprint(preferred=True)
+        extra.sub_spec = {"twoj1": 8, "twoj2": 4}
+        entry.fingerprints.append(extra)
+        save(self._db_with(entry), path)
+        with pytest.raises(
+                ValueError,
+                match="present on this entry with 2 record"):
+            load(path)
+
+    def test_method_present_but_none_preferred_raises(
+            self, tmp_path):
+        """A family present on an entry with nothing flagged
+        leaves the consumer no settings to query at."""
+        path = _path_for(tmp_path, "Au")
+        entry = self._harvested("env_a")
+        entry.fingerprints = [_bispectrum_fingerprint(
+            preferred=False)]
+        save(self._db_with(entry), path)
+        with pytest.raises(ValueError, match="exactly one"):
+            load(path)
+
+    def test_preferred_records_disagreeing_on_subspec_raise(
+            self, tmp_path):
+        """File-wide: the flag names the canonical settings, so
+        two entries flagging different sub_specs of one method
+        leave no canonical answer."""
+        path = _path_for(tmp_path, "Au")
+        odd = self._harvested("env_b")
+        odd.fingerprints[1].sub_spec = {"twoj1": 8, "twoj2": 4}
+        save(self._db_with(self._harvested("env_a"), odd), path)
+        with pytest.raises(ValueError, match="disagree"):
+            load(path)
+
+
 # ============================================================
 #  require_provenance() -- isolated unit tests
 # ============================================================
@@ -1306,13 +1418,17 @@ class TestEmitterFingerprintBlock:
 # ============================================================
 
 class TestRule10PreferredFingerprint:
-    """Rule 10 (DESIGN 5.6.5): for every fingerprint method that
-    appears anywhere in the file, exactly one record must carry
-    ``preferred = true``.  Zero preferred records for a present
-    method, or two or more, is a hard error; a method that is
-    wholly absent from the file is exempt.  The file-dictated
-    selection regime needs one unambiguous representative per
-    method to match crystalline structures against.
+    """Rule 10 (DESIGN 5.2): the preferred flag is scoped to the
+    ENTRY.  For every fingerprint method present on an entry,
+    exactly one of that entry's records carries ``preferred =
+    true``.  Zero for a present method, or two or more, is a hard
+    error; a method wholly absent from the entry is exempt, as is
+    an entry with no fingerprints at all.
+
+    The flag names the canonical ``sub_spec`` -- the settings the
+    file-dictated regime computes its query with -- so file-wide
+    every flagged record of a method must agree on it.  The
+    cross-entry cases live in TestRule10PreferredIsPerEntry above.
     """
 
     def test_zero_preferred_for_present_method_raises(
@@ -1386,10 +1502,12 @@ class TestRule10PreferredFingerprint:
         entry = lookup(re, "default_solid")
         assert entry.fingerprints[0].method == "reduce"
 
-    def test_preferred_counted_across_entries(self, tmp_path):
-        # Rule 10 counts records across the whole file, not within
-        # one entry: two entries each carrying a preferred
-        # bispectrum record is still two preferred -> a hard error.
+    def test_preferred_counted_within_an_entry_not_across(
+            self, tmp_path):
+        # The flag is scoped to the entry.  Two entries each
+        # carrying their own preferred bispectrum -- what the
+        # producer writes for every harvested environment -- is
+        # legal, and each entry's count is one.
         path = _path_for(tmp_path, "Au")
         db = _valid_db("Au")
         db.potentials[0].fingerprints = [
@@ -1397,8 +1515,10 @@ class TestRule10PreferredFingerprint:
         db.potentials[1].fingerprints = [
             _bispectrum_fingerprint(preferred=True)]
         save(db, path)
-        with pytest.raises(ValueError, match="preferred"):
-            load(path)
+        loaded = load(path)                   # must not raise
+        assert all(
+            sum(1 for fp in entry.fingerprints if fp.preferred) == 1
+            for entry in loaded.potentials)
 
 
 # ============================================================
