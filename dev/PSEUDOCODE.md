@@ -6823,18 +6823,34 @@ CANONICAL_LATTICE_ORDER     = (   # 6 Bravais families
 
 # Predictor tuning knobs (DESIGN 7.6).  All named here so a
 # post-seed-flight calibration is a one-file change.
-k_min          = 3        # below this, refuse the sub-model
-k_neighbors    = 5        # neighbors used at each k-NN stage
-epsilon        = 1e-6     # numerical floor on distance
-w_comp         = 1.0      # composition weight in d1
-w_latt         = 0.25     # lattice-family weight in d1
-w_gap          = 1.0      # gap weight in d2
-w_spin         = 0.5      # magnetization weight in d2
-sigma_gap      = 1.0      # gap normalization (eV) in d2
-sigma_spin     = 0.5      # magnetization normalization in d2
-#                           (Bohr magnetons per atom)
-sigma_gap_ref  = 1.0      # gap-spread -> confidence_1 (eV)
-sigma_kpd_ref  = 50.0     # kpd-spread -> confidence_2
+
+# How many entries a sub-model needs before it is trusted, and
+# how many neighbors each k-NN stage averages over.
+min_submodel_entries = 3
+neighbor_count       = 5
+
+# Keeps the inverse-distance weight finite when a neighbor sits
+# exactly on the query point.
+distance_floor       = 1e-6
+
+# Relative weights of the two terms in each stage's distance:
+# d1 compares chemistry, d2 the electronic character d1 predicts.
+composition_weight    = 1.0
+lattice_family_weight = 0.25
+gap_weight            = 1.0
+magnetization_weight  = 0.5
+
+# The physical scale each d2 term is measured against, so a gap
+# difference in eV and a moment difference in Bohr magnetons per
+# atom become comparable dimensionless numbers.
+gap_distance_scale           = 1.0   # eV
+magnetization_distance_scale = 0.5   # Bohr magnetons per atom
+
+# The spread at which a stage's confidence has fallen to 1/e: a
+# tight neighborhood means a trustworthy prediction, so the
+# spread of the neighbors' values is what confidence measures.
+gap_confidence_scale            = 1.0    # eV
+kpoint_density_confidence_scale = 50.0
 ```
 
 The dataclasses mirror DESIGN 7.4 exactly; restated here in
@@ -7487,7 +7503,7 @@ function select_submodel(pool, basis, functional,
              and e.context.functional == functional
              and e.context.kpoint_integration
                  == kpoint_integration]
-    if len(exact) >= k_min:
+    if len(exact) >= min_submodel_entries:
         return exact, False
 
     # 2. Most-populous (basis, functional) sub-model within
@@ -7497,11 +7513,11 @@ function select_submodel(pool, basis, functional,
     family = [e for e in pool
               if functional_family(e.context.functional) == fam]
     best = most_populous_submodel(family)
-    if len(best) >= k_min:
+    if len(best) >= min_submodel_entries:
         return best, False
 
     # 3. The whole system_type pool, context ignored.
-    if len(pool) >= k_min:
+    if len(pool) >= min_submodel_entries:
         return pool, False
 
     # 4. Too thin everywhere -> under-trained.
@@ -7524,15 +7540,18 @@ function most_populous_submodel(entries):
 ```
 
 The two k-NN stages share one inverse-distance-weighted
-helper.  Weights are `1/(d+epsilon)` normalized to sum 1.0.
+helper.  Weights are `1 / (d + distance_floor)`, normalized to
+sum to 1.0, so an exact match dominates without dividing by
+zero.
 
 ```
 function knn_weights(entries, distance_of):
     # distance_of(entry) -> float >= 0.  Returns the
-    # k_neighbors nearest as (entry, weight) pairs.
+    # neighbor_count nearest as (entry, weight) pairs.
     scored = sort(entries, key = distance_of)        # ascending
-    nearest = scored[: min(k_neighbors, len(scored))]
-    raw = [1.0 / (distance_of(e) + epsilon) for e in nearest]
+    nearest = scored[: min(neighbor_count, len(scored))]
+    raw = [1.0 / (distance_of(e) + distance_floor)
+           for e in nearest]
     total = sum(raw)
     return [(e, r / total) for e, r in zip(nearest, raw)]
 ```
@@ -7544,12 +7563,14 @@ function stage1(query, entries):
     # term, the latter halved so a full mismatch maps to the
     # same [0,1] range as composition (DESIGN 7.6 step 3).
     function d1(e):
-        comp_sq = sum_sq(sub(query.composition_vector,
-                             e.signature.composition_vector))
-        latt_sq = sum_sq(sub(query.lattice_onehot,
-                             e.signature.lattice_onehot))
-        return sqrt(w_comp * comp_sq
-                    + w_latt * latt_sq / 2.0)
+        composition_sq = sum_sq(
+            sub(query.composition_vector,
+                e.signature.composition_vector))
+        lattice_sq = sum_sq(
+            sub(query.lattice_onehot,
+                e.signature.lattice_onehot))
+        return sqrt(composition_weight * composition_sq
+                    + lattice_family_weight * lattice_sq / 2.0)
 
     nbrs = knn_weights(entries, d1)
     pgap = sum(w * e.measured.gap_ev   for e, w in nbrs)
@@ -7557,7 +7578,7 @@ function stage1(query, entries):
     # Confidence_1 from the weighted gap variance (7.6).
     var = sum(w * (e.measured.gap_ev - pgap) ** 2
               for e, w in nbrs)
-    conf1 = exp(-sqrt(var) / sigma_gap_ref)
+    conf1 = exp(-sqrt(var) / gap_confidence_scale)
     return pgap, pmag, conf1, [e.entry_id for e, _ in nbrs]
 ```
 
@@ -7578,17 +7599,19 @@ function stage2(pgap, pmag, entries):
     # like what this query is likely to produce"
     # (DESIGN 7.6 step 4).
     function d2(e):
-        gap_term = w_gap  * (pgap - e.measured.gap_ev) ** 2 \
-                   / sigma_gap ** 2
-        mag_term = w_spin * (pmag - intensive_mag(e)) ** 2 \
-                   / sigma_spin ** 2
+        gap_term = (gap_weight
+                    * (pgap - e.measured.gap_ev) ** 2
+                    / gap_distance_scale ** 2)
+        mag_term = (magnetization_weight
+                    * (pmag - intensive_mag(e)) ** 2
+                    / magnetization_distance_scale ** 2)
         return sqrt(gap_term + mag_term)
 
     nbrs = knn_weights(entries, d2)
     pkpd = sum(w * e.measured.kpoint_density for e, w in nbrs)
     var = sum(w * (e.measured.kpoint_density - pkpd) ** 2
               for e, w in nbrs)
-    conf2 = exp(-sqrt(var) / sigma_kpd_ref)
+    conf2 = exp(-sqrt(var) / kpoint_density_confidence_scale)
     return pkpd, conf2, [e.entry_id for e, _ in nbrs]
 ```
 
