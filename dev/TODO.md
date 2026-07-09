@@ -3177,8 +3177,16 @@ on the same data later with no schema change.  Built on P10.
   the rules, emitter determinism, the regressor on curated
   points, registry rejection of unknown keys, and censored-bound
   handling.  Register in src/scripts/CMakeLists.txt.  CODE;
-  DESIGN 8.5/8.6; ARCH 11.  (Needs a PSEUDOCODE section first --
-  section 8 has no pseudocode yet.)
+  DESIGN 8.5/8.6; PSEUDOCODE 16; ARCH 11.
+  PSEUDOCODE 16 now exists, and splits this item in two.  The
+  library half -- constants and registries (16.1), fingerprint
+  and registry loader (16.2), the twelve-rule reader (16.3), the
+  deterministic emitter and its round-trip (16.4) -- is fully
+  specified and can be built now.  The predictor half (16.5) is
+  BLOCKED on C115: `fit_group` cannot be written faithfully
+  until DESIGN settles how censored observations enter the fit,
+  and `feature_row`'s correction terms are a seed-calibrated
+  form.  Build the library first; do not guess the predictor.
 - [ ] C78. CMake build-system hook emitting build_info.toml at
   configure/install time -- compiler + full flag string +
   detected HDF5 / ScaLAPACK / BLAS / MPI versions and variants
@@ -3251,6 +3259,42 @@ on the same data later with no schema change.  Built on P10.
   in place of the echoed value.  Pairs with C78 (build
   identity) and C79 (wingbeat/imago.py capture hooks).
   CODE (Fortran + wingbeat); DESIGN 7.2; ARCH 11.
+
+- [ ] C115. Settle the DESIGN 8.9 open questions, plus two gaps
+  the PSEUDOCODE 16 pass surfaced.  Writing section 8's
+  pseudocode (2026-07-09) showed that the library half of the
+  dataspace is fully specifiable today and the predictor half is
+  not.  Blocks C77's predictor and C81's provisioning consumer;
+  does NOT block C77's library half.  Work:
+  (a) **How censored observations enter the fit.**  DESIGN 8.7
+  says an OOM memory figure is a lower bound and a timeout
+  walltime an upper bound, never a point; 8.9 leaves open how
+  such bounds reach the least squares.  PSEUDOCODE 16.5's
+  `fit_group` currently EXCLUDES them and says so -- a
+  placeholder, since discarding an OOM wastes real evidence
+  while feeding it in as a point biases every exponent.  Decide:
+  a censored (Tobit-style) regression, or a bound-weighting
+  scheme.
+  (b) **The correction-term form.**  16.5's `feature_row` gives
+  the v1 terms DESIGN 8.6 names by quantity, single-sourced for
+  re-derivation from the seed (C82).
+  (c) **Aggregate vs per-rank memory** (8.9), which decides what
+  the parallel correction even means.
+  (d) **Build effects on numerics** (8.9): whether the build
+  block is ever referenced from the section-7 convergence side,
+  against the no-cross-reference boundary.
+  (e) **NEW: no objective auto-promote rule for a cost
+  observation.**  DESIGN 8.7 borrows 7.8's curation discipline,
+  but 7.8's `auto_promote_ok` rests on a flatness test with no
+  cost analogue.  Either design a criterion or drop
+  `auto-promote` from the promoter's modes and have the curator
+  review every observation.
+  (f) **NEW: `SAFETY_MARGIN` is a safety parameter with no
+  value.**  DESIGN 8.6 rightly defers it to calibration, but the
+  provisioning consumer must not ship with it unset -- so the
+  seed (C82) is a hard prerequisite for C81, not merely a source
+  of accuracy.  Say so in DESIGN 8.8.
+  DESIGN 8.6/8.7/8.8/8.9; PSEUDOCODE 16.9.
 
 ---
 

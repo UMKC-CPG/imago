@@ -8190,3 +8190,932 @@ In practice the rule auto-promotes ~80% of a seed flight
 not-yet-flat outliers for the curator's interactive review
 -- the friction that makes a 250-entry seed tractable
 without rubber-stamping every entry (DESIGN 7.8).
+
+## 16. Resource & Cost Guidance Dataspace (DESIGN 8)
+
+The cost prong, and a deliberate *sibling* of section 15
+rather than an extension of it (ARCHITECTURE 11.1).  Where
+the historical-guidance dataspace records what operating
+point is **accurate**, this one records what a run **costs**:
+the problem-size signature, the parallel execution
+configuration, the build the binary was compiled with, and
+the measured peak memory, disk, and walltime.  A
+physics-informed regressor learns the cost surface, and the
+near-term consumer turns a prediction into a scheduler
+request that neither overflows memory nor exceeds the
+walltime limit (DESIGN 8.1).
+
+The two stay separate because a converged k-density
+transfers across machines and a walltime does not.  So this
+dataspace is partitioned by a **hardware fingerprint**, and
+its atomic unit is one **execution observation** -- a single
+run under a single configuration, never collapsed to a
+per-system summary.  That is what lets the same artifact
+serve provisioning now and configuration optimization, build
+comparison, and scaling studies later, with no schema change.
+
+Blocks, helpers first then drivers: the library
+`resource_db.py` (16.1 shapes and registries, 16.2 hardware
+fingerprint, 16.3 reader, 16.4 emitter, 16.5 predictor); the
+dispatch-time capture hooks (16.6); the producers
+`resource_harvest.py` / `resource_promote.py` (16.7); and the
+provisioning consumer in the flight layer (16.8).  All Python
+under `src/scripts/`.
+
+**Read 16.9 before implementing 16.5.**  DESIGN 8.9 leaves
+four questions open, and two of them reach into the
+predictor.  This section specifies everything the design
+pins and stops -- visibly -- where it does not.  A pseudocode
+that guessed past those points would read as settled and
+would be nothing of the kind.
+
+### 16.1 Constants, registries, and shapes (DESIGN 8.4)
+
+The constants and the three registries live in one place so a
+post-seed recalibration or a new knob is a one-file change.
+A key absent from its registry is rejected at load (rule 11):
+extensibility goes through the registry, never through silent
+key drift.
+
+```
+SCHEMA_VERSION          = 1
+VALID_SOURCES           = ("flight", "manual")
+VALID_OUTCOMES          = ("completed", "oom", "timeout",
+                           "failed")
+WAVEFUNCTION_COMPONENTS = (1, 4)     # Schrodinger | Dirac
+SPIN_CHANNELS           = (1, 2)
+
+EXECUTION_KNOB_REGISTRY = ("node_count", "cores_per_node",
+    "total_cores", "mpi_ranks", "omp_threads_per_rank",
+    "binding")
+VALID_BINDINGS          = ("none", "core", "socket")
+BUILD_KNOB_REGISTRY     = ("compiler_family",
+    "compiler_version", "optimization_level", "arch_simd",
+    "blas_impl", "blas_threading", "scalapack", "hdf5",
+    "mpi_family")
+RESOURCE_METRIC_REGISTRY = ("peak_memory_bytes", "disk_bytes",
+    "walltime_seconds", "cpu_seconds", "phase_timings")
+
+# The execution knobs that must be present and > 0 (rule 7).
+# `binding` is validated against VALID_BINDINGS instead.
+REQUIRED_POSITIVE_EXECUTION = ("node_count", "cores_per_node",
+    "total_cores", "mpi_ranks", "omp_threads_per_rank")
+
+# The metrics a completed run must carry, all > 0 (rule 9).
+REQUIRED_COMPLETED_METRICS = ("peak_memory_bytes",
+    "disk_bytes", "walltime_seconds")
+
+# Calibration knobs.  DESIGN 8.6 states plainly that the
+# thin-group threshold and the safety margin are tuned AFTER
+# the seed flight (TODO C82) and are deliberately not required
+# for the artifact to begin accumulating data.  They are named
+# here, in one place, so calibration is a one-line edit -- this
+# document does not invent their values.  Section 15 fixes its
+# analogous knobs because its seed exists; ours does not yet.
+MIN_GROUP_SAMPLES = <calibrated by the seed; 8.6/8.9>
+SAFETY_MARGIN     = <calibrated by the seed; 8.6>
+
+# k-NN fallback knobs, used only when a group is too thin to
+# fit (16.5).  Same rule: named here, valued by the seed.
+neighbor_count        = <calibrated by the seed; 8.6>
+distance_floor        = 1e-6   # keeps 1/distance finite when a
+                               #   neighbour coincides with the
+                               #   query point
+secular_dim_weight    = 1.0    # the dominant cost axis, so the
+                               #   other two are scaled against
+                               #   it and it holds the unit
+kpoint_count_weight   = <calibrated by the seed; 8.6>
+spin_channel_weight   = <calibrated by the seed; 8.6>
+```
+
+The dataclasses mirror the schema block for block.
+`ExecutionConfig` and `BuildConfig` hold open dictionaries
+rather than fixed fields *precisely so* the registries -- not
+the dataclass definitions -- are the single source of truth
+for which knobs exist.  Promoting a studied compiler flag to a
+first-class feature is then a registry edit (ARCHITECTURE
+11.3).
+
+```
+dataclass SizeSignature:
+    atom_count              : int
+    electron_count          : int
+    valence_electron_count  : int
+    basis_function_count    : int
+    wavefunction_components : int    # 1 (Schrodinger) | 4
+    secular_dimension       : int    # dominant cost driver
+    kpoint_count            : int
+    spin_channels           : int    # 1 | 2
+
+dataclass ExecutionConfig:
+    knobs : dict          # registry-validated key -> value
+
+dataclass BuildConfig:
+    knobs : dict          # registry-validated COARSE knobs;
+                          #   the verbatim compile string is
+                          #   Provenance.compile_string
+
+dataclass MeasuredResources:
+    metrics  : dict       # registry-validated metric -> value
+    censored : bool       # True when outcome != completed:
+                          #   a BOUND, not a point measurement
+
+dataclass Provenance:
+    flight_id        : str
+    source_structure : str
+    imago_commit     : str
+    hostname         : str
+    compile_string   : str   # build fidelity layer, verbatim
+    library_detail   : str
+    curator          : str
+
+dataclass Observation:
+    observation_id       : str
+    generated_at         : str
+    source               : str        # flight | manual
+    outcome              : str        # completed | oom | ...
+    hardware_fingerprint : str        # partition key
+    signature            : SizeSignature
+    execution            : ExecutionConfig
+    build                : BuildConfig
+    resources            : MeasuredResources
+    provenance           : Provenance
+
+dataclass ResourceDataspace:
+    schema_version              : int
+    observations_by_fingerprint : dict   # fp -> list[Obs]
+    hardware_registry           : dict   # fp -> attributes
+```
+
+### 16.2 Hardware fingerprint and registry (DESIGN 8.5)
+
+The fingerprint is the coarse partition *within which cost is
+comparable*.  Its whole job is to be stable: the CPU string is
+normalized to vendor plus microarchitecture family, and the
+stepping, base clock, and exact model number are dropped, so
+routine BIOS or microcode churn does not fragment the data.
+
+```
+function hardware_fingerprint(attrs):
+    # v1 recipe (DESIGN 8.5):
+    #   <cpu_vendor>-<cpu_microarch>-<cores>c-<mem_gb>gb
+    # e.g. "intel-haswell-24c-128gb".  Normalization is what
+    # makes the slug stable, so it is done here and nowhere
+    # else: lowercase, spaces to hyphens, and NOTHING of the
+    # stepping / clock / model number survives.
+    vendor    = normalize_token(attrs.cpu_vendor)
+    microarch = normalize_token(attrs.cpu_microarch)
+    return (vendor + "-" + microarch + "-"
+            + str(attrs.cores_per_node) + "c-"
+            + str(attrs.memory_per_node_gb) + "gb")
+```
+
+`hardware_registry.toml` maps each fingerprint to its full
+probed attributes (exact CPU model, socket count, memory,
+interconnect) for diagnostics.  The observation files carry
+only the fingerprint and never the repeated attributes,
+mirroring how section 15 keeps the element group table out of
+individual entries.
+
+```
+function load_hardware_registry(path):
+    raw = tomllib.load(path)
+    registry = {}
+    for fingerprint, attrs in raw.items():
+        # The slug must be REDERIVABLE from the attributes it
+        # maps to.  A registry whose key disagrees with its own
+        # body would silently partition two machines together.
+        require(hardware_fingerprint(attrs) == fingerprint,
+            path, fingerprint,
+            "fingerprint disagrees with its probed attributes")
+        registry[fingerprint] = attrs
+    return registry
+```
+
+The three registry validators are one function, because the
+three registries differ only in their name and contents.  The
+error names the file, the block, and the offending key -- the
+same discipline as section 15 and DESIGN 5.2.
+
+```
+function require_registered(table, registry, path, block):
+    # Rule 11.  An unknown key is a HARD error: it is nearly
+    # always a typo or a knob someone added without extending
+    # the registry, and either way silently dropping it loses
+    # the very fact the observation exists to record.
+    for key in table:
+        require(key in registry, path, block,
+            "unknown key " + key + " (extend the registry and "
+            "bump SCHEMA_VERSION to add a knob)")
+```
+
+### 16.3 TOML reader `load()` (DESIGN 8.2, rules 1-12)
+
+`load(root)` walks `entries/<fingerprint>/` and returns a
+validated `ResourceDataspace`.  Staging is read the same way
+by the promoter (16.7) and is never mixed into a prediction
+pool.
+
+```
+function load(root):
+    marker = read_file(join(root, "SCHEMA_VERSION")).strip()
+    require(marker == str(SCHEMA_VERSION),               # 1
+        join(root, "SCHEMA_VERSION"),
+        "marker " + marker + " != " + str(SCHEMA_VERSION))
+
+    registry = load_hardware_registry(
+        join(root, "hardware_registry.toml"))
+
+    by_fingerprint = {}
+    seen_ids = {}                    # observation_id -> path
+    for fingerprint in sorted(registry):
+        subdir = join(root, "entries", fingerprint)
+        if not exists(subdir):
+            continue                 # a registered, unseeded
+                                     #   machine: legal, empty
+        by_fingerprint[fingerprint] = [
+            load_observation(path, fingerprint, seen_ids,
+                             registry)
+            for path in sorted(glob(subdir, "*.toml"))]
+
+    return ResourceDataspace(
+        schema_version              = SCHEMA_VERSION,
+        observations_by_fingerprint = by_fingerprint,
+        hardware_registry           = registry)
+```
+
+`load_observation` checks the schema BEFORE building the
+dataclass (rule 12), so an omission surfaces as a validation
+failure naming the field rather than a bare constructor
+error.
+
+```
+function load_observation(path, fingerprint_dir, seen_ids,
+                          registry):
+    raw = tomllib.load(path)
+
+    for f in ("schema_version", "observation_id",
+              "generated_at", "source", "outcome",
+              "hardware_fingerprint"):
+        require(f in raw, path, "top-level", "missing: " + f)
+
+    require(raw["schema_version"] == SCHEMA_VERSION,     # 1
+        path, "top-level", "schema_version must be "
+        + str(SCHEMA_VERSION))
+
+    obs_id = raw["observation_id"]                       # 2
+    require(obs_id == file_stem(path), path, "top-level",
+        "observation_id must equal the file stem")
+    require(obs_id not in seen_ids, path, "top-level",
+        "duplicate observation_id, also in "
+        + seen_ids.get(obs_id, "?"))
+    seen_ids[obs_id] = path
+
+    fingerprint = raw["hardware_fingerprint"]            # 3
+    require(fingerprint in registry, path, "top-level",
+        "unregistered hardware_fingerprint " + fingerprint)
+    require(fingerprint == fingerprint_dir, path, "top-level",
+        "hardware_fingerprint disagrees with its directory")
+
+    require(raw["source"] in VALID_SOURCES,              # 4
+        path, "top-level", "source must be one of "
+        + str(VALID_SOURCES))
+    outcome = raw["outcome"]                             # 5
+    require(outcome in VALID_OUTCOMES, path, "top-level",
+        "outcome must be one of " + str(VALID_OUTCOMES))
+
+    signature  = load_signature(raw, path)               # 6
+    execution  = load_execution(raw, path)               # 7
+    build      = load_build(raw, path)                   # 8
+    resources  = load_resources(raw, path, outcome)      # 9
+    provenance = load_provenance(raw, path, raw["source"])  # 10
+
+    return Observation(
+        observation_id       = obs_id,
+        generated_at         = raw["generated_at"],
+        source               = raw["source"],
+        outcome              = outcome,
+        hardware_fingerprint = fingerprint,
+        signature            = signature,
+        execution            = execution,
+        build                = build,
+        resources            = resources,
+        provenance           = provenance)
+```
+
+```
+function load_signature(raw, path):
+    # Rule 6.  Every count is a physical quantity, so every
+    # bound below is a statement about physics, not taste:
+    # a cell has atoms, an all-electron run has electrons, the
+    # valence space is a subset of them, and the spinor
+    # structure is 1-component or 4-component, nothing between.
+    block = require_block(raw, "observation.signature", path)
+    for f in ("atom_count", "electron_count",
+              "basis_function_count", "secular_dimension",
+              "kpoint_count"):
+        require(block[f] > 0, path, "signature", f + " must be > 0")
+    require(0 <= block["valence_electron_count"]
+              <= block["electron_count"],
+        path, "signature",
+        "valence_electron_count must lie in [0, electron_count]")
+    require(block["wavefunction_components"]
+              in WAVEFUNCTION_COMPONENTS,
+        path, "signature",
+        "wavefunction_components must be 1 or 4")
+    require(block["spin_channels"] in SPIN_CHANNELS,
+        path, "signature", "spin_channels must be 1 or 2")
+    return SizeSignature(**block)
+```
+
+```
+function load_execution(raw, path):
+    # Rule 7.  total_cores is recorded, never derived from
+    # node_count x cores_per_node, so a partially-packed node
+    # stays faithful -- which is exactly the case a derived
+    # value would quietly misreport.
+    block = require_block(raw, "observation.execution", path)
+    require_registered(block, EXECUTION_KNOB_REGISTRY,
+                       path, "execution")
+    for f in REQUIRED_POSITIVE_EXECUTION:
+        require(f in block and block[f] > 0, path, "execution",
+            f + " must be present and > 0")
+    require(block["binding"] in VALID_BINDINGS, path,
+        "execution", "binding must be one of "
+        + str(VALID_BINDINGS))
+    return ExecutionConfig(knobs = block)
+```
+
+```
+function load_build(raw, path):
+    # Rule 8.  The COARSE layer only: bucketed values that make
+    # a build a comparable feature rather than a fragmenting
+    # one (an optimization LEVEL, not a flag string; a MAJOR
+    # version, not a patch).  The verbatim compile string is
+    # provenance, below.
+    block = require_block(raw, "observation.build", path)
+    require_registered(block, BUILD_KNOB_REGISTRY, path, "build")
+    for f in ("compiler_family", "optimization_level"):
+        require(f in block and block[f] != "", path, "build",
+            f + " must be present and non-empty")
+    return BuildConfig(knobs = block)
+```
+
+```
+function load_resources(raw, path, outcome):
+    # Rule 9, and the censoring rule of DESIGN 8.7.  A
+    # non-completed run is NOT discarded: an OOM kill is
+    # positive evidence that this configuration is insufficient
+    # at this size, and a timeout bounds the walltime from
+    # above.  Marking `censored` here is what stops the
+    # predictor (16.5) from ever reading a bound as a point.
+    block = require_block(raw, "observation.resources", path)
+    require_registered(block, RESOURCE_METRIC_REGISTRY,
+                       path, "resources")
+
+    if outcome == "completed":
+        for f in REQUIRED_COMPLETED_METRICS:
+            require(f in block and block[f] > 0, path,
+                "resources", f + " must be present and > 0 "
+                "for outcome=completed")
+    else if outcome == "oom":
+        require("peak_memory_bytes" in block, path, "resources",
+            "outcome=oom must record the memory limit it hit "
+            "(a LOWER bound on the true need)")
+    else if outcome == "timeout":
+        require("walltime_seconds" in block, path, "resources",
+            "outcome=timeout must record the walltime limit "
+            "(an UPPER bound on the true need)")
+    # outcome=failed carries no usable cost signal at all; it
+    #   is kept for diagnostics and never promoted (16.7).
+
+    return MeasuredResources(
+        metrics  = block,
+        censored = (outcome != "completed"))
+```
+
+```
+function load_provenance(raw, path, source):
+    # Rule 10.  compile_string is required for EVERY source --
+    # it is the build fidelity layer, and recording it verbatim
+    # is what lets a flag that is not a coarse knob today be
+    # recovered post-hoc when it turns out to matter.
+    block = require_block(raw, "observation.provenance", path)
+    require(block["compile_string"] != "", path, "provenance",
+        "compile_string must be present for every source")
+    if source == "flight":
+        for f in ("flight_id", "source_structure",
+                  "imago_commit"):
+            require(block.get(f, "") != "", path, "provenance",
+                f + " must be non-empty for source=flight")
+    return Provenance(**block)
+```
+
+### 16.4 Hand-formatted emitter `save_observation()` (8.3)
+
+The same deterministic discipline as 15.4 and DESIGN 7.5:
+fixed block sequence, fixed key order within each block,
+`%.16e` for every real, byte-identical output for a given
+in-memory observation.  The observation_id doubles as the file
+stem (rule 2), and its shape -- fingerprint plus a short hash
+-- makes a file self-identifying on sight.
+
+```
+function observation_slug(obs):
+    # DESIGN 8.3: "<fingerprint>-<6 hex>".  The hash is taken
+    # over the provenance that distinguishes two runs which
+    # agree on everything else, so two harvests of the same
+    # flight cannot collide unless they are the same run.
+    blob = (obs.provenance.flight_id
+            + obs.provenance.source_structure
+            + obs.generated_at)
+    return obs.hardware_fingerprint + "-" + sha256_hex(blob)[:6]
+
+function save_observation(obs, root, area = "staging"):
+    # Harvest writes to staging/; the curator's promote (16.7)
+    # is what moves a file to entries/.  Refuse a collision
+    # rather than overwrite: rule 2 makes the id unique across
+    # BOTH trees, so an existing path is a real conflict.
+    subdir = join(root, area, obs.hardware_fingerprint)
+    make_dirs(subdir)
+    path = join(subdir, obs.observation_id + ".toml")
+    require(not exists(path),
+        "save_observation: " + path + " already exists")
+    write_file(path, format_observation(obs))
+    return path
+```
+
+```
+function format_observation(obs):
+    # Block order is FIXED, and matches DESIGN 8.3's sketch, so
+    # a diff between two observations is a diff of values and
+    # never of layout.  Optional metrics are emitted only when
+    # present; phase_timings is a sub-table and therefore last,
+    # as TOML requires of a table's own keys before sub-tables.
+    lines = [emit_scalar("schema_version", SCHEMA_VERSION),
+             emit_scalar("observation_id", obs.observation_id),
+             emit_scalar("generated_at", obs.generated_at),
+             emit_scalar("source", obs.source),
+             emit_scalar("outcome", obs.outcome),
+             emit_scalar("hardware_fingerprint",
+                         obs.hardware_fingerprint)]
+
+    emit_block(lines, "[observation.signature]",
+               obs.signature, SIGNATURE_FIELD_ORDER)
+    emit_block(lines, "[observation.execution]",
+               obs.execution.knobs, EXECUTION_KNOB_REGISTRY)
+    emit_block(lines, "[observation.build]",
+               obs.build.knobs, BUILD_KNOB_REGISTRY)
+
+    # Resources, minus phase_timings, then phase_timings.
+    emit_block(lines, "[observation.resources]",
+               obs.resources.metrics,
+               [m for m in RESOURCE_METRIC_REGISTRY
+                if m != "phase_timings"])
+    if "phase_timings" in obs.resources.metrics:
+        emit_block(lines, "[observation.resources.phase_timings]",
+                   obs.resources.metrics["phase_timings"],
+                   PHASE_ORDER)   # setup, scf, eigensolve, ...
+
+    emit_block(lines, "[observation.provenance]",
+               obs.provenance, PROVENANCE_FIELD_ORDER)
+    return join(lines, "\n") + "\n"
+```
+
+Round-trip is the emitter's contract, exactly as it is the
+manifest writer's (11.6): whatever `load()` reads,
+`format_observation` writes back.  Every block the reader
+parses therefore has a writing counterpart above, and a
+metric the reader accepts but the writer drops would silently
+delete a measurement on the next curation pass.
+
+### 16.5 Predictor `predict()` (DESIGN 8.6)
+
+Within a fixed `(hardware_fingerprint, build_bucket)` group,
+cost is a smooth, physics-grounded function of size and
+parallel configuration.  That is why this predictor is a
+**physics-informed regression** and not the pure k-NN of 15.5:
+we know the shape of the curve before we see the data.  Peak
+memory scales roughly as the square of `secular_dimension` and
+the eigensolve as its cube, so the fit is a power law in log
+space and the exponent is *recovered from the data* rather
+than assumed:
+
+```
+log(resource) = log(A) + p * log(secular_dimension)
+                + (parallel and spin correction terms)
+```
+
+Expected `p` is near 2 for memory and near 3 for walltime.
+Recovering it rather than fixing it is the point: an exponent
+that comes back far from its expectation is telling you
+something true about the code, and a fixed exponent could
+never say it.
+
+```
+function build_bucket(build):
+    # The group key's second half.  A build is a COMPARABLE
+    # feature because its knobs are bucketed (8.2); the tuple
+    # is taken in registry order so the key is deterministic.
+    return tuple(build.knobs[k] for k in BUILD_KNOB_REGISTRY)
+
+function group_key(obs):
+    return (obs.hardware_fingerprint, build_bucket(obs.build))
+```
+
+```
+function feature_row(signature, execution):
+    # The design matrix row.  DESIGN 8.6 names the quantities
+    # the correction terms capture -- the speedup from
+    # `mpi_ranks` and `omp_threads_per_rank`, the memory split
+    # across ranks, and the spin channels -- but says plainly
+    # that "the exact functional form ... [is a] tuning knob
+    # calibrated after the seed flight."
+    #
+    # So this is the v1 form, in ONE place, and it is expected
+    # to be re-derived once the seed exists (16.9, TODO C82).
+    # It is a named function, not an expression inlined into
+    # the fit, precisely so recalibration touches one thing.
+    return [1.0,
+            log(signature.secular_dimension),   # the exponent p
+            log(signature.kpoint_count),
+            log(signature.spin_channels),
+            log(execution.knobs["mpi_ranks"]),
+            log(execution.knobs["omp_threads_per_rank"])]
+```
+
+```
+function fit_group(observations, metric):
+    # Least squares in log space over ONE (fingerprint,
+    # build_bucket) group.  Returns coefficients, or None when
+    # the group is too thin to fit a stable exponent -- in
+    # which case predict() falls back to k-NN, below.
+    #
+    # !! CENSORED OBSERVATIONS DO NOT ENTER HERE. !!  DESIGN 8.7
+    # is explicit that an OOM memory figure is a LOWER bound and
+    # a timeout walltime an UPPER bound, never a point; and
+    # DESIGN 8.9 records, as an OPEN QUESTION, how such bounds
+    # should enter the least-squares fit (a censored/Tobit-style
+    # regression, or a weighting scheme).  That question is not
+    # settled, so this pseudocode does not settle it: see 16.9.
+    # Feeding a bound in as though it were a measurement would
+    # bias every exponent the artifact ever reports.
+    usable = [o for o in observations
+              if not o.resources.censored
+              and metric in o.resources.metrics]
+    if len(usable) < MIN_GROUP_SAMPLES:
+        return None
+
+    rows    = [feature_row(o.signature, o.execution)
+               for o in usable]
+    targets = [log(o.resources.metrics[metric]) for o in usable]
+    return least_squares(rows, targets)
+```
+
+```
+function predict_metric(coefficients, signature, execution):
+    row = feature_row(signature, execution)
+    return exp(dot(coefficients, row))
+```
+
+The fallback chain has two rungs, and DESIGN 8.5 constrains
+both with one sentence: the predictor "never silently predicts
+from one machine for another."  So every result names the
+fingerprint it was fitted on, and a cold start says so.
+
+```
+dataclass ResourcePrediction:
+    peak_memory_bytes : real | None
+    disk_bytes        : real | None
+    walltime_seconds  : real | None
+    source_fingerprint : str   # the group actually fitted --
+                               #   may differ from the query's
+    is_borrowed        : bool  # fitted on a NEIGHBOURING machine
+    is_cold_start      : bool  # no usable data anywhere
+    sample_count       : int
+```
+
+```
+function predict(dataspace, query_fingerprint, build, signature,
+                 execution):
+    # Rung 1: this machine, this build bucket.
+    pool = dataspace.observations_by_fingerprint.get(
+        query_fingerprint, [])
+    key  = (query_fingerprint, build_bucket(build))
+    group = [o for o in pool if group_key(o) == key]
+
+    fitted = {m: fit_group(group, m)
+              for m in ("peak_memory_bytes", "disk_bytes",
+                        "walltime_seconds")}
+    if all(c is not None for c in fitted.values()):
+        return prediction_from(fitted, signature, execution,
+            source_fingerprint = query_fingerprint,
+            is_borrowed = False, is_cold_start = False,
+            sample_count = len(group))
+
+    # Rung 2: a thin group.  k-NN over the SAME machine, on the
+    # size and parallel axes, before ever leaving the machine --
+    # a same-machine neighbour is better evidence than a fitted
+    # curve from a different one.
+    if len(pool) > 0:
+        return knn_predict(pool, signature, execution,
+            source_fingerprint = query_fingerprint)
+
+    # Rung 3: this machine has NO observations.  Borrow from the
+    # nearest registered relative, and SAY SO -- the consumer
+    # (16.8) widens its margin on a borrowed prediction.
+    neighbour = nearest_fingerprint(query_fingerprint,
+                                    dataspace.hardware_registry)
+    if neighbour is not None and \
+            len(dataspace.observations_by_fingerprint
+                .get(neighbour, [])) > 0:
+        result = predict(dataspace, neighbour, build, signature,
+                         execution)
+        return with_flags(result, source_fingerprint = neighbour,
+                          is_borrowed = True)
+
+    # Rung 4: nothing anywhere.  Day-1 on a fresh cluster.
+    return ResourcePrediction(None, None, None,
+        source_fingerprint = query_fingerprint,
+        is_borrowed = False, is_cold_start = True,
+        sample_count = 0)
+```
+
+```
+function knn_predict(pool, signature, execution,
+                     source_fingerprint):
+    # DESIGN 8.6's thin-group fallback: k-NN over
+    # secular_dimension, kpoint_count, and spin_channels,
+    # scaled by the parallel config.
+    #
+    # Distances are taken in LOG space on the two count axes,
+    # because cost spans orders of magnitude: a 4000-dimension
+    # secular problem and a 400-dimension one are a factor of
+    # ten apart, not "3600 apart," and a linear distance would
+    # let every large system swamp the neighbourhood of every
+    # small one.  Censored observations are excluded for the
+    # same reason they are excluded from the fit (16.5): a
+    # bound is not a measurement.
+    usable = [o for o in pool if not o.resources.censored]
+    if len(usable) == 0:
+        return cold_start_prediction(source_fingerprint)
+
+    function distance_to(observation):
+        other = observation.signature
+        size_gap = log(signature.secular_dimension
+                       / other.secular_dimension)
+        kpt_gap  = log(signature.kpoint_count
+                       / other.kpoint_count)
+        # Spin is a 1-or-2 label, not a magnitude, so it enters
+        # as a mismatch penalty rather than a ratio.
+        spin_gap = (0.0 if signature.spin_channels
+                            == other.spin_channels else 1.0)
+        return sqrt(secular_dim_weight  * size_gap ** 2
+                    + kpoint_count_weight  * kpt_gap ** 2
+                    + spin_channel_weight  * spin_gap ** 2)
+
+    # The parallel config scales the ANSWER, not the distance:
+    # two runs of the same problem on different core counts are
+    # equally near in problem space, and it is their costs that
+    # differ.  So each neighbour's cost is rescaled to the
+    # query's configuration before it is averaged in.
+    neighbors = nearest(usable, distance_to, neighbor_count)
+    weights   = [1.0 / max(distance_to(o), distance_floor)
+                 for o in neighbors]
+
+    return weighted_average_of_rescaled_costs(
+        neighbors, weights, signature, execution,
+        source_fingerprint)
+```
+
+```
+function nearest_fingerprint(fingerprint, registry):
+    # "The nearest related fingerprint by probed attributes"
+    # (DESIGN 8.5).  The concrete ordering is this pseudocode's
+    # reading of that phrase, and it is deliberately narrow:
+    # only a machine of the SAME vendor and microarchitecture is
+    # a candidate at all, because a walltime does not carry
+    # across instruction sets.  Among those, the closest by core
+    # count and memory, in log space.
+    attrs = registry[fingerprint]
+    candidates = [f for f, a in registry.items()
+                  if f != fingerprint
+                  and a.cpu_vendor    == attrs.cpu_vendor
+                  and a.cpu_microarch == attrs.cpu_microarch]
+    if len(candidates) == 0:
+        return None
+    return min(candidates, key = lambda f: (
+        abs(log(registry[f].cores_per_node
+                / attrs.cores_per_node))
+        + abs(log(registry[f].memory_per_node_gb
+                  / attrs.memory_per_node_gb))))
+```
+
+### 16.6 Capture: what the run records (DESIGN 8.7)
+
+An observation is assembled at harvest from the four sources
+of ARCHITECTURE 11.4.  Two of them must be written *while the
+run happens* and cannot be reconstructed afterwards, which is
+why capture is its own step rather than part of the harvest.
+
+```
+# 1. Dispatch time, written by the wingbeat into the run dir.
+#    The size signature is known BEFORE the run (it derives from
+#    the makeinput inputs and the structure), and the execution
+#    config is what the wingbeat is about to launch.  Neither
+#    survives in any output file, so both are recorded here.
+function capture_dispatch(unit, wingbeat_dir, execution):
+    write_toml(join(wingbeat_dir, "resource_capture.toml"),
+        { "signature": size_signature_of(unit),
+          "execution": execution.knobs })
+
+# 2. Build time, emitted once by CMake (TODO C78).
+#    build_info.toml carries BOTH layers: the coarse bucketed
+#    knobs, and the verbatim compile string and library detail.
+
+# 3. After the run, from the scheduler's accounting:
+#    sacct -> MaxRSS (peak memory), disk high-water, Elapsed.
+
+# 4. Optionally, imago's own per-phase timings, self-reported.
+```
+
+`secular_dimension` is recorded **directly from imago** where
+imago reports it, with `basis_function_count` and
+`wavefunction_components` kept alongside so the derived value
+can be cross-checked against the authoritative one.  DESIGN
+8.9 leaves the choice of provenance open; the schema records
+it directly and keeps the primitives, which is what makes the
+cross-check possible either way.
+
+### 16.7 Harvest and promote (DESIGN 8.7)
+
+```
+function harvest_flight(workspace_root, db_root, registry):
+    # Walk a finished flight, build one Observation per run
+    # directory, write each to staging/<fingerprint>/.
+    build_info = load_build_info(workspace_root)  # both layers
+    for wingbeat_dir in run_directories(workspace_root):
+        capture = read_toml(
+            join(wingbeat_dir, "resource_capture.toml"))
+        accounting = read_scheduler_accounting(wingbeat_dir)
+
+        # The outcome is what decides whether the resources are
+        # measurements or bounds (16.3), so it is resolved FIRST
+        # and everything downstream reads it.
+        outcome = classify_outcome(accounting)
+        resources = assemble_resources(accounting, outcome,
+            phase_timings = read_self_report(wingbeat_dir))
+
+        obs = Observation(
+            observation_id = <filled by observation_slug>,
+            generated_at   = now_utc_iso8601(),
+            source         = "flight",
+            outcome        = outcome,
+            hardware_fingerprint = hardware_fingerprint(
+                probe_attributes(accounting.hostname)),
+            signature  = SizeSignature(**capture["signature"]),
+            execution  = ExecutionConfig(capture["execution"]),
+            build      = BuildConfig(build_info.coarse),
+            resources  = resources,
+            provenance = Provenance(
+                compile_string = build_info.compile_string,
+                library_detail = build_info.library_detail,
+                curator        = "resource_harvest.py", ...))
+        save_observation(obs, db_root, area = "staging")
+```
+
+```
+function classify_outcome(accounting):
+    # The scheduler already knows.  An OOM kill and a timeout
+    # are DATA (16.3), not failures to be dropped: the first
+    # says this configuration is insufficient at this size, the
+    # second bounds the walltime from above.  Only a Fortran
+    # abort unrelated to resources carries no cost signal.
+    if accounting.state == "OUT_OF_MEMORY":  return "oom"
+    if accounting.state == "TIMEOUT":        return "timeout"
+    if accounting.exit_code != 0:            return "failed"
+    return "completed"
+```
+
+The curator's promoter mirrors 15.7's four modes (`dry-run`,
+`all`, `auto-promote`, interactive), and promotion is a move
+of the file from `staging/<fingerprint>/` to
+`entries/<fingerprint>/`, so contents and provenance never
+change.  One rule DESIGN 8.7 states outright:
+
+```
+function may_promote(obs):
+    # A `failed` run is a Fortran abort unrelated to resources.
+    # It carries no usable cost signal and is staged only for
+    # diagnostics -- NEVER promoted (DESIGN 8.7).
+    if obs.outcome == "failed":
+        return False
+    # `completed`, `oom`, and `timeout` all carry signal: a
+    # measurement, a lower bound, an upper bound.
+    return True
+```
+
+DESIGN 8.7 says the curator promotes "with the same discipline
+as section 7.8," but 7.8's discipline includes an *objective
+auto-promote rule* (a flatness test on the staged file alone),
+and no such rule is stated for a cost observation.  What would
+one even test?  A cost has no analogue of convergence.  So the
+`auto-promote` mode above has no criterion beyond
+`may_promote`, and that is a gap in DESIGN, not an omission
+here: see 16.9.
+
+### 16.8 Provisioning consumer and day-1 (DESIGN 8.6, 8.8)
+
+The near-term consumer.  The flight layer asks the predictor
+what a proposed configuration will cost, applies a margin, and
+emits the scheduler request -- the resource-and-cost sibling of
+what 15.6 does for k-density.
+
+```
+function provision(dataspace, fingerprint, build, signature,
+                   execution):
+    p = predict(dataspace, fingerprint, build, signature,
+                execution)
+
+    if p.is_cold_start:
+        # DESIGN 8.8: a fresh fingerprint cannot be predicted
+        # for.  Ask generously, run, harvest -- and the run
+        # SEEDS the fingerprint.  The artifact improves
+        # monotonically from here; the first job pays for it.
+        return conservative_cold_start_request(signature)
+
+    margin = SAFETY_MARGIN
+    if p.is_borrowed:
+        # Fitted on a neighbouring machine (16.5 rung 3).  The
+        # prediction is not wrong so much as untested here, so
+        # widen rather than trust.  It is surfaced, never
+        # silent (DESIGN 8.5).
+        margin = widened(margin)
+
+    return SchedulerRequest(
+        memory   = p.peak_memory_bytes * margin,
+        disk     = p.disk_bytes        * margin,
+        walltime = p.walltime_seconds  * margin)
+```
+
+A small `manual` seed -- a handful of hand-entered
+observations spanning the size range on the local machine --
+accelerates day 1, exactly as the section-15 seed flight (C75)
+bootstraps convergence guidance.  This is TODO C82.
+
+### 16.9 What this section deliberately does not specify
+
+DESIGN 8.9 leaves four questions open.  Two of them reach into
+the predictor, so the pseudocode above stops at them rather
+than guessing past them.  Writing a plausible-looking
+algorithm here would make the chain *look* complete while
+leaving the code with nothing to be checked against -- which
+is the failure the chain exists to prevent.
+
+1. **How censored observations enter the fit.**  `fit_group`
+   (16.5) excludes them and says so.  That is a placeholder,
+   not an answer: an OOM lower bound is real evidence about
+   the cost surface and throwing it away wastes it, while
+   feeding it in as a point measurement biases every exponent.
+   The honest options are a censored (Tobit-style) regression
+   or a bound-weighting scheme, and DESIGN 8.9 says the choice
+   is calibrated after the seed.  **C77 cannot implement
+   `fit_group` faithfully until DESIGN settles this.**  The
+   library's schema, loader, emitter, and fingerprint (16.1 -
+   16.4) do not depend on it and can be built now.
+
+2. **The exact correction-term form.**  `feature_row` (16.5)
+   gives the v1 terms DESIGN 8.6 names by quantity, in one
+   place, to be re-derived from the seed.  The pseudocode
+   fixes *where* the form lives, not *what* it is.
+
+3. **Aggregate versus per-rank memory.**  Whether
+   `peak_memory_bytes` is a job aggregate, a per-node, or a
+   per-rank figure changes how the parallel correction is
+   modelled and how `sacct` / `time` / self-report are
+   reconciled (ARCHITECTURE 11.8).  The schema records one
+   number; which number it is must be settled before the
+   parallel term means anything.
+
+4. **Build effects on numerics, not just cost.**  Whether the
+   build block is ever referenced from the section-7
+   convergence side -- against the no-cross-reference boundary
+   -- is to be settled in DESIGN, not assumed here.
+
+Two further gaps this pseudocode pass surfaced, which DESIGN 8
+does not currently cover:
+
+5. **No objective auto-promote rule for a cost observation.**
+   DESIGN 8.7 borrows 7.8's curation discipline, but 7.8's
+   `auto_promote_ok` rests on a flatness test that has no cost
+   analogue (16.7).  Either a criterion is designed, or
+   `auto-promote` should be dropped from the promoter's modes
+   and the curator reviews every observation.
+
+6. **`MIN_GROUP_SAMPLES` and `SAFETY_MARGIN` have no values.**
+   DESIGN 8.6 says both are calibrated after the seed, which
+   is right, and 16.1 names them in one place so calibration is
+   a one-line edit.  But a margin is a *safety* parameter: the
+   consumer must not ship with it unset, so the seed (C82) is a
+   hard prerequisite for the provisioning consumer (C81), not
+   merely a source of accuracy.
