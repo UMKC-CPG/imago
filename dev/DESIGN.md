@@ -6895,6 +6895,22 @@ override for a queue this run does not use is simply not
 applied; a file may carry overrides for every queue on the
 cluster.
 
+**The loader owns every overlay.**  Reading the settings file
+and overlaying it are one operation, not two, and the reader
+takes the queue as an argument in order to perform both.  This
+is a deliberate constraint rather than a convenience.  Were the
+overlay a separate step, every piece of code that reads the
+file would have to remember to take it, and a reader that
+forgot would get settings that look complete and are quietly
+wrong -- the cluster-wide walltime where the queue's cap
+belongs, which a scheduler answers with a rejected or truncated
+job rather than an error naming the cause.  There is more than
+one such reader (the per-unit dispatch, and the driver's own
+batch submission), and there will be more as the resource-cost
+dataspace of section 8 grows its own.  Making un-overlaid
+settings *unobtainable* is what keeps them honest: the mistake
+is not merely avoided, it cannot be written.
+
 Two guards, in keeping with the strict-contract discipline
 the rest of the settings file follows.  A key inside an
 override that names no known setting is a configuration

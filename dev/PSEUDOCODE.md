@@ -6040,32 +6040,43 @@ function clusterrc.parameters_and_defaults():
 ```
 
 ```
-function load_site_config(profile=None):
+function load_site_config(profile=None, partition=None):
+    # Reading the settings file and overlaying it are ONE
+    #   operation (DESIGN 6.2.11, decision 1).  The loader takes
+    #   the queue so it can apply the queue overlay itself; there
+    #   is deliberately no way to obtain un-overlaid settings, so
+    #   no reader can forget to overlay and end up with the
+    #   cluster-wide walltime where a queue's cap belongs.
+    #
     # Resolve clusterrc.py by precedence: the working directory
     #   first (a per-run override), then $IMAGO_RC (the global
     #   default).  cluster_probe.py uses the same order.
     site = clusterrc.parameters_and_defaults()
-    # A named profile (advanced tier) overlays the base dict,
-    # so a user with several clusters selects one by name.
+    # Overlay 1: a named profile (advanced tier), so a user with
+    # several clusters selects one by name.
     if profile is not None:
         site = merge(site, site["profiles"][profile])
     # The required core must be present; everything else has a
     # default.  A gap here is a config error raised up front,
     # never a crash mid-flight (the strict-contract discipline
-    # the producer already follows, DESIGN 6.3.1).
-    for name in ("partitions", "worker_init"):
-        if is_empty(site[name]):     # None or empty -> unfilled
-            raise ConfigError("cluster rc missing " + name)
+    # the producer already follows, DESIGN 6.3.1).  It is checked
+    # BEFORE the queue overlay because picking the default queue
+    # reads `partitions`.
+    require_core(site)               # partitions, worker_init
+    # Overlay 2: the selected queue.  The queue is a per-run
+    # choice, defaulting to the first entry of the (now
+    # profile-overlaid) partitions list.
+    queue = partition or site["partitions"][0]
+    site = apply_queue_overrides(site, queue)
+    # An override may set worker_init, so re-check the core it
+    # could have emptied.  (It may not set partitions.)
+    require_core(site)
     return site
 ```
 
-The third overlay is the **per-queue override** (DESIGN 6.2.11,
-decision 1).  It cannot ride inside `load_site_config`, because
-it needs to know which queue this run uses, and the queue is
-itself a per-run choice.  So the caller resolves the queue from
-the profile-overlaid file, applies that queue's override, and
-only then lets the remaining per-run choices take their defaults
-from the site the overlays produced.
+The queue overlay itself (DESIGN 6.2.11, decision 1).  It is
+called only from the loader above; it is kept a named step so
+its two guards can be read -- and tested -- on their own.
 
 ```
 function apply_queue_overrides(site, partition):
@@ -6327,14 +6338,11 @@ function resolve_dispatch(dispatch, partition, nodes, walltime,
         return (None, None)
     # A cluster shape: the settings file IS required here, and a gap
     #   in its required core is a config error raised up front
-    #   (load_site_config), never a quiet local fall-back.
-    site    = load_site_config(profile)          # + profile overlay
-    # The queue decides which per-queue override applies, so resolve
-    #   it FIRST, from the profile-overlaid file, then overlay, then
-    #   let the remaining choices default from the result (DESIGN
+    #   (load_site_config), never a quiet local fall-back.  Passing
+    #   the queue is what makes the loader overlay it; the remaining
+    #   per-run choices then default from the overlaid site (DESIGN
     #   6.2.11, decision 1: defaults -> profile -> queue -> flags).
-    queue   = partition or site["partitions"][0]
-    site    = apply_queue_overrides(site, queue)
+    site    = load_site_config(profile, partition)
     choices = resolve_choices(site, {dispatch, partition, nodes,
                                      walltime})
     return (build_dispatch_config(site, choices), choices)
@@ -6453,7 +6461,10 @@ function submit_orchestrator_batch(argv, args, data_root):
     # may drive main(argv) with a vector that has nothing to do with
     # the process's own arguments; reading the process would then
     # submit a batch job running whatever launched us.
-    site         = load_site_config(args.profile)
+    # The driver's OWN job is sized from the same overlaid site the
+    # units are, so the queue rides into the loader here too: a
+    # debug queue that caps walltime caps the driver's job as well.
+    site         = load_site_config(args.profile, args.partition)
     choices      = resolve_choices(site, args)
     orchestrator = resolve_orchestrator(site, args)
     # Re-run THIS producer inside the batch job, dropping --submit
