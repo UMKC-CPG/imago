@@ -6871,6 +6871,40 @@ The principle is that the *core is tiny and the rest is
 invited*: approachable for someone bringing up their first
 cluster, rewarding for someone who wants to tune it.
 
+**How the layers resolve.**  Three of the settings above are
+not values but *overlays* on the others, so the order they
+apply in is part of the contract.  Most general first:
+
+1. the built-in defaults of `parameters_and_defaults()`;
+2. the named **profile**, when `--profile` selects one --
+   a user with access to several clusters keeps one file;
+3. the **per-queue override** for the queue this run will
+   actually use, because a setting may legitimately differ
+   by queue (a debug queue with a short walltime cap, a
+   large-memory queue with a different per-node capacity);
+4. the **per-run command-line flags** (decision 2), which
+   are the most specific statement there is.
+
+The queue overlay needs to know the queue, and the queue is
+itself a per-run choice (`--partition`, defaulting to the
+first entry of `partitions`).  So the queue is resolved
+first, *from the profile-overlaid file*, then its override
+is applied, and only then do the remaining per-run choices
+take their defaults from the site the overlays produced.  An
+override for a queue this run does not use is simply not
+applied; a file may carry overrides for every queue on the
+cluster.
+
+Two guards, in keeping with the strict-contract discipline
+the rest of the settings file follows.  A key inside an
+override that names no known setting is a configuration
+error, not a silent no-op -- it is almost always a typo, and
+a silently ignored typo in a resource request is exactly the
+failure this file exists to prevent.  And an override may
+not set `partitions` or `profiles`: those choose *which*
+overlay applies, so letting an overlay rewrite them invites
+a rule that refers to itself.
+
 **Discovering site facts -- the `cluster_probe.py` tool.**
 The settings file itself stays *pure data* -- like every other
 `*rc.py`, it is just `parameters_and_defaults()`, with the two
@@ -6963,9 +6997,13 @@ override rule is set out with the block, below).
 
 The everyday path is a single command (captured in the
 `command` log the scripts already keep); for a reproducible
-record, the client may also write the resolved configuration
-as a human-readable file in the run directory, beside the
-manifest.
+record, the client may also write the resolved *dispatch
+choices* -- the shape, queue, node count, time limit, and
+the profile that fed them -- as a human-readable file in the
+run directory, beside the manifest.  The orchestrator's own
+shape is not among them: the driver's `sbatch` script is
+itself written to the data root, and it records that shape
+exactly, in the form the scheduler received it.
 
 The command-line default is `slurm-per-job`, because the whole
 point of this work is that the producer and the database seed

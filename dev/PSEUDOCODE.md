@@ -4510,6 +4510,8 @@ function materialize_only(manifest_path, pdb_root,
 
 
 function main_submit_mode(argv, args, data_root):
+    # `argv` is the flag vector main() parsed, threaded through
+    # rather than re-read from the process (13.7 explains why).
     # --submit: run the producer as its OWN batch job (DESIGN
     # 6.2.11; the sbatch generator is 13.7).  Materialize every
     # structure HERE, on the login node, because it is the one
@@ -6057,6 +6059,40 @@ function load_site_config(profile=None):
     return site
 ```
 
+The third overlay is the **per-queue override** (DESIGN 6.2.11,
+decision 1).  It cannot ride inside `load_site_config`, because
+it needs to know which queue this run uses, and the queue is
+itself a per-run choice.  So the caller resolves the queue from
+the profile-overlaid file, applies that queue's override, and
+only then lets the remaining per-run choices take their defaults
+from the site the overlays produced.
+
+```
+function apply_queue_overrides(site, partition):
+    # Overlay ONLY the selected queue's settings.  A file may
+    # carry overrides for every queue on the cluster; the ones
+    # this run does not use are simply not applied.
+    override = site["queue_overrides"].get(partition)
+    if override is None:
+        return site
+
+    for key in override:
+        # A key naming no known setting is a TYPO, and a silently
+        # ignored typo in a resource request is exactly what this
+        # file exists to prevent.  Refuse it up front.
+        if key not in site:
+            raise ConfigError(
+                "queue override for " + partition +
+                " names unknown setting " + key)
+        # partitions / profiles choose WHICH overlay applies, so an
+        # overlay that rewrote them would refer to itself.
+        if key in ("partitions", "profiles"):
+            raise ConfigError(
+                "queue override may not set " + key)
+
+    return merge(site, override)
+```
+
 ```
 # Layer 2: per-run choices.  Each CLI flag defaults from the
 # site file -- the dispatch shape from default_topology
@@ -6292,7 +6328,13 @@ function resolve_dispatch(dispatch, partition, nodes, walltime,
     # A cluster shape: the settings file IS required here, and a gap
     #   in its required core is a config error raised up front
     #   (load_site_config), never a quiet local fall-back.
-    site    = load_site_config(profile)
+    site    = load_site_config(profile)          # + profile overlay
+    # The queue decides which per-queue override applies, so resolve
+    #   it FIRST, from the profile-overlaid file, then overlay, then
+    #   let the remaining choices default from the result (DESIGN
+    #   6.2.11, decision 1: defaults -> profile -> queue -> flags).
+    queue   = partition or site["partitions"][0]
+    site    = apply_queue_overrides(site, queue)
     choices = resolve_choices(site, {dispatch, partition, nodes,
                                      walltime})
     return (build_dispatch_config(site, choices), choices)
@@ -6359,8 +6401,12 @@ function build_orchestrator_sbatch(site, choices, command,
     # stands alone.  A missing walltime falls back to the run's
     # resolved walltime, so the driver's job always carries a
     # time limit.  `command` is the already-quoted command line
-    # the batch job runs.
-    orch     = orchestrator or site.get("orchestrator", {})
+    # the batch job runs.  Test for ABSENCE, not falsiness: a caller
+    # that deliberately passes an empty shape means "request nothing
+    # but the fallbacks," and must not silently re-inherit the site
+    # block.
+    orch     = (orchestrator if orchestrator is not None
+                else site.get("orchestrator", {}))
     cores    = orch.get("cores", 1)
     memory   = orch.get("memory")                 # None -> no --mem
     walltime = orch.get("walltime") or choices["walltime"]
@@ -6401,6 +6447,12 @@ exclusive: each names a different stopping point.
 # In build_initial_potentials.py (the client), after the
 # materialize pre-flight has fetched every structure.
 function submit_orchestrator_batch(argv, args, data_root):
+    # `argv` is the FLAG vector this run parsed -- the same list
+    # main() was handed, with no program name in it.  It is passed
+    # in rather than read from the process, because a library caller
+    # may drive main(argv) with a vector that has nothing to do with
+    # the process's own arguments; reading the process would then
+    # submit a batch job running whatever launched us.
     site         = load_site_config(args.profile)
     choices      = resolve_choices(site, args)
     orchestrator = resolve_orchestrator(site, args)
@@ -6408,8 +6460,11 @@ function submit_orchestrator_batch(argv, args, data_root):
     # so the batch invocation builds instead of resubmitting.  The
     # --orchestrator-* flags may ride along harmlessly: they are
     # read only when submitting, and the inner run does not submit.
+    # The script names ITSELF by path, so the command is correct
+    # however this process happened to be launched.
     inner   = [item for item in argv if item != "--submit"]
-    command = shell_quote_all([interpreter, *inner])
+    command = shell_quote_all(
+                  [interpreter, this_script_path, *inner])
 
     script_path = join(data_root, "orchestrator.sbatch")
     write_file(script_path,
