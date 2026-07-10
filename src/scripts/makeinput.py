@@ -1820,10 +1820,13 @@ def initialize_cell(settings, sc):
         _auto_sybd_path(settings, sc, epsilon)
 
     # ------------------------------------------------------------------
-    # Default k-point mesh shift (if not set on the command line).
+    # K-point mesh shift.  makeinput records only the REQUEST: an
+    # explicit -kpshift is passed through, and an unset shift stays
+    # the AUTO sentinel "-1 -1 -1" written verbatim into the kp file.
+    # imago resolves an AUTO request once the counts are known,
+    # since the choice depends on their parity (DESIGN 3.2/3.9;
+    # PSEUDOCODE 4d.1).  No shift is chosen here by crystal system.
     # ------------------------------------------------------------------
-    if settings.kp_shift == "-1 -1 -1":
-        _auto_kp_shift(settings)
 
     # ------------------------------------------------------------------
     # Move the space-group scratch files into .inputTemp.
@@ -2018,49 +2021,6 @@ def _auto_sybd_path(settings, sc, epsilon):
             settings.sybd_path = "bcc"
         else:
             settings.sybd_path = "sc"
-
-
-def _auto_kp_shift(settings):
-    """Set the default k-point mesh shift based on the SYBD path / lattice.
-
-    The shift is only set here if the user did not provide an explicit
-    -kpshift on the command line (indicated by the sentinel value
-    "-1 -1 -1").  The shift values are lattice-type-dependent defaults.
-
-    Parameters
-    ----------
-    settings : ScriptSettings
-        Settings object — ``kp_shift`` and ``cell_name`` will be set.
-    """
-    sp = settings.sybd_path
-
-    if "tric" in sp:
-        settings.cell_name = "triclinic"
-        settings.kp_shift  = "0.5 0.5 0.5"
-    elif "mono" in sp:
-        settings.cell_name = "monoclinic"
-        settings.kp_shift  = "0.5 0.5 0.5"
-    elif "ortho" in sp:
-        settings.cell_name = "orthorhombic"
-        settings.kp_shift  = "0.5 0.5 0.5"
-    elif "tet" in sp:
-        settings.cell_name = "tetragonal"
-        settings.kp_shift  = "0.5 0.5 0.5"
-    elif "rhomb" in sp:
-        settings.cell_name = "rhombohedral"
-        settings.kp_shift  = "0.5 0.5 0.5"
-    elif sp == "hex":
-        settings.cell_name = "hexagonal"
-        settings.kp_shift  = "0.3333333333333333 0.3333333333333333 0.25"
-    else:
-        # Nothing but cubic systems from here on.
-        settings.cell_name = "cubic"
-        if sp == "sc":
-            settings.kp_shift = "0.25 0.25 0.25"
-        elif sp == "fcc":
-            settings.kp_shift = "0.25 0.25 0.25"
-        elif sp == "bcc":
-            settings.kp_shift = "0.5 0.5 0.5"
 
 
 def assign_group(settings, sc, group_type):

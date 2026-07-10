@@ -88,3 +88,19 @@ def test_kpd_positive_is_density_not_gamma():
     assert settings.kp_gamma[2] is False
     assert settings.kp_note[1] == "(Density)"
     assert settings.kp_note[2] == "(Density)"
+
+
+def test_default_shift_is_the_auto_sentinel():
+    """With no ``-kpshift``, makeinput records the AUTO sentinel
+    ``-1 -1 -1`` and resolves nothing by crystal system; imago
+    selects the shift from the resolved counts (DESIGN 3.9 /
+    PSEUDOCODE 4d.1)."""
+    settings = _reconcile({})
+    assert settings.kp_shift == "-1 -1 -1"
+
+
+def test_explicit_shift_is_recorded_verbatim():
+    """An explicit ``-kpshift`` is passed through unchanged, to be
+    written into the kp file for imago to honor."""
+    settings = _reconcile({"kpshift": [0.5, 0.5, 0.5]})
+    assert settings.kp_shift == "0.5 0.5 0.5"

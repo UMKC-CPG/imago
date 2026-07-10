@@ -65,6 +65,10 @@ module O_KPoints
    real (kind=double), dimension (dim3) :: kPointShift ! Fractional amount to
          !   shift the kpoint mesh by along each of the a,b,c axes. This is
          !   only used if the kPointStyleCode equals 1 or 2.
+   logical :: isAutoShift ! True when the kp file requested an
+         !   automatic shift (the sentinel -1 -1 -1); resolveShift
+         !   then selects the shift from the resolved counts and the
+         !   point group (DESIGN 3.9).  Set in readKPoints.
    real (kind=double), dimension (dim3) :: kPointShiftMTOP ! Fractional amount
          !   to shift the kpoint mesh by along each of the a,b,c axes. This is
          !   only used if either doMTOP_SCF or doMTOP_PSCF flag is set to 1.
@@ -269,6 +273,11 @@ subroutine readKPoints(readUnit, writeUnit)
             & len('KP_SHIFT_A_B_C'),&
             & 'KP_SHIFT_A_B_C')
 
+      ! An all -1 shift is the AUTO sentinel: imago selects the
+      !   shift later, once the counts are known (DESIGN 3.9).  A
+      !   real shift lies in [0,1), so the sentinel is unmistakable.
+      isAutoShift = all(abs(kPointShift(:) + 1.0_double) < 1.0e-6_double)
+
       ! Read the number of point group operations for IBZ reduction.
       !   These are the rotational parts of the space group symmetry
       !   operations, expressed in their on-disk conventional-cell-abc
@@ -363,6 +372,11 @@ subroutine readKPoints(readUnit, writeUnit)
       call readData(readUnit,writeUnit,3,kPointShift,&
             & len('KP_SHIFT_A_B_C'),&
             & 'KP_SHIFT_A_B_C')
+
+      ! An all -1 shift is the AUTO sentinel: imago selects the
+      !   shift later, once the counts are known (DESIGN 3.9).  A
+      !   real shift lies in [0,1), so the sentinel is unmistakable.
+      isAutoShift = all(abs(kPointShift(:) + 1.0_double) < 1.0e-6_double)
 
       ! Read the number of point group operations for IBZ reduction.
       !   These are the rotational parts of the space group symmetry
@@ -1088,6 +1102,11 @@ subroutine initializeKPoints (inSCF)
 
    ! Define local variables.
    integer :: i ! Loop index for identity-map setup (style code 0).
+   integer, dimension(3) :: axisClass
+         ! Symmetry class of each reciprocal axis: axes coupled by
+         !   the point group share a class and must share a count
+         !   (DESIGN 3.8).  Filled by computeAxisClasses and used by
+         !   selectAxialCounts in the density branch (style code 2).
 
    ! The considerations for this operation are:
 
@@ -1208,16 +1227,25 @@ subroutine initializeKPoints (inSCF)
       enddo
    elseif (kPointStyleCode == 1) then
       ! Real first: computeRecipPointOps derives the reciprocal ops
-      !   as the inverse transpose of the direct (real) ops.
+      !   as the inverse transpose of the direct (real) ops.  The
+      !   counts came from the file; resolveShift then resolves an
+      !   AUTO shift request from those counts (DESIGN 3.9).
       call computeRealPointOps
       call computeRecipPointOps
+      call resolveShift
       call initializeKPointMesh(1) ! Apply symmetry.
       call convertKPointsToXYZ
    elseif (kPointStyleCode == 2) then
-      call computeAxialKPoints
-      ! Real first (see above).
+      ! Reciprocal operations FIRST: the axis classes and the
+      !   symmetry-compatible count selection both need them
+      !   (DESIGN 3.7 / 3.8; PSEUDOCODE 4d.3).  This reorders the
+      !   former counts-first flow.  resolveShift runs after the
+      !   counts, since the shift choice depends on their parity.
       call computeRealPointOps
       call computeRecipPointOps
+      call computeAxisClasses(axisClass)
+      call selectAxialCounts(axisClass)
+      call resolveShift
       call initializeKPointMesh(1) ! Apply symmetry.
       call convertKPointsToXYZ
    endif
@@ -1259,82 +1287,336 @@ subroutine initializeKPoints (inSCF)
 end subroutine initializeKPoints
 
 
-subroutine computeAxialKPoints
+subroutine computeAxisClasses(axisClass)
 
-   ! Define used modules.
+   ! Assign each reciprocal axis a symmetry class.  Two axes are
+   !   coupled when some point group operation, written in the
+   !   reciprocal abc basis, has a nonzero entry linking them off
+   !   the diagonal -- it sends one axis onto the other.  The
+   !   transitive closure of coupling gives the classes, and axes
+   !   in one class must share a k-point count for the uniform mesh
+   !   to be carried onto itself by the group (DESIGN 3.8 /
+   !   PSEUDOCODE 4c.1).  A cubic group couples all three axes; a
+   !   hexagonal or tetragonal group couples the two in-plane axes
+   !   and frees the principal one; orthorhombic and triclinic
+   !   groups couple nothing.
+
    use O_Kinds
-   use O_Constants, only:dim3
+
+   implicit none
+
+   ! Output: the class label of each of the three axes.  A label
+   !   is the smallest axis index belonging to that class.
+   integer, dimension(3), intent(out) :: axisClass
+
+   ! Local variables.
+   integer :: m ! Loop index over the point group operations.
+   integer :: i, j ! Loop indices over the three axes.
+   logical :: changed ! Whether the last relaxation pass merged.
+   logical, dimension(3,3) :: coupled ! coupled(i,j): i,j linked.
+   real (kind=double) :: opThresh ! Below this an entry is zero.
+
+   ! A signed-permutation entry is exactly +/-1, so anything above
+   !   a small floor is a genuine off-diagonal coupling.
+   opThresh = 1.0e-9_double
+
+   ! Build the symmetric coupling matrix over all operations.
+   coupled(:,:) = .false.
+   do m = 1, numPointOps
+      do i = 1, 3
+         do j = 1, 3
+            if ((i /= j) .and. &
+                  & (abs(abcRecipPointOps(i,j,m)) > opThresh)) then
+               coupled(i,j) = .true.
+               coupled(j,i) = .true.
+            endif
+         enddo
+      enddo
+   enddo
+
+   ! Start each axis in its own class, then relax: whenever two
+   !   coupled axes carry different labels, give both the smaller.
+   !   Repeat until stable so a transitive chain (axis 1 coupled to
+   !   2, and 2 to 3) collapses into a single class.
+   do i = 1, 3
+      axisClass(i) = i
+   enddo
+   changed = .true.
+   do while (changed)
+      changed = .false.
+      do i = 1, 3
+         do j = 1, 3
+            if (coupled(i,j) .and. &
+                  & (axisClass(j) < axisClass(i))) then
+               axisClass(i) = axisClass(j)
+               changed = .true.
+            endif
+         enddo
+      enddo
+   enddo
+
+end subroutine computeAxisClasses
+
+
+subroutine selectAxialCounts(axisClass)
+
+   ! Turn the requested volume density into symmetry-compatible,
+   !   as-isotropic-as-possible axial k-point counts (DESIGN 3.7 /
+   !   PSEUDOCODE 4c.2).  Axes sharing a class share a count, so the
+   !   uniform mesh is carried onto itself by the point group;
+   !   subject to that, the counts track the reciprocal axis
+   !   lengths so the inter-point spacing is as uniform as the
+   !   integers allow.  Sets the module array numAxialKPoints.
+
+   use O_Kinds
    use O_Lattice, only: recipCellVolume, recipMag
 
-   ! Define local variables.
-   integer :: i
-   integer :: nearIndex
-   real (kind=double) :: stepSize
-   real (kind=double) :: numKPointsEstimate
-   real (kind=double), dimension (dim3) :: fractionalPoints
+   implicit none
 
-   ! The user specifies a volume density (kpoints per unit reciprocal-space
-   !   volume in Bohr^-3). Multiply by the reciprocal cell volume to get the
-   !   target total number of kpoints in the full mesh.
-   numKPointsEstimate = minKPointDensity * recipCellVolume
+   ! Input: each axis's symmetry class (from computeAxisClasses).
+   integer, dimension(3), intent(in) :: axisClass
 
-   ! Distribute the total count across the three axes so that the spacing is
-   !   as uniform as possible (equal step size along each axis).
+   ! Local variables.
+   integer :: i, j ! Loop indices over the three axes.
+   integer :: memberCount ! Number of axes in a class.
+   integer :: bestClass ! Class whose increment evens spacing best.
+   integer, dimension(3) :: trialCounts ! Counts with one class up.
+   real (kind=double) :: uniformSpacing ! Common target spacing h.
+   real (kind=double) :: densityFloor ! Full-mesh point floor.
+   real (kind=double) :: classSum ! Sum of continuous counts, a class.
+   real (kind=double) :: bestSpread ! Smallest trial spacing spread.
+   real (kind=double) :: thisSpread ! One trial's spacing spread.
+   real (kind=double), dimension(3) :: contCount ! Continuous counts.
+   real (kind=double), dimension(3) :: sharedCount ! Class-averaged.
 
-   ! To force the step sizes to be equal for each axis, the ratio of the
-   !   axial magnitude and the number of kpoints along that axis should be
-   !   equal for all axes. I.e., recipMag(1) / numAxialKPoints(1) = stepSize,
-   !   and so forth for 2, and 3. With a fixed stepSize this would yield
-   !   real numbers for the number of kpoints. We will assume this for now
-   !   and then make integer later.
+   ! The Gamma sentinel (a non-positive density) is a single point
+   !   at the origin; guard it here even though it is resolved
+   !   upstream (DESIGN 3.6).
+   if (minKPointDensity <= 0.0_double) then
+      numAxialKPoints(:) = 1
+      return
+   endif
 
-   ! Now, establish a point density constraint: recipCellVolume /
-   !   product(numAxialKPoints(:)) = 1 / minKPointsDensity
+   ! Continuous isotropic counts: at a common spacing h the count
+   !   along axis i is |b_i| / h, and the product meets the density
+   !   (h chosen so product(|b_i|/h) = recipCellVolume*density).
+   uniformSpacing = (product(recipMag(:)) &
+         & / (recipCellVolume * minKPointDensity)) &
+         & ** (1.0_double / 3.0_double)
+   contCount(:) = recipMag(:) / uniformSpacing
 
-   ! Therefore, the step size is:
-   stepSize = (product(recipMag(:)) / &
-         & (recipCellVolume * minKPointDensity))**(1.0_double/3.0_double)
-
-   ! Now, solve for the number of axial points:
-   numAxialKPoints(:) = int(recipMag(:) / stepSize)
-
-   ! Compute the residual fractional part.
-   fractionalPoints(:) = (recipMag(:) / stepSize) &
-         & - real(numAxialKPoints(:),double)
-
-   ! Finally, adjust for the shift to integer values.
-
-   ! First, increment the number of kpoints along axes that are closest to
-   !   the next integer number of points until the density exceeds the target.
-   do while (minKPointDensity * recipCellVolume > product(numAxialKPoints(:)))
-      nearIndex = maxloc(fractionalPoints(:),1)
-      numAxialKPoints(nearIndex) = numAxialKPoints(nearIndex) + 1
-      fractionalPoints(nearIndex) = 0.0_double
-   enddo
-
-   ! Then, decrement the number of kpoints along the axes that are closest to
-   !   the previous integer (floor) until the density is less than the target.
-   !   First, fix any fractionalPoints that are zero to be one so that they
-   !   are never reduced.
+   ! Force one shared real count per class.  Coupled axes already
+   !   have equal |b_i|, so the mean only absorbs round-off.
    do i = 1, 3
-      if (fractionalPoints(i) == 0.0_double) then
-         fractionalPoints(i) = 1.0_double
-      endif
-   enddo
-   do while (minKPointDensity * recipCellVolume < product(numAxialKPoints(:)))
-      nearIndex = minloc(fractionalPoints(:),1)
-      numAxialKPoints(nearIndex) = numAxialKPoints(nearIndex) - 1
-      if (numAxialKPoints(nearIndex) == 0) then
-         numAxialKPoints(nearIndex) = 1
-      endif
-      fractionalPoints(nearIndex) = 1.0_double
+      classSum = 0.0_double
+      memberCount = 0
+      do j = 1, 3
+         if (axisClass(j) == axisClass(i)) then
+            classSum = classSum + contCount(j)
+            memberCount = memberCount + 1
+         endif
+      enddo
+      sharedCount(i) = classSum / real(memberCount, double)
    enddo
 
-   ! At this point, the numAxialKPoints should be optimized to be as close as
-   !   possible to the target density while keeping inter-point spacing as
-   !   constant as possible (comparing axes).
+   ! Round each axis to the nearest positive integer.  Members of
+   !   one class shared a value, so they round alike and the mesh
+   !   stays symmetry-compatible.
+   numAxialKPoints(:) = max(1, nint(sharedCount(:)))
 
-end subroutine computeAxialKPoints
+   ! Raise WHOLE classes until the full mesh meets the density
+   !   floor.  Never bump a single axis inside a multi-axis class
+   !   -- that would break symmetry compatibility.  At each step
+   !   pick the class whose increment leaves the three axis
+   !   spacings closest together (the most isotropic choice).
+   densityFloor = minKPointDensity * recipCellVolume
+   do while (real(product(numAxialKPoints(:)), double) &
+         & < densityFloor)
+      bestSpread = huge(1.0_double)
+      bestClass = 1
+      do i = 1, 3
+         ! Consider each class once, at its smallest-index axis.
+         if (axisClass(i) /= i) cycle
+         trialCounts(:) = numAxialKPoints(:)
+         do j = 1, 3
+            if (axisClass(j) == i) then
+               trialCounts(j) = trialCounts(j) + 1
+            endif
+         enddo
+         thisSpread = spacingSpread(trialCounts)
+         if (thisSpread < bestSpread) then
+            bestSpread = thisSpread
+            bestClass = i
+         endif
+      enddo
+      do j = 1, 3
+         if (axisClass(j) == bestClass) then
+            numAxialKPoints(j) = numAxialKPoints(j) + 1
+         endif
+      enddo
+   enddo
+
+end subroutine selectAxialCounts
+
+
+function spacingSpread(counts) result(spread)
+
+   ! The gap between the widest and narrowest inter-point spacing
+   !   across the three axes, |b_i| / counts(i).  A smaller spread
+   !   is a more isotropic mesh, so selectAxialCounts increments
+   !   the class that minimizes it (PSEUDOCODE 4c.2).
+
+   use O_Kinds
+   use O_Lattice, only: recipMag
+
+   implicit none
+
+   integer, dimension(3), intent(in) :: counts
+   real (kind=double) :: spread
+
+   real (kind=double), dimension(3) :: spacing
+
+   spacing(:) = recipMag(:) / real(counts(:), double)
+   spread = maxval(spacing(:)) - minval(spacing(:))
+
+end function spacingSpread
+
+
+function isShiftInvariant(shift) result(invariant)
+
+   ! True when shifting the mesh by `shift` leaves it carried onto
+   !   itself by every point group operation, i.e. (D M D^{-1} - I)
+   !   s is an integer vector for each reciprocal operation M, with
+   !   D = diag(numAxialKPoints) (DESIGN 3.8/3.9; PSEUDOCODE 4c.3).
+   !   A shift that fails this biases the sampling and defeats the
+   !   IBZ reduction, so selectShift keeps only invariant shifts.
+
+   use O_Kinds
+
+   implicit none
+
+   real (kind=double), dimension(3), intent(in) :: shift
+   logical :: invariant
+
+   integer :: m ! Loop index over the point group operations.
+   integer :: i, k ! Loop indices over the three axes.
+   real (kind=double) :: component ! One entry of (D M D^-1 - I) s.
+   real (kind=double) :: shiftThresh ! Integer-closeness tolerance.
+
+   shiftThresh = 1.0e-9_double
+   invariant = .true.
+
+   do m = 1, numPointOps
+      ! v = (D M D^{-1} - I) s, component by component.  The (i,k)
+      !   entry of D M D^{-1} is (nA_i / nA_k) * M(i,k).
+      do i = 1, 3
+         component = -shift(i)   ! the -I s contribution
+         do k = 1, 3
+            component = component + abcRecipPointOps(i,k,m) &
+                  & * real(numAxialKPoints(i), double) &
+                  & / real(numAxialKPoints(k), double) &
+                  & * shift(k)
+         enddo
+         if (abs(component - anint(component)) > shiftThresh) then
+            invariant = .false.
+            return
+         endif
+      enddo
+   enddo
+
+end function isShiftInvariant
+
+
+subroutine selectShift(shift)
+
+   ! Choose the Monkhorst-Pack shift (DESIGN 3.9; PSEUDOCODE 4c.3).
+   !   The Gamma-centered shift (0 0 0) is invariant under every
+   !   point group, so it is the universally safe default.  A
+   !   half-shift is a candidate only on an axis with an even count
+   !   greater than one; among the shift vectors that pass the
+   !   invariance test, take the one with the most half-components,
+   !   which folds the mesh deepest and tends to converge fastest.
+
+   use O_Kinds
+
+   implicit none
+
+   real (kind=double), dimension(3), intent(out) :: shift
+
+   integer :: i ! Loop index over the three axes.
+   integer :: a, b, c ! 0/1 half-offset selectors per axis.
+   integer :: halves ! Number of half-components in a candidate.
+   integer :: bestHalves ! Most half-components seen so far.
+   logical, dimension(3) :: halfAllowed ! Even, multi-point axis.
+   real (kind=double), dimension(3) :: candidate
+
+   ! A half-shift only makes sense on an even, multi-point axis (a
+   !   single-point axis takes no shift, DESIGN 3.6).
+   do i = 1, 3
+      halfAllowed(i) = (numAxialKPoints(i) > 1) .and. &
+            & (mod(numAxialKPoints(i), 2) == 0)
+   enddo
+
+   ! Gamma-centered is always valid; start there and improve.
+   shift(:) = 0.0_double
+   bestHalves = 0
+
+   ! Enumerate the eight {0, 1/2} combinations, skipping a half on
+   !   any axis that does not allow it.
+   do a = 0, 1
+      if ((a == 1) .and. (.not. halfAllowed(1))) cycle
+      do b = 0, 1
+         if ((b == 1) .and. (.not. halfAllowed(2))) cycle
+         do c = 0, 1
+            if ((c == 1) .and. (.not. halfAllowed(3))) cycle
+            candidate(1) = 0.5_double * real(a, double)
+            candidate(2) = 0.5_double * real(b, double)
+            candidate(3) = 0.5_double * real(c, double)
+            if (isShiftInvariant(candidate)) then
+               halves = a + b + c
+               if (halves > bestHalves) then
+                  bestHalves = halves
+                  shift(:) = candidate(:)
+               endif
+            endif
+         enddo
+      enddo
+   enddo
+
+end subroutine selectShift
+
+
+subroutine resolveShift
+
+   ! Resolve the mesh shift now that the counts are known (DESIGN
+   !   3.9; PSEUDOCODE 4d.3).  An AUTO request is selected from the
+   !   counts and point group; an explicit shift is honored, but an
+   !   axis carrying a single point takes no shift (DESIGN 3.6), and
+   !   a non-invariant explicit shift draws a warning since it
+   !   reduces poorly -- an override is the user's prerogative.
+
+   use O_Kinds
+
+   implicit none
+
+   integer :: i ! Loop index over the three axes.
+
+   if (isAutoShift) then
+      call selectShift(kPointShift)
+   else
+      do i = 1, 3
+         if (numAxialKPoints(i) == 1) then
+            kPointShift(i) = 0.0_double
+         endif
+      enddo
+      if (.not. isShiftInvariant(kPointShift)) then
+         write (20,*) 'WARNING: the explicit k-point shift is ', &
+               & 'not invariant under the cell point group; ', &
+               & 'symmetry reduction may be incomplete (DESIGN 3.9).'
+      endif
+   endif
+
+end subroutine resolveShift
 
 
 subroutine makeMTOPIndexMap
