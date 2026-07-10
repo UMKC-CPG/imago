@@ -970,6 +970,443 @@ branching exists outside these two routines.
 
 ---
 
+## 4c. K-Point Mesh Selection and Reduction
+        (DESIGN 3.7-3.11)
+
+This section turns a requested k-point volume density into
+a resolved Monkhorst-Pack mesh, then either keeps that mesh
+whole or folds it to the irreducible zone.  The mesh is the
+single primary product; the two downstream uses are
+selected by one flag:
+
+- **Full mesh** (`reduce = false`): the pure Monkhorst-Pack
+  grid, kept intact for Linear Analytic Tetrahedral
+  integration (sections 1-3).  Tetrahedra tile the full
+  grid, so no point may be folded away.
+- **Reduced mesh** (`reduce = true`): the same grid folded
+  to the IBZ by the point group (4c.5), for the symmetry-
+  reduced eigenvalue problem (sections 5-7).
+
+In density mode `makeinput.py` writes the symmetry block and
+density into the kp file (section 4b), and the map below runs
+inside `imago` (`kpoints.f90`) once the reciprocal lattice is
+known.  The `applySymmetry` argument already carried by
+`initializeKPointMesh` is exactly the `reduce` flag.
+
+**Placement note (for the follow-on shift task).** The
+automatic shift (4c.3) depends on the parity of the
+resolved counts, and in density mode the counts are
+resolved here, inside `imago`, not in `makeinput.py`.  The
+automatic shift must therefore be chosen here as well, not
+assigned by crystal-system name upstream.  The removal of
+the upstream by-name assignment across the makeinput ->
+kp-file -> `imago` chain is specified separately; this
+section specifies only the algorithm that replaces it.
+
+### 4c.1 Axis classes (DESIGN 3.8)
+
+Two reciprocal axes are *coupled* when some operation
+connects them off the diagonal; the transitive closure of
+coupling gives the axis classes that must share a count.
+The reciprocal-space operations are used, since the mesh
+transforms under them.
+
+```
+function computeAxisClasses(recipPointOps, numPointOps):
+    # Union-find over the three axes.
+    parent = [1, 2, 3]
+
+    for m = 1 to numPointOps:
+        R = recipPointOps(:,:,m)
+        for i = 1 to 3:
+            for j = 1 to 3:
+                if i != j and R(i,j) != 0:
+                    union(parent, i, j)
+
+    # Class label of each axis is its union-find root.
+    return [find(parent, i) for i in 1..3]
+```
+
+### 4c.2 Axial count selection (DESIGN 3.7)
+
+Choose the most isotropic integer mesh, per class, that
+meets the density floor.  Axes in one class share a count
+by construction, so the result is symmetry-compatible.
+
+```
+function selectAxialCounts(density, recipMag,
+                           recipCellVolume, classes):
+    # recipMag(i) = |b_i|.  density is the volume density D.
+    # A non-positive density is the Gamma sentinel (3.6),
+    # resolved to a single point upstream but guarded here.
+    if density <= 0:
+        return [1, 1, 1]
+
+    # Continuous isotropic counts at a common spacing h:
+    #   h = (prod|b_i| / (recipCellVolume * D))^(1/3),
+    #   x_i = |b_i| / h.
+    h = (recipMag(1) * recipMag(2) * recipMag(3)
+         / (recipCellVolume * density)) ^ (1/3)
+    x = [recipMag(i) / h for i in 1..3]
+
+    # Force one shared real count per class.  Coupled axes
+    # already have equal |b_i| (hence equal x); the mean
+    # guards against round-off before rounding.
+    for each distinct class label c:
+        members = [i for i in 1..3 if classes(i) == c]
+        shared  = mean(x(i) for i in members)
+        for i in members: x(i) = shared
+
+    # Nearest positive integer, per class (already equal
+    # within a class, so the class stays uniform).
+    n = [max(1, round(x(i))) for i in 1..3]
+
+    # Raise WHOLE classes until the full-mesh product meets
+    # the floor.  Never raise a single axis inside a multi-
+    # axis class -- that would break symmetry compatibility.
+    floor = density * recipCellVolume
+    while (n(1) * n(2) * n(3)) < floor:
+        # Among the classes, pick the one whose increment
+        # leaves the three axis spacings |b_i|/n_i closest
+        # together (best isotropy).
+        bestClass = argmin over classes c of
+            spacingSpread(n with class c incremented by 1,
+                          recipMag)
+        for i in members(bestClass): n(i) = n(i) + 1
+
+    return n
+
+function spacingSpread(n, recipMag):
+    s = [recipMag(i) / n(i) for i in 1..3]
+    return max(s) - min(s)
+```
+
+### 4c.3 Shift selection (DESIGN 3.9)
+
+Default to the Gamma-centered mesh, which is invariant
+under every point group.  Prefer a half-shift on even,
+multi-point axes only where the whole shift vector passes
+the invariance test; among the invariant candidates take
+the one with the most half-components, which folds deepest.
+
+```
+function selectShift(recipPointOps, numPointOps, counts):
+    D    = diag(counts)
+    Dinv = diag(1 / counts(1), 1 / counts(2), 1 / counts(3))
+
+    # Per-axis offset options.  A half-shift is a candidate
+    # only on an axis with an even count > 1 (a single-point
+    # axis takes no shift, per 3.6).
+    for i = 1 to 3:
+        if counts(i) > 1 and counts(i) is even:
+            options(i) = {0, 1/2}
+        else:
+            options(i) = {0}
+
+    best       = [0, 0, 0]     # Gamma-centered: always valid
+    bestHalves = 0
+    for each s in options(1) x options(2) x options(3):
+        if isShiftInvariant(s, D, Dinv,
+                            recipPointOps, numPointOps):
+            halves = count of components of s equal to 1/2
+            if halves > bestHalves:
+                best = s; bestHalves = halves
+    return best
+
+function isShiftInvariant(s, D, Dinv, recipPointOps,
+                          numPointOps):
+    # (D M D^{-1} - I) s must be integral for every op M.
+    for m = 1 to numPointOps:
+        v = (D * recipPointOps(:,:,m) * Dinv - I) * s
+        for k = 1 to 3:
+            if abs(v(k) - nint(v(k))) > 1e-9:
+                return false
+    return true
+```
+
+### 4c.4 Full Monkhorst-Pack mesh (DESIGN 3.2, 3.9)
+
+The pure Monkhorst-Pack grid in fractional abc coordinates
+with equal base weight.  This is the primary product of the
+section; 4c.5 optionally folds it.
+
+```
+function generateFullMesh(counts, shift):
+    delta(i) = 1 / counts(i)
+    numFull  = counts(1) * counts(2) * counts(3)
+    weightSum = 2                     # 2 electrons/state (3.2)
+    baseWeight = weightSum / numFull
+
+    p = 0
+    for i = 1 to counts(1):
+        for j = 1 to counts(2):
+            for k = 1 to counts(3):
+                p = p + 1
+                mesh(:,p) = -1/2
+                          + ([i, j, k] - 1 + shift) * delta
+    return mesh, baseWeight, numFull
+```
+
+### 4c.5 Reduction with reciprocal-lattice periodicity
+         (DESIGN 3.10)
+
+Fold the full mesh to the IBZ.  A merge is accepted when a
+rotated point coincides with a partner MODULO a reciprocal
+lattice vector -- i.e. their fractional difference is
+integral -- so wrapped coincidences are never missed.  The
+merge is exact (a true symmetry gives epsilon(Mk) =
+epsilon(k)), so this only shrinks the IBZ, never biases it.
+The op-map store (section 5) is retained.
+
+```
+function reduceToIBZ(mesh, numFull, baseWeight,
+                     recipPointOps, numPointOps):
+    identityOpIndex = 1               # guaranteed first (5)
+    kpThresh = 1e-5
+
+    tracker = [1, 2, ..., numFull]    # each pt its own rep
+    numIBZ  = 0
+    for a = 1 to numFull:
+        if tracker(a) != a: continue          # already folded
+        numIBZ = numIBZ + 1
+        tracker(a) = -numIBZ
+        ibzPoint(:,numIBZ) = mesh(:,a)
+        ibzWeight(numIBZ)  = baseWeight
+        fullKPToIBZOpMap(a) = identityOpIndex
+
+        for m = 1 to numPointOps:
+            img = recipPointOps(:,:,m) * mesh(:,a)
+            for b = a+1 to numFull:
+                if tracker(b) != b: continue
+                if isPeriodicMatch(img, mesh(:,b), kpThresh):
+                    tracker(b) = -numIBZ
+                    ibzWeight(numIBZ) += baseWeight
+                    fullKPToIBZOpMap(b) = m
+
+    for a = 1 to numFull:
+        fullKPToIBZKPMap(a) = -tracker(a)
+
+    # Postconditions (checkable invariants, DESIGN 3.10):
+    #   sum of star sizes           == numFull
+    #   each star size divides       numPointOps
+    #   sum(ibzWeight(1..numIBZ))   == weightSum
+    return ibzPoint, ibzWeight, numIBZ,
+           fullKPToIBZKPMap, fullKPToIBZOpMap
+
+function isPeriodicMatch(u, v, kpThresh):
+    # Coincidence modulo a reciprocal lattice vector: each
+    # component of the difference is integral.  nint = round
+    # to nearest integer.  Basis-independent, no interval
+    # convention needed, correct for non-orthogonal cells.
+    for k = 1 to 3:
+        d = u(k) - v(k)
+        if abs(d - nint(d)) > kpThresh:
+            return false
+    return true
+```
+
+Note on the op map under periodicity: `fullKPToIBZOpMap(b)`
+records the operation carrying the IBZ representative to
+`b`, now possibly modulo a reciprocal lattice vector.  That
+is physically exact -- `k` and `k + G` are the same point --
+and the downstream atom permutation (section 6, 7) uses only
+the operation index, so nothing else changes.
+
+### 4c.6 Driver: density to resolved mesh
+
+Ties the pieces together and records the resolved mesh so
+the convergence ladder (DESIGN 3.11 / 7.8) and the resource
+dataspace (DESIGN 8.2, `kpoint_count`) can read what was
+actually integrated.  The emission of that record into
+`result.toml` is specified with the 7.8 guard, not here.
+
+```
+function buildMeshFromDensity(density, shiftRequest,
+                              recipMag, recipCellVolume,
+                              recipPointOps, numPointOps,
+                              reduce):
+    classes = computeAxisClasses(recipPointOps, numPointOps)
+    counts  = selectAxialCounts(density, recipMag,
+                                recipCellVolume, classes)
+
+    if shiftRequest is AUTO:
+        shift = selectShift(recipPointOps, numPointOps,
+                            counts)
+    else:
+        shift = shiftRequest          # explicit user override
+
+    mesh, baseWeight, numFull =
+        generateFullMesh(counts, shift)
+
+    record resolvedCounts = counts       # 3.11 duplicate guard
+    record kpointCount    = numFull      # 8.2 size signature
+
+    if reduce:
+        return reduceToIBZ(mesh, numFull, baseWeight,
+                           recipPointOps, numPointOps)
+    else:
+        # Full MP mesh for tetrahedron integration; identity
+        # maps make every point its own IBZ representative.
+        return mesh, baseWeight, numFull,
+               identityMaps(numFull)
+```
+
+---
+
+## 4d. Wiring the Mesh Map Through the makeinput ->
+        kp-file -> imago Chain (DESIGN 3.2, 3.4, 3.9)
+
+Section 4c gives the mesh map as algorithms; this section
+places them across the three stages that produce a k-point
+mesh, and specifies that the shift is no longer chosen by
+crystal-system name.  The controlling fact: the shift depends
+on the parity of the resolved counts (4c.3), and in density
+mode the counts are resolved inside imago (4c.2).  So the
+automatic shift is resolved in imago, after the counts;
+makeinput records only the request.
+
+### 4d.1 makeinput: record the shift request, select nothing
+
+makeinput writes the shift REQUEST into the kp file and does
+not choose a shift.  An unset shift is the AUTO sentinel
+`-1 -1 -1`; an explicit `-kpshift` is passed through verbatim.
+No code in makeinput maps a crystal system to a shift.
+
+```
+function shift_request_for_kpfile(settings):
+    # DESIGN 3.2 / 3.9.  The shift written to the kp file is the
+    # request, not a resolved value.  A whole-Gamma group is
+    # handled separately (3.6): its canonical 1x1x1 / "0 0 0"
+    # form is written by the Gamma path, never the sentinel.
+    return settings.kp_shift        # AUTO sentinel or explicit
+```
+
+The AUTO sentinel is distinguishable from any real shift,
+which lies in [0, 1); `-1 -1 -1` never denotes an offset.
+
+### 4d.2 imago readKPoints: parse the request, flag AUTO
+
+```
+function readKPointShift(file):
+    read 'KP_SHIFT_A_B_C'
+    read kPointShift(1..3)                    # three floats
+    # The sentinel is a request to select later (4c.3), not a
+    # usable offset.  Flag it; resolve it in initializeKPoints
+    # once the counts are known.
+    isAutoShift = all(kPointShift(i) == -1 for i in 1..3)
+```
+
+### 4d.3 imago initializeKPoints: counts, then shift, then mesh
+
+This realizes the driver of 4c.6 in imago's module-state
+style, wired to the two mesh style codes.  The essential
+change from the earlier flow is order: the reciprocal
+operations are formed FIRST, because the axis classes and the
+shift selection both need them, and the count selection needs
+the classes.
+
+```
+# Style code 2 (density mode).  DESIGN 3.2 step 3.
+elif kPointStyleCode == 2:
+    computeRealPointOps()
+    computeRecipPointOps()
+    classes = computeAxisClasses(abcRecipPointOps,          # 4c.1
+                                 numPointOps)
+    numAxialKPoints = selectAxialCounts(                   # 4c.2
+        minKPointDensity, recipMag, recipCellVolume, classes)
+    resolveShift(classes)
+    initializeKPointMesh(applySymmetry)     # 4c.4 + 4c.5
+
+# Style code 1 (explicit mesh).  numAxialKPoints came from the
+# file; the shift may still be an AUTO request.
+elif kPointStyleCode == 1:
+    computeRealPointOps()
+    computeRecipPointOps()
+    classes = computeAxisClasses(abcRecipPointOps, numPointOps)
+    resolveShift(classes)
+    initializeKPointMesh(applySymmetry)
+
+
+function resolveShift(classes):
+    # DESIGN 3.9 / 4c.3.  Resolve an AUTO request from the
+    # counts; else honor the explicit shift, zeroing any single-
+    # point axis (3.6) and warning if it is not invariant -- an
+    # override is the user's prerogative, but a non-invariant
+    # shift reduces poorly.
+    if isAutoShift:
+        kPointShift = selectShift(abcRecipPointOps,
+                                  numPointOps, numAxialKPoints)
+    else:
+        for i in 1..3:
+            if numAxialKPoints(i) == 1:
+                kPointShift(i) = 0
+        if not isShiftInvariant(kPointShift,
+                diag(numAxialKPoints), diag(1 / numAxialKPoints),
+                abcRecipPointOps, numPointOps):
+            warn("explicit k-point shift is not invariant under"
+                 + " the cell's point group; symmetry reduction"
+                 + " may be incomplete (DESIGN 3.9)")
+```
+
+`initializeKPointMesh` is the 4c.4 + 4c.5 routine: it builds
+the full Monkhorst-Pack mesh, then folds it to the IBZ with
+the reciprocal-lattice-periodic match when `applySymmetry`
+is 1.  The full mesh is retained (`numFullMeshKP`,
+`fullKPToIBZKPMap`) so tetrahedron integration (LAT) tiles the
+whole mesh even when the eigenvalue problem uses the IBZ --
+this is how one built mesh serves both the reduced and the
+full (LAT) consumers.
+
+### 4d.4 Parallel consumer: the makeKPoints executable
+
+The standalone `makeKPoints` program (`makekpoints.F90`, its
+own `foldMesh`) pre-generates explicit k-point lists on the
+non-density path, and folds with the same raw comparison that
+4c.5 replaces.  It is a second consumer of the reduction and
+needs the same reciprocal-lattice-periodic match, so it does
+not under-reduce non-orthogonal cells while imago's own path
+does.  Its fold adopts `isPeriodicMatch` (4c.5) identically;
+the count and shift selection (4c.1-4c.3) do not apply there,
+since that path receives explicit counts and shift.
+
+### 4d.5 Emit the resolved mesh to the run output
+
+Once `initializeKPoints` has resolved the mesh --
+`numAxialKPoints` set, and `numKPoints` after the fold --
+imago writes two labeled records to the main run output (the
+settled SCF output on Fortran unit 20, `gs_scf-fb.out`), so
+imago.py can recover the mesh without re-deriving it
+(DESIGN 6.1.2; the parse is 12.5).  The resolved mesh is a
+per-run fact, constant across SCF cycles, so it does NOT
+belong in the per-cycle iteration file where the energy and
+gap live; a labeled record in the settled output is the robust
+home (DESIGN 6.1.6 prefers settled files to stdout scraping).
+
+Each record follows imago's own label/value convention: the
+all-caps tag on its own line, the value on the next line (as
+`KPOINT_STYLE_CODE` and the other kp tags are written and
+echoed).
+
+```
+# In initializeKPoints, after the mesh is built (styles 1
+# and 2), write to the main output unit:
+    write unit 20: "RESOLVED_KP_MESH"
+    write unit 20: numAxialKPoints(1), numAxialKPoints(2),
+                   numAxialKPoints(3)
+    write unit 20: "RESOLVED_KP_COUNT"
+    write unit 20: numKPoints
+```
+
+`RESOLVED_KP_MESH` is the full uniform mesh's axial counts;
+`RESOLVED_KP_COUNT` is the number of k-points actually
+computed -- the IBZ size when symmetry was applied, the full-
+mesh size otherwise.  Only the mesh style codes (1 and 2)
+emit these; an explicit-list run (style 0) builds no axial
+mesh and emits neither, so imago.py records both as absent
+(6.1.2).
+
+---
+
 ## 5. Save fullKPToIBZOpMap (DESIGN 2.4)
 
 This augments the existing IBZ folding loop in
@@ -4042,11 +4479,12 @@ function buildInitialPotentials(manifest_path,
     log = []
     for ref in manifest.reference_solids:
         struct = struct_of[ref.reference_id]
-        # Two-sided per-atom delta-below-threshold rule
-        # (DESIGN 7.8): the converged grid point's run, or
-        # None if nothing converged.  The tolerance is the
-        # solid's resolved kpoint_convergence_threshold (eV
-        # per atom), NOT its SCF threshold.
+        # Two-sided per-atom delta-below-threshold rule with the
+        # duplicate-mesh guard (DESIGN 7.8 step 3c): the converged
+        # grid point's run, or None if nothing converged.  The
+        # tolerance is the solid's resolved
+        # kpoint_convergence_threshold (eV per atom), NOT its SCF
+        # threshold.
         converged = pick_converged_unit(flight, ref,
             metric_threshold = ref.kpoint_convergence_threshold)
         if converged is None:
@@ -4145,6 +4583,53 @@ function buildInitialPotentials(manifest_path,
         manifest_snapshot = manifest,
         imago_commit      = imago_commit,
         per_run_log       = log)
+
+
+function pick_converged_unit(flight, ref, metric_threshold):
+    # DESIGN 5.7 / 7.8 step 3c.  Return the CalcUnit at the
+    # converged grid point of this solid's k-density sweep, or
+    # None when the sweep never flattens.  Shares the guidance
+    # harvest's guard (15.7): read each rung's resolved
+    # kpoint_mesh, collapse duplicate-mesh rungs, then apply the
+    # two-sided test -- reusing collapse_by_mesh + pick_converged
+    # so the potential harvest and the guidance harvest can never
+    # pick different rungs for the same solid.
+    axis = flight.sweep.varied_axes[0]           # k-density (v1)
+
+    # Only this solid's convergence runs that ran to completion;
+    # a failed or result-less unit is dropped (DESIGN 6.2.10).
+    grid = sort([u for u in flight.units
+                 if u.id == ref.reference_id
+                 and u.kind == "convergence"
+                 and completed(u)],
+                key = lambda u: swept_value_of(u, axis))
+    if len(grid) == 0:
+        return None
+
+    # Parse each run's result.toml.  energies are raw total-cell
+    # hartree; meshes[i] is the resolved kpoint_mesh (6.1.2), or
+    # None when absent -- which makes the guard inert (15.7).
+    densities, energies, meshes = [], [], []
+    for u in grid:
+        rt = read_result_toml(wingbeat_result(flight, u))
+        densities.append(swept_value_of(u, axis))
+        energies.append(rt["total_energy"])
+        meshes.append(rt.get("kpoint_mesh"))
+
+    # Per-atom normalization needs the cell size; load the
+    # expanded structure once from any completed run.
+    cell_atom_count = load_structure(grid[0].structure).num_atoms
+
+    # Collapse duplicate-mesh rungs, then the two-sided test.
+    # kept[j] is the original grid index of the j-th distinct
+    # mesh, so the chosen unit is the kept lowest-density member.
+    _, c_energies, kept = collapse_by_mesh(
+        densities, energies, meshes)
+    j = pick_converged(c_energies, cell_atom_count,
+                       metric_threshold)
+    if j is None:
+        return None
+    return grid[kept[j]]
 
 
 function discover_environments(converged, ref):
@@ -5449,27 +5934,45 @@ function _harvest_result(run_dir, temp, settings, reused,
                 for key, fname in names.items()
                 if exists(join(run_dir, fname)) }
 
-    iters  = None
-    energy = None
-    conv   = False
+    iters = energy = mag = gap_ev = gap_kind = None
+    scf_threshold = None
+    conv = False
     if "iteration" in outputs:
-        # One read of the last data row yields the
-        # convergence metric, the total energy, and the
-        # iteration count together (all 1-based columns).
-        row       = last_data_row(outputs["iteration"])
-        threshold = read_scf_threshold(
-                        join(run_dir, "imago.dat"))
-        # Column 4 is the SCF convergence metric;
-        # converged iff it is below the imago.dat criterion.
-        conv   = (column(row, 4) < threshold)
-        # Column 5 is the last iteration's total energy
-        # (converged or not).
+        # One read of the last data row yields several fields at
+        # once.  The row is a fixed 8-column form (all 1-based):
+        #   1 iter        4 convergence     7 gap (hartree)
+        #   5 total_E     6 magnetic moment 8 gap-kind code
+        # Columns 6-8 are length-gated so a shorter iteration
+        # file (a property pass, or a run before the gap columns)
+        # still parses cleanly.
+        row = last_data_row(outputs["iteration"])
+        scf_threshold = read_scf_threshold(
+                            join(run_dir, "imago.dat"))
+        # Column 4 is the SCF convergence metric; converged iff
+        # below the imago.dat criterion.  Column 5 is the last
+        # iteration's total energy.  Column 1 is a per-run cycle
+        # counter that resets each SCF invocation, so it is THIS
+        # run's iteration count even though reruns append rows.
+        conv   = (column(row, 4) < scf_threshold)
         energy = column(row, 5)
-        # Column 1 is a per-run cycle counter that resets
-        # to 1 each SCF invocation, so the last row's value
-        # is THIS run's iteration count -- reruns append
-        # rows but never inflate it.
         iters  = int(column(row, 1))
+        if len(row) >= 6:
+            mag = column(row, 6)
+        if len(row) >= 8:
+            gap_ev   = column(row, 7) * HARTREE_TO_EV
+            gap_kind = GAP_KIND_BY_CODE[int(column(row, 8))]
+
+    # Resolved mesh: two labeled lines in the SCF output (4d.5).
+    # Absent for an explicit-list run (style 0) or an older
+    # binary, in which case both stay None (DESIGN 6.1.2), which
+    # leaves the k-density guard inert (15.7).
+    kpoint_mesh  = None
+    kpoint_count = None
+    if "out" in outputs:
+        kpoint_mesh  = read_labeled_ints(outputs["out"],
+                          "RESOLVED_KP_MESH", 3)
+        kpoint_count = read_labeled_int(outputs["out"],
+                          "RESOLVED_KP_COUNT")
 
     status = CONVERGED if conv else NOT_CONVERGED
     # No SCF at all (e.g. -scf no post-SCF property run):
@@ -5483,9 +5986,31 @@ function _harvest_result(run_dir, temp, settings, reused,
         run_dir = run_dir, temp_dir = temp,
         scf_iterations = iters, converged = conv,
         reused_checkpoint = reused, total_energy = energy,
+        total_magnetization = mag, gap_ev = gap_ev,
+        gap_kind = gap_kind, scf_threshold = scf_threshold,
+        kpoint_mesh = kpoint_mesh, kpoint_count = kpoint_count,
         outputs = outputs, job = job_identity(settings),
         runtime_seconds = seconds,
         message = status.name)
+
+
+function read_labeled_ints(path, label, n):
+    # imago's label/value convention (4d.5): the tag is alone on
+    # a line and its value is on the NEXT line.  Return the first
+    # n integers on the line after the first line whose stripped
+    # text is exactly `label`, or None if the label is absent.
+    # The exact whole-line match is robust to surrounding output
+    # and to the label appearing as a substring elsewhere.
+    lines = read_lines(path)
+    for i in range(len(lines)):
+        if strip(lines[i]) == label:
+            tokens = split(lines[i + 1])
+            return [int(tokens[k]) for k in range(n)]
+    return None
+
+function read_labeled_int(path, label):
+    result = read_labeled_ints(path, label, 1)
+    return None if result is None else result[0]
 ```
 
 ```
@@ -8078,14 +8603,21 @@ function harvest_flight(workspace_root, db_root, dataspace):
         #    by swept k-density (read out of each unit's calc tag).
         grid = sort(units, key = lambda u: swept_value_of(u, axis))
 
-        # b. Parse each converged run's result.toml.
-        kpds, energies, rts = [], [], []
+        # b. Parse each converged run's result.toml.  meshes[i]
+        #    is the run's resolved kpoint_mesh -- the axial counts
+        #    imago integrated over (6.1.2 / PSEUDOCODE 4c.6) --
+        #    and feeds the duplicate-mesh guard in step (d).  It
+        #    is None when result.toml carries no kpoint_mesh (an
+        #    older run, or imago not yet emitting it), which the
+        #    guard treats as "cannot collapse" (see collapse_by_mesh).
+        kpoint_densities, energies, meshes, rts = [], [], [], []
         for u in grid:
             rt = read_result_toml(
                 join(workspace_root, "wingbeats", u.id, *u.calc,
                      "result.toml"))
-            kpds.append(swept_value_of(u, axis))
+            kpoint_densities.append(swept_value_of(u, axis))
             energies.append(rt["total_energy"])
+            meshes.append(rt.get("kpoint_mesh"))
             rts.append(rt)
 
         # c. A single-point grid harvests deliverables but does
@@ -8115,19 +8647,31 @@ function harvest_flight(workspace_root, db_root, dataspace):
         sc = load_structure(grid[0].structure)   # read_input_file
         cell_atom_count = sc.num_atoms
 
-        # d. Pick the converged grid point (DESIGN 7.8 3c): the
-        #    energies are raw total-cell hartree, so pick_converged
-        #    normalizes each delta to eV per atom before the test.
-        idx = pick_converged(energies, cell_atom_count,
-                             kpoint_threshold)
+        # d. Collapse duplicate-mesh rungs, then pick the
+        #    converged grid point (DESIGN 7.8 step 3c).  Two rungs
+        #    that resolved to the same mesh are one calculation run
+        #    twice; their zero energy delta would fool the two-
+        #    sided test, so collapse_by_mesh reduces the grid to one
+        #    rung per distinct mesh (keeping the lowest-density
+        #    member) before the test.  `kept[j]` maps a collapsed
+        #    index back to its original grid position.  The energies
+        #    are raw total-cell hartree, so pick_converged
+        #    normalizes each delta to eV per atom before comparing.
+        c_kpoint_densities, c_energies, kept = collapse_by_mesh(
+            kpoint_densities, energies, meshes)
+        j = pick_converged(c_energies, cell_atom_count,
+                           kpoint_threshold)
 
-        # e. Non-convergence at the top of the range: tag and
-        #    SKIP -- a non-converged sweep earns no entry.
-        if idx is None:
-            warn(unit_id + ": energy still moving at top of"
-                 + " grid -- skipped")
+        # e. No flat interior point -- energy still moving at the
+        #    top of the range, or the grid collapsed below the
+        #    three distinct meshes the interior test needs.  Tag
+        #    and SKIP: a non-converged sweep earns no entry.
+        if j is None:
+            warn(unit_id + ": no converged point (energy still"
+                 + " moving, or too few distinct meshes) -- skipped")
             tag_prediction_mismatch(workspace_root, unit_id)
             continue
+        idx = kept[j]              # original index of chosen rung
 
         # f. Signature: system_type from the prediction record (it
         #    carries it from 7.7; the record is guaranteed present
@@ -8140,7 +8684,7 @@ function harvest_flight(workspace_root, db_root, dataspace):
 
         # g. Build the rich GuidanceEntry from the three sources.
         chosen_rt  = rts[idx]
-        chosen_kpd = kpds[idx]
+        chosen_kpoint_density = kpoint_densities[idx]
         entry = GuidanceEntry(
             entry_id     = "",                # set by save_entry
             generated_at = now_iso8601_utc(),
@@ -8153,7 +8697,7 @@ function harvest_flight(workspace_root, db_root, dataspace):
                 #                               DESIGN 7.6
                 total_magnetization = chosen_rt.get(
                                         "total_magnetization", 0.0),
-                kpoint_density      = chosen_kpd),
+                kpoint_density      = chosen_kpoint_density),
             context      = Context(
                 # sub-model from THIS structure's record (the sole
                 #   home; DESIGN 7.8 step 3f / 6.2.9), never from
@@ -8167,11 +8711,15 @@ function harvest_flight(workspace_root, db_root, dataspace):
                 cell_volume_per_formula_unit =
                     sc.real_cell_volume * ANGSTROM3_TO_BOHR3),
             verification = Verification(
-                grid_values   = tuple(kpds),
-                grid_energies = tuple(energies),  # raw total-
+                # The COLLAPSED distinct-mesh grid (step d), so the
+                #   curator's auto_promote_ok re-judges flatness on
+                #   the same distinct calculations and never re-hits
+                #   the duplicate-mesh zero (DESIGN 7.8 step 3f).
+                grid_values   = tuple(c_kpoint_densities),
+                grid_energies = tuple(c_energies),  # raw total-
                 #   cell hartree; consumers normalize per atom
                 #   (Option B; DESIGN 7.8 / 7.2)
-                converged_at  = chosen_kpd,
+                converged_at  = chosen_kpoint_density,
                 metric        = "total_energy",
                 metric_threshold = kpoint_threshold,
                 # prediction is guaranteed present (record-less
@@ -8207,6 +8755,58 @@ function per_atom_ev(total_energy_hartree, cell_atom_count):
     # constant.  Single-sourced here so pick_converged and
     # auto_promote_ok normalize identically and cannot drift.
     return total_energy_hartree * HARTREE_TO_EV / cell_atom_count
+
+
+# Two runs of the same resolved mesh are the same calculation and
+# must give the same total energy; ENERGY_MATCH_EPS is the gap
+# below which they count as equal.  It is tight (near float noise,
+# in hartree): a single-threaded imago run is deterministic, so
+# genuine duplicates agree to the last digits and a wider gap
+# means the runs were not in fact identical.
+ENERGY_MATCH_EPS = 1e-9
+
+
+function collapse_by_mesh(kpoint_densities, energies, meshes):
+    # DESIGN 7.8 step 3c guard.  Reduce a density-sorted grid to
+    # one rung per distinct resolved mesh, keeping the lowest-
+    # density member.  Inputs are parallel arrays ordered by
+    # ascending requested density; meshes[i] is rung i's resolved
+    # kpoint_mesh (the axial counts, 6.1.2), or None.
+    #
+    # Returns (collapsed_densities, collapsed_energies, kept),
+    # where kept[j] is the ORIGINAL index of the j-th surviving
+    # rung, so a caller can map a collapsed index back to the run
+    # it names.
+    #
+    # If any mesh is None -- an older result.toml, or imago not
+    # yet emitting kpoint_mesh -- the guard cannot act: return the
+    # grid unchanged with identity indices.  The guard is thus
+    # INERT until result.toml carries the mesh (DESIGN 6.1.2 /
+    # 3.11), and behavior matches the pre-guard code.
+    if any(m is None for m in meshes):
+        return kpoint_densities, energies, list(range(len(meshes)))
+
+    kept = []
+    for i in range(len(meshes)):
+        # Same mesh as the last surviving rung?  Then rung i is
+        # that calculation run again (the map is monotone in
+        # density, 3.7, so equal meshes are contiguous).  An equal
+        # mesh MUST give an equal energy; a mismatch means the
+        # runs were not identical and is surfaced, not averaged.
+        if kept and meshes[i] == meshes[kept[-1]]:
+            if abs(energies[i] - energies[kept[-1]]) > ENERGY_MATCH_EPS:
+                error("k-density rungs "
+                      + kpoint_densities[kept[-1]] + " and "
+                      + kpoint_densities[i]
+                      + " resolved to the same mesh "
+                      + str(meshes[i]) + " but disagree in total"
+                      + " energy -- not the same calculation")
+            continue                        # drop the duplicate
+        kept.append(i)
+
+    return ([kpoint_densities[i] for i in kept],
+            [energies[i] for i in kept],
+            kept)
 
 
 function pick_converged(energies, cell_atom_count, threshold):

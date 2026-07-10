@@ -1169,7 +1169,7 @@ coordinate near, say, 2/9 is never falsely rejected.
 
 ---
 
-## 3. Density-Based K-Point Input Pipeline
+## 3. K-Point Mesh: Density Input, Selection, and Reduction
 
 ### 3.1 Motivation
 
@@ -1203,18 +1203,28 @@ When the user passes `-kpd`, `-scfkpd`, or `-pscfkpd`:
    - `KPOINT_INTG_CODE` = 0 (default; histogram)
    - `MIN_KP_LINE_DENSITY` = the user's volume density
      (label is historical; the value is a volume density)
-   - `KP_SHIFT_A_B_C` = the shift (auto or user-specified)
+   - `KP_SHIFT_A_B_C` = the shift REQUEST -- the user's
+     explicit shift, or an AUTO sentinel that imago
+     resolves once the resolved counts are known (3.9).
+     makeinput no longer selects a shift by crystal
+     system, because the choice depends on the counts'
+     parity, and in density mode the counts are resolved
+     inside imago
    - `NUM_POINT_OPS` = number of point group operations
    - `POINT_OPS` = the 3x3 rotation matrices (abc coords)
 3. At runtime, `imago` reads this file in `readKPoints`
-   (including the point group operations), then in
-   `initializeKPoints` calls:
-   - `computeAxialKPoints` — density to axial counts
-   - `computeRecipPointOps` — convert abc point ops to
-     reciprocal-space abc operations
-   - `initializeKPointMesh(1)` — build the uniform mesh
-     and fold it to the IBZ using the reciprocal-space
-     point group operations
+   (including the point group operations and the shift
+   request), then in `initializeKPoints`:
+   - forms the reciprocal point operations and their axis
+     classes (3.8), then the symmetry-compatible axial
+     counts from the density (3.7)
+   - resolves the shift: an AUTO request is selected from
+     the counts and operations (3.9); an explicit request
+     is honored, with any single-point axis zeroed (3.6)
+   - builds the full Monkhorst-Pack mesh (3.9), then
+     either folds it to the IBZ with reciprocal-lattice-
+     periodic matching (3.10) or keeps the full mesh for
+     tetrahedron integration
    - `convertKPointsToXYZ` — transform to Cartesian
 
 ### 3.3 Interaction with Existing Options
@@ -1261,6 +1271,14 @@ space group symmetry operations with translations stripped.
 They are given in fractional (abc) coordinates. Blank lines
 between operations are optional (for readability) and are
 skipped by the Fortran reader.
+
+`<shift_a> <shift_b> <shift_c>` is the shift request. It is
+either three explicit fractional offsets, or the AUTO
+sentinel `-1 -1 -1`, which directs imago to select the shift
+per 3.9 once the counts are resolved. A whole-Gamma request
+is written as the explicit `0 0 0` (3.6), not the sentinel:
+Gamma is a fully resolved single point at the origin, not an
+auto-selection.
 
 ### 3.5 Impact on Memory Estimation and Summary
 
@@ -1322,6 +1340,299 @@ canonical Gamma write). It supersedes an earlier behavior in
 which a `1 1 1` mesh was labeled `(Gamma)` while a nonzero
 auto-shift was still written -- a mismatch that routed the job
 to the complex executable despite the label.
+
+### 3.7 Mesh Selection: What the Density-to-Mesh Map Must Do
+
+Sections 3.1 through 3.6 describe how a requested volume density
+travels from the command line to the `imago` reader. This
+section specifies the step that happens next and inside the
+Fortran: turning that one density number into three integer
+axial counts `(n_a, n_b, n_c)` and a shift. The density is the
+knob the user and the convergence ladder (7.7, 7.8) turn; this
+map is what the knob drives.
+
+**The density itself is a sound rung parameter.** The quantity
+that sets sampling quality is the full uniform mesh, of size
+`n_a * n_b * n_c`, before any symmetry reduction. That product
+is monotone in the requested density -- a larger density asks
+for and receives a finer mesh -- which is exactly the geometry-
+independent guarantee 3.1 promises. The convergence ladder may
+therefore keep indexing its rungs by density. What must be
+fixed is not the knob but the map: the rule that chooses the
+integer mesh *shape* for a given density.
+
+**Two requirements define a good mesh shape, and they do not
+conflict.**
+
+1. *Isotropy.* The spacing between adjacent k-points along each
+   reciprocal axis is `|b_i| / n_i`, where `|b_i|` is the
+   reciprocal lattice vector length. A good mesh makes these
+   three spacings as nearly equal as the integer counts allow,
+   so the Brillouin zone is sampled evenly in every direction
+   rather than finely along one axis and coarsely along
+   another.
+
+2. *Symmetry compatibility.* The mesh should be carried onto
+   itself by every operation of the cell's point group (3.8).
+   A mesh that is not symmetry-compatible samples the zone in a
+   way the crystal's own symmetry says is redundant on one side
+   and sparse on another, and it reduces poorly because rotated
+   mesh points miss their partners.
+
+These two pull in the same direction, not against each other,
+because reciprocal axes that a symmetry operation exchanges
+necessarily have equal length. Isotropy then already wants
+their counts equal, which is precisely what symmetry
+compatibility requires. The isotropy target and the symmetry
+constraint agree on every cell.
+
+**The selection this section mandates.** Given the target
+volume density `D` and the reciprocal cell:
+
+1. Compute the reciprocal axis lengths `|b_i|` and the point
+   group's axis classes (3.8).
+2. Compute the continuous isotropic counts. With a common
+   spacing `h = (prod|b_i| / (recipCellVolume * D))^(1/3)`, the
+   real per-axis count is `x_i = |b_i| / h`. Axes in one class
+   have equal `|b_i|` and so equal `x_i`; assign the class a
+   single shared real count.
+3. Round each class's shared count to the nearest positive
+   integer. This is the isotropic choice, and because it is
+   applied per class the result is symmetry-compatible by
+   construction.
+4. If the resulting full-mesh product falls below the density
+   floor `D * recipCellVolume`, raise counts a whole class at a
+   time -- never a single axis within a multi-axis class --
+   choosing at each step the class whose increment most improves
+   uniformity, until the floor is met.
+
+The floor semantics of 3.1 are unchanged: the delivered mesh is
+still at least `D * recipCellVolume` points. What changes is
+that every candidate mesh along the way respects the symmetry
+classes and stays as isotropic as the integers permit.
+
+### 3.8 Symmetry-Compatible Axial Counts
+
+A uniform mesh with counts `(n_a, n_b, n_c)` and a shift `s`,
+built as in 3.2, is invariant under a point group operation `M`
+(written in the reciprocal abc basis) precisely when `M` maps
+every mesh point onto another mesh point. Writing `D` for the
+diagonal matrix `diag(n_a, n_b, n_c)`, the mesh points are the
+lattice `D^{-1} (Z^3 + s) - 1/2` inside the cell, and `M`
+carries this lattice onto itself exactly when
+
+    D M D^{-1}   is an integer matrix,
+
+and, for the shifted mesh, additionally when
+
+    (D M D^{-1} - I) s   is an integer vector.
+
+The first condition constrains the counts; the second
+constrains the shift (3.9). The counts condition has a simple
+combinatorial reading. For the signed-permutation matrices that
+make up crystallographic point groups in the abc basis, a
+nonzero off-diagonal entry `M[i, j]` means operation `M` sends
+axis `j` onto axis `i`. `D M D^{-1}` is then integral in that
+entry only if `n_i / n_j` is an integer; since the group also
+contains the inverse operation, `n_j / n_i` must be integral
+too, which forces `n_i = n_j`. Hence:
+
+**Axis-class rule.** Define two axes to be *coupled* when some
+group operation has a nonzero entry connecting them
+(`M[i, j] != 0` or `M[j, i] != 0`, `i != j`). Take the
+transitive closure to get axis *classes*. A mesh is symmetry-
+compatible if and only if all axes in the same class share one
+count.
+
+The classes follow the crystal family. A cubic group couples
+all three axes into one class, so `n_a = n_b = n_c`. A
+hexagonal or tetragonal group couples the two in-plane axes and
+leaves the principal axis free: two classes, `n_a = n_b` with
+`n_c` independent. An orthorhombic group couples nothing: three
+free classes. A triclinic group likewise leaves all three free,
+its only operations being the identity and inversion, which are
+diagonal. This is why the selection in 3.7 assigns counts by
+class: the class structure is exactly the set of equalities the
+group imposes, and it is derived from the operations themselves
+rather than from a hard-coded table of crystal systems, so it
+is correct for every cell `imago` can describe.
+
+### 3.9 Shift Selection
+
+The uniform mesh of 3.2 is a Monkhorst-Pack mesh: a regular grid
+over the reciprocal cell, folded to the irreducible zone by the
+point group with equal base weights. Its shift `s` (the
+`KP_SHIFT_A_B_C` value of 3.4) is the Monkhorst-Pack grid offset,
+expressed in units of the grid spacing, and it has exactly two
+principled values per axis:
+
+- `s = 0` places a sample on the origin: a Gamma-centered mesh.
+- `s = 1/2` centers the samples between grid nodes, so Gamma is
+  absent: the Monkhorst-Pack off-Gamma mesh.
+
+An intermediate offset (a quarter of the spacing, say) is neither
+of these and has no place here; it displaces the samples so that
+the point group no longer carries the mesh onto itself. Two
+considerations select between the two principled values.
+
+**Invariance.** A shift preserves symmetry only when it satisfies
+the second condition of 3.8, `(D M D^{-1} - I) s` integer for
+every operation `M`. A shift that violates it moves the samples
+so the group no longer maps the mesh onto itself, which both
+biases the sampling and defeats the reduction. The origin
+`s = 0` satisfies the condition for every point group, since the
+origin is a fixed point of every operation -- so a Gamma-centered
+mesh is symmetry-compatible for any cell whatsoever. The half-
+shift is admissible only for some groups: a cubic group admits
+the body-half `(1/2, 1/2, 1/2)`; a hexagonal group forbids the
+in-plane half-shift and admits only `(0, 0, 0)` and
+`(0, 0, 1/2)`. The invariant set is group-dependent and must be
+computed from the operations, not assumed from the crystal
+family name.
+
+**Reduction and convergence quality.** Among the invariant
+shifts, a half-shift on an axis with an even count generally
+folds the mesh furthest and tends to converge faster, because it
+centers the samples symmetrically in the zone interior and keeps
+them off the zone-boundary planes where fewer operations act. The
+effect on reduction is large: a cubic `4x4x4` mesh folds to 4
+irreducible points under `(1/2, 1/2, 1/2)` but to 20 under a
+quarter-spacing offset that breaks the mesh's inversion symmetry
+-- five times the eigenvalue problems for identical sampling.
+
+**The rule.** Default to the Gamma-centered mesh `s = 0`. Because
+it is invariant under every point group, it is the universally
+correct choice and the required one wherever no half-shift is
+admissible (face-centered cubic, the in-plane axes of hexagonal
+and trigonal cells, and the other cases where the half-shift
+fails the invariance test). Where the point group does admit a
+half-shift on an even-count axis -- a body-centered cubic or
+simple cubic cell, the principal axis of a hexagonal cell -- use
+it, for its faster convergence and deeper reduction. In all
+cases an axis carrying a single k-point takes no shift, per the
+single-point rule of 3.6, since a shift would move that lone
+sample off Gamma.
+
+This selection is made where the counts are known. In density
+mode the counts are resolved inside imago (3.7), so the
+automatic shift is resolved there too, after the counts and
+before the mesh is built; makeinput records only the request
+(3.2, 3.4). An explicit user shift is carried through
+unchanged; imago honors it verbatim and only warns if it is
+not invariant, since an override is the user's prerogative.
+
+This is a Monkhorst-Pack mesh throughout. It is distinct from the
+special-point method, which builds a small, individually placed,
+unequally weighted set of k-points rather than offsetting a
+uniform grid; that method is not what this pipeline implements,
+and its point coordinates are not mesh offsets. The Gamma-
+centered default also ties to 3.10: an even Gamma-centered mesh
+places samples on the zone-boundary planes, which are reciprocal-
+lattice-periodic partners, so the periodic comparison of 3.10 is
+what lets that default reduce fully.
+
+### 3.10 IBZ Reduction with Reciprocal-Lattice Periodicity
+
+Folding the uniform mesh to the irreducible zone (the loop of
+3.2's `initializeKPointMesh`) applies each operation to each
+mesh point and merges the image onto whatever mesh point it
+coincides with. The merge is exact and loses nothing: when a
+rotated point lands on a partner, `epsilon(M k) = epsilon(k)`
+holds identically because `M` is a true symmetry of the crystal,
+so transferring the partner's weight to the representative
+leaves the Brillouin-zone integral unchanged. Every mesh point
+is assigned to exactly one representative and contributes its
+weight once, so the weights still sum to the full value.
+
+**The periodicity gap.** Reciprocal space is periodic: two
+k-points that differ by a reciprocal lattice vector are the same
+physical point. A rotated mesh point may equal a partner only
+*after* translation by such a vector -- in abc coordinates, when
+the fractional difference is an integer rather than zero. A
+merge test that compares raw fractional differences against a
+small threshold misses these wrapped coincidences and leaves the
+two points unmerged. The reduction is still *correct* -- a
+missed merge only means the irreducible set carries an extra
+point whose weight is accounted for -- but it is *incomplete*,
+producing a larger IBZ and more eigenvalue problems than
+symmetry allows.
+
+**The periodic comparison.** The mesh must be reduced with a
+reciprocal-lattice-periodic match: two points coincide when
+their fractional difference is integral to within the threshold.
+The basis-independent form compares each component of the
+difference against its nearest integer,
+
+    delta_i - nint(delta_i)   negligible for i = a, b, c,
+
+which needs no assumption about the coordinate interval and is
+correct for orthogonal and non-orthogonal cells alike. This is
+strictly a superset of the raw comparison: it finds every merge
+the raw test finds, plus the wrapped ones. It can therefore only
+shrink the irreducible set, never enlarge it, and never creates
+a false merge, since an integer fractional difference is a true
+reciprocal-lattice translation.
+
+**When it matters.** For orthogonal cells (cubic, tetragonal,
+orthorhombic) the abc-basis operations are signed permutations
+that preserve each coordinate's magnitude, and a mesh shifted
+into the half-open interval never has a rotated image escape it,
+so the wrapped and raw comparisons coincide and the periodicity
+check is a no-op. For non-orthogonal cells (hexagonal, trigonal,
+triclinic, and centered monoclinic) the operations mix
+components, rotated images routinely fall outside the interval,
+and the periodic comparison is what recovers the full reduction.
+A hexagonal `6x6x6` mesh, for instance, folds to 28 irreducible
+points with the periodic test but only 40 without -- a 43 %
+inflation carried silently into every downstream cost. Because
+`imago` is intended for all cell types, including the
+hexagonal and trigonal cells the space-group machinery already
+supports (2.7), the periodic comparison is required, not
+optional.
+
+**Postconditions.** Whatever the cell, the completed reduction
+must satisfy three invariants, which serve as checkable
+correctness conditions:
+
+- The star sizes (the number of full-mesh points folded onto
+  each representative) sum to the full-mesh point count.
+- Each star size divides the point group order, since a star is
+  an orbit under the group.
+- The irreducible weights sum to the full weight value
+  (`weightSum`, 3.2).
+
+### 3.11 Density-Indexed Ladder and Duplicate Rungs
+
+The convergence ladder (7.7) requests a sequence of increasing
+densities and reads back the resulting energies. Because 3.7
+delivers a mesh that is a *step function* of density -- a
+well-behaved map holds the same integer mesh over a range of
+densities, then jumps to the next -- two adjacent rungs will
+sometimes resolve to the identical mesh. This is expected and
+correct behavior of a good map, not a fault: distinct density
+requests that fall in the same step are genuinely the same
+calculation.
+
+The consequence for the acceptance rule (7.8) is that two rungs
+can produce a byte-identical energy, giving an energy delta of
+exactly zero. The two-sided flatness test must not read such a
+zero as physical convergence, because it is an artifact of the
+map, not evidence that the energy has stopped moving. The guard
+belongs in 7.8 and is small: before applying the flatness test,
+recognize when consecutive rungs resolved to the same mesh --
+comparing the resolved k-point sets, which 8.2 already surfaces
+as `kpoint_count` -- and collapse such duplicates so the test
+only ever compares genuinely distinct calculations. With the
+mesh map of 3.7 producing smoothly varying shapes, true
+duplicates become the *only* source of zero deltas, so this
+guard has nothing to catch but them.
+
+This keeps the ladder indexed by density, as 3.1 intends, while
+making its rungs trustworthy. It is deliberately less invasive
+than re-indexing the ladder by resolved mesh: the density knob
+and the `makeinput.py` pipeline of 3.2 are preserved, and only
+the density-to-mesh map (3.7) and the duplicate guard (7.8)
+change.
 
 ---
 
@@ -5199,9 +5510,10 @@ ImagoResult
                       in Hartree, when available; the
                       ASE adapter (D12) converts to eV
   measured          MeasuredQuantities | None: scalar
-                      electronic-structure quantities
-                      harvested from the converged SCF
-                      output (see below).  None for
+                      electronic-structure quantities plus
+                      the resolved k-point mesh, harvested
+                      from the converged SCF output (see
+                      below).  None for
                       runs that did not converge or for
                       job types that do not compute
                       them.  Used by the guidance-
@@ -5248,6 +5560,25 @@ MeasuredQuantities
   total_magnetization  float | None: total magnetic
                          moment per formula unit in Bohr
                          magnetons; 0.0 for non-magnetic
+  kpoint_mesh          list[int] | None: the resolved
+                         axial k-point counts
+                         [n_a, n_b, n_c] that imago
+                         selected for this run
+                         (PSEUDOCODE 4c.6).  This is the
+                         mesh's identity: two runs with an
+                         equal kpoint_mesh integrated over
+                         the same k-points and are the
+                         same calculation.  The k-density
+                         ladder guard (7.8 step 3c) keys
+                         on it.  None for job types that
+                         build no mesh
+  kpoint_count         int | None: the number of k-points
+                         actually computed -- the IBZ size
+                         for a symmetry-reduced run, the
+                         full-mesh size otherwise
+                         (PSEUDOCODE 4c.6).  The resource
+                         dataspace's size signature (8.2).
+                         None when no mesh was built
 ```
 
 The `measured` block is the C76 follow-up: a small
@@ -8980,22 +9311,51 @@ still passes and the curator can spot it on review).
          and is skipped here before the convergence test.
       b. For each CalcUnit's converged run, parse
          result.toml for total_energy, gap_ev, gap_kind,
-         total_magnetization, and scf_threshold; read the
-         swept k-density out of the CalcUnit's calc tag.
-      c. Pick the converged grid point: the smallest
-         k-density at which the PER-ATOM energy change to
-         both neighbours is below the k-point threshold --
-         |E_i - E_{i+1}| / cell_atom_count <
-         metric_threshold AND |E_i - E_{i-1}| /
-         cell_atom_count < metric_threshold for i in
-         (1, len(grid)-1), the deltas taken in eV.
-         Requiring both consecutive-pair deltas to be
-         small mitigates a single-grid-point numerical
-         fluke.  `metric_threshold` is the k-point
-         convergence threshold in eV/atom, resolved from
-         the solid's `kpoint_convergence_threshold` (its own
-         value, else the manifest `[harvest]` block, else the
-         built-in 0.5 meV/atom = 5e-4 eV/atom default; 5.7) --
+         total_magnetization, scf_threshold, and
+         kpoint_mesh (the resolved axial counts, 6.1.2 /
+         PSEUDOCODE 4c.6); read the swept k-density out of
+         the CalcUnit's calc tag.
+      c. Collapse duplicate-mesh rungs, then pick the
+         converged grid point.  A requested k-density does
+         not map one-to-one onto the mesh imago integrates:
+         the density-to-mesh map (3.7) is a step function,
+         so a finer density can resolve to a mesh already
+         seen.  Two rungs with an equal `kpoint_mesh` are
+         the same calculation run twice; their energy delta
+         is exactly zero, and the two-sided test below would
+         read that manufactured zero as convergence
+         (DESIGN 3.11).  So first reduce the density-sorted
+         grid to one rung per distinct `kpoint_mesh`,
+         keeping the lowest-density member -- the cheapest
+         request that reaches that mesh, and the right
+         convergence density to record.  Because the mesh is
+         monotone in density (3.7), equal meshes occupy a
+         contiguous density range, so this simply merges
+         neighbours.  Equal meshes give equal energies, so
+         nothing is lost; a total-energy disagreement
+         between two runs of the same `kpoint_mesh` is not
+         averaged away but surfaced as an error, since it
+         means the runs were not in fact identical.
+         Then pick the converged grid point on the collapsed
+         grid: the smallest k-density at which the PER-ATOM
+         energy change to both neighbours is below the
+         k-point threshold -- |E_i - E_{i+1}| /
+         cell_atom_count < metric_threshold AND
+         |E_i - E_{i-1}| / cell_atom_count < metric_threshold
+         for i in (1, len(collapsed_grid)-1), the deltas
+         taken in eV.  Requiring both consecutive-pair
+         deltas to be small mitigates a single-grid-point
+         numerical fluke, and collapsing first guarantees
+         those deltas compare genuinely distinct meshes
+         rather than a mesh with itself.  Collapsing can
+         shrink the grid below the three points the interior
+         test needs; when it does, there is no interior
+         point and step (d) applies.  `metric_threshold` is
+         the k-point convergence threshold in eV/atom,
+         resolved from the solid's
+         `kpoint_convergence_threshold` (its own value, else
+         the manifest `[harvest]` block, else the built-in
+         0.5 meV/atom = 5e-4 eV/atom default; 5.7) --
          separate from `scf_threshold`, which governs one SCF
          run, not the flatness of energy versus k-density.
       d. If no point satisfies the criterion (energy
@@ -9025,9 +9385,11 @@ still passes and the curator can spot it on review).
               loaded structure (step e)
             - verification: grid_values,
               grid_energies (the parallel total-energy
-              array gathered in step b, so the
-              auto-promote rule can judge flatness from
-              the staged file alone),
+              array over the COLLAPSED distinct-mesh grid
+              of step c, so the auto-promote rule judges
+              flatness on genuinely distinct calculations
+              and never re-encounters the duplicate-mesh
+              zero the harvest already removed),
               converged_at = chosen k-density,
               metric, and metric_threshold -- the
               resolved kpoint_convergence_threshold,
@@ -9423,6 +9785,16 @@ primary day-1 design.
 ---
 
 ## References
+
+H. J. Monkhorst, J. D. Pack, "Special points for
+Brillouin-zone integrations," Phys. Rev. B 13, 5188
+(1976). DOI: 10.1103/PhysRevB.13.5188
+- The uniform reciprocal-space mesh, its offset (shift),
+  and symmetry folding to the irreducible zone that
+  section 3.7-3.10 specifies. The mesh `imago` builds is
+  a Monkhorst-Pack mesh: a regular grid with equal base
+  weights, Gamma-centered or half-shifted, reduced by the
+  point group.
 
 P. E. Bloechl, O. Jepsen, O. K. Andersen, "Improved
 tetrahedron method for Brillouin-zone integrations,"

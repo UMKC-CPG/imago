@@ -2413,64 +2413,87 @@ imports its neighbours from `$IMAGO_BIN`).
   the convergence tolerance with nothing on screen.  Fixed with
   three tests (one fails as `assert 0.0005 == 0.00025`).
 
-- [ ] C116. INVESTIGATE: two rungs of a k-density ladder produced
-  bit-identical results.  Observed 2026-07-09 in the first
-  successful end-to-end seed run (orchestrator job 14882026,
-  `si_cmce_64_1999`).  Densities 250 and 300 gave
-  `E(300) - E(250) == 0.0` exactly, an identical `gap_ev` to 16
-  digits, an identical `gs_enrg-fb.dat` checksum, and the same 11
-  SCF iterations.  Their `kp-scf.dat` files differ only in
-  `MIN_KP_LINE_DENSITY` (250 vs 300); `structure.dat` and
-  `imago.dat` are byte-identical, as they should be, since the
-  k-density lives only in `kp-scf.dat`.
+- [ ] C116. The k-density ladder is not a refinement sequence, and
+  `pick_converged` assumes it is.  A requested k-point density does
+  not map monotonically onto the mesh imago actually integrates
+  over: raising the density can leave the mesh unchanged, and can
+  even coarsen it.  The two-sided flatness test in DESIGN 7.8 step
+  3c reads an unchanged mesh as a converged energy, because two
+  runs of the same calculation differ by exactly zero.  This is a
+  DESIGN defect in the acceptance rule, not a bug in any script.
 
-  **This item is an investigation, not a fix.**  The obvious
-  reading -- that two requested densities resolve to the same
-  integer per-axis mesh, so the two runs are the same
-  calculation -- is a HYPOTHESIS that has not been verified, and
-  it was the first explanation to come to mind, which is reason
-  enough to distrust it.  Nothing about the resolved mesh was
-  ever read back: imago does not print the per-axis counts or the
-  k-point total anywhere we looked, so "same mesh" is inferred
-  from identical outputs rather than observed.
+  Measured 2026-07-09/10 from the first successful end-to-end seed
+  run (orchestrator job 14882026).  `gs_scf-fb.out` prints the
+  resolved irreducible k-point list under the heading `Kpoints in
+  x,y,z cartesian form in recip space cell are:`, so the mesh each
+  rung actually used can simply be counted.  Across the eight
+  ladder rungs (densities 25, 50, 100, 150, 200, 250, 300, 400)
+  the irreducible k-point counts are:
 
-  Alternatives that have NOT been ruled out, and should be, before
-  any change is proposed:
-  (a) the density-to-mesh map genuinely collapses 250 and 300 for
-      this lattice (15.16 x 9.06 x 9.03 Bohr, `CELL_MODE = full`);
-  (b) `MIN_KP_LINE_DENSITY` is parsed but then ignored, clamped,
-      or saturated somewhere above some value -- note 200 and 400
-      DO differ, which constrains but does not exclude this;
-  (c) the IBZ reduction (8 point ops here) collapses two distinct
-      full meshes onto the same irreducible set;
-  (d) something in the run directory was reused -- a stale dir, a
-      copied input, a cache interaction -- rather than recomputed.
-      The cache keys on `structure.dat` + scalars and NOT on the
-      k-density (DESIGN 6.2.5 says each density is its own run
-      dir), so this is worth checking rather than assuming.
+      si_fd-3m_227_*      3    6   12   24   20   30   60   45
+      si_ia-3_206_2016    2    4    7   18   18   24   32   48
+      si_cmce_64_1999     1    4    2    4    8   12   12    9
 
-  First step is instrumentation, not code change: get imago to
-  report the resolved per-axis counts and the k-point total it
-  actually computed, then read them off both runs.  That single
-  fact discriminates (a)/(c) from (b)/(d) immediately.
+  Read the diamond row across: density 150 gives 24 points and
+  density 200 gives 20.  Asking for a finer sampling returned a
+  coarser one.  The same reversal appears from 300 to 400 (60 down
+  to 45), and in the Cmce row from 300 to 400 (12 down to 9).  The
+  duplicated rungs -- `si_ia-3` at 150 and 200, `si_cmce` at 250
+  and 300 -- are the degenerate case of this, not a separate
+  phenomenon: in each pair the printed k-point lists are identical
+  point for point, so the two runs are one calculation performed
+  twice.  Every energy delta up such a ladder therefore mixes real
+  convergence with mesh-shape noise, which is why the deltas
+  alternate in sign instead of decaying.
 
-  Why it matters if (a) or (c) holds.  `pick_converged` (DESIGN
-  7.8 step 3c) requires BOTH neighbouring energy deltas to fall
-  below the flatness threshold.  A duplicated rung yields a delta
-  of exactly zero, which satisfies one side for free; three
-  consecutive duplicates would satisfy both and declare
-  convergence at whatever density that is -- a false plateau
-  produced by arithmetic rather than physics.  DESIGN 7.8 reasons
-  carefully about false plateaus but assumes the grid points are
-  distinct calculations.  In this run the left delta was 22
-  meV/atom, so the solid was correctly rejected; the hole was not
-  exercised.
+  This has already corrupted a shipped potential.  `pick_converged`
+  accepts the smallest interior rung whose energy is within the
+  threshold of BOTH neighbours.  `si_ia-3_206_2016` was accepted at
+  density 200 on a left-hand delta of exactly 0.000 meV/atom -- the
+  duplicate mesh compared against itself.  Its right-hand deltas
+  then GROW (0.131, 0.110, 0.732 meV/atom) and its gap is still
+  falling hard, 0.507 -> 0.287 eV between densities 200 and 400.
+  The solid is not converged; the rule declared it converged on an
+  arithmetic tie, and its potential is in
+  `share/atomicPDB/si/s_gaussian_pot.toml` today.  DESIGN 7.8
+  reasons carefully about false plateaus from a single numerical
+  dip, and the two-sided test defeats exactly that -- but it
+  assumes each grid point is a distinct calculation, and a repeated
+  rung manufactures a perfect zero on one side for free.
 
-  Note the adjacency: DESIGN 8.2's size signature already wants
-  `kpoint_count`, "number of k-points actually computed."  If that
-  is surfaced for the resource dataspace it also answers this
-  question -- but do NOT let that convenience choose the
-  explanation.  DESIGN 7.8; possibly imago Fortran (cf. C76, C84).
+  Ruled out by the measurement, and recorded so they are not
+  re-litigated: `MIN_KP_LINE_DENSITY` is neither ignored, clamped,
+  nor saturated (the collapse happens at DIFFERENT density pairs
+  for different lattices -- 150/200 for Ia-3, 250/300 for Cmce --
+  whereas a clamp would bite at the same density for every solid);
+  and no run directory was reused or stale (same reason, plus the
+  fd-3m rows show eight distinct meshes).  What remains, and does
+  NOT need settling before the DESIGN work, is whether the collapse
+  happens in the density-to-mesh map or in the IBZ reduction that
+  follows it.  Point-op counts differ widely across these solids
+  (Fd-3m 48, Ia-3 24, Cmce 8), so both remain live.
+
+  The DESIGN question, which is where this item lives.  A ladder
+  indexed by requested density asks a question the code cannot
+  answer, because density is not what the calculation consumes.
+  The candidate fix is to index the ladder by the resolved mesh
+  instead: generate the rungs, resolve each to its k-point set,
+  drop or merge rungs that resolve alike, and only then apply the
+  flatness test -- so that consecutive rungs are guaranteed to be
+  genuinely different calculations and a zero delta means a
+  converged energy rather than a repeated one.  Whether the ladder
+  should additionally require monotonically increasing k-point
+  counts, and what to do with a rung that coarsens, are open.  Do
+  not write code before DESIGN 7.8 answers this.
+
+  Adjacent, and now cheap: DESIGN 8.2's size signature already
+  wants `kpoint_count`, "number of k-points actually computed."
+  That number is the same one this item needs, and it is already
+  printed -- harvesting it into `result.toml` would let the
+  acceptance rule see the mesh directly instead of inferring it
+  from the requested density.  DESIGN 7.8 (defect) and 8.2
+  (consumer); then PSEUDOCODE 11.4 and code.  Cf. C117, whose
+  near-metal oscillation rides on top of this same noise.
 
 - [ ] C117. Decide the k-point integration scheme for near-metallic
   reference solids.  Observed 2026-07-09 in the same seed run:
@@ -2483,7 +2506,13 @@ imports its neighbours from `$IMAGO_BIN`).
   carries no width, so makeinput applies NO smearing (DESIGN 5.7).
   With no smearing and a near-zero gap, occupations jump each time
   a band crosses the Fermi level, which is a plausible source of
-  the 100+ meV/atom energy swings at low density.
+  the 100+ meV/atom energy swings at low density.  Not the only
+  source, though: C116 shows this solid's mesh does not refine
+  monotonically with the requested density (1, 4, 2, 4, 8, 12, 12,
+  9 irreducible points up the ladder), so part of the swing is the
+  mesh changing shape rather than the occupations jumping.  The two
+  effects compound, and C116 must be understood first, or a smearing
+  width will be chosen to damp noise that smearing did not cause.
 
   This is a curation question, not a bug: the schema already
   supports a per-solid override, so `linear-tetrahedral`
