@@ -629,6 +629,36 @@ def test_imago_runner_maps_failed_to_not_ok(tmp_path, monkeypatch):
     assert outcome.message == "fortran abort"
 
 
+def test_persist_result_carries_resolved_mesh(tmp_path):
+    """The resolved mesh reaches result.toml (DESIGN 6.1.2):
+    kpoint_mesh as a TOML array, kpoint_count as a scalar, so the
+    k-density guard (PSEUDOCODE 15.7) can read them back."""
+    import tomllib
+    import imago
+    result = _imago_result(
+        imago.RunStatus.CONVERGED,
+        total_energy=-31.1, kpoint_mesh=[4, 2, 3], kpoint_count=24)
+    ImagoWingbeat._persist_result(str(tmp_path), result)
+    with open(tmp_path / "result.toml", "rb") as handle:
+        loaded = tomllib.load(handle)
+    assert loaded["kpoint_mesh"] == [4, 2, 3]
+    assert loaded["kpoint_count"] == 24
+
+
+def test_persist_result_omits_absent_mesh(tmp_path):
+    """An explicit-list run or older binary emits no mesh; the
+    None fields are omitted from result.toml (so the guard reads
+    them back as absent and stays inert, PSEUDOCODE 15.7)."""
+    import tomllib
+    import imago
+    result = _imago_result(imago.RunStatus.CONVERGED)
+    ImagoWingbeat._persist_result(str(tmp_path), result)
+    with open(tmp_path / "result.toml", "rb") as handle:
+        loaded = tomllib.load(handle)
+    assert "kpoint_mesh" not in loaded
+    assert "kpoint_count" not in loaded
+
+
 def test_imago_runner_prepared_detection_under_inputs(tmp_path,
                                                       monkeypatch):
     """A staged ``inputs/imago.dat`` also marks a directory as

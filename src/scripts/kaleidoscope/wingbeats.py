@@ -247,6 +247,16 @@ class ImagoWingbeat(Wingbeat):
             result_file.write(
                 toml_line("scf_threshold", result.scf_threshold)
             )
+            # Resolved mesh (DESIGN 6.1.2): kpoint_mesh renders as
+            #   a TOML array, kpoint_count as a scalar; toml_line
+            #   omits either when None (an explicit-list run or an
+            #   older imago binary that emits neither).
+            result_file.write(
+                toml_line("kpoint_mesh", result.kpoint_mesh)
+            )
+            result_file.write(
+                toml_line("kpoint_count", result.kpoint_count)
+            )
             result_file.write(
                 toml_line("runtime_seconds", result.runtime_seconds)
             )

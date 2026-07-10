@@ -1207,6 +1207,27 @@ subroutine initializeKPoints (inSCF)
       call convertKPointsToXYZ
    endif
 
+   ! Emit the resolved mesh to the main output so that imago.py
+   !   can recover it without re-deriving the fold (PSEUDOCODE
+   !   4d.5; parsed by imago.py's _harvest_result, PSEUDOCODE
+   !   12.5).  RESOLVED_KP_MESH is the full uniform mesh's axial
+   !   counts; RESOLVED_KP_COUNT is the number of k-points
+   !   actually computed -- the IBZ size after symmetry folding,
+   !   the full-mesh size otherwise.  Each record follows imago's
+   !   label/value convention: the tag alone on its line, the
+   !   value on the next line (as KPOINT_STYLE_CODE and the other
+   !   kp tags are written).  Only the mesh style codes (1 and 2)
+   !   build an axial mesh; an explicit-list run (style 0) has
+   !   none, so it writes neither record and the harvester
+   !   records both as absent (DESIGN 6.1.2).
+   if ((kPointStyleCode == 1) .or. (kPointStyleCode == 2)) then
+      write (20,*) 'RESOLVED_KP_MESH'
+      write (20,*) numAxialKPoints(1), numAxialKPoints(2), &
+            & numAxialKPoints(3)
+      write (20,*) 'RESOLVED_KP_COUNT'
+      write (20,*) numKPoints
+   endif
+
    ! If the LAT integration method was requested, generate the tetrahedra
    !   and compute the BZ integration weight per tetrahedron. This must
    !   happen after the mesh is built (so that numAxialKPoints is set).

@@ -157,6 +157,53 @@ def _make_run_dir(tmp_path, last_delta, threshold=1.0e-4):
     return tmp_path
 
 
+def test_read_labeled_ints_tag_then_value(tmp_path):
+    """The labeled-record helpers read imago's tag/value form --
+    the tag alone on one line, the value on the next -- matching
+    RESOLVED_KP_MESH as imago writes it (PSEUDOCODE 4d.5 / 12.5).
+    List-directed output leaves leading whitespace, so the value
+    line is tokenized, not column-sliced."""
+    out = tmp_path / "gs_scf-fb.out"
+    out.write_text(
+        " KPOINT_STYLE_CODE\n               2\n"
+        " RESOLVED_KP_MESH\n           4           2           3\n"
+        " RESOLVED_KP_COUNT\n          24\n")
+    assert imago._read_labeled_ints(
+        str(out), "RESOLVED_KP_MESH", 3) == [4, 2, 3]
+    assert imago._read_labeled_int(
+        str(out), "RESOLVED_KP_COUNT") == 24
+    # An absent tag, and a substring that is not a whole-line
+    # match, both read as None.
+    assert imago._read_labeled_int(str(out), "RESOLVED_KP_NONE") \
+        is None
+
+
+def test_harvest_reads_resolved_mesh(tmp_path):
+    """_harvest_result recovers the resolved mesh from the SCF
+    output's RESOLVED_KP_* records into ImagoResult (DESIGN
+    6.1.2), where the k-density guard later reads it."""
+    d = _make_run_dir(tmp_path, last_delta="0.00005")
+    (tmp_path / "gs_scf-fb.out").write_text(
+        " RESOLVED_KP_MESH\n           4           2           3\n"
+        " RESOLVED_KP_COUNT\n          24\n")
+    r = imago._harvest_result(str(d), "/tmp/x", _settings(),
+                              1.0, reused=False)
+    assert r.kpoint_mesh == [4, 2, 3]
+    assert r.kpoint_count == 24
+
+
+def test_harvest_absent_mesh_is_none(tmp_path):
+    """No RESOLVED_KP_* records (an explicit-list run or older
+    binary) leaves both mesh fields None, keeping the guard
+    inert (PSEUDOCODE 15.7)."""
+    d = _make_run_dir(tmp_path, last_delta="0.00005")
+    (tmp_path / "gs_scf-fb.out").write_text(" some other output\n")
+    r = imago._harvest_result(str(d), "/tmp/x", _settings(),
+                              1.0, reused=False)
+    assert r.kpoint_mesh is None
+    assert r.kpoint_count is None
+
+
 def test_harvest_converged(tmp_path):
     """Final delta below the criterion => CONVERGED, with the
     iteration count (col 1) and total energy (col 5) read off

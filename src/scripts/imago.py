@@ -300,6 +300,10 @@ class ImagoResult:
     gap_kind: str | None = None        # none | direct | indirect
     scf_threshold: float | None = None  # SCF convergence criterion
     #                                     used (from imago.dat)
+    kpoint_mesh: list | None = None    # resolved axial counts
+    #                                    [n_a, n_b, n_c] (6.1.2)
+    kpoint_count: int | None = None    # k-points actually
+    #                                    computed (IBZ or full)
     message: str = ""
 
     @property
@@ -2681,6 +2685,19 @@ def _harvest_result(run_dir, temp, settings, seconds, reused):
             gap_ev = float(row[6]) * HARTREE_EV
             gap_kind = GAP_KIND_BY_CODE[int(float(row[7]))]
 
+    # Resolved mesh: two labeled records in the SCF output
+    #   (PSEUDOCODE 4d.5).  Absent for an explicit-list run
+    #   (style 0) or an older binary, in which case both stay
+    #   None (DESIGN 6.1.2), leaving the k-density guard inert
+    #   (the harvest's collapse_by_mesh, PSEUDOCODE 15.7).
+    kpoint_mesh = None
+    kpoint_count = None
+    if "out" in outputs:
+        kpoint_mesh = _read_labeled_ints(
+            outputs["out"], "RESOLVED_KP_MESH", 3)
+        kpoint_count = _read_labeled_int(
+            outputs["out"], "RESOLVED_KP_COUNT")
+
     if iterations is None:
         # No SCF in this run (e.g. a -scf no property pass):
         #   nothing to converge, so a clean run is CONVERGED.
@@ -2698,8 +2715,41 @@ def _harvest_result(run_dir, temp, settings, seconds, reused):
         total_energy=total_energy,
         total_magnetization=total_magnetization,
         gap_ev=gap_ev, gap_kind=gap_kind,
-        scf_threshold=scf_threshold, message=status.value,
+        scf_threshold=scf_threshold,
+        kpoint_mesh=kpoint_mesh, kpoint_count=kpoint_count,
+        message=status.value,
     )
+
+
+def _read_labeled_ints(path, label, count):
+    """Return the first ``count`` integers on the line AFTER the
+    first line whose stripped text is exactly ``label``, or None
+    when the label is absent (PSEUDOCODE 12.5).
+
+    This follows imago's label/value convention: the all-caps
+    tag sits alone on one line and its value is on the next
+    (as ``KPOINT_STYLE_CODE`` is written and echoed). The exact
+    whole-line match is robust to surrounding output and to the
+    label appearing as a substring elsewhere in the file."""
+    try:
+        with open(path) as labeled_file:
+            lines = labeled_file.readlines()
+    except OSError:
+        return None
+    for index, line in enumerate(lines):
+        if line.strip() == label and index + 1 < len(lines):
+            tokens = lines[index + 1].split()
+            if len(tokens) >= count:
+                return [int(tokens[k]) for k in range(count)]
+            return None
+    return None
+
+
+def _read_labeled_int(path, label):
+    """The single integer following ``label`` (PSEUDOCODE 12.5),
+    or None when the label is absent."""
+    result = _read_labeled_ints(path, label, 1)
+    return None if result is None else result[0]
 
 
 # ------------------------------------------------------------------ #
