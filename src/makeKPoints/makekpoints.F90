@@ -1888,15 +1888,12 @@ module KPointMesh_O
       ! Define local variables.
       integer :: i
 
+      ! Only rotate here; the reciprocal-lattice wrapping is done
+      !   in compareKPoints, which reduces each coordinate
+      !   difference modulo 1 rather than translating the point
+      !   into a fixed interval (DESIGN 3.10).
       do i = 1, 3
          foldedKPoint(i) = sum(abcRecipPointOp(i,:) * abcMeshKPoint(:))
-
-         !! Translate the folded kpoint to the interval 0-1.
-         !if (foldedKPoint(i) < 0.0_double) then
-         !   foldedKPoint(i) = foldedKPoint(i) + 1.0_double
-         !elseif (foldedKPoint(i) > 1.0_double) then
-         !   foldedKPoint(i) = foldedKPoint(i) - 1.0_double
-         !endif
       enddo  ! i=1,3
 
    end subroutine foldKPoint
@@ -1919,6 +1916,11 @@ module KPointMesh_O
       ! Define local variables.
       integer :: j,k
       integer :: isMatch
+      real (kind=double) :: coordDiff
+            ! Along one axis, the fractional-coordinate difference
+            !   between the folded kpoint and a candidate mesh
+            !   point, reduced modulo a reciprocal lattice vector
+            !   (modulo 1) for the periodic match below.
 
       ! Search through the remaining kpoints.
       do j = i+1,numMeshKPoints
@@ -1927,66 +1929,29 @@ module KPointMesh_O
          !   irriducable kpoint.
          if (kPointTracker(j) == j) then
 
-!            ! There are three separate ways that the two kpoints can be
-!            !   considered to match.
-
-            !  (1) Is the vector difference negligable?
+            ! Two kpoints coincide when their fractional difference
+            !   is integral: they then differ by a reciprocal
+            !   lattice vector and are the same physical point.
+            !   Testing (coordDiff - anint(coordDiff)) is basis-
+            !   independent and catches wrapped coincidences that a
+            !   raw difference misses for non-orthogonal cells,
+            !   where a rotated point routinely leaves the cell
+            !   (DESIGN 3.10 / PSEUDOCODE 4c.5 / 4d.4).  For
+            !   orthogonal cells no image escapes, so this reduces
+            !   to the raw comparison and changes nothing.
             isMatch = 1  ! Assume a match.
             do k = 1,3
-               ! If the value in any one direction is sufficiently different
-               !   then we don't have a match.
-               if (abs(foldedKPoint(k) - abcMeshKPoints(k,j)) > kpThresh) then
+               coordDiff = foldedKPoint(k) - abcMeshKPoints(k,j)
+               if (abs(coordDiff - anint(coordDiff)) > kpThresh) then
                   isMatch = 0
                   exit
                endif
             enddo
 
             if (isMatch == 1) then
-!write (53,*) "foldedKP=",foldedKPoint(:)
-!write (53,*) "abcMeshKP=",abcMeshKPoints(:,j)
                call saveKPoint(j)
-!write (53,*) "Matched #1"
                cycle
             endif
-
-
-!            ! (2) Is the shifted vector difference negligable?
-!            isMatch = 1  ! Assume a match.
-!            do k = 1,3
-!               ! If the value in any one direction is sufficiently different
-!               !   including the lattice shift then we don't have a match.
-!               if (abs(1.0_double - foldedKPoint(k) - abcMeshKPoints(k,j)) > &
-!                     & kpThresh) then
-!                  isMatch = 0
-!                  exit
-!               endif
-!            enddo
-!
-!            if (isMatch == 1) then
-!write (53,*) "foldedKP=",foldedKPoint(:)
-!write (53,*) "abcMeshKP=",abcMeshKPoints(:,j)
-!               call saveKPoint(j)
-!write (53,*) "Matched #2"
-!               cycle
-!            endif
-!
-!
-!            ! (3) Is the vector sum negligable?
-!            isMatch = 1  ! Assume a match.
-!            do k = 1,3
-!               if (abs(foldedKPoint(k) + abcMeshKPoints(k,j)) > kpThresh) then
-!                  isMatch = 0
-!                  exit
-!               endif
-!            enddo
-!
-!            if (isMatch == 1) then
-!write (53,*) "foldedKP=",foldedKPoint(:)
-!write (53,*) "abcMeshKP=",abcMeshKPoints(:,j)
-!               call saveKPoint(j)
-!write (53,*) "Matched #3"
-!               cycle
-!            endif
          endif
       enddo
    end subroutine compareKPoints

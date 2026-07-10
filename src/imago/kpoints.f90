@@ -856,6 +856,12 @@ subroutine initializeKPointMesh(applySymmetry)
    real (kind=double) :: kpThresh
    real (kind=double) :: weightSum
    real (kind=double) :: initWeight
+   real (kind=double) :: coordDiff
+         ! Along one axis, the fractional-coordinate difference
+         !   between a rotated kpoint and a candidate mesh point.
+         !   Reduced modulo a reciprocal lattice vector (i.e.
+         !   modulo 1) for the periodic match below.  Distinct
+         !   from abcDelta, which is the mesh step size.
    real (kind=double), dimension(3) :: abcDelta
    real (kind=double), dimension(3) :: foldedKPoint
    real (kind=double), allocatable, dimension(:,:) :: &
@@ -1001,11 +1007,20 @@ subroutine initializeKPointMesh(applySymmetry)
          do j = i + 1, numMeshKPoints
             if (kPointTracker(j) /= j) cycle
 
-            ! Check if the difference is negligible along all three axes.
+            ! Two kpoints coincide when their fractional difference
+            !   is integral -- they then differ by a reciprocal
+            !   lattice vector and are the same physical point.
+            !   Testing (coordDiff - anint(coordDiff)) is basis-
+            !   independent and catches wrapped coincidences that a
+            !   raw difference misses for non-orthogonal cells,
+            !   where a rotated point routinely leaves the cell
+            !   (DESIGN 3.10 / PSEUDOCODE 4c.5).  For orthogonal
+            !   cells no image escapes, so this reduces to the raw
+            !   comparison and changes nothing.
             isMatch = 1
             do k = 1, 3
-               if (abs(foldedKPoint(k) &
-                     & - abcMeshKPoints(k,j)) &
+               coordDiff = foldedKPoint(k) - abcMeshKPoints(k,j)
+               if (abs(coordDiff - anint(coordDiff)) &
                      & > kpThresh) then
                   isMatch = 0
                   exit
