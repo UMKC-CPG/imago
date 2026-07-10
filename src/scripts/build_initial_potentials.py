@@ -1183,12 +1183,26 @@ def pick_converged_unit(flight: Flight, reference_id: str,
     #   unit's staged structure.
     cell_atom_count = guidance_harvest.load_structure(
         completed[0].structure).num_atoms
+
+    # Collapse duplicate-mesh rungs, then the two-sided test, so the
+    #   potential harvest and the guidance harvest cannot pick
+    #   different rungs for the same solid (DESIGN 7.8 step 3c;
+    #   PSEUDOCODE 11.4).  meshes[i] is the resolved kpoint_mesh
+    #   (None -> the guard is inert).  kept maps a collapsed index
+    #   back to its completed-unit position.
+    densities = [
+        guidance_harvest.swept_value_of(unit, "kpt-density")
+        for unit in completed]
     energies = [result["total_energy"] for result in results]
+    meshes = [result.get("kpoint_mesh") for result in results]
+    _, collapsed_energies, kept = \
+        guidance_harvest.collapse_by_mesh(densities, energies, meshes)
     index = guidance_harvest.pick_converged(
-        energies, cell_atom_count, metric_threshold)
+        collapsed_energies, cell_atom_count, metric_threshold)
     if index is None:
         return None
-    return completed[index], results[index]
+    chosen = kept[index]
+    return completed[chosen], results[chosen]
 
 
 def _parse_scfv_type_block(path: str, type_number: int

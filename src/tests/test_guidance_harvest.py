@@ -194,6 +194,77 @@ def test_pick_converged_two_sided_and_no_endpoints():
 
 
 # --------------------------------------------------------------
+#  collapse_by_mesh -- the duplicate-rung guard (DESIGN 7.8 3c)
+# --------------------------------------------------------------
+
+def test_collapse_by_mesh_merges_contiguous_duplicates():
+    """Two rungs resolving to the same mesh collapse to one --
+    the lowest-density member -- and kept maps the survivor back
+    to its original index."""
+    densities = [100, 150, 200, 250]
+    energies = [-10.0, -10.5, -10.5, -10.7]
+    meshes = [[2, 2, 2], [3, 3, 3], [3, 3, 3], [4, 4, 4]]
+    dens, ergs, kept = gh.collapse_by_mesh(
+        densities, energies, meshes)
+    assert dens == [100, 150, 250]      # 200 (dup of 150) dropped
+    assert ergs == [-10.0, -10.5, -10.7]
+    assert kept == [0, 1, 3]            # survivors' original idx
+
+
+def test_collapse_by_mesh_none_is_inert():
+    """If any mesh is None (older result.toml / pre-emit binary)
+    the guard cannot act: the grid returns unchanged with
+    identity indices, so behavior matches the pre-guard code."""
+    densities = [100, 150, 200]
+    energies = [-10.0, -10.5, -10.5]
+    meshes = [[2, 2, 2], None, [3, 3, 3]]
+    dens, ergs, kept = gh.collapse_by_mesh(
+        densities, energies, meshes)
+    assert dens == densities
+    assert ergs == energies
+    assert kept == [0, 1, 2]
+
+
+def test_collapse_by_mesh_energy_mismatch_raises():
+    """Equal mesh MUST give equal energy; a disagreement means the
+    runs were not identical and is surfaced, not averaged."""
+    with pytest.raises(ValueError, match="same mesh"):
+        gh.collapse_by_mesh(
+            [100, 150], [-10.0, -10.4],
+            [[3, 3, 3], [3, 3, 3]])
+
+
+def test_guard_corrects_duplicate_mesh_false_plateau():
+    """The si_ia-3 seed failure, with its real ladder (16-atom
+    cell).  Densities 150 and 200 resolved to the SAME mesh
+    [2,3,3], so their energies are bit-identical and the raw
+    ladder carries a zero delta at 200.  Without the guard the
+    two-sided test accepts 200 on that manufactured zero; with
+    the guard, 200 is merged into 150 and the test lands on 250 --
+    a genuinely two-sided-flat point on distinct meshes (DESIGN
+    7.8 step 3c)."""
+    densities = [25, 50, 100, 150, 200, 250, 300, 400]
+    energies = [-62.0875583, -62.08399468, -62.08286333,
+                -62.07818894, -62.07818894, -62.0781121,
+                -62.07804731, -62.07761701]
+    meshes = [[1, 2, 1], [1, 2, 2], [3, 3, 1], [2, 3, 3],
+              [2, 3, 3], [4, 2, 3], [4, 4, 2], [3, 4, 4]]
+    threshold = 5e-4                            # 0.5 meV/atom
+
+    # Raw: the duplicate zero at 200 is read as convergence.
+    raw = gh.pick_converged(energies, 16, threshold)
+    assert densities[raw] == 200                # the false accept
+
+    # Guarded: 200 is merged into 150; the survivor at 250 is
+    #   flat on both sides over genuinely distinct meshes.
+    dens, ergs, kept = gh.collapse_by_mesh(
+        densities, energies, meshes)
+    assert 200 not in dens                      # duplicate removed
+    guarded = gh.pick_converged(ergs, 16, threshold)
+    assert dens[guarded] == 250                 # corrected point
+
+
+# --------------------------------------------------------------
 #  Converged harvest -- the entry's fields
 # --------------------------------------------------------------
 

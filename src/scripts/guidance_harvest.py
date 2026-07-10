@@ -199,6 +199,69 @@ def pick_converged(energies, cell_atom_count, threshold):
     return None
 
 
+# Two runs of the same resolved mesh are the same calculation and
+#   must give the same total energy; ENERGY_MATCH_EPS is the gap
+#   below which they count as equal.  It is tight (near float
+#   noise, in hartree): a single-threaded imago run is
+#   deterministic, so genuine duplicates agree to the last digits
+#   and a wider gap means the runs were not in fact identical.
+ENERGY_MATCH_EPS = 1e-9
+
+
+def collapse_by_mesh(kpoint_densities, energies, meshes):
+    """Reduce a density-sorted grid to one rung per distinct
+    resolved mesh, keeping the lowest-density member (DESIGN 7.8
+    step 3c guard; PSEUDOCODE 15.7).
+
+    The three inputs are parallel arrays ordered by ascending
+    requested density; ``meshes[i]`` is grid point i's resolved
+    ``kpoint_mesh`` (the axial counts, DESIGN 6.1.2), or ``None``.
+    Returns ``(collapsed_densities, collapsed_energies, kept)``,
+    where ``kept[j]`` is the ORIGINAL index of the j-th surviving
+    rung, so a caller can map a collapsed index back to the run it
+    names.
+
+    Two rungs that resolved to the same mesh are one calculation
+    run twice; their energy delta is exactly zero, which the
+    two-sided flatness test would misread as convergence
+    (DESIGN 3.11).  Collapsing removes that manufactured zero
+    before the test runs.
+
+    If any mesh is ``None`` -- an older result.toml, or an imago
+    binary that does not yet emit the mesh -- the guard cannot act
+    and returns the grid unchanged with identity indices, so it
+    stays inert until result.toml carries the mesh (DESIGN 6.1.2 /
+    3.11)."""
+
+    if any(mesh is None for mesh in meshes):
+        return (kpoint_densities, energies,
+                list(range(len(meshes))))
+
+    kept = []
+    for index in range(len(meshes)):
+        # Same mesh as the last surviving rung?  Then this rung is
+        #   that calculation run again (the density-to-mesh map is
+        #   monotone in density, DESIGN 3.7, so equal meshes are
+        #   contiguous).  An equal mesh MUST give an equal energy;
+        #   a mismatch means the runs were not identical, and is
+        #   surfaced rather than averaged away.
+        if kept and meshes[index] == meshes[kept[-1]]:
+            if abs(energies[index]
+                   - energies[kept[-1]]) > ENERGY_MATCH_EPS:
+                raise ValueError(
+                    "k-density rungs {0} and {1} resolved to the "
+                    "same mesh {2} but disagree in total energy "
+                    "-- not the same calculation".format(
+                        kpoint_densities[kept[-1]],
+                        kpoint_densities[index], meshes[index]))
+            continue
+        kept.append(index)
+
+    return ([kpoint_densities[i] for i in kept],
+            [energies[i] for i in kept],
+            kept)
+
+
 # ==============================================================
 #  Side-channel marker for a non-converged sweep (DESIGN 7.8 3d)
 # ==============================================================
@@ -268,17 +331,26 @@ def _require_field(result_toml: dict, field: str, unit_id: str):
     return result_toml[field]
 
 
-def build_entry(workspace_root, grid, kpds, energies,
+def build_entry(workspace_root, grid, kpoint_densities, energies,
                 result_tomls, idx, prediction, dataspace,
-                structure, kpoint_threshold):
+                structure, kpoint_threshold,
+                collapsed_densities, collapsed_energies):
     """Assemble the rich :class:`GuidanceEntry` for one converged
     structure sweep (DESIGN 7.8 step 3f; PSEUDOCODE 15.7 step g).
 
-    ``grid``/``kpds``/``energies``/``result_tomls`` are the
+    ``grid``/``kpoint_densities``/``energies``/``result_tomls`` are the
     per-grid-point units, swept k-densities, total energies, and
     parsed ``result.toml`` dicts (all parallel, sorted by
     k-density); ``idx`` is the converged index chosen by
-    :func:`pick_converged`.
+    :func:`pick_converged`, an index into these original arrays.
+
+    ``collapsed_densities``/``collapsed_energies`` are the same
+    ladder after the duplicate-mesh guard (:func:`collapse_by_mesh`)
+    merged rungs that resolved to one mesh.  They are what the
+    entry's verification grid stores, so the curator's
+    ``auto_promote_ok`` re-judges flatness on genuinely distinct
+    calculations and never re-encounters the duplicate-mesh zero
+    the harvest already removed (DESIGN 7.8 step 3f).
     ``prediction`` is this structure's ``[flight.predictions.<id>]``
     dict -- the SOLE source of both ``system_type`` and the
     (basis, functional, kpoint_integration) sub-model (DESIGN 6.2.9
@@ -295,7 +367,7 @@ def build_entry(workspace_root, grid, kpds, energies,
     :func:`save_entry` fills it with the deterministic slug."""
 
     chosen_result = result_tomls[idx]
-    chosen_kpd = kpds[idx]
+    chosen_kpoint_density = kpoint_densities[idx]
     # The SCF threshold is a per-run fact from result.toml, recorded
     #   in the entry's context; it is SEPARATE from the k-point
     #   flatness metric_threshold (kpoint_threshold, per atom in eV).
@@ -329,7 +401,7 @@ def build_entry(workspace_root, grid, kpds, energies,
         spin_polarization=0.0,
         total_magnetization=chosen_result.get(
             "total_magnetization", 0.0),
-        kpoint_density=chosen_kpd)
+        kpoint_density=chosen_kpoint_density)
 
     # The sub-model is read from THIS structure's record -- never
     #   from sweep.fixed_axes (now empty), so a combined
@@ -345,11 +417,14 @@ def build_entry(workspace_root, grid, kpds, energies,
             structure.real_cell_volume * _ANGSTROM3_TO_BOHR3))
 
     verification = Verification(
-        grid_values=tuple(kpds),
+        # The COLLAPSED distinct-mesh grid (step d), not the raw
+        #   ladder, so the stored flatness evidence is free of the
+        #   duplicate-mesh zero (DESIGN 7.8 step 3f).
+        grid_values=tuple(collapsed_densities),
         # grid_energies are RAW total-cell hartree (Option B);
         #   consumers (auto_promote_ok) normalize per atom.
-        grid_energies=tuple(energies),
-        converged_at=chosen_kpd,
+        grid_energies=tuple(collapsed_energies),
+        converged_at=chosen_kpoint_density,
         metric="total_energy",
         metric_threshold=kpoint_threshold,
         predictor_confidence=prediction["confidence"],
@@ -454,13 +529,18 @@ def harvest_flight(workspace_root, db_root, dataspace):
         # a. Sort the sub-grid by swept k-density.
         grid = sorted(units, key=lambda u: swept_value_of(u, axis))
 
-        # b. Parse each run's result.toml for the energy and the
-        #    measured quantities.
-        kpds, energies, result_tomls = [], [], []
+        # b. Parse each run's result.toml for the energy, the
+        #    measured quantities, and the resolved mesh.
+        #    ``meshes[i]`` feeds the duplicate-mesh guard in step
+        #    (d); it is None when result.toml carries no
+        #    kpoint_mesh, which the guard treats as "cannot
+        #    collapse" (collapse_by_mesh), keeping it inert.
+        kpoint_densities, energies, meshes, result_tomls = [], [], [], []
         for unit in grid:
             result_toml = _read_result_toml(workspace_root, unit)
-            kpds.append(swept_value_of(unit, axis))
+            kpoint_densities.append(swept_value_of(unit, axis))
             energies.append(result_toml["total_energy"])
+            meshes.append(result_toml.get("kpoint_mesh"))
             result_tomls.append(result_toml)
 
         # c. A single-point grid harvests deliverables but stages NO
@@ -490,22 +570,43 @@ def harvest_flight(workspace_root, db_root, dataspace):
                 "flatness tolerance the producer resolves and stamps "
                 "on the record, DESIGN 7.8)")
         structure = load_structure(grid[0].structure)
-        idx = pick_converged(
-            energies, structure.num_atoms, kpoint_threshold)
 
-        # e. Energy still moving at the top of the grid: tag the
-        #    flight and skip -- a non-converged sweep earns no entry.
-        if idx is None:
+        # Collapse duplicate-mesh rungs, then pick the converged
+        #   grid point on the distinct-mesh grid (DESIGN 7.8 step
+        #   3c).  Two rungs that resolved to the same mesh are one
+        #   calculation run twice; their zero energy delta would
+        #   fool the two-sided test, so they are merged first.
+        #   ``kept[chosen]`` maps the collapsed index back to its
+        #   original grid position.
+        collapsed_densities, collapsed_energies, kept = \
+            collapse_by_mesh(kpoint_densities, energies, meshes)
+        chosen = pick_converged(
+            collapsed_energies, structure.num_atoms,
+            kpoint_threshold)
+
+        # e. No flat interior point -- energy still moving at the
+        #    top of the range, or the grid collapsed below the
+        #    three distinct meshes the interior test needs.  Tag
+        #    the flight and skip: a non-converged sweep earns no
+        #    entry.
+        if chosen is None:
             tag_prediction_mismatch(workspace_root, unit_id)
             summaries.append(
-                unit_id + ": energy still moving at top of grid "
-                "-- skipped (tagged prediction_mismatch)")
+                unit_id + ": no converged point (energy still "
+                "moving, or too few distinct meshes) -- skipped "
+                "(tagged prediction_mismatch)")
             continue
+        idx = kept[chosen]
 
-        # f/g. Build the rich entry and stage it.
+        # f/g. Build the rich entry and stage it.  The verification
+        #   grid stored on the entry is the COLLAPSED distinct-mesh
+        #   grid, so the curator's auto_promote_ok re-judges
+        #   flatness on the same distinct calculations (7.8 3f).
         entry = build_entry(
-            workspace_root, grid, kpds, energies, result_tomls,
-            idx, prediction, dataspace, structure, kpoint_threshold)
+            workspace_root, grid, kpoint_densities, energies,
+            result_tomls, idx, prediction, dataspace, structure,
+            kpoint_threshold, collapsed_densities,
+            collapsed_energies)
         path = save_entry(entry, db_root)
         summaries.append(unit_id + ": staged " + path)
 
