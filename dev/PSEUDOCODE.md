@@ -1407,6 +1407,244 @@ mesh and emits neither, so imago.py records both as absent
 
 ---
 
+## 4e. Adaptive Mesh Climb (DESIGN 3.12)
+
+The convergence search, in mesh space.  It reuses the mesh
+selection of 4c.2 as its rung primitive and replaces the fixed
+verify grid the producer built for predict-then-verify (11.4 /
+7.7).  The producer predicts and records in density, but
+searches by climbing meshes: each rung is a distinct symmetry-
+compatible mesh, and the climb stops when the energy is flat.
+Two dispatch modes, gated by the prediction's confidence, share
+one rung rule and one stop test.
+
+Everything below is producer-side (Python).  The mesh primitives
+`selectAxialCounts` and `spacingSpread` are the 4c.2 functions,
+re-expressed here on an explicit counts vector rather than the
+imago module state, since the producer reasons about meshes for
+many materials at once.  `recipMag`, `recipCellVolume`, and the
+axis `classes` for a material are computed once from its cell
+(4c.1) and carried in its `config`.
+
+### 4e.1 Rung mechanics
+
+```
+function climbOneRung(counts, classes, recipMag):
+    # The next distinct mesh up the climb: one step of the 4c.2
+    # floor loop -- increment the axis class that most evens the
+    # three inter-point spacings (DESIGN 3.12.2).
+    bestClass = None
+    bestSpread = +infinity
+    for c in distinct(classes):
+        trial = bump(counts, classes, c, +1)
+        s = spacingSpread(trial, recipMag)          # 4c.2
+        if s < bestSpread:
+            bestSpread = s
+            bestClass = c
+    return bump(counts, classes, bestClass, +1)
+
+function descendOneRung(counts, classes, recipMag):
+    # The previous distinct mesh: the unique lower mesh that
+    # climbOneRung maps back to `counts` (DESIGN 3.12.4).  Returns
+    # `counts` unchanged when it is already minimal for the cell.
+    for c in distinct(classes):
+        if any axis of class c in `counts` equals 1:
+            continue                       # cannot go below 1
+        trial = bump(counts, classes, c, -1)
+        if climbOneRung(trial, classes, recipMag) == counts:
+            return trial
+    return counts
+
+function bump(counts, classes, c, step):
+    # Add `step` to every axis whose class is c (keeps a class
+    # equal, so the mesh stays symmetry-compatible, DESIGN 3.8).
+    return [n + step if classes[i] == c else n
+            for i, n in enumerate(counts)]
+```
+
+### 4e.2 The stop test and the ceiling
+
+```
+function pick_converged_climb(rungs, cell_atom_count, threshold,
+                              flat_needed):
+    # rungs: the distinct meshes run so far, sorted ascending, each
+    # a {mesh, energy}.  Return the index of the converged rung, or
+    # None to keep climbing.  A rung converges when its per-atom
+    # energy is within `threshold` of BOTH neighbours (the 7.8 step
+    # 3c two-sided test), and that flatness PERSISTS over
+    # `flat_needed` consecutive interior rungs (DESIGN 3.12.3):
+    # flat_needed is 1 for a confident search, 2 for cold/bootstrap
+    # (Q1).  With flat_needed = 1 this is exactly pick_converged.
+    e = [per_atom_ev(r.energy, cell_atom_count) for r in rungs]
+
+    def two_sided_flat(j):
+        return (abs(e[j] - e[j - 1]) < threshold and
+                abs(e[j] - e[j + 1]) < threshold)
+
+    for i in range(1, len(e) - 1):
+        top = i + flat_needed - 1          # last interior to check
+        if top > len(e) - 2:               # not enough rungs above
+            break                          #   to confirm i yet
+        if all(two_sided_flat(j) for j in range(i, top + 1)):
+            return i
+    return None
+
+
+function at_ceiling(mesh, max_count):
+    # The fixed per-axis backstop (DESIGN 3.12.3).  A cost ceiling
+    # from the resource dataspace (16) layers on later; the climb
+    # stops at whichever bites first.
+    return max(mesh) >= max_count
+```
+
+### 4e.3 One material's next action
+
+```
+function climbAction(rungs, config):
+    # Decide a material's next step from its accumulated rungs.
+    # RUN(mesh) -> run one more mesh; CONVERGED(index) -> done, that
+    # rung; CEILING -> stop, non-converged (DESIGN 3.12.3/3.12.5).
+    idx = pick_converged_climb(
+        rungs, config.cell_atom_count, config.threshold,
+        config.flat_needed)
+    if idx is not None:
+        return CONVERGED(idx)
+    if at_ceiling(rungs[-1].mesh, config.max_count):
+        return CEILING
+    return RUN(climbOneRung(rungs[-1].mesh, config.classes,
+                            config.recipMag))
+```
+
+### 4e.4 Seeding, and the two dispatch modes
+
+```
+function initial_meshes(prediction, config):
+    # The mesh(es) to run in the first round (DESIGN 3.12.4/3.12.5).
+    # The predicted density seeds a mesh via 4c.2; the mode decides
+    # whether the first round is a parallel grid or a single rung.
+    seed = selectAxialCounts(prediction.density, config.recipMag,
+                             config.recipCellVolume, config.classes)
+
+    if config.mode == PARALLEL_GRID:        # confident (Q3)
+        # The seed plus grid_width rungs on each side, all laid
+        # down in the first round and judged as one grid.
+        meshes = [seed]
+        lo = seed
+        hi = seed
+        repeat config.grid_width times:
+            lo = descendOneRung(lo, config.classes, config.recipMag)
+            hi = climbOneRung(hi, config.classes, config.recipMag)
+            meshes = [lo] + meshes + [hi]
+        return distinct(meshes)
+
+    else:                                    # climb (cold/moderate)
+        # Begin below the prediction so the seed acquires a lower
+        # neighbour, then climb upward.  start_offset grows as
+        # confidence falls (a weaker prediction starts lower).
+        start = seed
+        repeat config.start_offset times:
+            start = descendOneRung(start, config.classes,
+                                   config.recipMag)
+        return [start]
+```
+
+`config.mode`, `config.flat_needed`, `config.grid_width`, and
+`config.start_offset` are all set from `prediction.confidence`
+by a small policy the implementation tunes (DESIGN 3.12.6): high
+confidence selects `PARALLEL_GRID`, `flat_needed = 1`, a narrow
+grid; low or under-trained confidence selects the `CLIMB` mode,
+`flat_needed = 2`, and a lower start.  An under-trained
+prediction (7.6) starts the climb from the wide-grid floor
+rather than a predicted seed (7.9).
+
+### 4e.5 Round-based orchestration across materials
+
+```
+function converge_by_climb(materials, configs, predictions,
+                           dispatch_round):
+    # Drive every material through the round-based climb to a
+    # verdict -- converged, or ceiling-stopped (non-converged).
+    # Serial within a material, parallel across (DESIGN 3.12.5).
+    # dispatch_round(mesh_lists) runs the given meshes -- one or
+    # more per material -- in a single parallel round, and returns
+    # {material: [{mesh, energy}, ...]}.  Convergence-sweep units
+    # are built and dispatched exactly as any other (13), one calc
+    # per mesh; only the CHOICE of meshes is adaptive.
+
+    # Round 0: every material's initial mesh(es) (a grid, or one).
+    first = { m: initial_meshes(predictions[m], configs[m])
+              for m in materials }
+    results = dispatch_round(first)
+    rungs = { m: sort_by_mesh(results[m]) for m in materials }
+
+    outcomes = {}
+    active = list(materials)
+    while active is not empty:
+        next_mesh = {}
+        for m in list(active):
+            action = climbAction(rungs[m], configs[m])
+            if action is CONVERGED:
+                outcomes[m] = rungs[m][action.index]
+                active.remove(m)
+            elif action is CEILING:
+                outcomes[m] = NON_CONVERGED
+                tag_prediction_mismatch(workspace_root, m)   # 7.8 3d
+                active.remove(m)
+            else:                            # RUN(mesh)
+                next_mesh[m] = [action.mesh]
+        if next_mesh is empty:
+            break
+        # One parallel round: each still-active material's next rung.
+        more = dispatch_round(next_mesh)
+        for m in more:
+            rungs[m] = merge_distinct(rungs[m], more[m])
+
+    return outcomes, rungs
+```
+
+The loop preserves cluster throughput -- every active material
+advances one rung per round, all dispatched together -- while
+each material stays adaptive.  A material leaves `active` the
+moment it converges or hits its ceiling, so late-converging
+materials do not hold back the ones already done.  The dispatch
+core (13) is unchanged and domain-ignorant: it runs the meshes
+handed to it in a round and reports energies; the choice of the
+next mesh lives entirely here.
+
+### 4e.6 Recording the converged rung
+
+```
+function record_converged(m, rung, rungs_m, config, prediction):
+    # Build the harvest inputs for a converged material (feeds
+    # build_entry, 15.7).  The dataspace key is a DENSITY; the mesh
+    # is stored exact alongside it (DESIGN 3.12.4 / Q4).  The
+    # density a mesh represents is its full-mesh volume density,
+    # product(mesh) / recipCellVolume -- self-consistent with 4c.2,
+    # so a future prediction of this density reproduces this mesh
+    # in this cell.
+    converged_density = product(rung.mesh) / config.recipCellVolume
+    return {
+        converged_kpoint_density = converged_density,
+        converged_mesh           = rung.mesh,       # 7.2 (Q4)
+        # The stored flatness trace is the climb's distinct-mesh
+        # grid, so auto_promote_ok (15.7 / 7.8) re-judges on the
+        # same rungs the climb did.
+        grid_values   = [product(r.mesh) / config.recipCellVolume
+                         for r in rungs_m],
+        grid_energies = [r.energy for r in rungs_m],
+        # gap / magnetization / sub-model / provenance exactly as
+        # build_entry gathers them for a converged sweep (15.7).
+    }
+```
+
+`build_entry` (15.7) gains the `converged_mesh` field on the
+verification block; the harvest reads it from the chosen rung
+rather than deriving it, and the emitter (15.4) writes it when
+present.  Everything else in the guidance schema and predictor
+is unchanged (DESIGN 3.12.6).
+
+---
+
 ## 5. Save fullKPToIBZOpMap (DESIGN 2.4)
 
 This augments the existing IBZ folding loop in

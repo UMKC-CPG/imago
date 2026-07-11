@@ -1632,7 +1632,240 @@ making its rungs trustworthy. It is deliberately less invasive
 than re-indexing the ladder by resolved mesh: the density knob
 and the `makeinput.py` pipeline of 3.2 are preserved, and only
 the density-to-mesh map (3.7) and the duplicate guard (7.8)
-change.
+change. The guard stays valid, but for the convergence *search*
+itself, 3.12 revisits this choice: once 3.7 makes the mesh coarse
+for high-symmetry cells, a fixed density grid cannot resolve
+convergence, and the search climbs meshes directly.
+
+### 3.12 Adaptive Mesh Climb for Convergence
+
+Section 3.11 keeps the convergence search on a *fixed* grid of
+requested densities. That works when the density-to-mesh map is
+fine-grained, but 3.7 makes the map coarse for a high-symmetry
+cell: a cubic group forces `m x m x m`, so a wide spread of
+densities collapses onto a handful of meshes, and a fixed grid
+cannot place enough *distinct* rungs to see the energy flatten.
+A cubic cell whose grid tops out at `[5,5,5]` may still be moving
+by more than a meV per atom there, with no finer mesh available
+below the grid ceiling. This section replaces the fixed grid
+with an adaptive climb through meshes, and in doing so answers
+the ladder-axis question 3.11 set aside.
+
+#### 3.12.1 Density is the currency, the mesh is the step
+
+Two roles were conflated in the density ladder, and separating
+them resolves the tension:
+
+- **Density is the currency.** It is cell-size-independent and
+  therefore comparable across materials (3.1), which is exactly
+  what the historical guidance dataspace needs as its key: the
+  predictor stores and returns a `kpoint_density` (7.2, 7.6), so
+  a converged density learned from one material can seed another.
+- **The mesh is the step.** It is what imago actually integrates
+  over, it is discrete, and for a high-symmetry cell only a few
+  exist. It is the natural unit for *searching* for convergence,
+  because each distinct mesh is a genuinely different calculation
+  and consecutive meshes differ by the least the symmetry allows.
+
+So the producer **predicts and records in density, but searches
+in mesh space**: a predicted density seeds a starting mesh, the
+search climbs meshes until the energy is flat, and the converged
+result is recorded back as the density that reaches that mesh.
+Each half uses the unit it is good at.
+
+#### 3.12.2 The rung rule
+
+The climb reuses machinery 3.7 already defines. Selecting axial
+counts for a density is a loop that repeatedly increments the
+axis class whose bump most evens the three reciprocal-axis
+spacings (`spacingSpread`), stopping when it reaches the density
+floor. A convergence climb is the *same* increment with a
+different stop condition -- keep going until the energy is flat
+rather than until a density is met. One rung to the next:
+
+> Increment the axis class that minimizes `spacingSpread` (3.7).
+
+Because the class structure comes from the point group (3.8),
+this is one rule for every crystal system, with no per-material
+table. The sequences it produces (real reciprocal lattices):
+
+```
+cubic  Si:  [2,2,2] -> [3,3,3] -> [4,4,4] -> [5,5,5] -> [6,6,6]
+hex  graphite:  [2,2,1] -> [3,3,1] -> [4,4,1] -> [4,4,2] -> [5,5,2]
+ortho  Si:  [2,2,2] -> [2,2,3] -> [2,3,3] -> [2,3,4] -> [2,4,4]
+```
+
+A cubic cell moves in lockstep -- one degree of freedom, so the
+steps are coarse, but each is the *finest* mesh the symmetry
+permits (nothing exists between `[4,4,4]` and `[5,5,5]`). A
+hexagonal cell climbs its in-plane pair several steps for each
+principal-axis bump, holding the spacing even while the counts
+stay anisotropic (`na == nb` is preserved because they are one
+class). A triclinic or orthorhombic cell moves one axis at a
+time -- the finest granularity, and the best convergence
+resolution. Every rung is symmetry-compatible and distinct from
+the last by construction, so the climb produces no duplicate
+meshes and the duplicate guard of 3.11 becomes a safety net
+rather than the mechanism.
+
+The shift rides along for free: each rung's shift is chosen by
+`selectShift` (3.9) from that rung's counts, so it tracks the
+count parity as the climb proceeds (a cubic climb alternates the
+body-half shift on even meshes with Gamma-centered on odd).
+
+#### 3.12.3 The stop condition and the ceiling
+
+A rung is the converged one when its per-atom energy is within
+the k-point threshold of BOTH its neighbours on the climb -- the
+same two-sided test as 7.8 step 3c, now applied over consecutive
+*distinct* meshes. The climb therefore needs at least the
+candidate rung plus one below and one above before it can
+declare that rung converged, and it continues upward until such
+an interior rung appears. A cubic cell still moving at `[5,5,5]`
+simply climbs to `[6,6,6]`, `[7,7,7]`, and beyond until the
+two-sided test is met -- the adaptive stop is what rescues the
+case a fixed density ceiling could not.
+
+How many flat interior rungs the climb requires **scales with
+the prediction's confidence**. A confident prediction (7.6) is
+an independent statement of where convergence lies, so a single
+two-sided-flat rung landing near the predicted mesh is
+corroboration from two directions and the climb stops there. A
+cold or bootstrap search has no such corroboration and is
+establishing ground truth the seed database will be trusted on,
+so it requires the flatness to *persist* -- a second consecutive
+flat interior rung -- before stopping. The extra rung is cheap
+insurance against a coincidental plateau, which the mesh-space
+climb already makes rare (every rung is a distinct mesh, so the
+duplicate-mesh zeros of 3.11 cannot arise) but does not wholly
+exclude.
+
+Because a genuinely hard or ill-posed material could climb
+without ever flattening, the climb carries a **ceiling**, and
+two kinds compose. A fixed maximum per-axis count is the always-
+present hard backstop -- it prevents a runaway today and needs
+nothing else built. A cost ceiling drawn from the resource
+dataspace (8) is the operationally meaningful bound, since a
+count is a poor proxy for effort (a large cell at a modest mesh
+can dwarf a small cell at a fine one); it layers on once DESIGN
+8 predicts run cost. The climb stops at whichever bites first.
+A ceiling stop is reported as non-converged (7.8 step 3d / 7.9),
+exactly as a fixed grid that never flattened is today, and it
+carries the energy trace (`grid_energies`) so a curator can tell
+the two causes apart: a monotone, narrowing trace says raise the
+ceiling, while an oscillating one says the material needs
+smearing rather than a finer mesh (C117's near-metals are the
+archetype).
+
+#### 3.12.4 Seeding the climb from a prediction
+
+The guidance predictor (7.6) returns a `kpoint_density` for the
+new structure (or, when under-trained, signals the bootstrap
+path). `selectAxialCounts` (3.7) converts that density to a
+starting mesh on the ladder, and the climb begins a rung or more
+below it -- so the predicted rung has a lower neighbour and the
+climb only has to move upward to acquire its upper one. How far
+below to begin scales with confidence (below), so it is not a
+fixed offset. The effect of the dataspace is to shorten the
+climb, not to change its path:
+
+- **Cold** (under-trained, or a novel material): start low and
+  climb far. This is the bootstrap regime, where a wide search
+  is correct because nothing is known about where convergence
+  lies.
+- **Warm** (a populated dataspace): start near the answer and
+  confirm a flat interior in a rung or two. In the limit the
+  climb is just "run the predicted mesh and its neighbours,
+  confirm flat."
+
+`predictor_confidence` (7.6) is the natural dial for how much
+confirmation to demand, how far below the prediction to begin,
+and which dispatch mode to use (3.12.5) -- a confident
+prediction warrants a short, tight search; a weak one warrants a
+wider one. Whatever the search finds, the converged rung is
+recorded back as a density (7.8), so the dataspace stays keyed on
+the transferable currency and every converged material sharpens
+the next prediction. The density a converged mesh represents is
+its full-mesh volume density -- the product of its axial counts
+divided by the reciprocal cell volume -- which is self-consistent
+with 3.7, so a future prediction of that density reproduces that
+mesh in that cell. Its resolved mesh is recorded alongside the
+density (7.2), so the exact calculation is auditable -- a density
+round-trips through 3.7 only up to the rounding the map applies,
+whereas the mesh plus the cell is exact.
+
+#### 3.12.5 Orchestration
+
+A fixed grid is dispatched once and harvested after (6.2, 7.7);
+an adaptive climb is a control loop -- submit a rung, wait,
+judge, decide the next -- so the producer gains an outer loop
+around the dispatch layer rather than a single fan-out. This is
+exactly the shape Principle 12 reserves for client Python: the
+dependent, per-unit iteration lives in the producer, not in the
+dispatcher. The dispatch core stays domain-ignorant (Principles
+9 and 12): it runs whatever units it is handed and reports
+outcomes; the climb logic that reads energies and chooses the
+next mesh lives in the producer.
+
+The parallelism inverts cleanly. Within one material the rungs
+are serial -- rung N+1's mesh is not known until rung N's energy
+is judged -- but across materials the climbs are independent, so
+they run concurrently. The natural shape is round-based: each
+continuation round submits the next rung for every material still
+climbing -- at most one unit per material, all dispatched
+together -- waits for the round, judges each, and drops the
+materials that converged or hit the ceiling. (The confident
+mode's opening round is the one exception to the one-per-material
+bound: it lays down its whole small grid at once, below.) Cluster
+throughput is preserved -- many chains climb at once -- while
+each chain stays adaptive. This is a heavier interaction with the
+dispatch layer than the one-shot flight of 6.2, and the
+producer/dispatch wiring for it is elaborated where predict-then-
+verify is specified (7.7).
+
+The serial dependency is worth paying only when the search is
+genuinely uncertain, so `predictor_confidence` (7.6) gates two
+dispatch modes. A **confident** prediction has already narrowed
+convergence to a small mesh neighbourhood, so the producer
+dispatches a small *fixed* mesh grid -- the predicted rung and a
+rung or two on each side -- in a single parallel round, then
+judges it exactly as a climb round. This trades the climb's
+minimal calculation count for lower wall-clock latency, the
+better bargain when the prediction is trustworthy. The adaptive
+serial **climb** is reserved for the cold and moderate-confidence
+cases, where the search does not know in advance how far it must
+go. Both modes share the same rung rule (3.12.2), stop test
+(3.12.3), and harvest (7.8); they differ only in whether the
+rungs are laid down all at once or one at a time.
+
+#### 3.12.6 Relationship to the rest of the chain
+
+This section supersedes the *fixed verify grid* of predict-then-
+verify (7.7); the predictor (7.6) and the harvest (7.8) are
+unchanged, since they already speak in density and only ever
+needed a converged rung to record. The dataspace schema (7.2)
+gains one field -- the converged rung's resolved mesh, recorded
+in the verification block beside its density (3.12.4). The
+duplicate-rung guard (3.11 / 7.8) remains valid as a safety net.
+The mesh selection (3.7) and shift selection (3.9) are reused
+verbatim as the climb's rung and shift rules.
+
+The design choices are settled above; what remains is numeric
+tuning, best fixed by experiment on the seed set. These are
+empirically-justified knobs, so by Principle 11 they live in an
+auditable config -- the manifest `[harvest]` block (5.7), where
+`kpoint_convergence_threshold` (the metric threshold) already
+lives, or the site rc for the cost budget -- never as hardcoded
+script constants:
+
+- The `predictor_confidence` thresholds that gate one-versus-two
+  flat rungs (3.12.3) and the parallel-grid-versus-climb dispatch
+  mode (3.12.5).
+- The value of the fixed per-axis count ceiling, and the cost
+  budget once the resource dataspace (8) supplies one (3.12.3).
+- The width of the confident-mode fixed mesh grid -- how many
+  rungs to each side of the predicted one (3.12.5), and how far
+  below the prediction the climb mode begins (3.12.4).
 
 ---
 
@@ -8163,6 +8396,18 @@ the verification block sits at the entry level.
                                        satisfied.  Must
                                        equal
                                        `measured.kpoint_density`.
+  converged_mesh               ints    The resolved axial
+                                       counts [n_a,n_b,n_c] of
+                                       the converged rung (3.7
+                                       / 3.12.4), kept beside
+                                       converged_at so the
+                                       exact calculation is
+                                       auditable where a
+                                       density round-trips
+                                       only up to rounding.
+                                       Optional: absent on
+                                       curator-authored or
+                                       pre-mesh entries.
   metric                       string  Currently
                                        `"total_energy"`.
                                        Reserved:
@@ -8571,6 +8816,13 @@ class Verification:
                                           #   entry with no
                                           #   recorded sweep
     converged_at:           float
+    converged_mesh:         tuple[int, ...] | None
+    #                                      # resolved axial
+    #                                      #   counts of the
+    #                                      #   converged rung
+    #                                      #   (3.12.4); None on
+    #                                      #   pre-mesh or
+    #                                      #   curator entries
     metric:                 str            # "total_energy"
     metric_threshold:       float
     predictor_confidence:   float          # [0.0, 1.0]
@@ -9006,6 +9258,21 @@ to a concrete kaleidoscope flight.  The flight-builder
 helper that lives in `src/scripts/kaleidoscope/` (DESIGN
 6.2.8) is what calls into this design rung; the algorithm
 below is what it executes.
+
+**The verify search itself is specified in 3.12.**  Choosing
+the rungs and dispatching them is no longer a single fixed
+density grid: it is the adaptive mesh climb (3.12), which
+searches in mesh space and stops when the energy is flat.  A
+confident prediction instead dispatches a small *fixed mesh*
+grid around the predicted rung in one parallel round (3.12.5);
+a cold or under-trained prediction climbs from a low start.
+What stays in this subsection is the surrounding flow: computing
+the query signature, calling the predictor, selecting the sub-
+model, and attaching the per-structure `PredictionRecord` the
+harvest recovers later (7.8).  Where the algorithm below
+constructs a fixed density grid, read that as the density-grid
+special case the climb generalizes -- the predicted density is
+still what seeds the search, per 3.12.4.
 
 **Inputs:**
 

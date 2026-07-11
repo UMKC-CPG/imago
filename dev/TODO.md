@@ -2524,6 +2524,42 @@ imports its neighbours from `$IMAGO_BIN`).
   guidance predictor's sub-model and a database must not mix
   sub-models silently.  DESIGN 5.7 / 7.6; CURATION.
 
+- [ ] C118. Implement the adaptive mesh climb (DESIGN 3.12 /
+  PSEUDOCODE 4e).  The convergence search moves from a fixed
+  density grid to a climb through symmetry-compatible meshes,
+  seeded by the guidance prediction and stopped when the energy
+  is flat.  This is the fix for the 0/8 seed regression: a fixed
+  density ladder collapses onto too few distinct meshes for
+  high-symmetry cells (cubic Si tops out at [5,5,5] still moving
+  ~1.7 meV/atom), while the climb keeps going until flat.  Scope:
+    - Producer (`build_initial_potentials.py`): the round-based
+      climb loop (`converge_by_climb`, 4e.5) -- serial within a
+      material, parallel across -- replacing the one-shot verify
+      grid.  Rung mechanics (`climbOneRung` / `descendOneRung`,
+      4e.1) reuse `selectAxialCounts` / `spacingSpread` (4c.2);
+      the stop test with confidence-scaled persistence (4e.2) and
+      the ceiling; the two dispatch modes gated by confidence
+      (4e.4).
+    - Iterative dispatch: the producer drives kaleidoscope round
+      by round, reading energies between rounds (ARCH 9.7).  The
+      dispatch core stays dumb (Principle 12) -- each round is a
+      flat CalcUnit list; no dispatch-side change.
+    - Guidance schema: `Verification` gains `converged_mesh` (the
+      resolved axial counts); the reader (15.3), emitter (15.4),
+      and `build_entry` (15.7) carry it; the recorded density is
+      the converged mesh's full-mesh volume density (4e.6).
+    - Config, not constants (Principle 11): the ceiling, the
+      confidence thresholds, the grid width, the start offset,
+      and `flat_needed` live in the manifest characterization
+      block (like `metric_threshold`) or the site rc for the cost
+      budget -- never hardcoded (DESIGN 3.12.6).
+  The numeric values of those knobs are to be fixed by experiment
+  on the seed set (3.12.6), so a first pass can carry documented
+  provisional defaults in the config.  Presupposes the Stage 1-4
+  mesh rework (done).  After it lands, re-run the seed to close
+  C116 and unblock C117.  CODE; DESIGN 3.12; PSEUDOCODE 4e;
+  ARCH 9.7 / 10.
+
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 
 - [ ] C62. Implement the element-aware bispectrum per

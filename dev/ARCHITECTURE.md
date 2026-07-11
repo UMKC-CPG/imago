@@ -1889,6 +1889,26 @@ per-run CLI choices, the `Config` generator's home in
 kaleidoscope, and the uniform-slice deferral of right-sizing --
 and the code is C100 (done).
 
+The producer's interaction with kaleidoscope is not always a
+single fan-out.  The predict-then-verify convergence search
+(DESIGN 3.12) runs the k-point rungs as an adaptive climb: the
+producer dispatches one round of calculations -- at most one
+mesh per material for a climb, a small grid for a confident
+prediction -- reads the energies back, decides each material's
+next mesh, and dispatches the next round, until every material
+converges or hits a ceiling.  This makes the producer an
+*iterative* kaleidoscope client (many dispatch rounds) rather
+than a single-batch one.  It does not change the flight layer:
+each round is still a flat list of independent `CalcUnit`s, and
+the loop that reads energies and chooses the next mesh lives
+entirely in the producer's Python.  That is precisely the
+division Principle 12 draws -- dependent, per-unit iteration in
+client code, the dispatcher dumb -- so the climb needs no
+dispatch-side machinery, only the producer driving kaleidoscope
+round by round.  The verify step of the guidance dataspace
+(section 10) is correspondingly a confidence-gated grid-or-
+climb, not a single fixed grid.
+
 ### 9.8 Open architectural questions
 
 Most of the early questions are resolved and recorded
