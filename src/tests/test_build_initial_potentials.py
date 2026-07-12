@@ -59,6 +59,7 @@ from build_initial_potentials import (
 )
 import build_initial_potentials as bip
 import initial_potential_db as ipdb
+import mesh_climb
 from kaleidoscope import CalcUnit, Flight
 from kaleidoscope import cluster_config
 from kaleidoscope.builders.kpoint_convergence import PredictionRecord
@@ -2719,3 +2720,355 @@ def test_submit_honors_orchestrator_overrides(tmp_path, monkeypatch):
     # The keys the flag did not name still come from the site block.
     assert "#SBATCH --cpus-per-task=2" in captured["script"]
     assert "#SBATCH --time=24:00:00" in captured["script"]
+
+
+# ==================================================================
+#  The adaptive k-point mesh climb (PSEUDOCODE 4e.3 / 4e.5)
+#
+#  These drive climb_action and converge_by_climb with a SYNTHETIC
+#  dispatch_round -- a stand-in for the real mesh-dispatch adapter
+#  (still to be specified and built) that turns each requested mesh
+#  into a Rung by evaluating a per-material energy model.  Every
+#  material here is a cubic cell (one axis class, equal reciprocal
+#  magnitudes), so its climb is the lockstep [n,n,n] ladder and the
+#  hand-computed energies below are easy to follow.
+# ==================================================================
+
+# Cubic geometry: all three axes share one class, so counts move in
+#   lockstep and a density of D lands on the [round(D**(1/3))]^3 mesh.
+_CUBIC_CLASSES = [0, 0, 0]
+_CUBIC_RECIP_MAG = [1.0, 1.0, 1.0]
+
+
+def _cubic_config(mode, flat_needed, grid_width, start_offset,
+                  max_count):
+    """A cubic-cell ClimbConfig with a per-atom flatness threshold of
+    1.0 eV and one atom per cell, so a raw energy delta counts as
+    flat when it is below 1.0 / HARTREE hartree (DESIGN 7.8)."""
+    return bip.ClimbConfig(
+        classes=_CUBIC_CLASSES, recip_mag=_CUBIC_RECIP_MAG,
+        recip_cell_volume=1.0, mode=mode, flat_needed=flat_needed,
+        grid_width=grid_width, start_offset=start_offset,
+        cell_atom_count=1, threshold=1.0, max_count=max_count)
+
+
+def _converging_energy(mesh):
+    """A cubic energy model that keeps moving up to the [5,5,5] mesh
+    then goes flat: the [2..4] steps are electron-volts apart (never
+    flat), while every step from [5,5,5] up shifts a tenth of a
+    milli-hartree (~0.003 eV, always flat).  So the two-sided,
+    two-flat-rung climb converges at [6,6,6] -- the first rung whose
+    flatness is confirmed by a flat neighbour above it."""
+    n = mesh[0]
+    if n <= 2:
+        return 0.0
+    if n == 3:
+        return -1.0
+    if n == 4:
+        return -1.5
+    return -1.6 - 0.0001 * (n - 5)
+
+
+def _ceiling_energy(mesh):
+    """A cubic energy model that never goes flat: every rung drops a
+    full hartree (~27 eV) below the last, so the climb only ever
+    stops by reaching the per-axis ceiling (non-converged)."""
+    return -1.0 * mesh[0]
+
+
+def _flat_everywhere_energy(mesh):
+    """A cubic energy model that is flat at every rung (each step a
+    tenth of a milli-hartree), so a confident parallel grid finds a
+    flat interior point in its very first round."""
+    return -1.6 - 0.0001 * mesh[0]
+
+
+def _round_dispatcher(energy_of, counter=None):
+    """Build a synthetic ``dispatch_round``.  It runs each requested
+    mesh through the per-material ``energy_of[material]`` model and
+    returns ``{material: [Rung, ...]}``; an optional ``counter``
+    list gets one entry appended per round so a test can count how
+    many rounds the climb took."""
+    def dispatch_round(mesh_lists):
+        if counter is not None:
+            counter.append(len(mesh_lists))
+        return {
+            material: [bip.Rung(mesh, energy_of[material](mesh))
+                       for mesh in meshes]
+            for material, meshes in mesh_lists.items()}
+    return dispatch_round
+
+
+# --------------------------------------------------------------
+#  climb_action -- one material's next step
+# --------------------------------------------------------------
+
+def test_climb_action_runs_next_rung_while_energy_moves():
+    """With too few rungs to judge and the top below the ceiling,
+    the verdict is RUN carrying the next lockstep mesh."""
+    config = _cubic_config(
+        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)
+    rungs = [bip.Rung([2, 2, 2], 0.0), bip.Rung([3, 3, 3], -1.0)]
+    action = bip.climb_action(rungs, config)
+    assert action.kind == bip._ACTION_RUN
+    assert action.mesh == [4, 4, 4]
+
+
+def test_climb_action_reports_ceiling_when_backstop_reached():
+    """A top rung at the per-axis backstop, still not flat, yields
+    the CEILING verdict."""
+    config = _cubic_config(
+        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=5)
+    rungs = [bip.Rung([n, n, n], _ceiling_energy([n, n, n]))
+             for n in (3, 4, 5)]
+    action = bip.climb_action(rungs, config)
+    assert action.kind == bip._ACTION_CEILING
+
+
+def test_climb_action_reports_converged_index():
+    """When the per-atom energy is flat across the interior, the
+    verdict is CONVERGED at the first flat rung's index."""
+    config = _cubic_config(
+        mesh_climb.CLIMB, flat_needed=1, grid_width=0,
+        start_offset=1, max_count=20)
+    rungs = [bip.Rung([n, n, n], _flat_everywhere_energy([n, n, n]))
+             for n in (4, 5, 6)]
+    action = bip.climb_action(rungs, config)
+    assert action.kind == bip._ACTION_CONVERGED
+    assert action.index == 1                 # the [5,5,5] interior
+
+
+# --------------------------------------------------------------
+#  _sort_by_mesh / _merge_distinct
+# --------------------------------------------------------------
+
+def test_sort_by_mesh_orders_by_point_count():
+    """Rungs come back ascending by full-mesh point count, whatever
+    order they arrived in."""
+    rungs = [bip.Rung([5, 5, 5], -1.0), bip.Rung([2, 2, 2], -3.0),
+             bip.Rung([4, 4, 4], -2.0)]
+    ordered = [rung.mesh for rung in bip._sort_by_mesh(rungs)]
+    assert ordered == [[2, 2, 2], [4, 4, 4], [5, 5, 5]]
+
+
+def test_merge_distinct_drops_a_repeated_mesh():
+    """Merging keeps the ascending ladder and drops an incoming rung
+    whose mesh is already present, so no zero-delta duplicate reaches
+    the stop test."""
+    existing = [bip.Rung([2, 2, 2], 0.0), bip.Rung([3, 3, 3], -1.0)]
+    incoming = [bip.Rung([3, 3, 3], -1.0), bip.Rung([4, 4, 4], -1.5)]
+    merged = [rung.mesh for rung in
+              bip._merge_distinct(existing, incoming)]
+    assert merged == [[2, 2, 2], [3, 3, 3], [4, 4, 4]]
+
+
+# --------------------------------------------------------------
+#  converge_by_climb -- the round-based loop
+# --------------------------------------------------------------
+
+def test_climb_converges_over_several_rounds():
+    """A cold single-rung climb starts one rung below the predicted
+    [3,3,3] seed and climbs the lockstep ladder until two flat rungs
+    persist, converging at [6,6,6] and recording the whole ladder."""
+    materials = ["si"]
+    configs = {"si": _cubic_config(
+        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)}
+    seed_densities = {"si": 27.0}            # seeds the [3,3,3] mesh
+    dispatch_round = _round_dispatcher({"si": _converging_energy})
+
+    outcomes, rungs = bip.converge_by_climb(
+        materials, configs, seed_densities, dispatch_round)
+
+    assert outcomes["si"].mesh == [6, 6, 6]
+    ladder = [rung.mesh for rung in rungs["si"]]
+    assert ladder == [[n, n, n] for n in range(2, 9)]
+
+
+def test_grid_mode_converges_in_the_first_round():
+    """A confident parallel grid lays [4,4,4], [5,5,5], [6,6,6] down
+    together and, finding a flat interior point, converges in a
+    single dispatch round."""
+    materials = ["si"]
+    configs = {"si": _cubic_config(
+        mesh_climb.PARALLEL_GRID, flat_needed=1, grid_width=1,
+        start_offset=0, max_count=20)}
+    seed_densities = {"si": 125.0}           # seeds the [5,5,5] mesh
+    counter = []
+    dispatch_round = _round_dispatcher(
+        {"si": _flat_everywhere_energy}, counter)
+
+    outcomes, _ = bip.converge_by_climb(
+        materials, configs, seed_densities, dispatch_round)
+
+    assert outcomes["si"].mesh == [5, 5, 5]
+    assert len(counter) == 1                 # round 0 only
+
+
+def test_climb_stops_at_ceiling_and_tags_non_converged():
+    """A climb whose energy never goes flat stops at the per-axis
+    ceiling, is reported NON_CONVERGED, and fires the mismatch
+    callback for that material."""
+    materials = ["metal"]
+    configs = {"metal": _cubic_config(
+        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=5)}
+    seed_densities = {"metal": 27.0}
+    dispatch_round = _round_dispatcher({"metal": _ceiling_energy})
+    flagged = []
+
+    outcomes, _ = bip.converge_by_climb(
+        materials, configs, seed_densities, dispatch_round,
+        on_non_converged=flagged.append)
+
+    assert outcomes["metal"] is bip.NON_CONVERGED
+    assert flagged == ["metal"]
+
+
+def test_materials_climb_independently_in_shared_rounds():
+    """Two materials climb together: one converges while the other
+    runs to its ceiling.  Each reaches its own verdict, and the
+    mismatch callback fires only for the non-converged one."""
+    materials = ["good", "bad"]
+    configs = {
+        "good": _cubic_config(
+            mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+            start_offset=1, max_count=20),
+        "bad": _cubic_config(
+            mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+            start_offset=1, max_count=5)}
+    seed_densities = {"good": 27.0, "bad": 27.0}
+    dispatch_round = _round_dispatcher(
+        {"good": _converging_energy, "bad": _ceiling_energy})
+    flagged = []
+
+    outcomes, _ = bip.converge_by_climb(
+        materials, configs, seed_densities, dispatch_round,
+        on_non_converged=flagged.append)
+
+    assert outcomes["good"].mesh == [6, 6, 6]
+    assert outcomes["bad"] is bip.NON_CONVERGED
+    assert flagged == ["bad"]
+
+
+# ==================================================================
+#  The mesh-dispatch round adapter (PSEUDOCODE 4e.7; DESIGN 7.7)
+# ==================================================================
+
+def _mesh_of_unit(unit):
+    """Read the axial-count mesh back out of a kpt-mesh unit's calc
+    tag (``("kpt-mesh-4-4-4",)`` -> ``[4, 4, 4]``)."""
+    token = unit.calc[0][len("kpt-mesh-"):]
+    return [int(part) for part in token.split("-")]
+
+
+def _mesh_reader(energy_by_mesh, resolved_by_mesh=None):
+    """A fake result reader: return each mesh unit's chosen energy
+    and, unless overridden, echo the requested mesh as the resolved
+    one."""
+    def read_fn(workspace, unit):
+        mesh = _mesh_of_unit(unit)
+        resolved = mesh
+        if resolved_by_mesh is not None:
+            resolved = resolved_by_mesh.get(tuple(mesh), mesh)
+        return {"total_energy": energy_by_mesh[tuple(mesh)],
+                "kpoint_mesh": resolved}
+    return read_fn
+
+
+def _make_round(energy_by_mesh, *, completed=None,
+                resolved_by_mesh=None):
+    """Build a make_dispatch_round with the toolchain seam mocked:
+    no-op prepare / dispatch, a caller-chosen completion predicate,
+    and a fake result reader."""
+    if completed is None:
+        completed = lambda workspace, unit: True
+    return bip.make_dispatch_round(
+        {"si": object()}, {"si": {"scf_basis": "fb"}}, "/ws",
+        prepare_fn=lambda flight, workspace: None,
+        dispatch_fn=lambda flight, force=False: None,
+        completed_fn=completed,
+        read_fn=_mesh_reader(energy_by_mesh, resolved_by_mesh))
+
+
+def test_dispatch_round_reads_rungs_back():
+    """The adapter turns a round's meshes into completed rungs,
+    pairing each requested mesh with its run's total energy."""
+    dispatch_round = _make_round(
+        {(4, 4, 4): -1.0, (5, 5, 5): -1.1})
+    out = dispatch_round({"si": [[4, 4, 4], [5, 5, 5]]})
+    assert [(rung.mesh, rung.energy) for rung in out["si"]] \
+        == [([4, 4, 4], -1.0), ([5, 5, 5], -1.1)]
+
+
+def test_dispatch_round_omits_a_failed_mesh():
+    """A unit that did not complete is dropped from the round's
+    results, so the climb loop reads it as a run failure."""
+    dispatch_round = _make_round(
+        {(4, 4, 4): -1.0, (5, 5, 5): -1.1},
+        completed=lambda workspace, unit:
+            _mesh_of_unit(unit) != [5, 5, 5])
+    out = dispatch_round({"si": [[4, 4, 4], [5, 5, 5]]})
+    assert [rung.mesh for rung in out["si"]] == [[4, 4, 4]]
+
+
+def test_dispatch_round_asserts_the_mesh_is_honoured():
+    """An explicit mesh must resolve to itself; a run that reports a
+    different resolved mesh fails loudly rather than mis-recording
+    the rung."""
+    dispatch_round = _make_round(
+        {(4, 4, 4): -1.0},
+        resolved_by_mesh={(4, 4, 4): [9, 9, 9]})
+    with pytest.raises(RuntimeError):
+        dispatch_round({"si": [[4, 4, 4]]})
+
+
+# --------------------------------------------------------------
+#  converge_by_climb -- fail-fast on a rung that will not run
+# --------------------------------------------------------------
+
+def test_climb_round0_failure_is_non_converged():
+    """A material whose whole opening round fails to run has no rung
+    to stand on and is reported NON_CONVERGED with the mismatch
+    callback fired."""
+    def dispatch_round(mesh_lists):
+        return {material: [] for material in mesh_lists}
+    configs = {"si": _cubic_config(
+        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)}
+    flagged = []
+
+    outcomes, _ = bip.converge_by_climb(
+        ["si"], configs, {"si": 27.0}, dispatch_round,
+        on_non_converged=flagged.append)
+
+    assert outcomes["si"] is bip.NON_CONVERGED
+    assert flagged == ["si"]
+
+
+def test_climb_missing_continuation_rung_is_non_converged():
+    """When a continuation rung fails to come back, the climb cannot
+    advance, so the material stops NON_CONVERGED instead of
+    re-dispatching the failing mesh forever."""
+    calls = {"n": 0}
+
+    def dispatch_round(mesh_lists):
+        calls["n"] += 1
+        if calls["n"] == 1:                  # round 0 runs the seed
+            return {material: [bip.Rung(mesh, 0.0)
+                               for mesh in meshes]
+                    for material, meshes in mesh_lists.items()}
+        return {material: [] for material in mesh_lists}   # then fail
+    configs = {"si": _cubic_config(
+        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)}
+    flagged = []
+
+    outcomes, _ = bip.converge_by_climb(
+        ["si"], configs, {"si": 27.0}, dispatch_round,
+        on_non_converged=flagged.append)
+
+    assert outcomes["si"] is bip.NON_CONVERGED
+    assert flagged == ["si"]

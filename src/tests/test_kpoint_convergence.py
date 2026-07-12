@@ -352,3 +352,84 @@ def test_flight_serializes_prediction_and_sweep(patched, tmp_path):
     pred = data["flight"]["predictions"]["si"]
     assert pred["policy"] == "verify_around_prediction"
     assert pred["feature_vector"]["lattice_family"] == "cubic"
+
+
+# --------------------------------------------------------------
+#  The mesh-dispatch split (DESIGN 7.7; PSEUDOCODE 4e.7)
+# --------------------------------------------------------------
+
+def test_encode_mesh_value_joins_counts_with_hyphens():
+    """A mesh renders as its three counts hyphen-joined -- slug-safe
+    because axial counts are positive integers."""
+    assert kc.encode_mesh_value([4, 4, 4]) == "4-4-4"
+    assert kc.encode_mesh_value([10, 10, 4]) == "10-10-4"
+    assert kc.encode_mesh_value([3, 3, 2]) == "3-3-2"
+
+
+def test_decode_mesh_value_inverts_encode():
+    """decode_mesh_value round-trips encode_mesh_value back to the
+    integer count triple."""
+    for mesh in ([4, 4, 4], [10, 10, 4], [3, 3, 2]):
+        assert kc.decode_mesh_value(kc.encode_mesh_value(mesh)) \
+            == mesh
+
+
+def test_build_mesh_unit_sets_scfkp_and_kpt_mesh_tag():
+    """An explicit-mesh unit carries the mesh as the makeinput
+    `scfkp` option and tags itself `kpt-mesh-<a>-<b>-<c>`, keeping
+    the caller's options dict untouched."""
+    unit = kc.build_mesh_unit(_STRUCTURE, _OPTIONS, [4, 4, 4], "si")
+    assert unit.id == "si"
+    assert unit.wingbeat == "imago"
+    assert unit.calc == ("kpt-mesh-4-4-4",)
+    assert unit.options["scfkp"] == [4, 4, 4]
+    # The shared options dict must not have gained a mesh.
+    assert "scfkp" not in _OPTIONS
+
+
+def test_build_mesh_unit_tags_an_anisotropic_mesh():
+    """A non-cubic mesh tags each axis count in order."""
+    unit = kc.build_mesh_unit(_STRUCTURE, _OPTIONS, [5, 5, 2], "gr")
+    assert unit.calc == ("kpt-mesh-5-5-2",)
+    assert unit.options["scfkp"] == [5, 5, 2]
+
+
+def test_predict_kpoint_density_returns_prediction(patched):
+    """The predict-only builder returns the predicted density,
+    confidence, under-trained flag, and a `predict_then_climb`
+    record -- and lays no grid."""
+    patched(_result(kpd=150.0, confidence=0.8, under_trained=False))
+    density, confidence, under_trained, record = \
+        kc.predict_kpoint_density(
+            _STRUCTURE, _DATASPACE, "crystalline", _SUBMODEL)
+    assert density == 150.0
+    assert confidence == 0.8
+    assert under_trained is False
+    assert record.policy == "predict_then_climb"
+    assert record.predicted_kpoint_density == 150.0
+    assert record.basis == "fb"
+
+
+def test_predict_kpoint_density_curator_override(patched_no_predict):
+    """A pinned `center` bypasses the predictor: the density is the
+    pinned value at full confidence with a `curator_override`
+    record."""
+    density, confidence, under_trained, record = \
+        kc.predict_kpoint_density(
+            _STRUCTURE, _DATASPACE, "crystalline", _SUBMODEL,
+            center=250.0)
+    assert density == 250.0
+    assert confidence == 1.0
+    assert under_trained is False
+    assert record.policy == "curator_override"
+    assert record.predicted_kpoint_density == 250.0
+
+
+def test_predict_kpoint_density_requires_full_submodel(patched):
+    """A submodel missing one of the three sub-model-selecting names
+    is rejected, exactly as the density builder rejects it."""
+    patched(_result())
+    with pytest.raises(KaleidoscopeError):
+        kc.predict_kpoint_density(
+            _STRUCTURE, _DATASPACE, "crystalline",
+            {"basis": "fb", "functional": "gga-pbe"})

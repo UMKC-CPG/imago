@@ -2560,6 +2560,64 @@ imports its neighbours from `$IMAGO_BIN`).
   C116 and unblock C117.  CODE; DESIGN 3.12; PSEUDOCODE 4e;
   ARCH 9.7 / 10.
 
+  Increments (implementation ordering; each governed by the named
+  PSEUDOCODE section, which is where the specification lives):
+    - [x] Inc 0. Chain gate: PSEUDOCODE 4c.7 (producer-side
+      axis-class sourcing) and the 4d.5 amendment (imago emits
+      `RESOLVED_KP_CLASSES` as the port's validation hook).
+    - [x] Inc 1. `src/scripts/mesh_climb.py` primitives (axis
+      classes 4c.1 / 4c.7, count selection 4c.2, rung mechanics
+      4e.1) plus their unit tests (`test_mesh_climb.py`, 27 tests).
+    - [x] Inc 2. The pure decision helpers.  Stop test with
+      confidence-scaled persistence (`pick_converged_climb`, 4e.2)
+      beside `per_atom_ev`/`pick_converged` in `guidance_harvest`
+      (single-sourced); the per-axis ceiling (`at_ceiling`, 4e.2),
+      first-round seeding (`initial_meshes`, 4e.4), and the
+      confidence-to-mode policy (`resolve_climb_policy`, 4e.4) in
+      `mesh_climb`, with provisional threshold defaults.  Tests:
+      +9 in `test_mesh_climb.py`, +4 in `test_guidance_harvest.py`.
+      `climbAction` moved to Inc 3: ARCH 9.7 places the energy-
+      reading / next-mesh decision in the producer, with the loop.
+    - [x] Inc 3a. The producer's climb control loop, in
+      `build_initial_potentials.py` (ARCH 9.7): `climb_action`
+      (4e.3) and the `converge_by_climb` round-based loop (4e.5),
+      with the `dispatch_round` runner INJECTED, plus the `Rung` /
+      `ClimbConfig` / `ClimbAction` types and `_sort_by_mesh` /
+      `_merge_distinct` helpers.  The ceiling-tag call (7.8 step
+      3d) is an injected `on_non_converged` hook.  Tested with a
+      synthetic `dispatch_round` (+9 in
+      `test_build_initial_potentials.py`).
+    - [x] Inc 3b-design. Mesh-dispatch design + pseudocode (the
+      chain gate for 3b-code).  DESIGN 7.7 gains the mesh->run
+      mechanics (explicit `scfkp` mesh, `kpt-mesh` calc tag,
+      `total_energy`/`kpoint_mesh` read-back, the round adapter,
+      the builder split, and the fail-fast rule); PSEUDOCODE 4e.7
+      adds `encodeMeshValue`/`decodeMeshValue`, `build_mesh_unit`,
+      `predict_kpoint_density`, and `make_dispatch_round`; 4e.5 is
+      amended for fail-fast (round-0 empty + a requested rung that
+      does not return) and reconciled to `seed_densities` /
+      `on_non_converged`; 4e.4 reconciled to seed from a density.
+    - [x] Inc 3b-code. Mesh-dispatch adapter per 4e.7 / DESIGN 7.7.
+      Builder split in `kpoint_convergence.py`: `encode_mesh_value`
+      / `decode_mesh_value`, `build_mesh_unit` (`scfkp` option +
+      `kpt-mesh` tag), `predict_kpoint_density` (predict-only).
+      `make_dispatch_round` in the producer (injected prepare /
+      dispatch / completed / read; omits non-completed units;
+      asserts the mesh is honoured exactly).  `converge_by_climb`
+      gained the fail-fast guard (round-0 empty + missing-rung ->
+      NON_CONVERGED).  +7 builder tests, +5 producer tests; 221
+      affected-suite tests green.
+    - [ ] Inc 4. `converged_mesh` through the guidance schema:
+      reader (15.3), emitter (15.4), `build_entry` (15.7), and
+      `record_converged` (4e.6).
+    - [ ] Inc 5. The knobs of the scope's Config bullet, wired
+      into the manifest characterization block with documented
+      provisional defaults (3.12.6).
+    - [ ] Inc 6. Wire the producer main to `converge_by_climb`;
+      integration test; validate the Python axis classes against
+      imago's emitted `RESOLVED_KP_CLASSES` (implements the
+      Fortran emit of the 4d.5 amendment).
+
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 
 - [ ] C62. Implement the element-aware bispectrum per

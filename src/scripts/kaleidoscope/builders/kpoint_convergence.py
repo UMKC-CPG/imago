@@ -74,11 +74,13 @@ class PredictionRecord:
     predictor (PSEUDOCODE 15.6).  ``serialize_flight`` writes it
     verbatim as the ``[flight.prediction]`` table.
 
-    - ``policy``             : which grid path was taken
-                               (``trust_no_verify`` /
+    - ``policy``             : which prediction / grid path was
+                               taken (``trust_no_verify`` /
                                ``wide_grid_no_prior`` /
                                ``verify_around_prediction`` /
-                               ``curator_override``).
+                               ``curator_override`` for the density
+                               grid; ``predict_then_climb`` for the
+                               adaptive mesh climb, 7.7 / 3.12).
     - ``predicted_kpoint_density`` : the predicted converged
                                k-density (or the curator-pinned
                                value in override mode).
@@ -230,6 +232,24 @@ def build_calc_tag(calc_axes):
                 f"([a-z0-9-]+): {axis!r}")
         components.append(f"{axis}-{encode_axis_value(value)}")
     return tuple(components)
+
+
+def encode_mesh_value(mesh):
+    """Encode an axial-count mesh as a slug-safe calc-tag value
+    (DESIGN 6.2.4 / 7.7): the three counts joined by hyphens, e.g.
+    ``[4, 4, 4] -> "4-4-4"``.  Axial counts are always positive
+    integers, so the token needs none of ``encode_axis_value``'s
+    sign / decimal escaping and stays ``[a-z0-9-]``.  Paired with
+    ``decode_mesh_value`` so the harvest reads the mesh back off the
+    calc tag (DESIGN 7.7)."""
+    return "-".join(str(int(count)) for count in mesh)
+
+
+def decode_mesh_value(token):
+    """Invert :func:`encode_mesh_value`: ``"4-4-4" -> [4, 4, 4]``.
+    The hyphen-separated counts parse straight back to a list of
+    three integers (DESIGN 6.2.4 / 7.7)."""
+    return [int(part) for part in token.split("-")]
 
 
 # ------------------------------------------------------------------
@@ -506,3 +526,140 @@ def build_kpoint_convergence(structure, options, dataspace,
     flight = Flight(root=root, units=units, sweep=sweep)
     attach_prediction_record(flight, unit_id, record)
     return flight, record
+
+
+# ------------------------------------------------------------------
+#  The mesh-dispatch split (DESIGN 7.7; PSEUDOCODE 4e.7)
+#
+#  The adaptive climb (DESIGN 3.12) seeds from a prediction but lays
+#  its OWN rungs -- explicit meshes, one per calc -- so the density-
+#  era single call above splits in two: predict_kpoint_density does
+#  the prediction (no grid), and build_mesh_unit builds one explicit-
+#  mesh unit that the producer's round adapter dispatches.  The old
+#  build_kpoint_convergence is the density-era special case this pair
+#  generalizes; it retires when the producer migrates to the climb.
+# ------------------------------------------------------------------
+
+def build_mesh_unit(structure, options, mesh, id):
+    """Build one explicit-mesh convergence ``CalcUnit`` for the
+    adaptive climb (DESIGN 7.7; PSEUDOCODE 4e.7).
+
+    The climb searches in mesh space, so a rung is dispatched as an
+    explicit mesh rather than a density.  ``scfkp`` is makeinput's
+    key for an explicit axial-count mesh (a style-code-1 k-point
+    file: axial counts, shift, and point operations); imago resolves
+    its own symmetry shift and irreducible-wedge reduction from those
+    counts, so the requested mesh is honoured exactly (DESIGN 7.7).
+    ``kpt-mesh`` is the calc-tag axis the count triple renders under
+    (``kpt-mesh-<a>-<b>-<c>``), mirroring the density path's
+    ``kpt-density``.
+
+    The cache identity is the SAME one the density units used
+    (:func:`standard_key_fields`; DESIGN 6.2.1), so a mesh re-run in
+    a later climb round is a cache hit and costs nothing.
+
+    Parameters
+    ----------
+    structure
+        An ``imago.skl`` path or a loaded StructureControl, copied
+        verbatim onto the unit as the density builder does.
+    options
+        The fixed run settings in each tool's coded vocabulary; a
+        copy gains the ``scfkp`` mesh so the caller's dict is left
+        untouched.
+    mesh
+        The axial counts ``[a, b, c]`` to dispatch.
+    id
+        The unit id.  The producer passes the material's reference
+        id, which the round adapter reads back to route the energy.
+    """
+    unit_options = dict(options)
+    unit_options["scfkp"] = list(mesh)
+    # Assembled like build_calc_tag but with the mesh encoder: that
+    #   helper's encode_axis_value handles a scalar, not a count
+    #   triple.  "kpt-mesh" is a static slug, safe as a directory
+    #   level (DESIGN 6.2.4).
+    calc = ("kpt-mesh-" + encode_mesh_value(mesh),)
+    return CalcUnit(
+        id=id,
+        calc=calc,
+        structure=structure,
+        options=unit_options,
+        wingbeat="imago",
+        key_fields=standard_key_fields(structure, options))
+
+
+def predict_kpoint_density(structure, dataspace, system_type,
+                           submodel, center=None):
+    """Predict the converged k-point density for one structure,
+    laying no grid (DESIGN 7.7; PSEUDOCODE 4e.7).
+
+    This is the prediction HALF of :func:`build_kpoint_convergence`:
+    the query signature, the predictor call, and the per-structure
+    ``PredictionRecord``.  The adaptive climb (DESIGN 3.12) seeds
+    from the returned density and picks its dispatch mode and
+    persistence from the confidence, then lays its own rungs -- so
+    the grid the old builder built is gone, and only the prediction
+    remains here.
+
+    A curator-pinned ``center`` (the 5.7 ``kpoint_spec`` density
+    override) BYPASSES the predictor exactly as the density builder
+    does: the density is the pinned value at full confidence, and the
+    record documents the override.  The ``structure`` / ``dataspace``
+    / ``system_type`` / ``submodel`` / ``center`` arguments mirror
+    :func:`build_kpoint_convergence`.
+
+    Returns
+    -------
+    (density, confidence, is_under_trained, record)
+        ``density`` seeds the climb (DESIGN 3.12.4); ``confidence``
+        and ``is_under_trained`` drive the confidence policy (3.12.6 /
+        7.9); ``record`` is the ``PredictionRecord`` the harvest
+        recovers (7.8), the same one the density builder produced.
+    """
+    for required in ("basis", "functional", "kpoint_integration"):
+        if required not in submodel:
+            raise KaleidoscopeError(
+                f"predict_kpoint_density submodel must carry "
+                f"{required!r} (it selects the predictor sub-model)")
+
+    resolved = _load_structure(structure)
+    query_sig = compute_signature(
+        resolved, system_type, dataspace.group_table)
+
+    if center is not None:
+        # Curator override (5.7 kpoint_spec.density): the predictor
+        #   is never consulted; the density is the pinned value.
+        record = PredictionRecord(
+            policy="curator_override",
+            predicted_kpoint_density=float(center),
+            confidence=1.0,
+            is_under_trained=False,
+            neighbor_entry_ids=(),
+            predicted_gap=None,
+            predicted_magnetization=None,
+            system_type=system_type,
+            feature_vector=query_sig,
+            basis=submodel["basis"],
+            functional=submodel["functional"],
+            kpoint_integration=submodel["kpoint_integration"])
+        return float(center), 1.0, False, record
+
+    result = predict(
+        dataspace, query_sig, submodel["basis"],
+        submodel["functional"], submodel["kpoint_integration"])
+    record = PredictionRecord(
+        policy="predict_then_climb",
+        predicted_kpoint_density=result.predicted_kpoint_density,
+        confidence=result.confidence,
+        is_under_trained=result.is_under_trained,
+        neighbor_entry_ids=result.neighbor_entry_ids,
+        predicted_gap=result.predicted_gap,
+        predicted_magnetization=result.predicted_magnetization,
+        system_type=system_type,
+        feature_vector=query_sig,
+        basis=submodel["basis"],
+        functional=submodel["functional"],
+        kpoint_integration=submodel["kpoint_integration"])
+    return (result.predicted_kpoint_density, result.confidence,
+            result.is_under_trained, record)

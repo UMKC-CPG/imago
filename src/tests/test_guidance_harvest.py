@@ -193,6 +193,45 @@ def test_pick_converged_two_sided_and_no_endpoints():
     assert gh.pick_converged([3.0, 2.0, 1.0], 1, 1.0) is None
 
 
+def test_pick_converged_is_the_flat_needed_one_climb():
+    """pick_converged is exactly pick_converged_climb with
+    flat_needed=1, so the two agree on the same ladder (they share
+    one two-sided rule and cannot drift, DESIGN 3.12.3)."""
+    energies = [3.0, 2.0, 1.99, 1.985]
+    assert gh.pick_converged(energies, 1, 1.0) == \
+        gh.pick_converged_climb(energies, 1, 1.0, 1)
+
+
+def test_climb_demands_flatness_persist_over_two_rungs():
+    """With flat_needed=2 the returned index and the next interior
+    rung must BOTH be two-sided flat.  Here indices 2 and 3 are both
+    flat, so index 2 is the first of a persistent run."""
+    # Per-atom deltas (atom_count=1): the 3.0->2.0 step is huge, the
+    #   rest are small, so interior rungs 2 and 3 are flat.
+    energies = [3.0, 2.0, 1.99, 1.985, 1.983]
+    assert gh.pick_converged_climb(energies, 1, 1.0, 2) == 2
+
+
+def test_climb_rejects_a_single_lucky_flat_rung():
+    """A lone flat interior rung satisfies flat_needed=1 but not
+    flat_needed=2, so a persistence-demanding climb keeps going
+    where a single-grid pick would have stopped."""
+    # Index 2 is flat both sides; index 3 jumps up to 5.0, so the
+    #   flat run has length one.
+    energies = [3.0, 2.0, 1.99, 1.985, 5.0]
+    assert gh.pick_converged_climb(energies, 1, 1.0, 1) == 2
+    assert gh.pick_converged_climb(energies, 1, 1.0, 2) is None
+
+
+def test_climb_needs_enough_rungs_above_to_confirm():
+    """A flat rung cannot be confirmed at flat_needed=2 until a
+    further interior rung exists above it; with only one interior
+    rung the climb returns None even though that rung is flat."""
+    energies = [3.0, 2.99, 2.985]        # single interior rung (i=1)
+    assert gh.pick_converged_climb(energies, 1, 1.0, 1) == 1
+    assert gh.pick_converged_climb(energies, 1, 1.0, 2) is None
+
+
 # --------------------------------------------------------------
 #  collapse_by_mesh -- the duplicate-rung guard (DESIGN 7.8 3c)
 # --------------------------------------------------------------

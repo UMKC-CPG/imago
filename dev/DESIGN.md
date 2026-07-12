@@ -9462,6 +9462,84 @@ choice.  Without it, the harvested
 `predictor_confidence` and `predictor_neighbor_ids`
 fields would be unrecoverable.
 
+**Dispatching the climb: from a mesh to a run.**  The climb
+searches in mesh space (3.12), so the unit it dispatches names an
+explicit mesh, not a density.  makeinput already accepts one: the
+`scfkp = [a, b, c]` option writes a style-code-1 k-point file
+(axial counts, shift, and point operations), and imago resolves its
+own symmetry shift and irreducible-wedge reduction from those counts
+exactly as it would for a density-selected mesh (2.4).  The
+requested axial counts therefore ARE the resolved full mesh -- there
+is no density-to-mesh rounding to invert -- which is the whole
+reason the climb can search in mesh space (3.12.1).
+
+Two-name convention, mirroring the density path's `kpd` /
+`kpt-density` above:
+
+- `scfkp` is the makeinput options-dict key (its argparse dest),
+  carrying the three counts wherever the value reaches makeinput.
+- `kpt-mesh` is the display name in the calc-tag tree (6.2.4) and in
+  `Flight.sweep.varied_axes`.  A unit's swept value renders as the
+  single tag component `kpt-mesh-<a>-<b>-<c>` (e.g. `kpt-mesh-4-4-4`)
+  and reads back to the count triple by the inverse; the
+  hyphen-separated counts stay slug-safe because axial counts are
+  always positive integers.
+
+Reading a rung back needs two facts from each completed run's
+`result.toml` (6.1.2): `total_energy` is the rung's energy (the
+basis the flatness test normalizes to eV per atom, 7.8 step 3c) and
+`kpoint_mesh` is the resolved axial counts.  Because an explicit
+mesh is honoured exactly, `kpoint_mesh` must equal the requested
+mesh; the adapter asserts this, so a makeinput or imago change that
+silently altered the mesh is caught rather than mis-recorded.  (It
+is the same resolved-mesh line whose companion `RESOLVED_KP_CLASSES`
+emit validates the producer's axis-class port, 2.7.)
+
+**The round adapter.**  The climb's `dispatch_round` (3.12.5) is a
+thin producer-side adapter over the ordinary dispatch layer.  Given
+one round's `{material: [mesh, ...]}`, it builds one CalcUnit per
+mesh (below), assembles them into a single flat Flight for the
+round, runs the driver-side prepare pass and dispatches it (6.2.5 /
+6.2.11), then reads each completed unit's `(mesh, total_energy)`
+back into `{material: [rung, ...]}`.  The dispatch core is unchanged
+and domain-ignorant (Principle 12): it runs whatever units it is
+handed.  A mesh already run in an earlier round is a cache hit
+(6.2.5), so re-dispatching it costs nothing and the climb never has
+to track what it has already run.
+
+**Splitting the builder.**  The density-era flight builder (6.2.8;
+the algorithm above) does prediction AND grid-laying in one call.
+The climb separates the two, because it seeds from the prediction
+but lays its own rungs:
+
+- `predict_kpoint_density` runs steps 1-2 and 5 above -- the query
+  signature, the predictor call, and the per-structure
+  `PredictionRecord` -- and returns the predicted density,
+  confidence, under-trained flag, and record.  The producer uses the
+  density to seed the climb (3.12.4) and the confidence to pick the
+  dispatch mode and the persistence (3.12.6); the record is attached
+  for the harvest exactly as before (7.8).
+- `build_mesh_unit` builds one explicit-mesh CalcUnit -- the `scfkp`
+  option, the `kpt-mesh` tag, and the same cache identity (6.2.1)
+  the density units used -- and the adapter calls it once per mesh
+  per round.
+
+The old single-call grid builder is the density-era special case the
+climb generalizes: its confidence-widened grid becomes the confident
+mode's small fixed grid (3.12.5).  It retires when the producer
+migrates to the climb, and no other client depends on it.
+
+**A rung that fails to run.**  A unit that does not complete has no
+`result.toml`, hence no energy, so the adapter returns only the rungs
+that completed.  A still-active material that asked to run a mesh and
+did not get it back cannot climb further, so the producer stops it as
+NON_CONVERGED with a run-failure reason -- distinct from a ceiling
+stop (3.12.3) -- and the round loop moves on.  This keeps the loop
+from re-dispatching a failing mesh forever.  It is deliberately not a
+retry: recovering a flaky run is the runner's and the custodian's
+job, above the domain-ignorant dispatch layer (Principle 12), not the
+climb's.
+
 ### 7.8 Harvest Pipeline (Staging and Promotion)
 
 The harvest hook turns a finished flight into a staged

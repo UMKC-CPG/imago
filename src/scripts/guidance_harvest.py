@@ -168,6 +168,53 @@ def swept_value_of(unit, axis: str) -> float:
 #  The two-sided convergence rule (DESIGN 7.8 step 3c)
 # ==============================================================
 
+def pick_converged_climb(energies, cell_atom_count, threshold,
+                         flat_needed):
+    """Return the smallest interior index whose per-atom energy is
+    flat over ``flat_needed`` consecutive interior rungs, or ``None``
+    when no such run exists yet (PSEUDOCODE 4e.2; DESIGN 3.12.3).
+
+    A single rung is "flat" when its per-atom energy is within
+    ``threshold`` of BOTH neighbours -- the same two-sided test
+    :func:`pick_converged` applies (DESIGN 7.8 step 3c).  The
+    adaptive climb generalises it by demanding the flatness PERSIST:
+    the returned index and the next ``flat_needed - 1`` interior
+    rungs must all pass that two-sided test.  A confident search
+    sets ``flat_needed = 1`` (a single flat interior rung is
+    enough); a cold or bootstrap search sets ``flat_needed = 2`` so
+    one lucky flat step cannot end the climb prematurely (DESIGN
+    3.12.3).  With ``flat_needed = 1`` this is exactly
+    :func:`pick_converged`.
+
+    ``energies`` are raw total-cell values in hartree (Option B),
+    normalized once to eV per atom (:func:`per_atom_ev`) before
+    comparing, and ``threshold`` is stated per atom -- so a large
+    cell is not held to a tighter bound than a small one (DESIGN
+    7.8).  Endpoints are never eligible: a rung needs both a lower
+    and an upper neighbour to be judged, and a sweep that only goes
+    flat at its top edge is suspect and left for the auto-promote
+    rule (DESIGN 7.8)."""
+
+    per_atom = [per_atom_ev(energy, cell_atom_count)
+                for energy in energies]
+
+    def two_sided_flat(rung):
+        below_down = abs(
+            per_atom[rung] - per_atom[rung - 1]) < threshold
+        below_up = abs(
+            per_atom[rung] - per_atom[rung + 1]) < threshold
+        return below_down and below_up
+
+    for first in range(1, len(per_atom) - 1):
+        last = first + flat_needed - 1     # last interior to confirm
+        if last > len(per_atom) - 2:       # not enough rungs above
+            break                          #   to confirm `first` yet
+        if all(two_sided_flat(rung)
+               for rung in range(first, last + 1)):
+            return first
+    return None
+
+
 def pick_converged(energies, cell_atom_count, threshold):
     """Return the smallest interior grid index whose total energy
     is within ``threshold`` of BOTH neighbours, or ``None`` when
@@ -185,18 +232,15 @@ def pick_converged(energies, cell_atom_count, threshold):
     one-sided "delta below threshold" rule).  Endpoints are never
     eligible -- a converged-at-the-edge sweep is suspect (the grid
     may have been too narrow) and is left for the auto-promote
-    rule to reject (DESIGN 7.8)."""
+    rule to reject (DESIGN 7.8).
 
-    per_atom = [per_atom_ev(energy, cell_atom_count)
-                for energy in energies]
-    for index in range(1, len(per_atom) - 1):
-        below_up = abs(
-            per_atom[index] - per_atom[index + 1]) < threshold
-        below_down = abs(
-            per_atom[index] - per_atom[index - 1]) < threshold
-        if below_up and below_down:
-            return index
-    return None
+    This is the ``flat_needed = 1`` case of
+    :func:`pick_converged_climb`, kept under its own name as the
+    single-grid convergence pick the harvest and auto-promote call
+    -- the two share the one two-sided rule and cannot drift."""
+
+    return pick_converged_climb(energies, cell_atom_count,
+                                threshold, 1)
 
 
 # Two runs of the same resolved mesh are the same calculation and

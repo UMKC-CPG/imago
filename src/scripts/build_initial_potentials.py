@@ -105,6 +105,7 @@ import shlex
 import subprocess
 import sys
 import tomllib
+from collections import namedtuple
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -112,6 +113,7 @@ from typing import Any
 import initial_potential_db as ipdb
 import guidance_db
 import guidance_harvest
+import mesh_climb
 # The curation-manifest schema (dataclasses + readers) lives in its
 #   own neutral library so the producer and the authoring tool
 #   (expand_manifest) share one definition; the producer imports the
@@ -121,7 +123,7 @@ from curation_manifest import (
     load_manifest_v2, load_structure_sources, resolve_settings)
 from kaleidoscope import CalcUnit, Flight, SweepRecord, dispatch
 from kaleidoscope.builders.kpoint_convergence import (
-    build_kpoint_convergence, standard_key_fields)
+    build_kpoint_convergence, build_mesh_unit, standard_key_fields)
 from kaleidoscope.cluster_config import (
     resolve_dispatch, write_resolved_dispatch,
     load_site_config, resolve_choices, resolve_orchestrator,
@@ -1779,6 +1781,345 @@ def prepare_units(flight: Flight, workspace: str) -> None:
             if key_file.name == "structure.dat":
                 key_file.source = os.path.join(
                     staging, "structure.dat")
+
+
+# ==================================================================
+#  The adaptive k-point mesh climb (DESIGN 3.12; PSEUDOCODE 4e.3 /
+#  4e.5)
+#
+#  The producer converges each reference solid's k-point sampling by
+#  CLIMBING through symmetry-compatible meshes rather than sweeping a
+#  fixed density grid: it dispatches a round of meshes, reads the
+#  energies back, decides each material's next mesh, and dispatches
+#  the next round, until every material goes flat (converged) or
+#  reaches a ceiling (non-converged).  This is the iterative-client
+#  shape ARCHITECTURE 9.7 reserves for the producer -- the dispatch
+#  core stays dumb (Principle 12), running whatever meshes it is
+#  handed; the loop that reads energies and chooses the next mesh
+#  lives here.
+#
+#  The mesh arithmetic (rung moves, the ceiling, first-round seeding,
+#  the confidence policy) lives in ``mesh_climb``; the energy
+#  flatness test is ``guidance_harvest.pick_converged_climb``, single-
+#  sourced with the harvest's own convergence rule so the two cannot
+#  drift.  What lives here is the control loop tying them together.
+#
+#  How a chosen mesh becomes an actual dispatched run -- the
+#  ``dispatch_round`` adapter -- is INJECTED, exactly as
+#  ``dispatch_fn`` / ``prepare_fn`` are on ``build_initial_potentials``
+#  below, so this loop is unit-testable with a synthetic round.  The
+#  real adapter (the explicit-mesh CalcUnit, its calc tag, and the
+#  mesh-keyed energy read-back) is deferred: its own pseudocode is
+#  still to be written before it may be coded (the chain gate; see
+#  TODO C118 increment 3b).
+# ==================================================================
+
+# One rung of a climb: a resolved mesh (axial counts ``[a, b, c]``)
+#   and the total-cell energy the engine returned for it (raw
+#   hartree, the basis ``pick_converged_climb`` normalizes to eV per
+#   atom before judging flatness, DESIGN 7.8).
+Rung = namedtuple("Rung", ["mesh", "energy"])
+
+
+## Everything one material's climb needs, gathered per material
+##   (DESIGN 3.12).  Geometry comes from the loaded cell, the policy
+##   fields from ``resolve_climb_policy`` (mesh_climb, keyed on the
+##   predictor's confidence), and the energy/ceiling knobs from the
+##   manifest characterisation block:
+##     classes            axis-class labels (mesh_climb 4c.1 / 4c.7)
+##     recip_mag          the three reciprocal-axis magnitudes |b_i|
+##     recip_cell_volume  reciprocal cell volume (density<->mesh map)
+##     mode               PARALLEL_GRID or CLIMB (mesh_climb)
+##     flat_needed        consecutive flat rungs the stop test needs
+##     grid_width         rungs each side of the seed (grid mode)
+##     start_offset       rungs below the seed a climb starts from
+##     cell_atom_count    atoms per cell (per-atom energy normalizer)
+##     threshold          per-atom eV flatness tolerance (DESIGN 7.8)
+##     max_count          per-axis ceiling backstop (DESIGN 3.12.3)
+ClimbConfig = namedtuple(
+    "ClimbConfig",
+    ["classes", "recip_mag", "recip_cell_volume", "mode",
+     "flat_needed", "grid_width", "start_offset",
+     "cell_atom_count", "threshold", "max_count"])
+
+
+# The three verdicts ``climb_action`` returns (DESIGN 3.12.3 /
+#   3.12.5): run one more mesh, stop converged at a rung, or stop at
+#   the ceiling having never gone flat (non-converged).
+_ACTION_RUN = "run"
+_ACTION_CONVERGED = "converged"
+_ACTION_CEILING = "ceiling"
+
+# A ``climb_action`` result.  ``kind`` is one of the three verdicts
+#   above; ``index`` names the converged rung (set for CONVERGED
+#   only); ``mesh`` is the next mesh to run (set for RUN only).  The
+#   fields a verdict does not use are ``None``.
+ClimbAction = namedtuple("ClimbAction", ["kind", "index", "mesh"])
+
+# The outcome a material carries when it stops at the ceiling without
+#   ever going flat (DESIGN 3.12.3).  A distinct sentinel, not a
+#   ``Rung``, so the harvest tells a non-converged material apart
+#   from a converged one at a glance.
+NON_CONVERGED = "non_converged"
+
+
+def _mesh_point_count(mesh):
+    """The full-mesh k-point count of an axial-count mesh -- the
+    product of its three counts.  This orders a climb: a rung with
+    more points sits higher, so it is the sort key for the ladder."""
+    return mesh[0] * mesh[1] * mesh[2]
+
+
+def _sort_by_mesh(rungs):
+    """Return ``rungs`` sorted ascending by mesh size, so the stop
+    test reads a monotone ladder.  The full-mesh point count orders
+    them; the mesh tuple breaks any tie deterministically."""
+    return sorted(
+        rungs,
+        key=lambda rung: (_mesh_point_count(rung.mesh),
+                          tuple(rung.mesh)))
+
+
+def _merge_distinct(existing, incoming):
+    """Return ``existing`` and ``incoming`` rungs combined, dropping
+    any incoming rung whose mesh is already present, and re-sorted
+    ascending.  A climb only ever appends meshes above its current
+    top, but the distinct merge keeps the ladder clean even if a
+    round hands back a mesh already run -- a manufactured zero-delta
+    pair would otherwise fool the two-sided stop test (DESIGN 3.11)."""
+    seen = {tuple(rung.mesh) for rung in existing}
+    merged = list(existing)
+    for rung in incoming:
+        if tuple(rung.mesh) not in seen:
+            merged.append(rung)
+            seen.add(tuple(rung.mesh))
+    return _sort_by_mesh(merged)
+
+
+def climb_action(rungs, config):
+    """Decide one material's next step from its accumulated rungs
+    (PSEUDOCODE 4e.3; DESIGN 3.12.3 / 3.12.5).
+
+    Returns a ``ClimbAction``:
+
+    - ``converged`` with the index of the converged rung, once the
+      per-atom energy has gone flat over ``config.flat_needed``
+      consecutive interior rungs -- the same two-sided test the
+      harvest applies (``guidance_harvest.pick_converged_climb``);
+    - ``ceiling`` when the top rung has reached the per-axis backstop
+      without converging, so the search stops non-converged;
+    - ``run`` with the next mesh up the climb otherwise
+      (``mesh_climb.climb_one_rung``).
+
+    ``rungs`` are this material's distinct meshes run so far, sorted
+    ascending, each a ``Rung(mesh, energy)``."""
+    index = guidance_harvest.pick_converged_climb(
+        [rung.energy for rung in rungs],
+        config.cell_atom_count, config.threshold, config.flat_needed)
+    if index is not None:
+        return ClimbAction(_ACTION_CONVERGED, index, None)
+    if mesh_climb.at_ceiling(rungs[-1].mesh, config.max_count):
+        return ClimbAction(_ACTION_CEILING, None, None)
+    next_mesh = mesh_climb.climb_one_rung(
+        rungs[-1].mesh, config.classes, config.recip_mag)
+    return ClimbAction(_ACTION_RUN, None, next_mesh)
+
+
+def converge_by_climb(materials, configs, seed_densities,
+                      dispatch_round, on_non_converged=None):
+    """Drive every material through the round-based climb to a
+    verdict (PSEUDOCODE 4e.5; DESIGN 3.12.5).
+
+    Serial within a material -- rung N+1's mesh is not known until
+    rung N's energy is judged -- but parallel across materials: each
+    round dispatches the next rung for EVERY material still climbing,
+    all together, so cluster throughput is preserved while each
+    material stays adaptive.  A material leaves the active set the
+    moment it converges or hits its ceiling, so a late-converging
+    material does not hold back the ones already done.
+
+    Parameters
+    ----------
+    materials
+        The material identifiers to converge.
+    configs
+        ``{material: ClimbConfig}`` -- each material's geometry,
+        resolved policy, and energy / ceiling knobs.
+    seed_densities
+        ``{material: float}`` -- the seed density for round 0 (the
+        guidance prediction, or the wide-grid floor for an under-
+        trained bootstrap, DESIGN 7.9).  Passed as a density rather
+        than a prediction object because that is all the seeding
+        needs; the policy was already resolved into ``configs``.
+    dispatch_round
+        The injected round runner.  ``dispatch_round(mesh_lists)``
+        takes ``{material: [mesh, ...]}``, runs those meshes (one
+        calc per mesh) in a single parallel round, and returns
+        ``{material: [Rung, ...]}``, OMITTING any mesh whose run did
+        not complete (DESIGN 7.7).  The dispatch core stays
+        domain-ignorant (Principle 12); only the CHOICE of meshes,
+        made here, is adaptive.
+    on_non_converged
+        Optional ``on_non_converged(material)`` callback, invoked
+        when a material stops non-converged -- at the ceiling, or
+        because a rung failed to run -- so the caller can tag the
+        prediction mismatch (DESIGN 7.8 step 3d).  Injected and
+        defaulting to a no-op so this loop stays free of the
+        workspace; the producer wires it when it drives the climb.
+
+    A material leaves the active set the moment it converges, hits
+    its ceiling, or has a requested rung fail to run.  A failed rung
+    stops the material NON_CONVERGED rather than re-dispatching a
+    failing mesh forever; recovering a flaky run is the runner's and
+    custodian's job, not the climb's (Principle 12; DESIGN 7.7).
+
+    Returns
+    -------
+    (outcomes, rungs)
+        ``outcomes[material]`` is the converged ``Rung`` or the
+        ``NON_CONVERGED`` sentinel (a ceiling stop or a run failure);
+        ``rungs[material]`` is the full distinct-mesh ladder that
+        material climbed, ascending -- the flatness trace the harvest
+        re-judges (4e.6)."""
+
+    # Round 0: every material's initial mesh or meshes -- a small
+    #   parallel grid for a confident prediction, a single starting
+    #   rung for a climb (mesh_climb.initial_meshes, 4e.4).
+    first = {}
+    for material in materials:
+        config = configs[material]
+        policy = mesh_climb.ClimbPolicy(
+            config.mode, config.flat_needed, config.grid_width,
+            config.start_offset)
+        first[material] = mesh_climb.initial_meshes(
+            seed_densities[material], policy, config.classes,
+            config.recip_mag, config.recip_cell_volume)
+    results = dispatch_round(first)
+    rungs = {}
+    outcomes = {}
+    active = []
+    for material in materials:
+        rungs[material] = _sort_by_mesh(results.get(material, []))
+        # A material whose whole opening round failed to run has no
+        #   rung to stand on, so it is non-converged from the start
+        #   (a run failure, DESIGN 7.7).
+        if not rungs[material]:
+            outcomes[material] = NON_CONVERGED
+            if on_non_converged is not None:
+                on_non_converged(material)
+        else:
+            active.append(material)
+
+    while active:
+        next_mesh = {}
+        for material in list(active):
+            action = climb_action(
+                rungs[material], configs[material])
+            if action.kind == _ACTION_CONVERGED:
+                outcomes[material] = rungs[material][action.index]
+                active.remove(material)
+            elif action.kind == _ACTION_CEILING:
+                outcomes[material] = NON_CONVERGED
+                if on_non_converged is not None:
+                    on_non_converged(material)
+                active.remove(material)
+            else:                                    # _ACTION_RUN
+                next_mesh[material] = [action.mesh]
+        if not next_mesh:
+            break
+        # One parallel round: each still-active material's next rung.
+        more = dispatch_round(next_mesh)
+        for material in list(next_mesh):
+            requested = next_mesh[material][0]
+            ran = more.get(material, [])
+            # The requested rung failing to run means the climb
+            #   cannot advance, so stop the material non-converged
+            #   rather than re-dispatch it forever (DESIGN 7.7).
+            if requested not in [rung.mesh for rung in ran]:
+                outcomes[material] = NON_CONVERGED
+                if on_non_converged is not None:
+                    on_non_converged(material)
+                active.remove(material)
+            else:
+                rungs[material] = _merge_distinct(
+                    rungs[material], ran)
+
+    return outcomes, rungs
+
+
+def make_dispatch_round(structures, options_by_material, workspace,
+                        *, prepare_fn=prepare_units,
+                        dispatch_fn=dispatch,
+                        completed_fn=_unit_completed,
+                        read_fn=_read_unit_result, force=False):
+    """Build the ``dispatch_round`` adapter ``converge_by_climb``
+    injects (DESIGN 7.7; PSEUDOCODE 4e.7).
+
+    The returned closure runs ONE climb round.  Given
+    ``{material: [mesh, ...]}`` it builds one explicit-mesh unit per
+    requested mesh (:func:`build_mesh_unit`), assembles them into a
+    single flat round Flight, runs the driver-side prepare pass and
+    dispatches it, then reads each COMPLETED unit's ``(mesh, energy)``
+    back into ``{material: [Rung, ...]}``.  A unit that did not
+    complete is omitted, so the climb loop stops that material as a
+    run failure (4e.5).
+
+    The adapter closes over each material's ``structure`` and coded
+    ``options`` (keyed by the material id, which is also the unit id
+    so an energy routes straight back), and over the ``workspace``
+    the run directories live under.  ``prepare_fn`` / ``dispatch_fn``
+    / ``completed_fn`` / ``read_fn`` are injected -- defaulting to the
+    real driver-side prepare, the real kaleidoscope dispatch, and the
+    real status / result readers -- so a caller can unit-test the
+    adapter with the toolchain seam mocked (each live run needs a
+    real imago, C74).  ``force`` bypasses the run-reuse cache.
+
+    A mesh already run in an earlier round is a cache hit (DESIGN
+    6.2.5), so re-dispatching it costs nothing and the climb never
+    has to track what it has already run."""
+
+    def dispatch_round(mesh_lists):
+        # Build one unit per requested mesh, remembering which mesh
+        #   and material each carries so the energy routes back
+        #   without re-decoding the calc tag.
+        built = []
+        for material, meshes in mesh_lists.items():
+            for mesh in meshes:
+                unit = build_mesh_unit(
+                    structures[material],
+                    options_by_material[material], mesh, material)
+                built.append((material, mesh, unit))
+
+        flight = Flight(
+            root=workspace, units=[unit for _, _, unit in built],
+            sweep=SweepRecord(varied_axes=("kpt-mesh",),
+                              fixed_axes={}))
+        prepare_fn(flight, workspace)
+        dispatch_fn(flight, force=force)
+
+        rungs_by_material = {material: [] for material in mesh_lists}
+        for material, mesh, unit in built:
+            # A unit that did not complete has no energy; omit it, so
+            #   the climb loop reads a run failure (4e.5 / DESIGN 7.7).
+            if not completed_fn(workspace, unit):
+                continue
+            result = read_fn(workspace, unit)
+            # An explicit mesh is honoured exactly (DESIGN 7.7): a
+            #   resolved mesh that differs means makeinput or imago
+            #   silently changed it, so fail loudly rather than record
+            #   the wrong rung against this density.
+            resolved = result.get("kpoint_mesh")
+            if resolved is not None and list(resolved) != list(mesh):
+                raise RuntimeError(
+                    f"requested mesh {list(mesh)} but the run for "
+                    f"{material!r} resolved {list(resolved)}; an "
+                    f"explicit scfkp mesh must be honoured exactly "
+                    f"(DESIGN 7.7)")
+            rungs_by_material[material].append(
+                Rung(list(mesh), result["total_energy"]))
+        return rungs_by_material
+
+    return dispatch_round
 
 
 def build_initial_potentials(manifest_path: str, pdb_root: str,

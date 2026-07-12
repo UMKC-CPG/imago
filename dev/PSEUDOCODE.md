@@ -1251,6 +1251,87 @@ function buildMeshFromDensity(density, shiftRequest,
                identityMaps(numFull)
 ```
 
+### 4c.7 Producer-side axis-class sourcing (DESIGN 2.7)
+
+The adaptive climb (4e) runs in the producer, in Python, and
+needs a cell's axis `classes` before it dispatches anything --
+`initial_meshes` (4e.4) seeds a grid or a descent from the
+predicted density, and both call `selectAxialCounts` (4c.2),
+which needs `classes`.  imago computes `abcRecipPointOps` and
+`computeAxisClasses` at runtime, but the producer cannot wait
+for a run to learn how a cell's axes couple.  So the producer
+sources the classes itself, from the same two ingredients imago
+uses: the space-group operations on disk and the cell the
+structure loads in.
+
+This is a Python mirror of the runtime chain
+`computeRealPointOps -> computeRecipPointOps ->
+computeAxisClasses` (DESIGN 2.7 / 4c.1).  The raw operations
+come from `share/spaceDB/<sg>` in conventional-abc fractional
+form (the producer already reads them to write the kp file,
+`_extract_point_ops`); the loaded and conventional lattices come
+from the loaded `StructureControl` (`real_lattice`,
+`full_cell_real_lattice`), which also already holds the
+reciprocal lattice the climb needs for `recipMag` and
+`recipCellVolume`.
+
+```
+function axisClassesForCell(convAbcPointOps, numPointOps,
+                            loadedLattice, convLattice, cellMode):
+    # loadedLattice, convLattice: 3x3, lattice vectors as ROWS
+    #   (the StructureControl layout), in a common length unit.
+    # convAbcPointOps: numPointOps rotation matrices R acting as
+    #   r' = R*r on conventional-abc fractional coordinates.
+
+    # Change of basis loaded-fractional -> conventional-fractional
+    #   (DESIGN 2.7).  Vectors-as-columns are the transpose of the
+    #   row-major storage: Lc = transpose(convLattice),
+    #   L = transpose(loadedLattice).  In `full` mode L == Lc so
+    #   T = I and the conjugation collapses to a copy.
+    if cellMode == "full":
+        T    = identity(3)
+        Tinv = identity(3)
+    else:                                   # "prim"
+        Lc   = transpose(convLattice)
+        L    = transpose(loadedLattice)
+        T    = matmul(inverse(Lc), L)       # r_conv = T * r_loaded
+        Tinv = inverse(T)
+
+    recipOps = []
+    for m = 1 to numPointOps:
+        Rconv   = convAbcPointOps(m)
+        # Direct-space op in the loaded basis: ordinary similarity
+        #   (covariant fractional coords), DESIGN 2.7.
+        Rloaded = matmul(Tinv, matmul(Rconv, T))
+        # Reciprocal-space twin: inverse transpose (contravariant),
+        #   DESIGN 2.7.  This is what the mesh folds under.
+        Rrecip  = transpose(inverse(Rloaded))
+        recipOps.append(Rrecip)
+
+    # 4c.1 union-find over the reciprocal ops' off-diagonal
+    #   couplings gives the axis classes.
+    return computeAxisClasses(recipOps, numPointOps)
+```
+
+The producer rounds each `Rloaded`/`Rrecip` to the nearest
+integer before the union-find: a valid lattice automorphism is
+integer with determinant +/-1 (DESIGN 2.7), so the conjugation's
+floating-point residue is round-off to be cleaned, and a
+non-integer result after rounding-tolerance check is a corrupt
+cell or space group and is raised, not silently classed.
+
+**Validation against the runtime.**  The producer's classes must
+match the ones imago resolves for the same cell, or the climb
+would seed and step a differently-coupled ladder than imago
+integrates.  To make the agreement checkable rather than
+asserted, imago's mesh emit (4d.5) also prints its resolved
+`abcRecipPointOps`-derived class vector as `RESOLVED_KP_CLASSES`;
+a producer self-test runs `axisClassesForCell` on a spread of
+seed cells (cubic, hexagonal `full`, and a `prim` reduction) and
+asserts it reproduces that emitted vector.  The emit is a
+validation hook, not a runtime dependency -- the climb never
+reads it back, since it needs the classes before the first run.
+
 ---
 
 ## 4d. Wiring the Mesh Map Through the makeinput ->
@@ -1395,14 +1476,24 @@ echoed).
                    numAxialKPoints(3)
     write unit 20: "RESOLVED_KP_COUNT"
     write unit 20: numKPoints
+    # Validation hook for the producer's axis-class port (4c.7):
+    #   emit the resolved axis-class label of each reciprocal
+    #   axis, so a producer self-test can assert its own
+    #   axisClassesForCell reproduces what imago resolved.
+    write unit 20: "RESOLVED_KP_CLASSES"
+    write unit 20: axisClass(1), axisClass(2), axisClass(3)
 ```
 
 `RESOLVED_KP_MESH` is the full uniform mesh's axial counts;
 `RESOLVED_KP_COUNT` is the number of k-points actually
 computed -- the IBZ size when symmetry was applied, the full-
-mesh size otherwise.  Only the mesh style codes (1 and 2)
-emit these; an explicit-list run (style 0) builds no axial
-mesh and emits neither, so imago.py records both as absent
+mesh size otherwise.  `RESOLVED_KP_CLASSES` is the axis-class
+label vector (`axisClass`, filled by `computeAxisClasses`,
+4c.1) -- three integers whose equality pattern says which axes
+the point group couples; it exists to validate the producer's
+4c.7 mirror, not for the run itself.  Only the mesh style codes
+(1 and 2) emit these; an explicit-list run (style 0) builds no
+axial mesh and emits none, so imago.py records them as absent
 (6.1.2).
 
 ---
@@ -1444,9 +1535,14 @@ function climbOneRung(counts, classes, recipMag):
     return bump(counts, classes, bestClass, +1)
 
 function descendOneRung(counts, classes, recipMag):
-    # The previous distinct mesh: the unique lower mesh that
-    # climbOneRung maps back to `counts` (DESIGN 3.12.4).  Returns
-    # `counts` unchanged when it is already minimal for the cell.
+    # A lower mesh that climbOneRung steps back up to `counts`
+    # (DESIGN 3.12.4).  A mesh can have more than one such lower
+    # neighbour (e.g. hexagonal [4,4,2] is reached from both
+    # [4,4,1] and [3,3,2]); the loop returns the first in class
+    # order, so climbOneRung(descendOneRung(counts)) == counts
+    # always holds, but descendOneRung need not undo a particular
+    # climb path.  Returns `counts` unchanged when it is already
+    # minimal for the cell.
     for c in distinct(classes):
         if any axis of class c in `counts` equals 1:
             continue                       # cannot go below 1
@@ -1518,11 +1614,14 @@ function climbAction(rungs, config):
 ### 4e.4 Seeding, and the two dispatch modes
 
 ```
-function initial_meshes(prediction, config):
+function initial_meshes(density, config):
     # The mesh(es) to run in the first round (DESIGN 3.12.4/3.12.5).
-    # The predicted density seeds a mesh via 4c.2; the mode decides
+    # The seed DENSITY -- the prediction, or the wide-grid floor when
+    # under-trained (7.9) -- picks a mesh via 4c.2; the mode decides
     # whether the first round is a parallel grid or a single rung.
-    seed = selectAxialCounts(prediction.density, config.recipMag,
+    # (The producer resolves the confidence policy into `config`
+    # first, so seeding takes only the density, not the prediction.)
+    seed = selectAxialCounts(density, config.recipMag,
                              config.recipCellVolume, config.classes)
 
     if config.mode == PARALLEL_GRID:        # confident (Q3)
@@ -1560,25 +1659,40 @@ rather than a predicted seed (7.9).
 ### 4e.5 Round-based orchestration across materials
 
 ```
-function converge_by_climb(materials, configs, predictions,
-                           dispatch_round):
+function converge_by_climb(materials, configs, seed_densities,
+                           dispatch_round, on_non_converged):
     # Drive every material through the round-based climb to a
-    # verdict -- converged, or ceiling-stopped (non-converged).
-    # Serial within a material, parallel across (DESIGN 3.12.5).
-    # dispatch_round(mesh_lists) runs the given meshes -- one or
-    # more per material -- in a single parallel round, and returns
-    # {material: [{mesh, energy}, ...]}.  Convergence-sweep units
-    # are built and dispatched exactly as any other (13), one calc
-    # per mesh; only the CHOICE of meshes is adaptive.
+    # verdict -- converged, or non-converged (a ceiling, or a rung
+    # that failed to run).  Serial within a material, parallel across
+    # (DESIGN 3.12.5).  dispatch_round(mesh_lists) runs the given
+    # meshes -- one or more per material -- in a single parallel round
+    # and returns {material: [{mesh, energy}, ...]}, OMITTING any mesh
+    # whose run did not complete (7.7); the mesh->unit encoding and
+    # the read-back are 4e.7.  seed_densities[m] is m's round-0 seed
+    # density (the prediction, or the wide-grid floor when under-
+    # trained, 3.12.4 / 7.9); the confidence policy is already
+    # resolved into configs[m].  on_non_converged(m) tags a
+    # prediction mismatch (7.8 3d); it is injected so this loop stays
+    # free of the workspace.
 
-    # Round 0: every material's initial mesh(es) (a grid, or one).
-    first = { m: initial_meshes(predictions[m], configs[m])
+    # Round 0: every material's initial mesh(es) -- a grid, or one
+    #   (initial_meshes, 4e.4).  A material whose whole opening round
+    #   failed to run has no rung to stand on, so it is non-converged
+    #   from the start (run failure, 7.7).
+    first = { m: initial_meshes(seed_densities[m], configs[m])
               for m in materials }
     results = dispatch_round(first)
-    rungs = { m: sort_by_mesh(results[m]) for m in materials }
-
+    rungs = {}
     outcomes = {}
-    active = list(materials)
+    active = []
+    for m in materials:
+        rungs[m] = sort_by_mesh(get(results, m, []))
+        if rungs[m] is empty:
+            outcomes[m] = NON_CONVERGED               # run failure
+            on_non_converged(m)
+        else:
+            active.append(m)
+
     while active is not empty:
         next_mesh = {}
         for m in list(active):
@@ -1588,7 +1702,7 @@ function converge_by_climb(materials, configs, predictions,
                 active.remove(m)
             elif action is CEILING:
                 outcomes[m] = NON_CONVERGED
-                tag_prediction_mismatch(workspace_root, m)   # 7.8 3d
+                on_non_converged(m)                    # 7.8 3d
                 active.remove(m)
             else:                            # RUN(mesh)
                 next_mesh[m] = [action.mesh]
@@ -1596,8 +1710,17 @@ function converge_by_climb(materials, configs, predictions,
             break
         # One parallel round: each still-active material's next rung.
         more = dispatch_round(next_mesh)
-        for m in more:
-            rungs[m] = merge_distinct(rungs[m], more[m])
+        for m in list(next_mesh):
+            requested = next_mesh[m][0]
+            ran = get(more, m, [])
+            if requested not in [r.mesh for r in ran]:
+                # The requested rung failed to run, so the climb
+                #   cannot advance: stop it non-converged (7.7).
+                outcomes[m] = NON_CONVERGED           # run failure
+                on_non_converged(m)
+                active.remove(m)
+            else:
+                rungs[m] = merge_distinct(rungs[m], ran)
 
     return outcomes, rungs
 ```
@@ -1642,6 +1765,112 @@ verification block; the harvest reads it from the chosen rung
 rather than deriving it, and the emitter (15.4) writes it when
 present.  Everything else in the guidance schema and predictor
 is unchanged (DESIGN 3.12.6).
+
+### 4e.7 Dispatching a mesh (DESIGN 7.7)
+
+The climb searches in mesh space, so a rung is dispatched as an
+EXPLICIT mesh, not a density.  Three small pieces bridge a mesh to
+a run and back: the calc-tag encoding, the predict-only builder that
+seeds the climb, and the round adapter `converge_by_climb` (4e.5)
+injects.  All three are specified in DESIGN 7.7.
+
+```
+function encodeMeshValue(mesh):        # DESIGN 6.2.4 / 7.7
+    # A mesh's calc-tag value token: the three axial counts joined
+    # by hyphens.  Counts are positive integers, so the token stays
+    # slug-safe ([a-z0-9-]).
+    return str(mesh[0]) + "-" + str(mesh[1]) + "-" + str(mesh[2])
+
+function decodeMeshValue(token):
+    # Invert encodeMeshValue: "4-4-4" -> [4, 4, 4].
+    return [int(part) for part in split(token, "-")]
+
+
+function build_mesh_unit(structure, options, mesh, id):
+    # One explicit-mesh convergence unit (DESIGN 7.7 / 6.2.1).
+    # `scfkp` is the makeinput key for an explicit axial-count mesh
+    # (a style-code-1 k-point file); `kpt-mesh` is its calc-tag axis.
+    # The cache identity is the same one the density units used
+    # (6.2.1), so a mesh re-run in a later round is a cache hit and
+    # costs nothing.
+    unit_options = copy(options)
+    unit_options["scfkp"] = mesh                 # [a, b, c]
+    calc = buildCalcTag({ "kpt-mesh": encodeMeshValue(mesh) })
+    return CalcUnit(id=id, calc=calc, structure=structure,
+                    options=unit_options, wingbeat="imago",
+                    key_fields=standardKeyFields(structure, options))
+
+
+function predict_kpoint_density(structure, dataspace, system_type,
+                                submodel, center):
+    # The prediction HALF of the former grid builder (7.7 steps 1-2
+    # and 5): signature -> predict -> PredictionRecord.  It lays NO
+    # grid -- the climb seeds from the density and picks its mode and
+    # persistence from the confidence (3.12.4 / 3.12.6).  A curator-
+    # pinned `center` bypasses the predictor exactly as before
+    # (5.7 / 6.2.9).  Returns the seed density, the confidence and
+    # under-trained flag the policy reads, and the record the harvest
+    # recovers (7.8).
+    sig = computeSignature(load(structure), system_type,
+                           dataspace.group_table)
+    if center is not None:
+        result = None                            # curator override
+        density = center
+        confidence = 1.0
+        under_trained = false
+        policy = "curator_override"
+    else:
+        result = predict(dataspace, sig, submodel.basis,
+                         submodel.functional,
+                         submodel.kpoint_integration)
+        density = result.predicted_kpoint_density
+        confidence = result.confidence
+        under_trained = result.is_under_trained
+        policy = "predict_then_climb"
+    record = buildPredictionRecord(policy, density, confidence,
+                                   under_trained, result, sig,
+                                   system_type, submodel)
+    return density, confidence, under_trained, record
+
+
+function make_dispatch_round(structures, options_by_material):
+    # The producer builds the round adapter converge_by_climb (4e.5)
+    # injects, closing over each material's structure and options.
+    # The returned dispatch_round(mesh_lists) is what the loop calls;
+    # the material key doubles as the unit id (materials ARE the
+    # reference ids the producer already uses).
+    function dispatch_round(mesh_lists):
+        # Build one unit per requested mesh, REMEMBERING which mesh
+        #   and material each carries, so the energy routes back
+        #   without re-decoding the calc tag (the requested mesh is
+        #   already in hand).
+        built = []                               # (m, mesh, unit)
+        for m in mesh_lists:
+            for mesh in mesh_lists[m]:
+                unit = build_mesh_unit(structures[m],
+                                       options_by_material[m], mesh,
+                                       id = m)
+                append(built, (m, mesh, unit))
+        flight = Flight([unit for (_, _, unit) in built],
+                        Sweep(varied = ("kpt-mesh",), fixed = {}))
+        prepareUnits(flight)                     # driver-side (6.2.5)
+        dispatch(flight)                         # 6.2.11
+
+        out = { m: [] for m in mesh_lists }
+        for (m, mesh, unit) in built:
+            if not completed(unit):              # failed -> OMIT so
+                continue                         #   4e.5 stops it
+            res = readResult(unit)               # result.toml (6.1.2)
+            assert res.kpoint_mesh == mesh       # honoured exactly
+            append(out[m], Rung(mesh, res.total_energy))
+        return out
+    return dispatch_round
+```
+
+The old single-call grid builder (`build_kpoint_convergence`, 15.6)
+is the density-era special case this pair generalizes; it is retired
+when the producer migrates to the climb (no other client depends on
+it), and 15.6 is reconciled to the split at that point.
 
 ---
 
