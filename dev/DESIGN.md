@@ -4783,6 +4783,35 @@ and resolves against the `[harvest]` block, not `[defaults]`:
   finished runs are read back -- and the resolved value is
   recorded on each guidance entry the solid contributes.
 
+The adaptive mesh climb's tuning knobs (3.12.6) live in an
+optional `[harvest.kpoint_climb]` sub-table.  Unlike
+`kpoint_convergence_threshold`, they are **database-wide** -- they
+tune how the whole seed campaign searches, not one solid's physics
+-- so they resolve `[harvest.kpoint_climb]` -> built-in default,
+with no per-solid override.  Each knob is optional; an omitted one
+takes the producer's provisional default (3.12.6), so a manifest
+that names neither the sub-table nor any knob searches with the
+built-in policy.  The seven knobs are:
+
+- `max_count` (positive int): the fixed per-axis count ceiling the
+  climb never exceeds, the backstop that guarantees termination
+  when the energy never quite goes flat (3.12.3).
+- `confidence_high` (real, [0,1]): the predictor-confidence at or
+  above which a prediction is trusted enough to dispatch a small
+  fixed mesh grid in one round rather than climb (3.12.5).
+- `grid_width` (int >= 0): how many rungs to each side of the
+  predicted rung the confident mode's fixed grid spans (3.12.5).
+- `start_offset_moderate`, `start_offset_cold` (int >= 0): how
+  many rungs below the predicted seed the climb mode begins -- the
+  moderate offset for a low-confidence prediction, the larger cold
+  offset for an under-trained one, since a weaker guide starts
+  lower (3.12.4).
+- `flat_needed_confident`, `flat_needed_cold` (positive int): how
+  many consecutive flat interior rungs the stop test must see
+  before it accepts convergence -- one when confident, two when
+  cold, so a single lucky flat step cannot end a cold climb early
+  (3.12.3).
+
 **Per-entry fields (`[[reference_solid.entry]]`).**  An entry
 is an *optional customization* on an auto-discovered environment, not
 a harvest instruction (5.2.2, 5.2.3).  Every field is optional;

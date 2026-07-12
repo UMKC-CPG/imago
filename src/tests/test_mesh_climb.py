@@ -433,6 +433,41 @@ def test_weak_prediction_selects_a_single_rung_climb():
     assert policy.start_offset == 1
 
 
+def test_climb_policy_from_empty_manifest_is_the_defaults():
+    """An empty [harvest.kpoint_climb] sub-table yields the built-in
+    provisional policy: DEFAULT_POLICY_THRESHOLDS and
+    DEFAULT_MAX_COUNT unchanged."""
+    thresholds, max_count = mesh_climb.climb_policy_from_manifest({})
+    assert thresholds == mesh_climb.DEFAULT_POLICY_THRESHOLDS
+    assert max_count == mesh_climb.DEFAULT_MAX_COUNT
+
+
+def test_climb_policy_from_manifest_overrides_named_knobs():
+    """A sub-table overrides only the knobs it names; the rest keep
+    their provisional defaults."""
+    thresholds, max_count = mesh_climb.climb_policy_from_manifest(
+        {"confidence_high": 0.9, "max_count": 30})
+    assert thresholds.confidence_high == 0.9          # overridden
+    assert max_count == 30                            # overridden
+    # An unnamed knob keeps its default.
+    assert thresholds.flat_needed_cold == \
+        mesh_climb.DEFAULT_POLICY_THRESHOLDS.flat_needed_cold
+
+
+def test_climb_policy_from_manifest_full_override():
+    """Every knob named is carried into the resolved policy."""
+    thresholds, max_count = mesh_climb.climb_policy_from_manifest(
+        {"confidence_high": 0.7, "grid_width": 2,
+         "start_offset_moderate": 1, "start_offset_cold": 3,
+         "flat_needed_confident": 1, "flat_needed_cold": 2,
+         "max_count": 24})
+    assert thresholds == mesh_climb.PolicyThresholds(
+        confidence_high=0.7, grid_width=2,
+        start_offset_moderate=1, start_offset_cold=3,
+        flat_needed_confident=1, flat_needed_cold=2)
+    assert max_count == 24
+
+
 def test_under_trained_forces_a_lower_cold_climb():
     """An under-trained prediction climbs even when its confidence
     number is high, and starts lower than a merely-weak one (the

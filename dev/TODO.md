@@ -2616,9 +2616,17 @@ imports its neighbours from `$IMAGO_BIN`).
       array) in `guidance_db.py`; `build_entry` reads it from the
       chosen rung's `result.toml` in `guidance_harvest.py`;
       `record_converged` in the producer.  +7 tests.
-    - [ ] Inc 5. The knobs of the scope's Config bullet, wired
-      into the manifest characterization block with documented
-      provisional defaults (3.12.6).
+    - [x] Inc 5. The climb-policy knobs sourced from the manifest
+      (Principle 11).  DESIGN 5.7 gains the optional
+      `[harvest.kpoint_climb]` sub-table (7 knobs, database-wide,
+      each with a provisional default); PSEUDOCODE carries the
+      `KPOINT_CLIMB_KEYS` validation and the confidence-policy
+      prose.  Code: `curation_manifest` parses / validates / emits
+      the sub-table (`HARVEST_SETTING_KEYS` + `KPOINT_CLIMB_KEYS`);
+      `mesh_climb.climb_policy_from_manifest` merges it over the
+      provisional defaults into `(PolicyThresholds, max_count)`.
+      A test pins `KPOINT_CLIMB_KEYS` to mesh_climb so they cannot
+      drift.  Wiring into the producer main is Inc 6.
     - [ ] Inc 6. Wire the producer main to `converge_by_climb`;
       integration test; validate the Python axis classes against
       imago's emitted `RESOLVED_KP_CLASSES` (implements the

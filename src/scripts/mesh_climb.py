@@ -540,6 +540,34 @@ def resolve_climb_policy(confidence, under_trained,
         start_offset=start_offset)
 
 
+def climb_policy_from_manifest(climb_settings):
+    """Merge a manifest ``[harvest.kpoint_climb]`` sub-table over the
+    provisional defaults (PSEUDOCODE 4e.4; DESIGN 5.7 / 3.12.6).
+
+    Returns ``(thresholds, max_count)``: a ``PolicyThresholds`` the
+    confidence-to-mode policy reads (``resolve_climb_policy``) and
+    the per-axis ceiling ``at_ceiling`` reads.  Every knob is
+    optional -- an omitted one keeps its provisional default
+    (``DEFAULT_POLICY_THRESHOLDS`` / ``DEFAULT_MAX_COUNT``, whose
+    values are still to be fixed by the seed experiment, 3.12.6) --
+    so an empty ``climb_settings`` yields the built-in policy and a
+    partial one overrides only the knobs it names.
+
+    ``climb_settings`` is the plain dict the manifest reader parsed
+    from ``[harvest.kpoint_climb]``; its keys were already validated
+    against the known knob names at load
+    (``curation_manifest.KPOINT_CLIMB_KEYS``), so only the merge
+    remains here."""
+    threshold_overrides = {
+        field: climb_settings[field]
+        for field in PolicyThresholds._fields
+        if field in climb_settings}
+    thresholds = DEFAULT_POLICY_THRESHOLDS._replace(
+        **threshold_overrides)
+    max_count = climb_settings.get("max_count", DEFAULT_MAX_COUNT)
+    return thresholds, max_count
+
+
 def _distinct_meshes(meshes):
     """Return ``meshes`` with exact duplicates removed and first-
     seen order preserved.  A parallel grid whose seed sits near the

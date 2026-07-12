@@ -1656,6 +1656,21 @@ grid; low or under-trained confidence selects the `CLIMB` mode,
 prediction (7.6) starts the climb from the wide-grid floor
 rather than a predicted seed (7.9).
 
+The numeric knobs that policy reads -- the `confidence_high`
+threshold, the two `flat_needed` counts, `grid_width`, the two
+`start_offset` values, and the per-axis `max_count` ceiling -- are
+config, not constants (Principle 11).  They are sourced from the
+manifest `[harvest.kpoint_climb]` sub-table (DESIGN 5.7 / 3.12.6),
+each knob falling back to a documented provisional default when the
+sub-table or that knob is omitted.  The producer resolves them once
+per run by merging the sub-table over the provisional defaults into
+a `PolicyThresholds` bundle plus `max_count`; the manifest reader
+validates the sub-table's keys against the known knob names
+(`KPOINT_CLIMB_KEYS`), so a mistyped knob fails loudly at load
+rather than silently taking a default.  The provisional default
+values themselves are still to be fixed by the seed experiment
+(3.12.6).
+
 ### 4e.5 Round-based orchestration across materials
 
 ```
@@ -5253,10 +5268,17 @@ function load_manifest_v2(path):
                      if k in raw.get("defaults", {}) }
     # The optional [harvest] block: shared HARVEST settings, read
     #   back after the runs finish rather than fed into any run
-    #   (DESIGN 5.7).  Its one v1 key, kpoint_convergence_threshold,
-    #   carries a built-in producer default, so the block -- and
-    #   the key -- may be omitted entirely (validated below).
+    #   (DESIGN 5.7).  kpoint_convergence_threshold carries a built-in
+    #   producer default, and the [harvest.kpoint_climb] sub-table's
+    #   knobs each do too (3.12.6), so the block -- and every key --
+    #   may be omitted entirely.  The sub-table's keys are validated
+    #   against KPOINT_CLIMB_KEYS so a mistyped knob fails loudly at
+    #   load rather than silently taking its default.
     raw_harvest = raw.get("harvest", {})
+    climb = raw_harvest.get("kpoint_climb", {})
+    for knob in climb:
+        require(knob in KPOINT_CLIMB_KEYS, path,
+            "unknown [harvest.kpoint_climb] knob: " + knob)
 
     solids               = raw.get("reference_solid",
                                    [])
@@ -5431,6 +5453,16 @@ RUN_SETTING_KEYS = ("basis", "functional",
 #   solid names neither its own kpoint_convergence_threshold nor a
 #   [harvest] block (DESIGN 5.7 / 7.8).  Per atom, in eV.
 DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 5.0e-4    # 0.5 meV/atom
+
+# The adaptive-climb tuning knobs that may live in the optional
+#   [harvest.kpoint_climb] sub-table (DESIGN 5.7 / 3.12.6).  Six
+#   name the confidence-to-policy PolicyThresholds (4e.4); max_count
+#   is the per-axis ceiling (4e.2).  Each carries a provisional
+#   built-in default (mesh_climb), so the sub-table -- and any knob
+#   -- may be omitted.  Database-wide: no per-solid override.
+KPOINT_CLIMB_KEYS = ("confidence_high", "grid_width",
+    "start_offset_moderate", "start_offset_cold",
+    "flat_needed_confident", "flat_needed_cold", "max_count")
 
 
 function apply_manifest_defaults(manifest):
@@ -5910,9 +5942,19 @@ function format_manifest(manifest):
     # authored kpoint_convergence_threshold on every rewrite.
     if manifest.harvest:
         emit "[harvest]"
+        # The scalar settings first; the kpoint_climb sub-table is a
+        #   dict, emitted as its own [harvest.kpoint_climb] block.
         for key in HARVEST_SETTING_KEYS:
+            if key == "kpoint_climb":
+                continue
             if key in manifest.harvest:
                 emit key = manifest.harvest[key]
+        climb = manifest.harvest.get("kpoint_climb", {})
+        if climb:
+            emit "[harvest.kpoint_climb]"
+            for knob in KPOINT_CLIMB_KEYS:
+                if knob in climb:
+                    emit knob = climb[knob]
 
     for solid in manifest.reference_solids:
         emit "[[reference_solid]]"

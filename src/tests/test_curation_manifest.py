@@ -23,7 +23,9 @@ from curation_manifest import (
     default_characterization,
     resolve_settings,
     DEFAULT_KPOINT_CONVERGENCE_THRESHOLD,
+    KPOINT_CLIMB_KEYS,
 )
+import mesh_climb
 
 pytestmark = pytest.mark.unit
 
@@ -361,6 +363,57 @@ def test_harvest_block_omitted_when_unset():
     text = format_manifest(
         _manifest(_sparse_si(), defaults=dict(_DEFAULTS)))
     assert "[harvest]" not in text
+
+
+def test_kpoint_climb_subtable_round_trips(tmp_path):
+    # A full [harvest.kpoint_climb] tuning sub-table survives a
+    #   write -> read cycle knob for knob (DESIGN 5.7 / 3.12.6).
+    climb = {"max_count": 24, "confidence_high": 0.8,
+             "grid_width": 2, "start_offset_moderate": 1,
+             "start_offset_cold": 3, "flat_needed_confident": 1,
+             "flat_needed_cold": 2}
+    loaded = _write_and_load(
+        _manifest(_sparse_si(), defaults=dict(_DEFAULTS),
+                  harvest={"kpoint_climb": climb}), tmp_path)
+    assert loaded.harvest["kpoint_climb"] == climb
+
+
+def test_kpoint_climb_partial_subtable_round_trips(tmp_path):
+    # Only the knobs a curator wrote are emitted and read back; the
+    #   rest fall to their built-in defaults at resolve time, not
+    #   here, so the manifest stays sparse.
+    climb = {"max_count": 30}
+    text = format_manifest(
+        _manifest(_sparse_si(), defaults=dict(_DEFAULTS),
+                  harvest={"kpoint_climb": climb}))
+    assert "[harvest.kpoint_climb]" in text
+    assert "max_count" in text
+    assert "confidence_high" not in text
+    loaded = _write_and_load(
+        _manifest(_sparse_si(), defaults=dict(_DEFAULTS),
+                  harvest={"kpoint_climb": climb}), tmp_path)
+    assert loaded.harvest["kpoint_climb"] == {"max_count": 30}
+
+
+def test_unknown_kpoint_climb_knob_rejected(tmp_path):
+    # A mistyped climb knob fails loudly at load rather than
+    #   silently taking a default (DESIGN 3.12.6).  Written by hand
+    #   because the emitter only emits known knobs.
+    text = format_manifest(
+        _manifest(_sparse_si(), defaults=dict(_DEFAULTS)))
+    text += "\n[harvest.kpoint_climb]\nconfidence_hi = 0.8\n"
+    path = tmp_path / "manifest.toml"
+    path.write_text(text)
+    with pytest.raises(ValueError, match="unknown.*knob"):
+        load_manifest_v2(str(path))
+
+
+def test_kpoint_climb_keys_match_mesh_climb():
+    # KPOINT_CLIMB_KEYS stays in step with mesh_climb's policy
+    #   fields plus the ceiling, so the manifest schema and the
+    #   resolver cannot drift (DESIGN 5.7 / 3.12.6).
+    assert set(KPOINT_CLIMB_KEYS) == (
+        set(mesh_climb.PolicyThresholds._fields) | {"max_count"})
 
 
 def test_authored_harvest_threshold_reaches_the_solid(tmp_path):

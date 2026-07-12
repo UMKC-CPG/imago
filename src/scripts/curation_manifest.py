@@ -262,8 +262,27 @@ RUN_SETTING_KEYS = ("basis", "functional", "kpoint_integration",
 
 # The harvest settings that may live in the top-level [harvest]
 #   block (DESIGN 5.7).  Unlike the run settings these govern how
-#   finished runs are READ BACK, not how they run; v1 holds one.
-HARVEST_SETTING_KEYS = ("kpoint_convergence_threshold",)
+#   finished runs are READ BACK, not how they run:
+#   ``kpoint_convergence_threshold`` (a scalar, per-solid
+#   overridable) and the optional ``kpoint_climb`` sub-table
+#   (database-wide policy tuning for the adaptive mesh climb,
+#   DESIGN 3.12.6).
+HARVEST_SETTING_KEYS = ("kpoint_convergence_threshold",
+                        "kpoint_climb")
+
+# The tuning knobs the ``[harvest.kpoint_climb]`` sub-table may
+#   carry (DESIGN 5.7 / 3.12.6).  Six name mesh_climb's
+#   ``PolicyThresholds`` fields; ``max_count`` is the per-axis climb
+#   ceiling.  Each carries a provisional built-in default
+#   (mesh_climb), so the sub-table -- and any knob -- may be
+#   omitted; the loader validates the keys so a mistyped knob fails
+#   loudly rather than silently defaulting.  Database-wide: no
+#   per-solid override (unlike the threshold).  A test asserts this
+#   list stays in step with mesh_climb.
+KPOINT_CLIMB_KEYS = ("confidence_high", "grid_width",
+                     "start_offset_moderate", "start_offset_cold",
+                     "flat_needed_confident", "flat_needed_cold",
+                     "max_count")
 
 
 def default_run_settings() -> dict[str, Any]:
@@ -511,6 +530,12 @@ def load_manifest_v2(path: str,
     raw_harvest = {key: raw["harvest"][key]
                    for key in HARVEST_SETTING_KEYS
                    if key in raw.get("harvest", {})}
+    # Validate the climb sub-table's knobs so a mistyped one fails
+    #   at load rather than silently taking its default (a curator
+    #   who wrote a knob down meant it; DESIGN 3.12.6 / 5.7).
+    for knob in raw_harvest.get("kpoint_climb", {}):
+        _require(knob in KPOINT_CLIMB_KEYS, path,
+                 "unknown [harvest.kpoint_climb] knob: " + repr(knob))
 
     seen_ref_ids: set[str] = set()
     seen_element_label: set[tuple[str, str]] = set()
@@ -1009,9 +1034,20 @@ def format_manifest(manifest: CurationManifest) -> str:
     if manifest.harvest:
         lines.append("")
         lines.append("[harvest]")
+        # The scalar settings first; the kpoint_climb sub-table is a
+        #   dict, emitted as its own [harvest.kpoint_climb] block.
         for key in HARVEST_SETTING_KEYS:
+            if key == "kpoint_climb":
+                continue
             if key in manifest.harvest:
                 lines.append(_field(key, manifest.harvest[key]))
+        climb = manifest.harvest.get("kpoint_climb")
+        if climb:
+            lines.append("")
+            lines.append("[harvest.kpoint_climb]")
+            for knob in KPOINT_CLIMB_KEYS:
+                if knob in climb:
+                    lines.append(_field(knob, climb[knob]))
 
     for solid in manifest.reference_solids:
         lines.append("")
