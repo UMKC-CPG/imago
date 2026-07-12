@@ -2627,10 +2627,21 @@ imports its neighbours from `$IMAGO_BIN`).
       provisional defaults into `(PolicyThresholds, max_count)`.
       A test pins `KPOINT_CLIMB_KEYS` to mesh_climb so they cannot
       drift.  Wiring into the producer main is Inc 6.
-    - [ ] Inc 6. Wire the producer main to `converge_by_climb`;
-      integration test; validate the Python axis classes against
-      imago's emitted `RESOLVED_KP_CLASSES` (implements the
-      Fortran emit of the 4d.5 amendment).
+    - [ ] Inc 6. Wire the producer main to the climb.  IN PROGRESS
+      (flow-design discussion) -- see `dev/CLIMB_INC6.md` for the
+      full analysis, the current-flow map, and the open questions.
+      Split: **6a** rewrite DESIGN 5.7 + PSEUDOCODE 11.4 for the
+      climb (the gate; density-grid 11.4 must change first) +
+      retire `build_kpoint_convergence` / reconcile 15.6; **6b**
+      rewire `build_initial_potentials` main + orchestration tests;
+      **6c** (in scope) imago `RESOLVED_KP_CLASSES` emit (4d.5) +
+      producer axis-class self-test (4c.7) + fcc-prim check (needs
+      a rebuilt binary).  RESUME AT: settle Q1 (in-memory guidance
+      contribution + shared `build_entry` core vs re-read) and Q2
+      (`build_entry` common interface) in `dev/CLIMB_INC6.md`; Q3
+      (`-loen` pre-flight batch) and Q4 (rung->run-dir extraction)
+      look settled.  Then 6a.  Follow-on: live seed re-run closes
+      C116, unblocks C117.
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 
