@@ -469,6 +469,14 @@ def build_entry(workspace_root, grid, kpoint_densities, energies,
         #   consumers (auto_promote_ok) normalize per atom.
         grid_energies=tuple(collapsed_energies),
         converged_at=chosen_kpoint_density,
+        # The chosen rung's resolved mesh, stored exact beside the
+        #   density so the calculation is auditable where a density
+        #   round-trips only up to rounding (DESIGN 3.12.4 / 7.2).
+        #   Read from its result.toml (the resolved axial counts,
+        #   DESIGN 6.1.2); absent on an older run -> None.
+        converged_mesh=(tuple(chosen_result["kpoint_mesh"])
+                        if chosen_result.get("kpoint_mesh")
+                        is not None else None),
         metric="total_energy",
         metric_threshold=kpoint_threshold,
         predictor_confidence=prediction["confidence"],

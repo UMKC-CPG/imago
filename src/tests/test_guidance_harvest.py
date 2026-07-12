@@ -43,7 +43,7 @@ _DATASPACE = types.SimpleNamespace(group_table={})
 # --------------------------------------------------------------
 
 def _make_workspace(tmp_path, kpds, energies, *,
-                    gaps=None, kinds=None, mags=None,
+                    gaps=None, kinds=None, mags=None, meshes=None,
                     scf_threshold=1.0, write_scf_threshold=True,
                     kpoint_convergence_threshold=5.0e-4,
                     write_gap=True, add_loen=False,
@@ -107,6 +107,14 @@ def _make_workspace(tmp_path, kpds, energies, *,
                 result_file.write(toml_line("gap_kind", kind))
             result_file.write(
                 toml_line("total_magnetization", mag))
+            if meshes is not None:
+                # The resolved axial counts imago records for this
+                #   grid point (DESIGN 6.1.2), which build_entry
+                #   stores as verification.converged_mesh.
+                a_count, b_count, c_count = meshes[index]
+                result_file.write(
+                    f"kpoint_mesh = [{a_count}, {b_count}, "
+                    f"{c_count}]\n")
             if write_scf_threshold:
                 result_file.write(
                     toml_line("scf_threshold", scf_threshold))
@@ -345,6 +353,29 @@ def test_converged_entry_measured_and_context(patched, tmp_path):
     # 100 Angstrom^3 -> Bohr^3 via the module's own factor.
     assert entry.context.cell_volume_per_formula_unit == \
         pytest.approx(100.0 * gh._ANGSTROM3_TO_BOHR3)
+
+
+def test_converged_entry_records_the_mesh(patched, tmp_path):
+    """build_entry records the chosen rung's resolved axial counts
+    as verification.converged_mesh, read from its result.toml
+    (DESIGN 3.12.4 / 7.2)."""
+    root = _make_workspace(
+        tmp_path, [25, 50, 100], [0.5, 0.5, 0.5],
+        meshes=[[3, 3, 3], [4, 4, 4], [5, 5, 5]])
+    gh.harvest_flight(root, str(tmp_path / "db"), _DATASPACE)
+    entry = patched["entries"][0]
+    # Flat energies converge at the interior [4,4,4] rung.
+    assert entry.verification.converged_at == 50
+    assert entry.verification.converged_mesh == (4, 4, 4)
+
+
+def test_converged_entry_mesh_absent_is_none(patched, tmp_path):
+    """A run whose result.toml carries no kpoint_mesh (an older
+    binary) records converged_mesh as None, not a failure."""
+    root = _make_workspace(
+        tmp_path, [25, 50, 100], [0.5, 0.5, 0.5])   # no meshes
+    gh.harvest_flight(root, str(tmp_path / "db"), _DATASPACE)
+    assert patched["entries"][0].verification.converged_mesh is None
 
 
 def test_converged_entry_verification_and_provenance(patched,

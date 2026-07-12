@@ -411,6 +411,20 @@ class TestLoadDataspace:
         assert all(entries == [] for entries
                    in space.entries_by_system_type.values())
 
+    def test_reads_converged_mesh(self, tmp_path):
+        space = load(_write_dataspace(tmp_path, _entry_text(
+            verification={**DEF_VER,
+                          "converged_mesh": [10, 10, 3]})))
+        entry = space.entries_by_system_type["crystalline"][0]
+        assert entry.verification.converged_mesh == (10, 10, 3)
+
+    def test_converged_mesh_absent_is_none(self, tmp_path):
+        # DEF_VER carries no converged_mesh (an older or curator
+        #   entry), so it loads as None (DESIGN 7.2).
+        space = load(_write_dataspace(tmp_path))
+        entry = space.entries_by_system_type["crystalline"][0]
+        assert entry.verification.converged_mesh is None
+
     def test_manual_entry_without_verification(self, tmp_path):
         text = _entry_text(
             top={**DEF_TOP, "source": "manual"}, verification=None)
@@ -590,6 +604,13 @@ class TestVerificationRule10:
             _load_entry_text(tmp_path, _entry_text(
                 verification={**DEF_VER, "converged_at": 100.0}))
 
+    def test_converged_mesh_wrong_length(self, tmp_path):
+        # A k-mesh is always three axial counts; a shorter one is
+        #   corrupt (DESIGN 7.2 rule 10).
+        with pytest.raises(ValueError, match="three axial counts"):
+            _load_entry_text(tmp_path, _entry_text(
+                verification={**DEF_VER, "converged_mesh": [4, 4]}))
+
     def test_unknown_metric(self, tmp_path):
         with pytest.raises(ValueError, match="unknown metric"):
             _load_entry_text(tmp_path, _entry_text(
@@ -635,6 +656,18 @@ class TestEmitter:
         assert reloaded.provenance == original.provenance
         assert reloaded.source == original.source
         assert reloaded.entry_id == slug_for(original)
+
+    def test_round_trip_converged_mesh(self, tmp_path):
+        # A present converged_mesh emits as an inline int array
+        #   aligned beside converged_at (width 22) and survives
+        #   save -> load (DESIGN 7.2).
+        original = _load_entry_text(tmp_path, _entry_text(
+            verification={**DEF_VER, "converged_mesh": [8, 8, 6]}))
+        out = format_entry(original, "x")
+        assert ("converged_mesh".ljust(22) + " = [8, 8, 6]") in out
+        path = save_entry(original, str(tmp_path))
+        reloaded = load_entry(path, "crystalline", {})
+        assert reloaded.verification.converged_mesh == (8, 8, 6)
 
     def test_round_trip_manual_without_verification(self, tmp_path):
         text = _entry_text(

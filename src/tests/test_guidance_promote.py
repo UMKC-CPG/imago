@@ -67,6 +67,7 @@ def _make_entry(*, converged_at=100.0,
             grid_energies=(tuple(grid_energies)
                            if grid_energies is not None else None),
             converged_at=converged_at,
+            converged_mesh=None,
             metric="total_energy",
             metric_threshold=metric_threshold,
             predictor_confidence=0.9,

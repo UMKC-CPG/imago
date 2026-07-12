@@ -1737,34 +1737,38 @@ next mesh lives entirely here.
 ### 4e.6 Recording the converged rung
 
 ```
-function record_converged(m, rung, rungs_m, config, prediction):
-    # Build the harvest inputs for a converged material (feeds
-    # build_entry, 15.7).  The dataspace key is a DENSITY; the mesh
-    # is stored exact alongside it (DESIGN 3.12.4 / Q4).  The
-    # density a mesh represents is its full-mesh volume density,
-    # product(mesh) / recipCellVolume -- self-consistent with 4c.2,
-    # so a future prediction of this density reproduces this mesh
-    # in this cell.
+function record_converged(rung, rungs, config):
+    # Build the DENSITY / MESH / GRID harvest inputs for a converged
+    # CLIMB material; build_entry (15.7) adds the gap, magnetization,
+    # sub-model, and provenance around them.  `rung` is the converged
+    # rung, `rungs` its ascending distinct-mesh ladder.  The dataspace
+    # key is a DENSITY; the mesh is stored exact alongside it (DESIGN
+    # 3.12.4 / Q4).  The density a mesh represents is its full-mesh
+    # volume density, product(mesh) / recipCellVolume -- self-
+    # consistent with 4c.2, so a future prediction of this density
+    # reproduces this mesh in this cell.  (m and prediction are the
+    # caller's to thread into build_entry; record_converged needs
+    # only the rungs and the cell's reciprocal volume.)
     converged_density = product(rung.mesh) / config.recipCellVolume
     return {
         converged_kpoint_density = converged_density,
         converged_mesh           = rung.mesh,       # 7.2 (Q4)
         # The stored flatness trace is the climb's distinct-mesh
-        # grid, so auto_promote_ok (15.7 / 7.8) re-judges on the
-        # same rungs the climb did.
+        # ladder, so auto_promote_ok (15.7 / 7.8) re-judges on the
+        # same rungs the climb did.  It is ascending because `rungs`
+        # is, and product(mesh) rises with each rung.
         grid_values   = [product(r.mesh) / config.recipCellVolume
-                         for r in rungs_m],
-        grid_energies = [r.energy for r in rungs_m],
-        # gap / magnetization / sub-model / provenance exactly as
-        # build_entry gathers them for a converged sweep (15.7).
+                         for r in rungs],
+        grid_energies = [r.energy for r in rungs],
     }
 ```
 
 `build_entry` (15.7) gains the `converged_mesh` field on the
-verification block; the harvest reads it from the chosen rung
-rather than deriving it, and the emitter (15.4) writes it when
-present.  Everything else in the guidance schema and predictor
-is unchanged (DESIGN 3.12.6).
+verification block; the density harvest reads it from the chosen
+rung's `result.toml`, the climb harvest gets it from
+`record_converged`, and the emitter (15.4) writes it when present.
+Everything else in the guidance schema and predictor is unchanged
+(DESIGN 3.12.6).
 
 ### 4e.7 Dispatching a mesh (DESIGN 7.7)
 
@@ -7975,6 +7979,12 @@ dataclass Verification:
     grid_energies          : tuple[float] | None  # parallel
                                           #   to grid_values
     converged_at           : float
+    converged_mesh         : tuple[int] | None    # resolved axial
+                                          #   counts of the
+                                          #   converged rung
+                                          #   (3.12.4); None on
+                                          #   pre-mesh / curator
+                                          #   entries
     metric                 : str          # "total_energy"
     metric_threshold       : float
     predictor_confidence   : float        # [0.0, 1.0]
@@ -8342,12 +8352,20 @@ function load_verification(v, measured, path):
     if energies is not None:
         require(len(energies) == len(grid), path,
             "grid_energies length != grid_values length")
+    # converged_mesh optional (absent on pre-mesh / curator
+    #   entries); when present it is the three axial counts (7.2).
+    mesh = v.get("converged_mesh")
+    if mesh is not None:
+        require(len(mesh) == 3, path,
+            "converged_mesh must be three axial counts")
     return Verification(
         grid_values            = tuple(grid),
         grid_energies          = (tuple(energies)
                                   if energies is not None
                                   else None),
         converged_at           = v["converged_at"],
+        converged_mesh         = (tuple(mesh)
+                                  if mesh is not None else None),
         metric                 = v["metric"],
         metric_threshold       = v["metric_threshold"],
         predictor_confidence   = v["predictor_confidence"],
@@ -8465,6 +8483,12 @@ function format_entry(entry, slug):
             emit_float_array(out, "grid_energies",
                              v.grid_energies)
         emit_kv(out, "converged_at",     v.converged_at)
+        # converged_mesh: an inline int array (the resolved axial
+        #   counts), beside converged_at; omitted when None (7.2).
+        if v.converged_mesh is not None:
+            out.append("converged_mesh = ["
+                + join_csv(str(n) for n in v.converged_mesh)
+                + "]")
         emit_kv(out, "metric",           v.metric)
         emit_kv(out, "metric_threshold", v.metric_threshold)
         emit_kv(out, "predictor_confidence",
@@ -9187,6 +9211,12 @@ function harvest_flight(workspace_root, db_root, dataspace):
                 #   cell hartree; consumers normalize per atom
                 #   (Option B; DESIGN 7.8 / 7.2)
                 converged_at  = chosen_kpoint_density,
+                # The chosen rung's resolved mesh, stored exact
+                #   beside the density (DESIGN 3.12.4 / 7.2); read
+                #   from its result.toml (6.1.2), absent -> None.
+                converged_mesh = (tuple(chosen_rt["kpoint_mesh"])
+                                  if "kpoint_mesh" in chosen_rt
+                                  else None),
                 metric        = "total_energy",
                 metric_threshold = kpoint_threshold,
                 # prediction is guaranteed present (record-less

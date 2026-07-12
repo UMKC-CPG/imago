@@ -2607,9 +2607,15 @@ imports its neighbours from `$IMAGO_BIN`).
       gained the fail-fast guard (round-0 empty + missing-rung ->
       NON_CONVERGED).  +7 builder tests, +5 producer tests; 221
       affected-suite tests green.
-    - [ ] Inc 4. `converged_mesh` through the guidance schema:
-      reader (15.3), emitter (15.4), `build_entry` (15.7), and
-      `record_converged` (4e.6).
+    - [x] Inc 4. `converged_mesh` through the guidance schema.
+      Propagated the field from DESIGN 7.2 into PSEUDOCODE (the
+      `Verification` dataclass, the reader 15.3, the emitter 15.4,
+      `build_entry` 15.7) and simplified `record_converged` (4e.6)
+      to `(rung, rungs, config)`.  Code: `Verification.converged_mesh`
+      + reader (optional, three-count check) + emitter (inline int
+      array) in `guidance_db.py`; `build_entry` reads it from the
+      chosen rung's `result.toml` in `guidance_harvest.py`;
+      `record_converged` in the producer.  +7 tests.
     - [ ] Inc 5. The knobs of the scope's Config bullet, wired
       into the manifest characterization block with documented
       provisional defaults (3.12.6).

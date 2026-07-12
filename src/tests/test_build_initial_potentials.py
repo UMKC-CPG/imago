@@ -3072,3 +3072,27 @@ def test_climb_missing_continuation_rung_is_non_converged():
 
     assert outcomes["si"] is bip.NON_CONVERGED
     assert flagged == ["si"]
+
+
+# --------------------------------------------------------------
+#  record_converged -- the climb's harvest inputs (PSEUDOCODE 4e.6)
+# --------------------------------------------------------------
+
+def test_record_converged_builds_density_mesh_and_grid():
+    """record_converged turns a converged rung and its ladder into
+    the density / mesh / grid harvest inputs: the density is the
+    full-mesh volume density (product of counts over the reciprocal
+    cell volume), the mesh is stored exact, and the grid is the
+    ascending ladder's densities and raw energies."""
+    config = _cubic_config(                  # recip_cell_volume = 1.0
+        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)
+    rungs = [bip.Rung([4, 4, 4], -1.0), bip.Rung([5, 5, 5], -1.1),
+             bip.Rung([6, 6, 6], -1.1)]
+
+    out = bip.record_converged(rungs[1], rungs, config)
+
+    assert out["converged_mesh"] == [5, 5, 5]
+    assert out["converged_kpoint_density"] == 125.0      # 5^3 / 1.0
+    assert out["grid_values"] == [64.0, 125.0, 216.0]
+    assert out["grid_energies"] == [-1.0, -1.1, -1.1]

@@ -261,6 +261,12 @@ class Verification:
     grid_values: tuple[float, ...]
     grid_energies: tuple[float, ...] | None
     converged_at: float
+    # The resolved axial counts [n_a, n_b, n_c] of the converged
+    #   rung, stored exact beside converged_at so the calculation is
+    #   auditable where a density round-trips only up to the mesh
+    #   map's rounding (DESIGN 3.12.4 / 7.2).  None on curator-
+    #   authored or pre-mesh entries that carry no resolved mesh.
+    converged_mesh: tuple[int, ...] | None
     metric: str                       # "total_energy"
     metric_threshold: float
     predictor_confidence: float       # [0.0, 1.0]
@@ -738,11 +744,20 @@ def load_verification(raw_verification: dict[str, Any],
         _require(len(energies) == len(grid), path,
                  "grid_energies length != grid_values length")
 
+    # converged_mesh is optional -- absent on curator-authored or
+    #   pre-mesh entries -- but a k-point mesh is always three axial
+    #   counts, so a present one that is not length 3 is corrupt.
+    mesh = v.get("converged_mesh")
+    if mesh is not None:
+        _require(len(mesh) == 3, path,
+                 "converged_mesh must be three axial counts")
+
     return Verification(
         grid_values=tuple(grid),
         grid_energies=(tuple(energies)
                        if energies is not None else None),
         converged_at=v["converged_at"],
+        converged_mesh=(tuple(mesh) if mesh is not None else None),
         metric=v["metric"],
         metric_threshold=v["metric_threshold"],
         predictor_confidence=v["predictor_confidence"],
@@ -945,11 +960,20 @@ def format_entry(entry: GuidanceEntry, slug: str) -> str:
             _emit_float_array(lines, "grid_energies",
                               v.grid_energies)
         scalar_width = max(
-            len("converged_at"), len("metric"),
-            len("metric_threshold"), len("predictor_confidence"),
+            len("converged_at"), len("converged_mesh"),
+            len("metric"), len("metric_threshold"),
+            len("predictor_confidence"),
             len("predictor_neighbor_ids"))
+        _emit_scalars(lines, [("converged_at", v.converged_at)],
+                      width=scalar_width)
+        # converged_mesh: an inline int array (the resolved axial
+        #   counts), kept beside converged_at; omitted when None so
+        #   pre-mesh / curator entries stay clean (DESIGN 7.2).
+        if v.converged_mesh is not None:
+            counts = ", ".join(str(n) for n in v.converged_mesh)
+            lines.append("converged_mesh".ljust(scalar_width)
+                         + " = [" + counts + "]")
         _emit_scalars(lines, [
-            ("converged_at", v.converged_at),
             ("metric", v.metric),
             ("metric_threshold", v.metric_threshold),
             ("predictor_confidence", v.predictor_confidence)],

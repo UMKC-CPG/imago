@@ -2122,6 +2122,38 @@ def make_dispatch_round(structures, options_by_material, workspace,
     return dispatch_round
 
 
+def record_converged(rung, rungs, config):
+    """Build the density / mesh / grid harvest inputs for a
+    converged climb material (PSEUDOCODE 4e.6; DESIGN 3.12.4).
+
+    The guidance dataspace is keyed on a DENSITY, but the climb
+    converges a MESH, so the converged rung is recorded both ways.
+    The density a mesh represents is its full-mesh volume density,
+    ``product(mesh) / recip_cell_volume`` -- self-consistent with the
+    count selection (``mesh_climb.select_axial_counts``), so a future
+    prediction of this density reproduces this mesh in this cell --
+    and the exact mesh is stored beside it (DESIGN 3.12.4 / 7.2).
+
+    ``rung`` is the converged rung; ``rungs`` its ascending
+    distinct-mesh ladder (the flatness trace the curator's
+    auto-promote rule re-judges).  Returns the density / mesh / grid
+    fields only; the producer's climb harvest threads them into
+    :func:`guidance_harvest.build_entry`, which adds the gap,
+    magnetization, sub-model, and provenance (4e.6 / 15.7)."""
+    volume = config.recip_cell_volume
+    return {
+        "converged_kpoint_density":
+            _mesh_point_count(rung.mesh) / volume,
+        "converged_mesh": list(rung.mesh),
+        # Ascending because `rungs` is and the point count rises with
+        #   each rung; raw total-cell energies (Option B), which the
+        #   consumer normalizes per atom (DESIGN 7.8).
+        "grid_values": [_mesh_point_count(one.mesh) / volume
+                        for one in rungs],
+        "grid_energies": [one.energy for one in rungs],
+    }
+
+
 def build_initial_potentials(manifest_path: str, pdb_root: str,
                              data_root: str, *, force: bool = False,
                              single_element: str | None = None,
