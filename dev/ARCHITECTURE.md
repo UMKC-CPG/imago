@@ -133,6 +133,21 @@ Modules directly affected by the current development:
   asymmetric); the long-term direction is for `makegroups.py`
   to absorb *all* type assignment (reduce, target, block),
   leaving `makeinput.py` purely an input-writer.
+- **symmetry.py** (`src/scripts/symmetry.py`): the first
+  focused module split out of `structure_control.py` at the
+  symmetry seam (Section 7).  It owns reading a cell's
+  conventional-cell-abc space-group point operations (and
+  fractional translations) from `share/spaceDB/<sg>` -- the
+  single `read_conv_abc_point_ops(...)` that both `makeinput.py`
+  (the k-point-file writer, for `buildAtomPerm`'s fractional
+  translations) and `build_initial_potentials.py` (the
+  initial-potential producer, for the mesh climb's axis
+  classes, DESIGN 3.12) read through, so one parser of the
+  spaceDB operation file serves both and cannot drift.
+  `StructureControl` exposes a thin accessor delegating here.
+  Future symmetry concerns (supercell construction, atom
+  permutation tables) migrate into this module as Section 7's
+  split proceeds.
 
 ---
 
@@ -140,11 +155,19 @@ Modules directly affected by the current development:
 
 ```
 makeinput.py (top-level orchestrator)
+  +-- symmetry.py (read_conv_abc_point_ops: the single
+  |     spaceDB operation reader; kp writer uses the
+  |     fractional translations for buildAtomPerm)
   +-- (mesh mode: -kp)
   |     writes kp-scf.dat / kp-pscf.dat (style 1)
   +-- (density mode: -kpd)
   |     writes kp-scf.dat / kp-pscf.dat (style 2)
   +-- makeKPoints (legacy, no longer called by makeinput)
+
+build_initial_potentials.py (initial-potential producer)
+  +-- symmetry.py (same read_conv_abc_point_ops; the mesh
+  |     climb uses the rotations for axis classes, DESIGN 3.12)
+  +-- kaleidoscope (dispatch), guidance_db (dataspace)
 
 imago.F90 (top-level dispatcher)
   +-- O_KPoints (kpoints.f90)
@@ -635,6 +658,36 @@ choice is to keep `structure_control.py` as-is and
 route new force-field-adjacent logic into small
 dedicated modules (the path taken for
 `angle_utils.py` in the angle-handling rework).
+
+**Starting the split at the symmetry seam (2026-07-14).**
+The initial-potential producer's adaptive mesh climb
+(DESIGN 3.12; ARCHITECTURE 9.7) is the first concern to hit
+trigger #3.  To seed and step the climb the producer must
+compute a cell's k-point axis classes *before* it dispatches
+any run, which means reading the cell's conventional-cell-abc
+space-group point operations from `share/spaceDB/<sg>` in
+Python.  That reader currently lives only inside
+`makeinput.py` (the private `_extract_point_ops`, which the
+k-point-file writer uses); duplicating it in the producer
+would leave two parsers of one file free to drift, and the
+climb's later self-check -- do the producer's Python axis
+classes match the operations imago actually used (DESIGN 2.7)
+-- is only meaningful if the climb and the kp writer start
+from the *same* operations.  So the reader is promoted into a
+new focused module, **`symmetry.py`**, as the first tenant of
+the module this section already earmarks: a single
+`read_conv_abc_point_ops(...)` that both the kp writer (which
+keeps consuming the fractional translations for
+`buildAtomPerm`) and the producer (which uses the rotations
+for axis classes, DESIGN 3.12) read through, so one parser of
+the spaceDB operation file serves both and cannot drift.
+`StructureControl` gains a thin accessor delegating to it, so
+a caller can still ask a loaded cell for its operations
+without the reading logic entering the monolith.  The
+remaining seams (geometry, neighbors, I/O, and the rest of
+symmetry -- supercell construction, atom permutation tables)
+stay future work; this starts the split in the small, driven
+by a real need rather than a scheduled refactor.
 
 ---
 

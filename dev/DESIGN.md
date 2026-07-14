@@ -1195,7 +1195,10 @@ This mechanism already exists in `imago` (`kPointStyleCode=2`,
 When the user passes `-kpd`, `-scfkpd`, or `-pscfkpd`:
 
 1. `makeinput.py` extracts the point group operations from
-   the space group database (`_extract_point_ops`) and
+   the space group database -- through the shared
+   `symmetry.read_conv_abc_point_ops` reader (ARCHITECTURE
+   2, 7), the single parser both the kp writer and the
+   initial-potential producer read that file through -- and
    writes kpoint files (`kp-scf.dat` and/or `kp-pscf.dat`)
    directly, bypassing the `makeKPoints` executable.
 2. Each file uses `kPointStyleCode=2` and contains:
@@ -5127,12 +5130,23 @@ cache.
 
 **Procedure.**
 
-The pipeline runs in three phases — *build*, *dispatch*,
-*harvest* — so that every reference solid's verification runs are
-launched as one flat parallel batch (the predict-then-verify
-shape of DESIGN 6.2.1) rather than one solid at a time.
+The pipeline runs in three phases — *build*, *converge*,
+*harvest*.  The build phase predicts and seeds every solid; the
+converge phase walks each solid's k-point mesh upward in adaptive
+parallel rounds until its energy flattens; the harvest phase
+reads each converged run.  Convergence is no longer a static grid
+guessed up front and dispatched in one batch: it is the adaptive
+mesh climb (DESIGN 3.12), which searches in *mesh* space -- so
+every rung is a genuinely distinct calculation, never several
+densities collapsing onto one symmetric mesh -- while it *keys*
+and *records* its result in the transferable k-point *density*.
+Predict in density, search in mesh, record in density.
 
-1. Load and validate the manifest (the rules above).
+1. Load and validate the manifest (the rules above).  Resolve the
+   climb policy once for the run: merge the manifest's optional
+   `[harvest.kpoint_climb]` knobs over the provisional defaults
+   into the confidence thresholds and the per-axis `max_count`
+   ceiling the climb reads (3.12.6).
 2. For every element with a directory in `share/atomicPDB/`,
    load the element's existing `s_gaussian_pot.toml` if it is
    present (preserving every environment harvested by earlier
@@ -5146,44 +5160,70 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
    a. `materialize_structure(ref)` → a local structure file
       (read from disk for `structure_path`, or fetched once from
       COD at the pinned `cod_revision` for `cod_id`).
-   b. Build the two inputs the next step needs.  `options =
-      make_producer_options(ref)` translates the manifest physics
-      into each tool's coded settings (`functional` → `xccode`,
-      `kpoint_integration` → `scfkpint`, `basis` → `scf_basis`,
-      `scf_threshold` → `converg`, `kpoint_spec.shift` →
-      `kpshift`; 6.2.10), while `submodel = {basis, functional,
-      kpoint_integration}` keeps the human names the predictor and
-      record speak.  Then `build_kpoint_convergence(structure,
-      options, dataspace, system_type, submodel, …)` (DESIGN
-      6.2.8 / 7) consults the guidance dataspace and returns the
-      **verification grid**: a set of k-point densities bracketing
-      the predicted converged density, widened by the prediction's
-      uncertainty (a length-1 grid in trust mode; the wide default
-      grid when the dataspace cannot predict).  A manifest
-      `kpoint_spec.density` is passed as the `center` argument -- a
-      curator override that pins or centres the grid and bypasses
-      the predictor.
-   c. Emit one `CalcUnit` per grid point — each carrying the
-      materialized structure, the coded run settings (the SCF
-      convergence limit `converg` among them), and the k-density
-      for that point — plus one structure-only
-      `imago.py -loen -scf no` unit per declared Fortran-side
-      fingerprint (the bispectrum fingerprint depends on geometry
-      alone, not on SCF convergence, so it need not wait for the
-      converged grid point).  Tag the `<calc>` level by k-density
-      per DESIGN 6.2.4 and collect every solid's units into a
-      single `Flight`.
-4. **Dispatch.**  Hand the whole `Flight` to kaleidoscope, which
-   runs and tracks the batch through the wingbeat seam and its
-   run-reuse cache (DESIGN 6.2.5).  The producer runs no SCF or
-   loen calculation itself.
+   b. Predict and seed.  `options = make_producer_options(ref)`
+      translates the manifest physics into each tool's coded
+      settings (`functional` → `xccode`, `kpoint_integration` →
+      `scfkpint`, `basis` → `scf_basis`, `scf_threshold` →
+      `converg`, `kpoint_spec.shift` → `kpshift`; 6.2.10), while
+      `submodel = {basis, functional, kpoint_integration}` keeps
+      the human names the predictor and record speak.  Then
+      `predict_kpoint_density(structure, options, dataspace,
+      system_type, submodel, center)` (DESIGN 7.7) consults the
+      guidance dataspace and returns the **seed density**, the
+      prediction's `confidence` and under-trained flag, and the
+      `PredictionRecord` the harvest later recovers.  It lays *no*
+      grid: the climb (step 4) searches outward from the seed.  A
+      manifest `kpoint_spec.density` is passed as `center` -- a
+      curator override that pins the seed and bypasses the
+      predictor.  From that confidence and the run's resolved
+      climb policy, build the solid's `ClimbConfig`: the dispatch
+      mode (`PARALLEL_GRID` when confident, `CLIMB` when cold or
+      under-trained), the flatness persistence `flat_needed`, and
+      the reciprocal-cell geometry the rung mechanics read
+      (3.12.4 / 3.12.5): the reciprocal magnitudes and cell
+      volume from the loaded cell, and the axis classes
+      recomputed in Python from the cell's conventional-abc
+      space-group operations -- read through the same shared
+      `symmetry.read_conv_abc_point_ops` the kp writer uses, so
+      the classes the climb seeds from are derived from the very
+      operations imago will run under (2.7).
+   c. Emit one structure-only `imago.py -loen -scf no` unit per
+      declared Fortran-side fingerprint (the bispectrum
+      fingerprint depends on geometry alone, not on SCF
+      convergence, so it need not wait for a converged mesh).
+      These loen units are geometry-only and mesh-independent, so
+      they belong to no climb round: they are dispatched once,
+      together, in a small pre-flight batch before the climb, and
+      their run dirs persist for the harvest's fingerprint step.
+      The *convergence* units are not built here -- the climb
+      builds each round's meshes as it runs (step 4).
+4. **Converge.**  Drive every solid through the round-based climb
+   (`converge_by_climb`, DESIGN 3.12.5): serial within a solid,
+   parallel across.  Round 0 dispatches each solid's seed mesh(es)
+   (`initial_meshes` from the seed density and mode -- a small
+   parallel grid when confident, one starting rung when cold);
+   each later round reads the rungs so far and, for every still-
+   active solid, either accepts a converged rung, stops at the
+   `max_count` ceiling, or dispatches one more mesh.  A round's
+   meshes all dispatch together as one parallel batch through
+   kaleidoscope's wingbeat seam and run-reuse cache (DESIGN
+   6.2.5); each mesh rides an explicit axial-count k-point file
+   (`build_mesh_unit`, DESIGN 7.7), so a mesh re-run in a later
+   round is a cache hit.  A solid leaves the climb the moment it
+   converges or ceilings, so late solids never hold back the ones
+   already done.  The producer runs no SCF itself.  Each solid's
+   outcome is either its **converged rung** (the mesh, its
+   energy, and the ascending distinct-mesh ladder below it) or
+   `NON_CONVERGED` -- a ceiling, or a rung that failed to run.  A
+   non-converged solid is flagged, never retried here: retries are
+   the runner's job (Principle 12).
 5. **Harvest.**  For each `[[reference_solid]]`:
-   a. Pick the converged grid point from the solid's units with
-      the two-sided delta-below-threshold rule (DESIGN 7.8 / the
-      C72 harvest).  If no grid point converges (for example,
-      non-convergence at the top of the range), skip the solid's
-      entries and flag it in the run log rather than harvesting a
-      non-converged potential.
+   a. If the solid is `NON_CONVERGED`, flag it in the run log and
+      harvest no potential (a non-converged sweep earns neither a
+      potential nor a guidance entry).  Otherwise its converged
+      rung names the mesh whose `kpt-mesh-<a>-<b>-<c>` run dir --
+      the run the climb already dispatched -- carries the
+      converged potential, and the steps below read that run.
    b. Record that run's SCF iteration count and convergence
       metrics in the run log.
    c. Discover the run's environments: every atom carries a
@@ -5236,21 +5276,37 @@ shape of DESIGN 6.2.1) rather than one solid at a time.
            stands; otherwise append it.  An explicit
            customization `label` naming an existing entry
            replaces it.
-   d. **Guidance contribution.**  Harvest the same converged grid
-      point into the historical guidance dataspace's staging area
-      (`share/historicalGuidanceDB/staging/<system_type>/`, via
-      the C72 `harvest_flight` hook), so every reference solid the
-      producer converges becomes training data that sharpens the
-      predictor for the next solid.  Trust-mode (length-1 grid)
-      runs harvest the potential but do *not* auto-stage a
-      guidance entry — a single point is weaker evidence than a
-      converged grid (DESIGN 7).
+   d. **Guidance contribution.**  The climb already holds the
+      solid's converged rung and its ladder in memory, so the
+      guidance entry is built *in place* -- no re-read of the
+      workspace.  `record_converged(rung, rungs, config)` (DESIGN
+      3.12.4) turns the converged rung into the entry's k-point
+      density and the ascending flatness ladder; those chosen
+      facts, together with the converged run's `result.toml` (gap,
+      magnetization, SCF threshold, exact mesh, commit), feed the
+      one entry builder `build_entry` -- the *same* builder the
+      standalone density harvest uses, so the two paths cannot
+      diverge -- and `save_entry` stages the result under
+      `share/historicalGuidanceDB/staging/<system_type>/`.
+      `build_entry` reads the exact converged mesh from
+      `result.toml`, the same source in both harvest paths, so the
+      mesh stored beside the density cannot differ between them.
+      Every reference solid the producer converges thus becomes
+      training data that sharpens the predictor for the next
+      solid.  A converged climb always carries at least the three
+      distinct rungs its stop test required (3.12.3), so the
+      stored flatness ladder is always long enough for the
+      curator's `auto_promote_ok` to re-judge -- every converged
+      solid contributes an entry, and a curator-pinned seed is
+      verified by the climb like any other (there is no unverified
+      single-point "trust" harvest here, unlike the density-era
+      helper, DESIGN 7).
 6. Save each affected `ElementDatabase` to disk via
    `initial_potential_db.save()` (5.5).
 7. Write `share/curation/run_log.toml` capturing the manifest
-   snapshot, per-run iteration counts, the converged k-density
-   chosen for each solid, and the Imago commit.  The validation
-   harness (5.8) reads this log.
+   snapshot, per-run iteration counts, the converged mesh and its
+   k-density chosen for each solid, and the Imago commit.  The
+   validation harness (5.8) reads this log.
 
 **Flags:**
 
@@ -6803,6 +6859,19 @@ changes the contracts above.
 
 #### 6.2.8 Flight-builder helper for predict-then-verify
 
+> **Where the producer's k-point convergence lives now.**  The
+> producer drives k-point convergence through the adaptive mesh
+> climb (DESIGN 3.12, producer flow in 5.7), which predicts in
+> density but searches in mesh.  The one-shot density-grid builder
+> `build_kpoint_convergence` this subsection designed is retired:
+> DESIGN 7.7 documents its split into `predict_kpoint_density`
+> (predict only) plus the climb machinery (`build_mesh_unit` per
+> rung; `mesh_climb` drives the search).  The verification-grid
+> design below is retained as the rationale the climb inherits --
+> predict a converged operating point, then verify around it --
+> now realized by a mesh search rather than a fixed grid of
+> densities.
+
 This subsection designs the **first option-axis builder
 helper** living inside `src/scripts/kaleidoscope/`: a
 small factory function that turns "a structure plus an
@@ -7368,12 +7437,13 @@ dest the run actually used.
 
 *Related robustness fix (surfaced by the failed smoke run).*
 When every unit fails this way, no `result.toml` is written, and
-the harvest's `pick_converged_unit` raised `FileNotFoundError`
-trying to open it.  A failed or result-less unit must be treated
-as **non-converged** (logged and skipped, 5.7), never an
-uncaught crash: the harvest reads `status.toml` and skips any
-unit whose status is not a completed run before it reaches for
-that unit's `result.toml`.
+opening a missing one raised `FileNotFoundError`.  A failed or
+result-less unit must be treated as **non-converged** (logged and
+skipped, 5.7), never an uncaught crash: the completion gate
+(`_unit_completed`) reads `status.toml` and skips any unit whose
+status is not a completed run before its `result.toml` is read, so
+the climb's round adapter omits it and the material stops
+non-converged (4e.5).
 
 *Follow-on code (for TODO).*  (a) add makeinput `-converg`;
 (b) rewrite `make_producer_options` to emit the dest-keyed, coded
@@ -7381,7 +7451,8 @@ vocabulary above; (c) export `imago.OPTION_KEYS` plus a
 `CACHE_ONLY_KEYS` set from `kaleidoscope.wingbeats`; (d) move the
 partition into `ImagoWingbeat.run` and retire the single-shared-
 options call to `run_structure`; (e) update `_KEY_SCALAR_NAMES`;
-(f) harden `pick_converged_unit` against a missing `result.toml`.
+(f) the completion gate (`_unit_completed`) reads `status.toml`
+before any `result.toml`, so a missing one cannot crash the harvest.
 
 #### 6.2.11 Cluster dispatch configuration
 
@@ -9546,17 +9617,18 @@ but lays its own rungs:
   `PredictionRecord` -- and returns the predicted density,
   confidence, under-trained flag, and record.  The producer uses the
   density to seed the climb (3.12.4) and the confidence to pick the
-  dispatch mode and the persistence (3.12.6); the record is attached
-  for the harvest exactly as before (7.8).
+  dispatch mode and the persistence (3.12.6); the record travels to
+  the harvest as a plain dict the producer stamps per solid (7.8).
 - `build_mesh_unit` builds one explicit-mesh CalcUnit -- the `scfkp`
   option, the `kpt-mesh` tag, and the same cache identity (6.2.1)
   the density units used -- and the adapter calls it once per mesh
   per round.
 
-The old single-call grid builder is the density-era special case the
+The single-call grid builder was the density-era special case the
 climb generalizes: its confidence-widened grid becomes the confident
-mode's small fixed grid (3.12.5).  It retires when the producer
-migrates to the climb, and no other client depends on it.
+mode's small fixed grid (3.12.5).  The producer now drives the climb,
+so that builder is retired; `predict_kpoint_density` and
+`build_mesh_unit` are the two pieces that remain.
 
 **A rung that fails to run.**  A unit that does not complete has no
 `result.toml`, hence no energy, so the adapter returns only the rungs

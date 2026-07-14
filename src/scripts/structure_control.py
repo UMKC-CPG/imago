@@ -47,6 +47,7 @@ import re
 import random
 import subprocess
 
+import symmetry
 from element_data import ElementData
 
 
@@ -4050,6 +4051,28 @@ class StructureControl:
             for xyz_axis in range(1, 4):
                 if abs(self.real_lattice[abc_axis][xyz_axis]) < EPSILON:
                     self.real_lattice[abc_axis][xyz_axis] = 0.0
+
+    def point_ops(self):
+        """Return this cell's space-group rotation matrices, in the
+        on-disk conventional-cell-abc fractional form (PSEUDOCODE
+        4b.4; DESIGN 2.7).
+
+        A thin accessor over the shared
+        :func:`symmetry.read_conv_abc_point_ops`: it reads the same
+        ``share/spaceDB/<sg>`` operation file the k-point writer
+        reads, keyed on this loaded cell's own ``space_group_db`` and
+        ``space_group_name``, and returns just the rotations (the
+        fractional translations the reader also yields are not needed
+        here).  The initial-potential producer's mesh climb
+        (``build_initial_potentials.build_climb_config``) calls this
+        to compute a cell's k-point axis classes before dispatching
+        any run, so the classes it seeds from are derived from the
+        very operations imago will run under.
+        """
+        rotation_matrices, _fractional_translations = (
+            symmetry.read_conv_abc_point_ops(
+                self.space_group_db, self.space_group_name))
+        return rotation_matrices
 
     def make_inv_or_recip_lattice(self, lattice=None, lattice_inv=None,
                                    make_recip=True):

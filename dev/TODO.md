@@ -2627,21 +2627,22 @@ imports its neighbours from `$IMAGO_BIN`).
       provisional defaults into `(PolicyThresholds, max_count)`.
       A test pins `KPOINT_CLIMB_KEYS` to mesh_climb so they cannot
       drift.  Wiring into the producer main is Inc 6.
-    - [ ] Inc 6. Wire the producer main to the climb.  IN PROGRESS
-      (flow-design discussion) -- see `dev/CLIMB_INC6.md` for the
-      full analysis, the current-flow map, and the open questions.
-      Split: **6a** rewrite DESIGN 5.7 + PSEUDOCODE 11.4 for the
-      climb (the gate; density-grid 11.4 must change first) +
-      retire `build_kpoint_convergence` / reconcile 15.6; **6b**
-      rewire `build_initial_potentials` main + orchestration tests;
-      **6c** (in scope) imago `RESOLVED_KP_CLASSES` emit (4d.5) +
-      producer axis-class self-test (4c.7) + fcc-prim check (needs
-      a rebuilt binary).  RESUME AT: settle Q1 (in-memory guidance
-      contribution + shared `build_entry` core vs re-read) and Q2
-      (`build_entry` common interface) in `dev/CLIMB_INC6.md`; Q3
-      (`-loen` pre-flight batch) and Q4 (rung->run-dir extraction)
-      look settled.  Then 6a.  Follow-on: live seed re-run closes
-      C116, unblocks C117.
+    - [ ] Inc 6. Wire the producer main to the climb.  6a + 6b DONE
+      (uncommitted); 6c remains.  **6a** (DONE): DESIGN 5.7 +
+      PSEUDOCODE 11.4 rewritten for the climb; the chosen-facts
+      `build_entry` (Q1/Q2 resolved); an A'' diversion added
+      `symmetry.py` -- the shared `share/spaceDB` point-ops reader
+      both the kp writer and the producer read through (ARCH 2/3/7
+      started the Section-7 symmetry split in the small).  **6b**
+      (DONE): rewired `build_initial_potentials` main to the three-
+      phase climb (build / converge / harvest) with `build_climb_-
+      config`; FULL-SWEEP retirement of `build_kpoint_convergence` +
+      its helper tail + `pick_converged_unit` across code / tests /
+      PSEUDOCODE 15.6 / DESIGN; orchestration tests rewired; the
+      make_run_log_entry mesh-vs-density fix.  **6c** (NEXT, needs a
+      rebuilt binary): imago `RESOLVED_KP_CLASSES` emit (4d.5) +
+      producer axis-class self-test (4c.7) + fcc-prim check.
+      Follow-on: live seed re-run closes C116, unblocks C117.
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 

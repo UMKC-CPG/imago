@@ -123,7 +123,7 @@ from curation_manifest import (
     load_manifest_v2, load_structure_sources, resolve_settings)
 from kaleidoscope import CalcUnit, Flight, SweepRecord, dispatch
 from kaleidoscope.builders.kpoint_convergence import (
-    build_kpoint_convergence, build_mesh_unit, standard_key_fields)
+    build_mesh_unit, predict_kpoint_density, standard_key_fields)
 from kaleidoscope.cluster_config import (
     resolve_dispatch, write_resolved_dispatch,
     load_site_config, resolve_choices, resolve_orchestrator,
@@ -869,11 +869,11 @@ def build_loen_units(ref: ReferenceSolid, struct_path: str,
     descriptor table holds one row per atom, so declarations across both
     sources are de-duplicated by their calc tag and at most one unit is
     built per distinct tag.  Each unit is tagged ``kind="fingerprint"``
-    so the convergence harvest (:func:`pick_converged_unit`, which keeps
-    only ``"convergence"``) ignores it and only the fingerprint harvest
-    reads its descriptor.  Python-side (reduce) declarations need no unit
-    -- they are computed in process during the harvest -- so they are
-    skipped here.
+    so the producer dispatches it in the separate loen pre-flight batch
+    (never in a climb convergence round), and only the fingerprint
+    harvest reads its descriptor.  Python-side (reduce) declarations
+    need no unit -- they are computed in process during the harvest --
+    so they are skipped here.
 
     ``options`` is the solid's ``make_producer_options`` dict; the loen
     overrides are layered on a copy so the convergence units are
@@ -1128,83 +1128,6 @@ def _unit_completed(workspace_root: str, unit) -> bool:
         workspace_root, "wingbeats", unit.id, *unit.calc)
     status = read_status(wingbeat_dir)
     return bool(status) and status.get("status") == "done"
-
-
-def pick_converged_unit(flight: Flight, reference_id: str,
-                        workspace_root: str,
-                        metric_threshold: float):
-    """Return ``(unit, result_toml)`` for the converged grid point
-    of one solid's convergence sweep, or ``None`` when the energy is
-    still moving at the top of the grid -- or when nothing ran to
-    completion (PSEUDOCODE 11.4).
-
-    Uses the same two-sided delta-below-threshold rule as the
-    guidance harvest (DESIGN 7.8 step 3c), reused via
-    ``guidance_harvest.pick_converged``: the smallest interior
-    k-density whose total energy is within ``metric_threshold`` of
-    both neighbours, PER ATOM and in eV (the basis the threshold is
-    stated in).  ``metric_threshold`` is the solid's resolved
-    ``kpoint_convergence_threshold``, NOT its SCF threshold; the
-    per-atom normalization needs the cell size, so the structure is
-    loaded once from a completed unit.  A single-point grid (a
-    trust-mode run or a single-point curator override) has no
-    interior point to judge, so its lone run IS the deliverable --
-    the producer trusts the pinned/predicted point and harvests its
-    potential directly.
-
-    Only units that ran to completion are considered: a failed or
-    result-less unit is treated as non-converged and dropped before
-    its ``result.toml`` is opened (DESIGN 6.2.10).  When no unit
-    completed -- e.g. every unit failed at the makeinput/imago seam
-    -- the solid did not converge and the function returns ``None``,
-    which the caller logs and skips (5.7)."""
-
-    units = [unit for unit in flight.units
-             if unit.id == reference_id
-             and unit.kind == "convergence"]
-    units = sorted(
-        units,
-        key=lambda unit: guidance_harvest.swept_value_of(
-            unit, "kpt-density"))
-
-    # Keep only the units that completed; a failed/result-less unit
-    # is not a convergence data point and has no result.toml to read.
-    completed = [unit for unit in units
-                 if _unit_completed(workspace_root, unit)]
-    if not completed:
-        return None
-
-    results = [_read_unit_result(workspace_root, unit)
-               for unit in completed]
-
-    if len(completed) == 1:
-        return completed[0], results[0]
-
-    # Per-atom normalization needs the cell size (the same structure
-    #   the guidance harvest loads); read it once from a completed
-    #   unit's staged structure.
-    cell_atom_count = guidance_harvest.load_structure(
-        completed[0].structure).num_atoms
-
-    # Collapse duplicate-mesh rungs, then the two-sided test, so the
-    #   potential harvest and the guidance harvest cannot pick
-    #   different rungs for the same solid (DESIGN 7.8 step 3c;
-    #   PSEUDOCODE 11.4).  meshes[i] is the resolved kpoint_mesh
-    #   (None -> the guard is inert).  kept maps a collapsed index
-    #   back to its completed-unit position.
-    densities = [
-        guidance_harvest.swept_value_of(unit, "kpt-density")
-        for unit in completed]
-    energies = [result["total_energy"] for result in results]
-    meshes = [result.get("kpoint_mesh") for result in results]
-    _, collapsed_energies, kept = \
-        guidance_harvest.collapse_by_mesh(densities, energies, meshes)
-    index = guidance_harvest.pick_converged(
-        collapsed_energies, cell_atom_count, metric_threshold)
-    if index is None:
-        return None
-    chosen = kept[index]
-    return completed[chosen], results[chosen]
 
 
 def _parse_scfv_type_block(path: str, type_number: int
@@ -1666,17 +1589,25 @@ def make_imago_provenance(commit: str, timestamp: str,
 #  Run log (DESIGN 5.7 / 5.8; PSEUDOCODE 11.4 write_run_log)
 # ============================================================
 
-def make_run_log_entry(ref: ReferenceSolid, unit,
+def make_run_log_entry(ref: ReferenceSolid, harvest_inputs: dict,
                        result_toml: dict) -> dict[str, Any]:
     """One converged-solid row for the run log: the reference id,
-    the converged k-density (read off the chosen unit's calc tag),
-    and the SCF iteration count the 5.8 harness reads."""
+    the converged mesh AND its k-density, and the SCF iteration
+    count the 5.8 harness reads (PSEUDOCODE 11.4).
+
+    ``harvest_inputs`` is :func:`record_converged`'s output for this
+    solid, so the mesh and density are the exact converged rung's --
+    the climb searches in mesh space, and a mesh does not round-trip
+    from its calc tag the way a swept density did, so both are read
+    from the recorded rung rather than the unit's tag (DESIGN
+    3.12.4)."""
 
     return {
         "reference_id": ref.reference_id,
         "converged": True,
-        "converged_kpoint_density": guidance_harvest.swept_value_of(
-            unit, "kpt-density"),
+        "converged_mesh": harvest_inputs["converged_mesh"],
+        "converged_kpoint_density":
+            harvest_inputs["converged_kpoint_density"],
         "scf_iterations": result_toml.get("scf_iterations"),
     }
 
@@ -2048,7 +1979,8 @@ def converge_by_climb(materials, configs, seed_densities,
 
 
 def make_dispatch_round(structures, options_by_material, workspace,
-                        *, prepare_fn=prepare_units,
+                        *, parsl_config=None,
+                        prepare_fn=prepare_units,
                         dispatch_fn=dispatch,
                         completed_fn=_unit_completed,
                         read_fn=_read_unit_result, force=False):
@@ -2066,9 +1998,13 @@ def make_dispatch_round(structures, options_by_material, workspace,
 
     The adapter closes over each material's ``structure`` and coded
     ``options`` (keyed by the material id, which is also the unit id
-    so an energy routes straight back), and over the ``workspace``
-    the run directories live under.  ``prepare_fn`` / ``dispatch_fn``
-    / ``completed_fn`` / ``read_fn`` are injected -- defaulting to the
+    so an energy routes straight back), over the ``workspace`` the run
+    directories live under, and over the resolved dispatch
+    ``parsl_config`` -- the SAME Config the loen pre-flight ran under
+    (``None`` for the local opt-out, a real Parsl ``Config`` for a
+    cluster shape) -- so every round's units land in one tree and run
+    under one dispatch shape.  ``prepare_fn`` / ``dispatch_fn`` /
+    ``completed_fn`` / ``read_fn`` are injected -- defaulting to the
     real driver-side prepare, the real kaleidoscope dispatch, and the
     real status / result readers -- so a caller can unit-test the
     adapter with the toolchain seam mocked (each live run needs a
@@ -2090,8 +2026,12 @@ def make_dispatch_round(structures, options_by_material, workspace,
                     options_by_material[material], mesh, material)
                 built.append((material, mesh, unit))
 
+        # The round's flight carries the workspace root and the
+        #   resolved dispatch Config, so its units live in the same
+        #   tree and run under the same shape as the pre-flight batch.
         flight = Flight(
             root=workspace, units=[unit for _, _, unit in built],
+            parsl_config=parsl_config,
             sweep=SweepRecord(varied_axes=("kpt-mesh",),
                               fixed_axes={}))
         prepare_fn(flight, workspace)
@@ -2154,6 +2094,109 @@ def record_converged(rung, rungs, config):
     }
 
 
+def _lattice_rows(one_indexed_lattice):
+    """Extract a plain 3x3 (rows a/b/c, columns x/y/z) from a
+    ``StructureControl`` 1-indexed 4x4 lattice.
+
+    ``StructureControl`` stores lattices Perl-port style: index 0 is
+    an unused ``None`` sentinel, so the three lattice vectors live at
+    rows 1..3 and their Cartesian components at columns 1..3.
+    ``mesh_climb.axis_classes_for_cell`` wants the lattice vectors as
+    ordinary 0-indexed rows, which this returns."""
+
+    return [[one_indexed_lattice[axis][component]
+             for component in range(1, 4)]
+            for axis in range(1, 4)]
+
+
+def build_climb_config(ref, structure, confidence, under_trained,
+                       thresholds, max_count):
+    """Assemble one reference solid's :data:`ClimbConfig` (PSEUDOCODE
+    11.4; DESIGN 3.12 / 5.7) from three sources: the loaded cell's
+    reciprocal geometry (the rung mechanics search there), the
+    confidence-derived climb policy, and the run's energy / ceiling
+    knobs.
+
+    Called once per solid in the build phase, BEFORE any run -- the
+    climb needs a cell's axis classes to seed and step, so they are
+    recomputed here from the cell's own space-group operations
+    (``cell.point_ops`` -> the shared reader, PSEUDOCODE 4b.4), never
+    read back from a run.
+
+    Parameters
+    ----------
+    ref
+        The ``ReferenceSolid``, for its resolved per-atom k-point
+        flatness threshold (the climb's stop tolerance).
+    structure
+        The solid's local ``.skl`` path.
+    confidence, under_trained
+        The predictor's confidence and bootstrap flag, which shape
+        the search (parallel grid vs. serial climb; DESIGN 3.12.6).
+    thresholds, max_count
+        The run-wide climb policy resolved once from the manifest
+        (:func:`mesh_climb.climb_policy_from_manifest`, 4e.4): the
+        confidence-to-mode ``thresholds`` bundle and the per-axis
+        ceiling ``max_count``.
+    """
+
+    cell = guidance_harvest.load_structure(structure)
+
+    # Recompute the reciprocal lattice from the FINAL loaded cell
+    #   (primitive for a prim reduction), so the reciprocal-axis
+    #   magnitudes and cell volume match the mesh the climb builds
+    #   (DESIGN 3.12.4).  make_inv_or_recip_lattice fills
+    #   recip_lattice and recip_cell_volume (the 2*pi convention);
+    #   it is idempotent, so calling it here is safe whatever the
+    #   loader already computed.
+    #
+    # Unlike real_lattice (whose ROWS are the cell vectors), the
+    #   reciprocal is stored as an inverse, so its reciprocal
+    #   vectors b_i are its COLUMNS -- component index first, vector
+    #   index second.  The magnitude of reciprocal axis i is thus
+    #   the norm DOWN column i.  (Reading it row-wise transposes the
+    #   vectors and silently mis-scales every non-cubic cell -- a
+    #   cubic cell hides it because its row and column norms match.)
+    cell.make_inv_or_recip_lattice(make_recip=True)
+    recip_lattice = cell.recip_lattice
+    recip_mag = [
+        (recip_lattice[1][axis] ** 2 + recip_lattice[2][axis] ** 2
+         + recip_lattice[3][axis] ** 2) ** 0.5
+        for axis in range(1, 4)]
+
+    # Axis classes (4c.7 / DESIGN 2.7): which reciprocal axes must
+    #   share a k-point count.  The rotations come from the cell's
+    #   own space group via the shared reader, so the classes the
+    #   climb seeds from are derived from the operations imago will
+    #   run under.  cell_mode is "full" when the loaded cell IS the
+    #   conventional cell (do_full_cell), else "prim".
+    cell_mode = "full" if cell.do_full_cell else "prim"
+    classes = mesh_climb.axis_classes_for_cell(
+        cell.point_ops(),
+        _lattice_rows(cell.real_lattice),
+        _lattice_rows(cell.full_cell_real_lattice),
+        cell_mode)
+
+    # Confidence -> the shape of the search (4e.4): dispatch mode,
+    #   flatness persistence, grid width, climb start offset.  The
+    #   knob thresholds were resolved once for the run from the
+    #   manifest (climb_policy_from_manifest).
+    policy = mesh_climb.resolve_climb_policy(
+        confidence, under_trained, thresholds)
+
+    return ClimbConfig(
+        classes=classes,
+        recip_mag=recip_mag,
+        recip_cell_volume=cell.recip_cell_volume,
+        mode=policy.mode,
+        flat_needed=policy.flat_needed,
+        grid_width=policy.grid_width,
+        start_offset=policy.start_offset,
+        cell_atom_count=cell.num_atoms,
+        threshold=ref.kpoint_convergence_threshold,
+        max_count=max_count)
+
+
 def build_initial_potentials(manifest_path: str, pdb_root: str,
                              data_root: str, *, force: bool = False,
                              single_element: str | None = None,
@@ -2170,10 +2213,12 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                              fingerprint_fn=harvest_fingerprints
                              ) -> list[dict[str, Any]]:
     """The three-phase producer (DESIGN 5.7; PSEUDOCODE 11.4):
-    *build* a single combined flight, *dispatch* it through
-    kaleidoscope, then *harvest* each solid's converged potential
-    and contribute the same converged point back to the guidance
-    dataspace.  Returns the per-run log (also written to disk).
+    *build* each solid's ClimbConfig from a predicted seed density
+    (no grid), *converge* every solid through the adaptive mesh
+    climb (predict in density, search in mesh), then *harvest* each
+    converged solid's potential and contribute the same converged
+    rung back to the guidance dataspace.  Returns the per-run log
+    (also written to disk).
 
     ``dispatch_shape`` selects where the flight runs (DESIGN 6.2.11):
     ``local`` (the default here, so tests and in-process callers stay
@@ -2206,91 +2251,157 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     timestamp = _now_iso8601_utc()
     workspace = curation_workspace_root(pdb_root)
 
-    # ----- Phase 1: build.  Refresh the isolated baselines, then
-    # accumulate every solid's convergence units (and any loen
-    # units) into ONE combined flight so the whole producer run
-    # dispatches as a single flat parallel batch.
+    # Resolve the climb policy ONCE for the run (PSEUDOCODE 4e.4 /
+    #   DESIGN 3.12.6): the optional [harvest.kpoint_climb] knobs
+    #   merged over the provisional defaults into the confidence
+    #   `thresholds` bundle and the per-axis `max_count` ceiling every
+    #   solid's ClimbConfig reads.  An empty sub-table yields the
+    #   built-in policy; a mistyped knob already failed loudly at load.
+    thresholds, max_count = mesh_climb.climb_policy_from_manifest(
+        manifest.harvest.get("kpoint_climb", {}))
+
+    # ----- Phase 1: build.  Refresh the isolated baselines, then per
+    # solid: materialize the structure, PREDICT its seed k-point
+    # density (no grid), and build its ClimbConfig.  The convergence
+    # units are NOT built here -- the climb builds each round's meshes
+    # as it runs (Phase 2).  Only the geometry-only fingerprint units
+    # are built now, collected into one pre-flight batch (they are
+    # mesh-independent, so they belong to no climb round; DESIGN 5.7).
     elements = None if single_element is None else [single_element]
     databases = refresh_isolated_entries(
         pdb_root, manifest, imago_commit, timestamp, elements)
 
-    all_units: list = []
-    predictions: dict[str, Any] = {}
+    struct_of: dict[str, str] = {}       # reference_id -> .skl path
+    options_of: dict[str, Any] = {}      # reference_id -> coded options
+    configs: dict[str, ClimbConfig] = {}      # reference_id -> config
+    seed_densities: dict[str, float] = {}     # reference_id -> density
+    predictions: dict[str, Any] = {}     # reference_id -> record dict
+    loen_units: list = []                # every solid's fingerprint units
     for ref in manifest.reference_solids:
         struct = materialize_structure(ref, manifest_dir, pdb_root)
+        struct_of[ref.reference_id] = struct
         options = make_producer_options(ref, imago_commit)
+        options_of[ref.reference_id] = options
         # The predictor and the PredictionRecord speak the human
-        # physics names, not the codes, so the sub-model travels to
-        # the builder in its OWN dict -- never mixed into the
-        # tool-facing options (DESIGN 6.2.8 / 6.2.10), which would
-        # both duplicate the basis and make makeinput reject
-        # "functional" / "kpoint_integration".
+        # physics names, not the codes, so the sub-model travels in
+        # its OWN dict -- never mixed into the tool-facing options
+        # (DESIGN 6.2.8 / 6.2.10), which would duplicate the basis and
+        # make makeinput reject "functional" / "kpoint_integration".
         submodel = {
             "basis": ref.basis,
             "functional": ref.functional,
             "kpoint_integration": ref.kpoint_integration,
         }
-        # One builder call per solid (DESIGN 6.2.9): a pinned
-        # kpoint_spec.density is the curator override (predictor
-        # bypassed); otherwise full predict-then-verify.
-        flight_i, record_i = build_kpoint_convergence(
-            struct, options, dataspace, ref.system_type, submodel,
-            id=ref.reference_id,
-            center=ref.kpoint_spec.get("density"))
-        all_units.extend(flight_i.units)
-        all_units.extend(build_loen_units(
-            ref, struct, options, manifest.characterization))
-        # Store the plain dict (metadata must be TOML-serializable).
-        #   Stamp the resolved per-atom k-point flatness tolerance
-        #   onto it too: the guidance harvest judges convergence from
-        #   the workspace alone, and this is a manifest/resolved fact,
-        #   absent from any run's result.toml (DESIGN 7.8 / 5.7).
-        predictions[ref.reference_id] = asdict(record_i)
+        # PREDICTION ONLY (PSEUDOCODE 4e.7): the climb seeds from the
+        #   density and picks its mode / persistence from the
+        #   confidence (DESIGN 3.12.4 / 3.12.6).  A pinned
+        #   kpoint_spec.density is the curator override (predictor
+        #   bypassed); otherwise None and predict runs, flagging
+        #   under-trained when the dataspace has no useful prior (7.9).
+        density, confidence, under_trained, record = \
+            predict_kpoint_density(
+                struct, dataspace, ref.system_type, submodel,
+                center=ref.kpoint_spec.get("density"))
+        seed_densities[ref.reference_id] = density
+        # Everything the climb needs for this solid, gathered once: the
+        #   reciprocal geometry the rung mechanics read, the confidence-
+        #   derived policy, and the energy / ceiling knobs.
+        configs[ref.reference_id] = build_climb_config(
+            ref, struct, confidence, under_trained,
+            thresholds, max_count)
+        # Store the record as a plain dict (metadata must be TOML-
+        #   serializable), and stamp the resolved per-atom k-point
+        #   flatness tolerance onto it: the guidance harvest reads
+        #   both, and the tolerance is a manifest/resolved fact absent
+        #   from any run's result.toml (DESIGN 7.8 / 5.7).
+        predictions[ref.reference_id] = asdict(record)
         predictions[ref.reference_id][
             "kpoint_convergence_threshold"] = (
                 ref.kpoint_convergence_threshold)
+        # Geometry-only fingerprint units: one structure-only
+        #   `-loen -scf no` unit per Fortran-side declaration.  The
+        #   bispectrum fingerprint depends on geometry alone, so these
+        #   need not wait for a converged mesh; they dispatch in the
+        #   pre-flight below and their run dirs persist for the harvest.
+        loen_units.extend(build_loen_units(
+            ref, struct, options, manifest.characterization))
 
-    flight = Flight(
-        root=workspace, units=all_units,
-        sweep=SweepRecord(varied_axes=("kpt-density",),
-                          fixed_axes={}),
-        metadata={"predictions": predictions})
-
-    # ----- Phase 1b: prepare (driver-side).  makeinput runs HERE,
-    # in the driver, not on a worker: the cache keys on
-    # structure.dat (DESIGN 6.2.5), so it must exist before the
-    # hit-test.  Each unit is staged into its own prepare/ area,
-    # separate from its run directory, and the staged structure.dat
-    # becomes the unit's KeyFile source; a cache hit is then decided
-    # from local files and never reaches the scheduler.
-    prepare_fn(flight, workspace)
-
-    # ----- Phase 2: dispatch.  Kaleidoscope runs and tracks every
-    # unit through the wingbeat seam and its run-reuse cache.  The
-    # dispatch shape becomes the flight's Parsl Config (None for the
-    # local opt-out); the driver then auto-selects Local vs Parsl and
-    # honours the force cache-bypass (DESIGN 6.2.11; PSEUDOCODE 13.5).
-    flight.parsl_config, dispatch_choices = resolve_dispatch(
+    # ----- Phase 1b: loen pre-flight (DESIGN 5.7 / 11.4).  Resolve
+    # the dispatch Config ONCE for the whole run (DESIGN 6.2.11):
+    # local -> None (the driver runs in process); a cluster shape -> a
+    # real Parsl Config.  Both this pre-flight and every climb round
+    # dispatch under it; `force` bypasses the run-reuse cache.  The
+    # fingerprint units are mesh-independent, so they dispatch once
+    # here as a small flat batch (makeinput runs driver-side: the
+    # cache keys on structure.dat, DESIGN 6.2.5); their run dirs
+    # persist for the Phase 3 fingerprint harvest.  The convergence
+    # units are prepared per round inside the climb instead.
+    parsl_config, dispatch_choices = resolve_dispatch(
         dispatch_shape, partition, nodes, walltime, profile)
     if save_config and dispatch_choices is not None:
         write_resolved_dispatch(workspace, dispatch_choices, profile)
-    dispatch_fn(flight, force=force)
+    loen_flight = Flight(
+        root=workspace, units=loen_units,
+        parsl_config=parsl_config,
+        sweep=SweepRecord(varied_axes=(), fixed_axes={}))
+    if loen_units:
+        prepare_fn(loen_flight, workspace)
+        dispatch_fn(loen_flight, force=force)
 
-    # ----- Phase 3: harvest.  Per solid, pick the converged grid
-    # point, extract the potential at each named site, and record
-    # the run.  Non-converged solids are logged and skipped.
+    # ----- Phase 2: converge.  Drive every solid through the adaptive
+    # mesh climb (converge_by_climb): serial within a solid, parallel
+    # across, one round per iteration.  The round adapter closes over
+    # each solid's structure, coded options, and the resolved Config;
+    # the loop reads each round's energies and chooses each solid's
+    # next mesh until it flattens (its converged rung) or hits the
+    # max_count ceiling (NON_CONVERGED).  A mesh re-run in a later
+    # round is a cache hit (DESIGN 6.2.5).  on_non_converged tags the
+    # solid's workspace with a prediction mismatch (DESIGN 7.8 step
+    # 3d); it is injected so the round loop stays free of the workspace.
+    dispatch_round = make_dispatch_round(
+        struct_of, options_of, workspace,
+        parsl_config=parsl_config, prepare_fn=prepare_fn,
+        dispatch_fn=dispatch_fn, force=force)
+    materials = [ref.reference_id for ref in manifest.reference_solids]
+    outcomes, rungs = converge_by_climb(
+        materials, configs, seed_densities, dispatch_round,
+        on_non_converged=lambda material:
+            guidance_harvest.tag_prediction_mismatch(
+                workspace, material))
+
+    # ----- Phase 3: harvest.  Per solid, locate the converged rung's
+    # run, extract the potential at each named site, record the run,
+    # and contribute the same converged rung back to the guidance
+    # dataspace in memory.  A NON_CONVERGED solid (a ceiling stop or a
+    # run failure) is logged and skipped -- no potential, no entry.
     per_run_log: list[dict[str, Any]] = []
     for ref in manifest.reference_solids:
-        converged = pick_converged_unit(
-            flight, ref.reference_id, workspace,
-            ref.kpoint_convergence_threshold)
-        if converged is None:
+        struct = struct_of[ref.reference_id]
+        outcome = outcomes[ref.reference_id]
+        if outcome is NON_CONVERGED:
             per_run_log.append(make_nonconverged_log_entry(ref))
             continue
-        unit, result_toml = converged
+
+        # record_converged turns this solid's converged rung and its
+        #   ladder into the guidance density, exact mesh, and flatness
+        #   trace in memory (DESIGN 3.12.4).  Both the run log and the
+        #   guidance entry read it, so it is computed once, here.
+        harvest_inputs = record_converged(
+            outcome, rungs[ref.reference_id],
+            configs[ref.reference_id])
+
+        # The converged rung names the mesh whose run carries the
+        #   converged potential (DESIGN 3.12.4 / Q4).  Rebuild the SAME
+        #   mesh unit the climb dispatched -- a cache hit, so it costs
+        #   nothing -- to point at that run dir, and read its
+        #   result.toml for the iteration count and measured character.
+        converged = build_mesh_unit(
+            struct, options_of[ref.reference_id], outcome.mesh,
+            ref.reference_id)
+        converged_result = _read_unit_result(workspace, converged)
         per_run_log.append(
-            make_run_log_entry(ref, unit, result_toml))
-        scf_iterations = result_toml.get("scf_iterations")
+            make_run_log_entry(ref, harvest_inputs, converged_result))
+        scf_iterations = converged_result.get("scf_iterations")
 
         # Discover one representative per distinct environment in the
         #   converged run (DESIGN 5.2.3 / 5.7).  Each carries its
@@ -2299,12 +2410,12 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         #   layered on; the harvest only extracts the potential and
         #   inserts the entry.
         for env in discover_environments(
-                result_toml, ref, identity_fn=identity_fn):
+                converged_result, ref, identity_fn=identity_fn):
             elem_key = env.element.lower()
             if elem_key not in databases:
                 continue        # filtered out by --element
             coefficients, alphas = extract_fn(
-                result_toml, env.atom_site)
+                converged_result, env.atom_site)
 
             new_entry = ipdb.PotentialEntry(
                 label=env.label,
@@ -2323,21 +2434,38 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                     scf_iterations),
                 # Every environment harvests the database-wide
                 #   [characterization] recipe (preferred) plus any
-                #   per-entry override (non-preferred).
+                #   per-entry override (non-preferred).  Fortran-side
+                #   matchers read the pre-flight loen run.
                 fingerprints=fingerprint_fn(
-                    flight, ref, env.atom_site, env.overrides,
-                    result_toml, manifest.characterization))
+                    loen_flight, ref, env.atom_site, env.overrides,
+                    converged_result, manifest.characterization))
             # Insert-or-skip (DESIGN 5.2.3): replace a same-label
             #   entry (a re-harvested solid or a curator override),
             #   skip a bispectrum duplicate (the stored representative
             #   stands), or append a genuinely novel environment.
             insert_or_skip(databases[elem_key], new_entry)
 
-    # ----- Phase 3b: guidance contribution.  The same converged
-    # grid points feed the historical-guidance dataspace staging,
-    # so every solid the producer converges sharpens the predictor.
-    guidance_harvest.harvest_flight(
-        workspace, guidance_root, dataspace)
+        # In-memory guidance contribution (DESIGN 5.7 / 11.4).  The
+        #   climb already holds this solid's converged rung and its
+        #   ascending ladder, so the entry is built in place -- no
+        #   re-read of the workspace.  record_converged turns the rung
+        #   into the entry's density and flatness ladder; those chosen
+        #   facts, with the converged run's result.toml (gap /
+        #   magnetization / SCF threshold / exact mesh / commit), feed
+        #   the SHARED build_entry -- the same builder the standalone
+        #   density harvest uses -- and save_entry stages it.  A
+        #   converged climb always carries >= 3 distinct rungs (the
+        #   two-sided stop test, DESIGN 3.12.3), so every converged
+        #   solid contributes an entry.
+        entry = guidance_harvest.build_entry(
+            workspace, struct, predictions[ref.reference_id],
+            dataspace, guidance_harvest.load_structure(struct),
+            ref.kpoint_convergence_threshold,
+            harvest_inputs["grid_values"],
+            harvest_inputs["grid_energies"],
+            harvest_inputs["converged_kpoint_density"],
+            converged_result)
+        guidance_harvest.save_entry(entry, guidance_root)
 
     # ----- Write outputs: every affected element file, plus the
     # run log the 5.8 validation harness reads.

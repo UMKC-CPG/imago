@@ -1,43 +1,39 @@
-"""kaleidoscope.builders.kpoint_convergence -- the predict-then-
-verify k-point-density flight builder (DESIGN 6.2.8 / 7.7;
-PSEUDOCODE 15.6).
+"""kaleidoscope.builders.kpoint_convergence -- the k-point
+convergence builder the adaptive mesh climb uses (DESIGN 7.7 /
+3.12; PSEUDOCODE 4e.7).
 
-This is the FIRST option-axis builder in the flight-builder split
-(DESIGN 6.2; see ``kaleidoscope.builders``).  It turns "a
-structure + a dict of fixed makeinput options + a loaded
-historical-guidance ``Dataspace``" into a ``Flight`` of
-``CalcUnit``s laid out as a *verification grid* around the
-predictor's predicted operating point, plus a
-``PredictionRecord`` the later harvest step recovers.
+This is an option-axis builder in the flight-builder split (DESIGN
+6.2; see ``kaleidoscope.builders``).  It provides the two pieces
+the historical-guidance producer needs to converge a solid's
+k-point sampling: ``predict_kpoint_density`` looks up a converged
+k-point density for "a structure + a loaded historical-guidance
+``Dataspace`` + a sub-model" (predicting from chemically-similar
+systems, laying no grid), and ``build_mesh_unit`` builds one
+explicit-mesh convergence ``CalcUnit``.  It also defines the
+``PredictionRecord`` the later harvest recovers and the calc-tag
+encoding for the density and mesh axes.
 
-It is one *strategy* for one *axis*: it sweeps the k-point density
-and does so by PREDICTING a converged value from the guidance
-database and then VERIFYING around it.  Sibling builders for other
-axes (an XANES target-atom sweep, a basis-size sweep) are plain
-enumerations and live beside this module; structure-axis sweeps
-are out of kaleidoscope's scope entirely (DESIGN 6.2).
+The producer's climb (``mesh_climb``; DESIGN 3.12) drives these:
+it seeds from the predicted density, then walks a sequence of
+symmetry-compatible meshes -- one ``build_mesh_unit`` per rung --
+until the total energy flattens.  This module supplies the
+prediction and the per-mesh unit; the search itself lives in the
+climb.
 
 **Why this is a builder, not part of the dispatch core.**  The
 core (``model`` / ``workspace`` / ``cache`` / ``dispatch``) is
 deliberately domain-agnostic: it runs and tracks calculations
 without knowing what they compute (VISION Principle 9/12).  This
-builder is the opposite -- it consults the guidance database,
-knows the swept knob is a k-point density, and knows how to spell
-the per-grid-point directory tag.  To keep the dumb core's import
-graph free of the physics layer, a client imports it explicitly::
+module is the opposite -- it consults the guidance database, knows
+the swept knob is a k-point mesh, and knows how to spell the
+per-calc directory tag.  To keep the dumb core's import graph free
+of the physics layer, a client imports it explicitly::
 
     from kaleidoscope.builders.kpoint_convergence \
-        import build_kpoint_convergence
+        import predict_kpoint_density, build_mesh_unit
 
 Importing it pulls in ``guidance_db`` and ``structure_control``;
 the core never does.
-
-The verification-grid idea (DESIGN 7.7): rather than make the
-user guess a converged k-point density up front, look up what
-worked for chemically-similar systems, predict a density, and
-run a small spread of calculations *around* that prediction --
-tight when the predictor is confident, wide when it is not -- so
-the truly converged point is captured even if the guess was off.
 """
 
 import math
@@ -140,52 +136,6 @@ class PredictionRecord:
     basis: str = ""
     functional: str = ""
     kpoint_integration: str = ""
-
-
-# ------------------------------------------------------------------
-#  Grid construction (DESIGN 7.7 / 7.9)
-# ------------------------------------------------------------------
-
-def default_wide_kpoint_density_grid():
-    """The fixed 8-point bracket spanning a factor of 16, used
-    when no usable predictor exists (DESIGN 7.9).  It lives here
-    rather than in the dataspace because an empty crystalline
-    subtree has no content to consult -- the chicken-and-egg the
-    seed flight (C75) is meant to break."""
-    return [25.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 400.0]
-
-
-def logspace(low, high, num_points):
-    """Return ``num_points`` geometrically (log-) spaced values
-    from ``low`` to ``high`` inclusive.  Log spacing gives
-    symmetric multiplicative coverage around a center, which is
-    what the verification grid wants.  A request for a single
-    point returns the geometric midpoint."""
-    if num_points <= 1:
-        return [math.sqrt(low * high)]
-    log_step = (math.log(high) - math.log(low)) / (num_points - 1)
-    return [math.exp(math.log(low) + index * log_step)
-            for index in range(num_points)]
-
-
-def build_verification_grid(center, confidence):
-    """Lay out the k-density values to sweep around ``center``,
-    with both the multiplicative span and the number of points
-    scaling inversely with predictor ``confidence`` (DESIGN 7.7).
-
-    At ``confidence = 1`` the grid is a tight 3 points spanning
-    ``[center/1.2, center*1.2]`` -- a quick check that the prior
-    still holds.  At ``confidence = 0`` it widens to ~7 points
-    spanning ``[center/2.7, center*2.7]``, broad enough to bracket
-    the true converged point even if the prediction was a poor
-    guide.  The constants are starting heuristics (DESIGN 7.7);
-    keeping them in this one function makes post-seed calibration
-    a single-file change."""
-    # Multiplicative half-span: 1.2 means center/1.2 .. center*1.2.
-    width = 1.2 + 1.5 * (1.0 - confidence)
-    # Point count grows as confidence falls.
-    num_points = round(3 + 4 * (1.0 - confidence))
-    return logspace(center / width, center * width, num_points)
 
 
 # ------------------------------------------------------------------
@@ -309,235 +259,16 @@ def _load_structure(structure):
     return structure
 
 
-def _slug_from_path(path):
-    """Derive a filesystem-safe unit id from a structure path: the
-    base filename without its extension, lower-cased, with any run
-    of non-slug characters collapsed to a single hyphen.  Used
-    only when the caller passes no explicit ``id`` (PSEUDOCODE
-    15.6); a non-path structure with no id is an error because no
-    stable id can be derived from an in-memory object."""
-    if not isinstance(path, str):
-        raise KaleidoscopeError(
-            "build_kpoint_convergence needs an explicit id when "
-            "structure is not a path (cannot derive a slug from "
-            "an object)")
-    stem = os.path.splitext(os.path.basename(path))[0]
-    slug = re.sub(r"[^a-z0-9_-]+", "-", stem.lower()).strip("-")
-    if not slug:
-        raise KaleidoscopeError(
-            f"cannot derive a slug id from structure path {path!r}")
-    return slug
-
-
 # ------------------------------------------------------------------
-#  Attaching the prediction without teaching the core about it
-# ------------------------------------------------------------------
-
-def attach_prediction_record(flight, structure_id, record):
-    """Stash one structure's PredictionRecord on the flight as a
-    plain dict under ``metadata["predictions"][structure_id]``
-    (PSEUDOCODE 15.6; DESIGN 6.2.9).  Keying by structure id lets a
-    single combined flight carry many structures' predictions -- a
-    producer merges several one-entry mappings into one flight, and
-    the harvest looks each structure up by its id (DESIGN 7.8).
-
-    The domain-agnostic core only round-trips this opaque table
-    (serialize_flight emits it as ``[flight.predictions.<id>]``);
-    the harvest step reads it back.  ``asdict`` recurses through the
-    nested ``feature_vector`` Signature so the whole record is
-    plain scalars, arrays, and a sub-table (metadata must be
-    TOML-serializable)."""
-    flight.metadata.setdefault("predictions", {})
-    flight.metadata["predictions"][structure_id] = asdict(record)
-
-
-# ------------------------------------------------------------------
-#  The builder
-# ------------------------------------------------------------------
-
-def build_kpoint_convergence(structure, options, dataspace,
-                             system_type, submodel, verify=True,
-                             id=None, center=None, root=""):
-    """Build a predict-then-verify ``Flight`` for one structure
-    (DESIGN 6.2.8 / 7.7; PSEUDOCODE 15.6).
-
-    Parameters
-    ----------
-    structure
-        An ``imago.skl`` path, or an already-loaded
-        StructureControl.
-    options
-        The fixed (non-swept) run settings in each tool's own
-        coded vocabulary (``scf_basis`` / ``xccode`` / ``scfkpint``
-        / ``converg`` / ``kpshift`` / ``imago_commit``), held
-        constant across every grid point and copied verbatim into
-        every unit.  Carries NO physics-name keys -- the wingbeat
-        forwards it to the tools as-is (DESIGN 6.2.10).
-    dataspace
-        The historical-guidance ``Dataspace`` loaded by
-        ``guidance_db.load`` (DESIGN 7.4).
-    system_type
-        One of the four valid system types (DESIGN 7.2),
-        declared by the caller.
-    submodel
-        The three human physics names the predictor and the
-        ``PredictionRecord`` speak: ``basis``, ``functional``,
-        ``kpoint_integration`` (DESIGN 7.6 step 2).  Kept OUT of
-        ``options`` because makeinput would reject these names --
-        they are a prediction input, not a tool setting (DESIGN
-        6.2.8 / 6.2.10).
-    verify
-        When False, *trust mode*: a length-1 grid at the
-        predicted (or pinned) value, no widening (DESIGN 6.2.1).
-    id
-        The flight-level unit id (a slug).  Derived from the
-        structure path when omitted.
-    center
-        A curator-pinned k-density (the 5.7 ``kpoint_spec``
-        override).  When given, the predictor is BYPASSED and the
-        grid is built around this value instead -- a tight verify
-        grid (``verify=True``) or a single point (``verify=False``)
-        -- with policy ``curator_override`` (DESIGN 6.2.9).  When
-        None, the builder runs full predict-then-verify.
-    root
-        The workspace root for the returned flight.  PSEUDOCODE
-        15.6 leaves this to the caller; it is exposed here as an
-        optional argument so the producer can set it directly
-        rather than mutating the returned flight.
-
-    Returns
-    -------
-    (Flight, PredictionRecord)
-        The flight is ready to dispatch (once ``root`` is set);
-        the record is also stashed in ``flight.metadata`` under
-        ``predictions[id]`` so the harvest recovers it (6.2.9).
-    """
-    # The three sub-model-selecting names are mandatory.
-    for required in ("basis", "functional", "kpoint_integration"):
-        if required not in submodel:
-            raise KaleidoscopeError(
-                f"build_kpoint_convergence submodel must carry "
-                f"{required!r} (it selects the predictor "
-                f"sub-model)")
-
-    # 1. Feature signature for the query structure (DESIGN 7.4).
-    resolved = _load_structure(structure)
-    query_sig = compute_signature(
-        resolved, system_type, dataspace.group_table)
-
-    # 2-3. Choose the grid of k-densities and record which path we
-    #    took (DESIGN 7.7 step 3 / 6.2.9).  `result` stays None in
-    #    curator-override mode (the predictor is never consulted);
-    #    in predict mode predict() always returns a PredictionResult
-    #    (never None), so no None-guards are needed there.
-    if center is not None:
-        # Curator override (5.7 kpoint_spec.density): a tight verify
-        # grid centred on the pinned density, or a single point when
-        # not verifying.  No prediction is consulted.
-        result = None
-        grid_values = (build_verification_grid(center, 1.0)
-                       if verify else [center])
-        policy = "curator_override"
-    else:
-        result = predict(
-            dataspace, query_sig, submodel["basis"],
-            submodel["functional"], submodel["kpoint_integration"])
-        if not verify:
-            # Trust mode: one point at the predicted value.
-            grid_values = [result.predicted_kpoint_density]
-            policy = "trust_no_verify"
-        elif result.is_under_trained:
-            # No usable prior: fall back to the wide-grid default.
-            grid_values = default_wide_kpoint_density_grid()
-            policy = "wide_grid_no_prior"
-        else:
-            # Predict-then-verify with confidence-aware widening.
-            grid_values = build_verification_grid(
-                result.predicted_kpoint_density, result.confidence)
-            policy = "verify_around_prediction"
-
-    # 4. Round + dedupe to integer k-densities so the on-disk tag
-    #    parses back to exactly the swept value (DESIGN 6.2.4); a
-    #    grid where rounding merged two close points collapses.
-    kpd_grid = sorted(set(round(value) for value in grid_values))
-
-    unit_id = id if id is not None else _slug_from_path(structure)
-    units = []
-    for kpd_int in kpd_grid:
-        unit_options = dict(options)
-        unit_options["kpd"] = kpd_int        # makeinput options key
-        # The display name in the calc-tag tree (DESIGN 6.2.4);
-        #   the helper is the translation point between the
-        #   makeinput "kpd" key and the "kpt-density" axis name.
-        calc_axes = {"kpt-density": kpd_int}
-        units.append(CalcUnit(
-            id=unit_id,
-            calc=build_calc_tag(calc_axes),
-            structure=structure,
-            options=unit_options,
-            wingbeat="imago",
-            key_fields=standard_key_fields(structure, options)))
-
-    # 5. Record the sweep shape so serialize_flight emits
-    #    [flight.sweep] and the harvest recovers the varied axis
-    #    without parsing run-directory paths (DESIGN 6.2.8 step 6).
-    #    fixed_axes is EMPTY: the (basis, functional,
-    #    kpoint_integration) sub-model rides on the per-structure
-    #    record below, never duplicated here, so the same fact never
-    #    lives in two places (DESIGN 6.2.9).
-    sweep = SweepRecord(varied_axes=("kpt-density",), fixed_axes={})
-
-    # 6. Assemble the full prediction record (DESIGN 7.7 step 5).
-    #    In curator-override mode there is no `result`: the record
-    #    documents the pinned value (full confidence, no neighbors,
-    #    no predicted character).  The three sub-model axes come
-    #    from `options` either way and are recorded ONLY here (not
-    #    in fixed_axes), so a combined mixed-sub-model flight stays
-    #    harvestable per structure (DESIGN 6.2.9 / 7.8 step 3f).
-    if result is None:
-        record = PredictionRecord(
-            policy=policy,
-            predicted_kpoint_density=float(center),
-            confidence=1.0,
-            is_under_trained=False,
-            neighbor_entry_ids=(),
-            predicted_gap=None,
-            predicted_magnetization=None,
-            system_type=system_type,
-            feature_vector=query_sig,
-            basis=submodel["basis"],
-            functional=submodel["functional"],
-            kpoint_integration=submodel["kpoint_integration"])
-    else:
-        record = PredictionRecord(
-            policy=policy,
-            predicted_kpoint_density=result.predicted_kpoint_density,
-            confidence=result.confidence,
-            is_under_trained=result.is_under_trained,
-            neighbor_entry_ids=result.neighbor_entry_ids,
-            predicted_gap=result.predicted_gap,
-            predicted_magnetization=result.predicted_magnetization,
-            system_type=system_type,
-            feature_vector=query_sig,
-            basis=submodel["basis"],
-            functional=submodel["functional"],
-            kpoint_integration=submodel["kpoint_integration"])
-
-    flight = Flight(root=root, units=units, sweep=sweep)
-    attach_prediction_record(flight, unit_id, record)
-    return flight, record
-
-
-# ------------------------------------------------------------------
-#  The mesh-dispatch split (DESIGN 7.7; PSEUDOCODE 4e.7)
+#  Predict-then-climb: the two halves the producer uses
+#  (DESIGN 7.7; PSEUDOCODE 4e.7)
 #
 #  The adaptive climb (DESIGN 3.12) seeds from a prediction but lays
-#  its OWN rungs -- explicit meshes, one per calc -- so the density-
-#  era single call above splits in two: predict_kpoint_density does
-#  the prediction (no grid), and build_mesh_unit builds one explicit-
-#  mesh unit that the producer's round adapter dispatches.  The old
-#  build_kpoint_convergence is the density-era special case this pair
-#  generalizes; it retires when the producer migrates to the climb.
+#  its OWN rungs -- explicit meshes, one per calc -- so the producer
+#  reaches for two independent pieces here: predict_kpoint_density
+#  makes the prediction (no grid), and build_mesh_unit builds one
+#  explicit-mesh convergence unit that the producer's round adapter
+#  dispatches.  The climb (mesh_climb) chooses which meshes to build.
 # ------------------------------------------------------------------
 
 def build_mesh_unit(structure, options, mesh, id):
@@ -594,20 +325,17 @@ def predict_kpoint_density(structure, dataspace, system_type,
     """Predict the converged k-point density for one structure,
     laying no grid (DESIGN 7.7; PSEUDOCODE 4e.7).
 
-    This is the prediction HALF of :func:`build_kpoint_convergence`:
-    the query signature, the predictor call, and the per-structure
-    ``PredictionRecord``.  The adaptive climb (DESIGN 3.12) seeds
-    from the returned density and picks its dispatch mode and
-    persistence from the confidence, then lays its own rungs -- so
-    the grid the old builder built is gone, and only the prediction
-    remains here.
+    This is the prediction half of the producer's convergence
+    search: the query signature, the predictor call, and the
+    per-structure ``PredictionRecord``.  The adaptive climb (DESIGN
+    3.12) seeds from the returned density and picks its dispatch
+    mode and persistence from the confidence, then lays its own
+    rungs (:func:`build_mesh_unit` per rung), so no grid is built
+    here -- only the prediction.
 
     A curator-pinned ``center`` (the 5.7 ``kpoint_spec`` density
-    override) BYPASSES the predictor exactly as the density builder
-    does: the density is the pinned value at full confidence, and the
-    record documents the override.  The ``structure`` / ``dataspace``
-    / ``system_type`` / ``submodel`` / ``center`` arguments mirror
-    :func:`build_kpoint_convergence`.
+    override) BYPASSES the predictor: the density is the pinned
+    value at full confidence, and the record documents the override.
 
     Returns
     -------
@@ -615,7 +343,7 @@ def predict_kpoint_density(structure, dataspace, system_type,
         ``density`` seeds the climb (DESIGN 3.12.4); ``confidence``
         and ``is_under_trained`` drive the confidence policy (3.12.6 /
         7.9); ``record`` is the ``PredictionRecord`` the harvest
-        recovers (7.8), the same one the density builder produced.
+        recovers (7.8).
     """
     for required in ("basis", "functional", "kpoint_integration"):
         if required not in submodel:

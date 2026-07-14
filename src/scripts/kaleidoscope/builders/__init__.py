@@ -28,5 +28,5 @@ builder's physics-layer dependencies (e.g. ``guidance_db``) is an
 explicit, opt-in act by the client::
 
     from kaleidoscope.builders.kpoint_convergence \
-        import build_kpoint_convergence
+        import predict_kpoint_density, build_mesh_unit
 """

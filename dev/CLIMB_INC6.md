@@ -69,36 +69,59 @@ Already built and unit-tested (inc 0-5), waiting to be wired:
 `resolve_climb_policy`, `initial_meshes`, `at_ceiling` (mesh_climb);
 `ClimbConfig` / `Rung` types.
 
-## Open design questions (resume HERE)
+## Open design questions
 
-**Q1 -- Guidance contribution: in-memory vs workspace re-read.**
-The climb holds the converged rung + full ladder in memory, and
-4e.6 has `record_converged` *feed* `build_entry`.  So the climb
-path is: per converged material, `record_converged(rung, rungs,
-config)` -> grid arrays; read the converged rung's `result.toml`
-for gap/mag/scf; `build_entry(...)` -> `save_entry`.  That
-REPLACES the `harvest_flight(workspace)` re-read for the producer.
-- PROPOSAL: climb producer contributes guidance in-memory; the
-  standalone `harvest_flight` CLI (guidance_harvest.py:519, its
-  `__main__` at :682) stays as-is for density-grid flights --
+**Q1 + Q2 -- RESOLVED (2026-07-13): chosen-facts `build_entry`.**
+Q1 (in-memory vs workspace re-read) and Q2 (`build_entry`'s
+interface) collapse into one refactor.  The two guidance paths
+differ ONLY in how they *pick* the converged point; once picked,
+both hand the identical already-chosen facts to one entry builder.
+
+Refactor `build_entry` (guidance_harvest.py:378) to the
+chosen-facts shape:
+
+    build_entry(workspace_root, source_structure, prediction,
+                dataspace, structure, kpoint_threshold,
+                grid_values, grid_energies,        # the ladder
+                converged_density, converged_mesh, # the chosen rung
+                chosen_result)                     # result.toml
+
+- The DENSITY harvest assembles those in `harvest_flight`'s loop
+  from `collapse_by_mesh` + `pick_converged` (the pick stays
+  where it already lives).
+- The CLIMB assembles them from `record_converged` (grid arrays +
+  converged density/mesh) plus the converged rung's `result.toml`.
+- Shared stage core: `save_entry(build_entry(...))` -- a thin pair
+  both callers go through, so the two paths CANNOT drift on a
+  schema change.  Drops the density-only args (`grid`,
+  `kpoint_densities`, `energies`, `result_tomls`, `idx`,
+  `collapsed_*`) and the internal `result_tomls[idx]` re-pick.
+- The standalone `harvest_flight` CLI (guidance_harvest.py:519,
+  `__main__` at :682) stays intact for density-grid flights --
   untouched, not retired.
-- REFACTOR WORRY: `harvest_flight` and the climb path both need
-  the per-structure "pick -> build_entry -> save_entry" core.
-  PROPOSAL: factor that core into a shared helper both call, so
-  they cannot diverge.  << programmer to confirm >>
 
-**Q2 -- `build_entry`'s interface** (guidance_harvest.py:378).
-Today it takes the density-grid arrays (`kpoint_densities`,
-`energies`, `result_tomls`, `idx`, collapsed arrays).  The climb
-supplies `(converged_kpoint_density, converged_mesh, grid_values,
-grid_energies)` from `record_converged` plus the chosen run's
-`result.toml`.  PROPOSAL: refactor `build_entry` to take the
-already-chosen `(grid_values, grid_energies, converged_density,
-converged_mesh, chosen_result)` explicitly -- one shape both the
-density harvest (via `collapse_by_mesh`) and the climb (via
-`record_converged`) produce, so there is ONE entry builder.
-<< programmer to confirm; this is the other real architecture call
- alongside Q1 >>
+This is the last architecture call; Q3/Q4 below were already
+settled.  6a may now proceed.
+
+**Refinement while writing 6a (2026-07-14):** `build_entry` takes
+**10** args, not 11 -- `converged_mesh` is NOT passed.  Both paths
+already hand `build_entry` the chosen rung's `result.toml`, and the
+exact mesh lives in it (`kpoint_mesh`, DESIGN 6.1.2), so build_entry
+reads the mesh from `chosen_result` in BOTH paths.  `record_converged`
+supplies only the density and the flatness ladder.  This drops one
+arg from the Q1-Q2 preview and removes the need for the climb to
+thread a mesh through.  Landed in PSEUDOCODE 15.7 (definition), 11.4
+(climb call), and the 4e.6 note.
+
+**Scoping move (2026-07-14):** retiring the pseudocode for
+`build_kpoint_convergence` (15.6) and `pick_converged_unit` is moved
+to **6b**, done together with removing their code.  Deleting the
+pseudocode while its code still exists would create
+code-without-pseudocode -- the wrong direction through the gate.  So
+after 6a the state is deliberately: 11.4/5.7 describe the climb, and
+15.6 + the retired-helper code still stand until 6b removes both at
+once.  DESIGN 6.2.8 now carries a forward-pointer (added in 6a) so a
+reader lands on the climb; 15.6 reconciliation itself waits for 6b.
 
 **Q3 -- `-loen` fingerprint units (SETTLED-looking).**
 Geometry-only, mesh-independent (`build_loen_units`).  They do not
@@ -115,12 +138,15 @@ fingerprint harvest read that dir.  The producer maps
 
 ## After the questions resolve
 
-1. 6a: rewrite DESIGN 5.7 + PSEUDOCODE 11.4 for the climb (build
-   ClimbConfig + seed per solid; pre-flight `-loen` batch;
-   iterative `converge_by_climb`; in-memory guidance via
-   `record_converged` -> shared `build_entry`); retire
-   `build_kpoint_convergence` and reconcile PSEUDOCODE 15.6.
-2. 6b: rewire the producer main; retire the density-grid builder;
+1. 6a (DONE 2026-07-14): rewrote DESIGN 5.7 + PSEUDOCODE 11.4 for
+   the climb (build ClimbConfig + seed per solid; pre-flight `-loen`
+   batch; iterative `converge_by_climb`; in-memory guidance via
+   `record_converged` -> shared 10-arg `build_entry`); added the
+   DESIGN 6.2.8 forward-pointer.  15.6 / `pick_converged_unit`
+   retirement deferred to 6b (see the scoping move above).
+2. 6b: rewire the producer main; retire the density-grid builder
+   (`build_kpoint_convergence`) AND its pseudocode 15.6, plus
+   `pick_converged_unit` and its pseudocode, together with the code;
    orchestration tests with the seam mocked.
 3. 6c: imago `RESOLVED_KP_CLASSES` emit (4d.5) + producer
    axis-class self-test (4c.7) + fcc-prim check; needs a rebuilt

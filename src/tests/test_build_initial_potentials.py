@@ -50,7 +50,6 @@ from build_initial_potentials import (
     extract_potential,
     read_site_identity_map,
     assemble_entry_label,
-    pick_converged_unit,
     make_run_log_entry,
     make_nonconverged_log_entry,
     write_run_log,
@@ -1093,7 +1092,7 @@ def _write_result(workspace, unit_id, calc, *, energy,
     """Write one COMPLETED unit's status.toml and result.toml under
     the workspace (the kaleidoscope run-dir layout).  A completed
     run carries both: the harvest's completion gate
-    (pick_converged_unit) reads status.toml first (DESIGN 6.2.10),
+    (``_unit_completed``) reads status.toml first (DESIGN 6.2.10),
     then result.toml."""
 
     run_dir = os.path.join(workspace, "wingbeats", unit_id, *calc)
@@ -2004,110 +2003,19 @@ def test_assemble_entry_label_builds_the_5_2_1_form():
         "forsterite", "Mg", 1, 2, 2) == "forsterite-mg1-t2-a2"
 
 
-# ---- pick_converged_unit -------------------------------------
-
-def _grid_flight(unit_id, kpds):
-    units = [CalcUnit(id=unit_id, structure="au.skel",
-                      calc=(f"kpt-density-{k}",)) for k in kpds]
-    return Flight(root="ws", units=units)
-
-
-def test_pick_converged_unit_returns_flat_interior_point(
-        tmp_path, monkeypatch):
-    # pick_converged_unit loads the structure for cell_atom_count
-    #   (per-atom eV normalization); the fake units carry no real
-    #   .skl, so stub the load with a known atom count.
-    monkeypatch.setattr(
-        bip.guidance_harvest, "load_structure",
-        lambda path: types.SimpleNamespace(num_atoms=2))
-    workspace = str(tmp_path)
-    flight = _grid_flight("au_fcc", [50, 100, 200])
-    flight.root = workspace
-    # Flat across the interior point (both neighbour deltas below
-    #   threshold) so the two-sided rule converges at index 1.
-    for k, energy in zip((50, 100, 200), (0.5, 0.5, 0.5)):
-        _write_result(workspace, "au_fcc",
-                      (f"kpt-density-{k}",), energy=energy)
-    unit, result = pick_converged_unit(
-        flight, "au_fcc", workspace, metric_threshold=0.1)
-    assert unit.calc == ("kpt-density-100",)
-    assert result["scf_iterations"] == 7
-
-
-def test_pick_converged_unit_none_when_energy_still_moving(
-        tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        bip.guidance_harvest, "load_structure",
-        lambda path: types.SimpleNamespace(num_atoms=2))
-    workspace = str(tmp_path)
-    flight = _grid_flight("au_fcc", [50, 100, 200])
-    flight.root = workspace
-    for k, energy in zip((50, 100, 200), (3.0, 2.0, 1.0)):
-        _write_result(workspace, "au_fcc",
-                      (f"kpt-density-{k}",), energy=energy)
-    assert pick_converged_unit(
-        flight, "au_fcc", workspace, metric_threshold=0.1) is None
-
-
-def test_pick_converged_unit_none_when_all_units_failed(tmp_path):
-    """Every unit failed at the makeinput/imago seam: each wrote a
-    status.toml='failed' and NO result.toml.  pick_converged_unit
-    must treat the solid as non-converged (return None), never crash
-    opening a missing result.toml (DESIGN 6.2.10)."""
-    workspace = str(tmp_path)
-    flight = _grid_flight("au_fcc", [50, 100, 200])
-    flight.root = workspace
-    for k in (50, 100, 200):
-        _write_failed(workspace, "au_fcc", (f"kpt-density-{k}",))
-    assert pick_converged_unit(
-        flight, "au_fcc", workspace, metric_threshold=0.1) is None
-
-
-def test_pick_converged_unit_drops_failed_keeps_completed(
-        tmp_path, monkeypatch):
-    """A failed unit is dropped from the grid before its (absent)
-    result.toml is read; the convergence rule runs on the survivors
-    (DESIGN 6.2.10)."""
-    monkeypatch.setattr(
-        bip.guidance_harvest, "load_structure",
-        lambda path: types.SimpleNamespace(num_atoms=2))
-    workspace = str(tmp_path)
-    flight = _grid_flight("au_fcc", [50, 100, 200])
-    flight.root = workspace
-    # 50 failed; 100 and 200 completed flat -> a single survivor pair
-    #   has no interior point, so the rule cannot confirm convergence.
-    _write_failed(workspace, "au_fcc", ("kpt-density-50",))
-    _write_result(workspace, "au_fcc", ("kpt-density-100",),
-                  energy=0.5)
-    _write_result(workspace, "au_fcc", ("kpt-density-200",),
-                  energy=0.5)
-    # Two survivors, no interior point -> None (not a crash).
-    assert pick_converged_unit(
-        flight, "au_fcc", workspace, metric_threshold=0.1) is None
-
-
-def test_pick_converged_unit_single_point_is_the_deliverable(
-        tmp_path):
-    # A single pinned point (curator override / trust mode) has no
-    #   interior to judge: its lone run IS the deliverable.
-    workspace = str(tmp_path)
-    flight = _grid_flight("au_fcc", [120])
-    flight.root = workspace
-    _write_result(workspace, "au_fcc", ("kpt-density-120",),
-                  energy=0.5)
-    unit, _ = pick_converged_unit(
-        flight, "au_fcc", workspace, metric_threshold=0.1)
-    assert unit.calc == ("kpt-density-120",)
-
-
 # ---- run log -------------------------------------------------
 
 def test_write_run_log_round_trips(tmp_path):
     log_path = str(tmp_path / "curation" / "run_log.toml")
     rows = [
+        # record_converged's output shape: the converged mesh, its
+        #   k-density, and the flatness ladder (only mesh + density
+        #   reach the run log).
         make_run_log_entry(
-            _ref(), CalcUnit(id="au_fcc", structure="au.skel",
-                             calc=("kpt-density-100",)),
+            _ref(),
+            {"converged_mesh": [4, 4, 4],
+             "converged_kpoint_density": 100,
+             "grid_values": [], "grid_energies": []},
             {"scf_iterations": 7}),
         make_nonconverged_log_entry(_ref(reference_id="ag_fcc")),
     ]
@@ -2118,6 +2026,7 @@ def test_write_run_log_round_trips(tmp_path):
     assert data["run"][0]["reference_id"] == "au_fcc"
     assert data["run"][0]["converged"] is True
     assert data["run"][0]["converged_kpoint_density"] == 100
+    assert data["run"][0]["converged_mesh"] == [4, 4, 4]
     assert data["run"][1]["converged"] is False
 
 
@@ -2146,6 +2055,73 @@ scf_threshold = 1.0e-6
 """)
 
 
+def _install_climb_mocks(monkeypatch, workspace, *,
+                         material="au_fcc", converged_mesh=(4, 4, 4)):
+    """Install the climb-flow seams for an orchestration test.
+
+    The producer's build phase predicts a seed and assembles a
+    ``ClimbConfig`` per solid, then ``converge_by_climb`` drives the
+    climb; all three need a live imago and the guidance dataspace, so
+    they are mocked deterministically here (the climb's own logic is
+    exercised by the converge_by_climb unit tests below).  The mocked
+    ``build_climb_config`` picks ``recip_cell_volume`` so the
+    converged mesh's k-density is a round number the run-log
+    assertions can name: ``product([4,4,4]) / 0.64 == 100``.  The
+    converged mesh's ``result.toml`` is written where Phase 3 rebuilds
+    the unit and reads it back.  Returns a dict recording whether the
+    guidance contribution fired."""
+
+    def fake_predict(struct, dataspace, system_type, submodel,
+                     center=None):
+        seed = float(center) if center is not None else 100.0
+        record = PredictionRecord(
+            policy=("curator_override" if center is not None
+                    else "verify_around_prediction"),
+            predicted_kpoint_density=seed, confidence=0.9,
+            is_under_trained=False, system_type=system_type,
+            basis=submodel["basis"],
+            functional=submodel["functional"],
+            kpoint_integration=submodel["kpoint_integration"])
+        return seed, 0.9, False, record
+
+    monkeypatch.setattr(bip, "predict_kpoint_density", fake_predict)
+
+    config = bip.ClimbConfig(
+        classes=[0, 0, 0], recip_mag=[1.0, 1.0, 1.0],
+        recip_cell_volume=0.64, mode="climb", flat_needed=1,
+        grid_width=0, start_offset=1, cell_atom_count=2,
+        threshold=1.0e-6, max_count=20)
+    monkeypatch.setattr(bip, "build_climb_config",
+                        lambda *a, **k: config)
+
+    # A converged rung plus the >= 3 distinct rungs its stop test
+    #   required (DESIGN 3.12.3), so record_converged has a ladder.
+    ladder = [bip.Rung([2, 2, 2], -1.0), bip.Rung([3, 3, 3], -1.0),
+              bip.Rung(list(converged_mesh), -1.0)]
+
+    def fake_converge(materials, configs, seeds, dispatch_round,
+                      on_non_converged=None):
+        outcomes = {m: bip.Rung(list(converged_mesh), -1.0)
+                    for m in materials}
+        return outcomes, {m: ladder for m in materials}
+
+    monkeypatch.setattr(bip, "converge_by_climb", fake_converge)
+
+    mesh_tag = ("kpt-mesh-" + "-".join(str(c) for c in converged_mesh),)
+    _write_result(workspace, material, mesh_tag, energy=-1.0)
+
+    # The guidance entry builder and store are unit-tested in
+    #   test_guidance_harvest; here we only confirm the producer wires
+    #   the in-memory contribution through them.
+    harvested = {}
+    monkeypatch.setattr(bip.guidance_harvest, "build_entry",
+                        lambda *a, **k: object())
+    monkeypatch.setattr(
+        bip.guidance_harvest, "save_entry",
+        lambda entry, root: harvested.setdefault("called", True))
+    return harvested
+
+
 def test_build_initial_potentials_harvests_curated_entry(
         tmp_path, monkeypatch):
     """End-to-end producer wiring with the toolchain seam mocked:
@@ -2161,54 +2137,26 @@ def test_build_initial_potentials_harvests_curated_entry(
     (tmp_path / "au.skel").write_text("dummy structure\n")
     manifest_path = _write(tmp_path, _AU_LOCAL_MANIFEST)
 
-    # Fake dataspace + builder: build_kpoint_convergence returns a
-    #   three-point grid flight + a real PredictionRecord (asdict
-    #   must serialize it).
+    # The predictor, ClimbConfig assembly, and climb all need a live
+    #   imago and the guidance dataspace; install those seams mocked
+    #   (predict -> config -> converge, plus the converged mesh's
+    #   result.toml), and record that the guidance contribution fires.
     monkeypatch.setattr(
         bip.guidance_db, "load",
         lambda root: types.SimpleNamespace(group_table={}))
-
-    def fake_builder(struct, options, dataspace, system_type,
-                     submodel, *, id, center):
-        units = [CalcUnit(id=id, structure=struct,
-                          calc=(f"kpt-density-{k}",),
-                          options={**options, "kpd": k})
-                 for k in (50, 100, 200)]
-        record = PredictionRecord(
-            policy="verify_around_prediction",
-            predicted_kpoint_density=100.0, confidence=0.9,
-            is_under_trained=False, system_type=system_type,
-            basis=submodel["basis"],
-            functional=submodel["functional"],
-            kpoint_integration=submodel["kpoint_integration"])
-        # root is overridden on the combined flight the producer
-        #   builds, so a placeholder here is fine.
-        return Flight(root="", units=units), record
-
-    monkeypatch.setattr(bip, "build_kpoint_convergence",
-                        fake_builder)
-
-    # Mock dispatch: write a flat-energy result.toml per unit so
-    #   pick_converged_unit lands on kpt-density-100.
-    def fake_dispatch(flight, force=False):
-        # Flat energies so the two-sided rule converges at the
-        #   interior point (kpt-density-100) under the 1e-6
-        #   manifest threshold.
-        for unit in flight.units:
-            _write_result(flight.root, unit.id, unit.calc,
-                          energy=0.5)
-
-    # Mock the scfV read and the guidance harvest (tested
-    #   elsewhere); record that the contribution fired.
-    harvested = {}
-    monkeypatch.setattr(
-        bip.guidance_harvest, "harvest_flight",
-        lambda ws, db, ds: harvested.setdefault("called", True))
-    # Phase 3's pick_converged_unit loads the structure for
-    #   cell_atom_count; the fake units carry no real .skl.
+    workspace = bip.curation_workspace_root(pdb_root)
+    harvested = _install_climb_mocks(monkeypatch, workspace)
+    # build_entry (mocked) receives the loaded structure; a stub for
+    #   the loader suffices since the mock ignores it.
     monkeypatch.setattr(
         bip.guidance_harvest, "load_structure",
         lambda path: types.SimpleNamespace(num_atoms=2))
+
+    # The loen pre-flight is the only real dispatch (the climb is
+    #   mocked); the fingerprint harvest is stubbed, so nothing reads
+    #   its results.
+    def fake_dispatch(flight, force=False):
+        pass
 
     build_initial_potentials(
         manifest_path, pdb_root, data_root,
@@ -2261,36 +2209,14 @@ def test_build_initial_potentials_derives_label_at_harvest(
     monkeypatch.setattr(
         bip.guidance_db, "load",
         lambda root: types.SimpleNamespace(group_table={}))
-
-    def fake_builder(struct, options, dataspace, system_type,
-                     submodel, *, id, center):
-        units = [CalcUnit(id=id, structure=struct,
-                          calc=(f"kpt-density-{k}",),
-                          options={**options, "kpd": k})
-                 for k in (50, 100, 200)]
-        record = PredictionRecord(
-            policy="verify_around_prediction",
-            predicted_kpoint_density=100.0, confidence=0.9,
-            is_under_trained=False, system_type=system_type,
-            basis=submodel["basis"],
-            functional=submodel["functional"],
-            kpoint_integration=submodel["kpoint_integration"])
-        return Flight(root="", units=units), record
-
-    monkeypatch.setattr(bip, "build_kpoint_convergence",
-                        fake_builder)
-
-    def fake_dispatch(flight, force=False):
-        for unit in flight.units:
-            _write_result(flight.root, unit.id, unit.calc,
-                          energy=0.5)
-
-    monkeypatch.setattr(
-        bip.guidance_harvest, "harvest_flight",
-        lambda ws, db, ds: None)
+    workspace = bip.curation_workspace_root(pdb_root)
+    _install_climb_mocks(monkeypatch, workspace)
     monkeypatch.setattr(
         bip.guidance_harvest, "load_structure",
         lambda path: types.SimpleNamespace(num_atoms=2))
+
+    def fake_dispatch(flight, force=False):
+        pass
 
     # Inject the site-identity reader: site 1 is Au species 1,
     #   type 1, so the derived label is au_fcc-au1-t1-a1.
@@ -2420,42 +2346,35 @@ def test_build_initial_potentials_resolves_defaults(
     monkeypatch.setattr(
         bip.guidance_db, "load",
         lambda root: types.SimpleNamespace(group_table={}))
+    workspace = bip.curation_workspace_root(pdb_root)
+    _install_climb_mocks(monkeypatch, workspace)
+    monkeypatch.setattr(
+        bip.guidance_harvest, "load_structure",
+        lambda path: types.SimpleNamespace(num_atoms=2))
 
-    def fake_builder(struct, options, dataspace, system_type,
-                     submodel, *, id, center):
+    def asserting_predict(struct, dataspace, system_type, submodel,
+                          center=None):
         # The submodel must carry the resolved run settings, not
-        #   None: assert the [defaults] flowed through to the builder.
+        #   None: assert the [defaults] flowed through to the
+        #   predictor, and the resolved kpoint_spec.density is center.
         assert submodel["basis"] == "fb"
         assert submodel["functional"] == "wigner"
         assert submodel["kpoint_integration"] == "linear-tetrahedral"
-        assert center == 60.0        # kpoint_spec.density resolved
-        units = [CalcUnit(id=id, structure=struct,
-                          calc=(f"kpt-density-{k}",),
-                          options={**options, "kpd": k})
-                 for k in (50, 100, 200)]
+        assert center == 60.0
         record = PredictionRecord(
-            policy="verify_around_prediction",
-            predicted_kpoint_density=100.0, confidence=0.9,
+            policy="curator_override",
+            predicted_kpoint_density=60.0, confidence=0.9,
             is_under_trained=False, system_type=system_type,
             basis=submodel["basis"],
             functional=submodel["functional"],
             kpoint_integration=submodel["kpoint_integration"])
-        return Flight(root="", units=units), record
+        return 60.0, 0.9, False, record
 
-    monkeypatch.setattr(bip, "build_kpoint_convergence",
-                        fake_builder)
+    monkeypatch.setattr(bip, "predict_kpoint_density",
+                        asserting_predict)
 
     def fake_dispatch(flight, force=False):
-        for unit in flight.units:
-            _write_result(flight.root, unit.id, unit.calc,
-                          energy=0.5)
-
-    monkeypatch.setattr(
-        bip.guidance_harvest, "harvest_flight",
-        lambda ws, db, ds: None)
-    monkeypatch.setattr(
-        bip.guidance_harvest, "load_structure",
-        lambda path: types.SimpleNamespace(num_atoms=2))
+        pass
 
     build_initial_potentials(
         manifest_path, pdb_root, data_root,
@@ -2466,8 +2385,8 @@ def test_build_initial_potentials_resolves_defaults(
         fingerprint_fn=lambda *args, **kwargs: [])
 
     # The Au entry harvested -- the run could only reach harvest
-    #   because scf_threshold resolved from [defaults] (1e-6, so the
-    #   flat grid converges at the interior kpt-density-100 point).
+    #   because scf_threshold resolved from [defaults] and the climb
+    #   converged (mocked); the resolved basis rides in provenance.
     database = ipdb.load(element_path(pdb_root, "au"),
                          known_methods=None)
     entry = ipdb.lookup(database, "default_solid")
@@ -2485,32 +2404,64 @@ def test_build_initial_potentials_resolves_defaults(
 
 def test_producer_local_default_attaches_no_config(monkeypatch,
                                                    tmp_path):
-    """build_initial_potentials defaults to local: it attaches no
-    Parsl Config to the flight and calls the driver with force, never
-    an executor (the curation_executor seam is gone)."""
-    seen = {}
+    """build_initial_potentials defaults to local: resolve_dispatch
+    returns no Parsl Config, and that None (with the force
+    cache-bypass) is threaded into the climb's round dispatcher."""
 
-    def fake_dispatch(flight, force=False):
-        seen["parsl_config"] = flight.parsl_config
-        seen["force"] = force
+    data_root = str(tmp_path)
+    pdb_root = os.path.join(data_root, "atomicPDB")
+    (tmp_path / "au.skel").write_text("dummy structure\n")
+    manifest_path = _write(tmp_path, _AU_LOCAL_MANIFEST)
 
-    # A manifest with no reference solids exercises the build/dispatch
-    #   path without needing structures or a converged harvest.
-    monkeypatch.setattr(bip, "load_manifest_v2", lambda path,
-                        known_methods=None: types.SimpleNamespace(
-                            manifest_path=str(tmp_path / "m.toml"),
-                            reference_solids=[]))
+    monkeypatch.setattr(
+        bip.guidance_db, "load",
+        lambda root: types.SimpleNamespace(group_table={}))
     monkeypatch.setattr(bip, "refresh_isolated_entries",
                         lambda *a, **k: {})
-    monkeypatch.setattr(bip.guidance_db, "load", lambda root: None)
-    monkeypatch.setattr(bip.guidance_harvest, "harvest_flight",
-                        lambda *a, **k: None)
+    # Mock the Phase-1 predict + config; converge returns
+    #   NON_CONVERGED so Phase 3 skips the harvest entirely (no
+    #   element database or result.toml needed).
+    monkeypatch.setattr(
+        bip, "predict_kpoint_density",
+        lambda struct, ds, st, sm, center=None: (
+            60.0, 0.9, False, PredictionRecord(
+                policy="curator_override",
+                predicted_kpoint_density=60.0, confidence=0.9,
+                is_under_trained=False, system_type=st,
+                basis=sm["basis"], functional=sm["functional"],
+                kpoint_integration=sm["kpoint_integration"])))
+    monkeypatch.setattr(
+        bip, "build_climb_config",
+        lambda *a, **k: bip.ClimbConfig(
+            classes=[0, 0, 0], recip_mag=[1.0, 1.0, 1.0],
+            recip_cell_volume=1.0, mode="climb", flat_needed=1,
+            grid_width=0, start_offset=1, cell_atom_count=2,
+            threshold=1.0e-6, max_count=20))
+    monkeypatch.setattr(
+        bip, "converge_by_climb",
+        lambda materials, *a, **k: (
+            {m: bip.NON_CONVERGED for m in materials}, {}))
     monkeypatch.setattr(bip, "save_databases", lambda *a, **k: None)
     monkeypatch.setattr(bip, "write_run_log", lambda *a, **k: None)
 
+    # Spy the round dispatcher's resolved config + force.  The climb
+    #   is mocked, so the round adapter is built but never called.
+    seen = {}
+    real_make = bip.make_dispatch_round
+
+    def spy_make(*args, parsl_config=None, force=False, **kwargs):
+        seen["parsl_config"] = parsl_config
+        seen["force"] = force
+        return real_make(*args, parsl_config=parsl_config,
+                         force=force, **kwargs)
+
+    monkeypatch.setattr(bip, "make_dispatch_round", spy_make)
+
     bip.build_initial_potentials(
-        str(tmp_path / "m.toml"), str(tmp_path / "atomicPDB"),
-        str(tmp_path), dispatch_fn=fake_dispatch, force=True)
+        manifest_path, pdb_root, data_root,
+        dispatch_fn=lambda flight, force=False: None,
+        prepare_fn=lambda flight, workspace: None,
+        force=True)
     assert seen["parsl_config"] is None
     assert seen["force"] is True
 
@@ -3096,3 +3047,66 @@ def test_record_converged_builds_density_mesh_and_grid():
     assert out["converged_kpoint_density"] == 125.0      # 5^3 / 1.0
     assert out["grid_values"] == [64.0, 125.0, 216.0]
     assert out["grid_energies"] == [-1.0, -1.1, -1.1]
+
+
+# --------------------------------------------------------------
+#  build_climb_config: geometry sourced from the loaded cell
+# --------------------------------------------------------------
+
+_FIXTURE_STRUCTURES = os.path.join(
+    os.path.dirname(__file__), "fixtures", "structures")
+
+
+@pytest.mark.integration
+def test_build_climb_config_axis_classes_and_recip_mag():
+    """build_climb_config recomputes a cell's axis classes and
+    reciprocal-axis magnitudes from its OWN space-group operations
+    and lattice, before any run (DESIGN 3.12).  A cubic cell couples
+    all three axes into one class with equal |b_i|; a hexagonal cell
+    couples its in-plane pair (equal |b_a| = |b_b|) and leaves the c
+    axis apart -- the check that would catch the reciprocal being
+    read row-wise instead of down its columns."""
+
+    thresholds = mesh_climb.DEFAULT_POLICY_THRESHOLDS
+    ref = types.SimpleNamespace(kpoint_convergence_threshold=1.0e-4)
+
+    cubic = bip.build_climb_config(
+        ref, os.path.join(_FIXTURE_STRUCTURES, "si_diamond.skl"),
+        confidence=0.9, under_trained=False,
+        thresholds=thresholds, max_count=20)
+    # All three axes share one class; the three |b_i| are equal.
+    assert len(set(cubic.classes)) == 1
+    assert cubic.recip_mag[0] == pytest.approx(cubic.recip_mag[1])
+    assert cubic.recip_mag[1] == pytest.approx(cubic.recip_mag[2])
+    # A confident, trained prediction warrants the parallel-grid
+    #   mode (mesh_climb 4e.4).
+    assert cubic.mode == mesh_climb.PARALLEL_GRID
+    assert cubic.threshold == 1.0e-4
+    assert cubic.max_count == 20
+
+    hexagonal = bip.build_climb_config(
+        ref, os.path.join(_FIXTURE_STRUCTURES, "beo_hexagonal.skl"),
+        confidence=0.9, under_trained=False,
+        thresholds=thresholds, max_count=20)
+    # The in-plane pair a,b share a class distinct from c, and their
+    #   reciprocal magnitudes are equal while c's differs.
+    assert hexagonal.classes[0] == hexagonal.classes[1]
+    assert hexagonal.classes[2] != hexagonal.classes[0]
+    assert hexagonal.recip_mag[0] == pytest.approx(
+        hexagonal.recip_mag[1])
+    assert hexagonal.recip_mag[2] != pytest.approx(
+        hexagonal.recip_mag[1])
+
+
+@pytest.mark.integration
+def test_build_climb_config_under_trained_climbs_serially():
+    """An under-trained prediction (the bootstrap regime, DESIGN 7.9)
+    warrants the serial CLIMB mode, not a parallel grid."""
+
+    ref = types.SimpleNamespace(kpoint_convergence_threshold=1.0e-4)
+    config = bip.build_climb_config(
+        ref, os.path.join(_FIXTURE_STRUCTURES, "si_diamond.skl"),
+        confidence=0.0, under_trained=True,
+        thresholds=mesh_climb.DEFAULT_POLICY_THRESHOLDS,
+        max_count=20)
+    assert config.mode == mesh_climb.CLIMB

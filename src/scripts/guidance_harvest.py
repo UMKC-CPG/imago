@@ -375,56 +375,64 @@ def _require_field(result_toml: dict, field: str, unit_id: str):
     return result_toml[field]
 
 
-def build_entry(workspace_root, grid, kpoint_densities, energies,
-                result_tomls, idx, prediction, dataspace,
-                structure, kpoint_threshold,
-                collapsed_densities, collapsed_energies):
+def build_entry(workspace_root, source_structure, prediction,
+                dataspace, structure, kpoint_threshold,
+                grid_values, grid_energies, converged_density,
+                chosen_result):
     """Assemble the rich :class:`GuidanceEntry` for one converged
-    structure sweep (DESIGN 7.8 step 3f; PSEUDOCODE 15.7 step g).
+    structure from its ALREADY-CHOSEN facts (DESIGN 7.8 step 3f;
+    PSEUDOCODE 15.7).
 
-    ``grid``/``kpoint_densities``/``energies``/``result_tomls`` are the
-    per-grid-point units, swept k-densities, total energies, and
-    parsed ``result.toml`` dicts (all parallel, sorted by
-    k-density); ``idx`` is the converged index chosen by
-    :func:`pick_converged`, an index into these original arrays.
+    This is the ONE entry builder both guidance harvests feed, so a
+    schema change touches a single place and the two paths cannot
+    drift (the Q1-Q2 shared core, DESIGN 5.7).  Each path picks its
+    converged rung its own way -- the standalone density sweep
+    (:func:`harvest_flight`) via ``collapse_by_mesh`` +
+    ``pick_converged``, the producer's in-memory climb
+    (``build_initial_potentials``) via the climb +
+    ``record_converged`` -- then hands the identical chosen facts
+    here:
 
-    ``collapsed_densities``/``collapsed_energies`` are the same
-    ladder after the duplicate-mesh guard (:func:`collapse_by_mesh`)
-    merged rungs that resolved to one mesh.  They are what the
-    entry's verification grid stores, so the curator's
-    ``auto_promote_ok`` re-judges flatness on genuinely distinct
-    calculations and never re-encounters the duplicate-mesh zero
-    the harvest already removed (DESIGN 7.8 step 3f).
-    ``prediction`` is this structure's ``[flight.predictions.<id>]``
-    dict -- the SOLE source of both ``system_type`` and the
-    (basis, functional, kpoint_integration) sub-model (DESIGN 6.2.9
-    / 7.8 step 3f).  ``harvest_flight`` has already guaranteed it is
-    present (a structure with no record is skipped before reaching
-    here), so no None-guards are needed.
+      * ``grid_values`` / ``grid_energies`` -- the distinct-mesh
+        flatness ladder (ascending), the second as raw total-cell
+        hartree (Option B; the consumer normalizes per atom).  Stored
+        as the entry's verification grid so the curator's
+        ``auto_promote_ok`` re-judges flatness on the same genuinely
+        distinct calculations, never re-encountering a duplicate-mesh
+        zero (DESIGN 7.8 step 3f).
+      * ``converged_density`` -- the chosen rung's k-point density.
+      * ``chosen_result`` -- the chosen run's parsed ``result.toml``.
 
-    ``structure`` is the loaded StructureControl (``harvest_flight``
-    loads it once for ``cell_atom_count`` and passes it in, so it is
-    not reloaded here).  ``kpoint_threshold`` is the resolved
-    per-atom eV flatness tolerance, recorded as the entry's
-    ``metric_threshold`` (DESIGN 7.8) -- distinct from the run's
-    ``scf_threshold``.  The ``entry_id`` is left empty here;
-    :func:`save_entry` fills it with the deterministic slug."""
+    Everything MEASURED (gap, magnetization), the SCF threshold, the
+    exact converged mesh, and the Imago commit come from
+    ``chosen_result``; the sub-model and ``system_type`` from
+    ``prediction`` (its SOLE source, DESIGN 6.2.9 / 7.8 step 3f -- a
+    structure with no record is skipped before reaching here, so no
+    None-guards are needed); the cell facts and signature from the
+    loaded ``structure`` (passed in, not reloaded here).
 
-    chosen_result = result_tomls[idx]
-    chosen_kpoint_density = kpoint_densities[idx]
-    # The SCF threshold is a per-run fact from result.toml, recorded
-    #   in the entry's context; it is SEPARATE from the k-point
-    #   flatness metric_threshold (kpoint_threshold, per atom in eV).
-    #   A converged run must record it (a required context fact), so
-    #   an absent one fails loudly rather than storing None.
-    scf_threshold = result_tomls[0].get("scf_threshold")
+    ``source_structure`` is the structure's local path -- recorded in
+    the entry's provenance and used to name any loud failure.
+    ``kpoint_threshold`` is the resolved per-atom eV flatness
+    tolerance, stored as the entry's ``metric_threshold`` (DESIGN
+    7.8) -- distinct from the run's ``scf_threshold``.  The
+    ``entry_id`` is left empty here; :func:`save_entry` fills it with
+    the deterministic slug."""
+
+    # The SCF threshold is a per-run fact from the chosen run's
+    #   result.toml, recorded in the entry's context; it is SEPARATE
+    #   from the k-point flatness metric_threshold (kpoint_threshold,
+    #   per atom in eV).  A converged run must record it (a required
+    #   context fact), so an absent one fails loudly, not as None.
+    scf_threshold = chosen_result.get("scf_threshold")
     if scf_threshold is None:
         raise ValueError(
-            grid[0].id + ": converged run's result.toml carries no "
-            "scf_threshold (a required context fact, DESIGN 5.2)")
+            source_structure + ": converged run's result.toml "
+            "carries no scf_threshold (a required context fact, "
+            "DESIGN 5.2)")
 
     # system_type rides on this structure's prediction record (it
-    #   carries it from the builder, DESIGN 7.7).
+    #   carries it from the predictor, DESIGN 7.7).
     system_type = prediction["system_type"]
 
     signature = compute_signature(
@@ -435,9 +443,10 @@ def build_entry(workspace_root, grid, kpoint_densities, energies,
         #   electronic character the predictor keys on); a run that
         #   did not surface them cannot earn an entry, so this is a
         #   loud failure rather than a silent default.
-        gap_ev=_require_field(chosen_result, "gap_ev", grid[0].id),
+        gap_ev=_require_field(
+            chosen_result, "gap_ev", source_structure),
         gap_kind=_require_field(
-            chosen_result, "gap_kind", grid[0].id),
+            chosen_result, "gap_kind", source_structure),
         # spin_polarization is not surfaced by imago (the iteration
         #   file carries the magnetic moment, not a polarization),
         #   so it is recorded as 0.0; the predictor's spin character
@@ -445,12 +454,12 @@ def build_entry(workspace_root, grid, kpoint_densities, energies,
         spin_polarization=0.0,
         total_magnetization=chosen_result.get(
             "total_magnetization", 0.0),
-        kpoint_density=chosen_kpoint_density)
+        kpoint_density=converged_density)
 
     # The sub-model is read from THIS structure's record -- never
-    #   from sweep.fixed_axes (now empty), so a combined
-    #   mixed-sub-model flight harvests each structure correctly
-    #   (DESIGN 6.2.9 / 7.8 step 3f).
+    #   from sweep.fixed_axes (empty), so a combined mixed-sub-model
+    #   flight harvests each structure correctly (DESIGN 6.2.9 / 7.8
+    #   step 3f).
     context = Context(
         basis=prediction["basis"],
         functional=prediction["functional"],
@@ -461,19 +470,21 @@ def build_entry(workspace_root, grid, kpoint_densities, energies,
             structure.real_cell_volume * _ANGSTROM3_TO_BOHR3))
 
     verification = Verification(
-        # The COLLAPSED distinct-mesh grid (step d), not the raw
-        #   ladder, so the stored flatness evidence is free of the
-        #   duplicate-mesh zero (DESIGN 7.8 step 3f).
-        grid_values=tuple(collapsed_densities),
+        # The distinct-mesh flatness ladder the picker judged, not a
+        #   raw duplicate-bearing ladder, so the stored evidence is
+        #   free of the duplicate-mesh zero (DESIGN 7.8 step 3f).
+        grid_values=tuple(grid_values),
         # grid_energies are RAW total-cell hartree (Option B);
         #   consumers (auto_promote_ok) normalize per atom.
-        grid_energies=tuple(collapsed_energies),
-        converged_at=chosen_kpoint_density,
+        grid_energies=tuple(grid_energies),
+        converged_at=converged_density,
         # The chosen rung's resolved mesh, stored exact beside the
         #   density so the calculation is auditable where a density
         #   round-trips only up to rounding (DESIGN 3.12.4 / 7.2).
-        #   Read from its result.toml (the resolved axial counts,
-        #   DESIGN 6.1.2); absent on an older run -> None.
+        #   Read from the chosen run's result.toml (the resolved axial
+        #   counts, DESIGN 6.1.2) -- the SAME source in both harvests,
+        #   so the mesh cannot differ between them; absent on an older
+        #   run -> None.
         converged_mesh=(tuple(chosen_result["kpoint_mesh"])
                         if chosen_result.get("kpoint_mesh")
                         is not None else None),
@@ -486,7 +497,7 @@ def build_entry(workspace_root, grid, kpoint_densities, energies,
     commit = chosen_result.get("imago_commit") or _UNKNOWN_COMMIT
     provenance = Provenance(
         flight_id=flight_id_of(workspace_root),
-        source_structure=grid[0].structure,
+        source_structure=source_structure,
         imago_commit=commit,
         curator="guidance_harvest.py")
 
@@ -650,15 +661,19 @@ def harvest_flight(workspace_root, db_root, dataspace):
             continue
         idx = kept[chosen]
 
-        # f/g. Build the rich entry and stage it.  The verification
-        #   grid stored on the entry is the COLLAPSED distinct-mesh
-        #   grid, so the curator's auto_promote_ok re-judges
-        #   flatness on the same distinct calculations (7.8 3f).
+        # f/g. Build the rich entry from the already-chosen facts and
+        #   stage it (the shared chosen-facts core, DESIGN 5.7).  The
+        #   density sweep picked its rung above (collapse_by_mesh +
+        #   pick_converged); it now hands build_entry the collapsed
+        #   distinct-mesh ladder, the chosen rung's k-density, and its
+        #   result.toml -- the SAME shape the producer's in-memory
+        #   climb hands it, so the two paths stage identical entries
+        #   and cannot drift on a schema change (7.8 3f).
         entry = build_entry(
-            workspace_root, grid, kpoint_densities, energies,
-            result_tomls, idx, prediction, dataspace, structure,
-            kpoint_threshold, collapsed_densities,
-            collapsed_energies)
+            workspace_root, grid[0].structure, prediction,
+            dataspace, structure, kpoint_threshold,
+            collapsed_densities, collapsed_energies,
+            kpoint_densities[idx], result_tomls[idx])
         path = save_entry(entry, db_root)
         summaries.append(unit_id + ": staged " + path)
 

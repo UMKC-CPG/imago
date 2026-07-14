@@ -85,6 +85,8 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 
+import symmetry
+
 
 # ---------------------------------------------------------------------------
 # Error type for the callable build API
@@ -3876,46 +3878,19 @@ def _extract_point_ops(settings):
         ``frac_trans`` — each element is a list of 3
         floats giving the fractional translation for
         that operation.
+
+    The parse itself lives once, in the shared
+    :func:`symmetry.read_conv_abc_point_ops` (PSEUDOCODE
+    4b.4): the k-point writer here and the
+    initial-potential producer read the same operation
+    file through it, so the operations the producer
+    seeds its mesh climb from cannot drift from the ones
+    this writer emits.  This function only adapts the
+    settings' ``space_db`` name to that reader's
+    ``space_group_db`` argument.
     """
-    sg_path = os.path.join(
-        settings.space_db,
-        settings.space_group_name)
-    with open(sg_path, "r") as f:
-        # Skip description line.
-        f.readline()
-        # Skip root space group number line.
-        f.readline()
-        # Read number of space ops and shifts.
-        parts = f.readline().split()
-        num_space_ops = int(parts[0])
-        num_shifts = int(parts[1])
-        num_point_ops = (
-            num_space_ops // num_shifts)
-
-        # Read each point group operation.
-        point_ops = []
-        frac_trans = []
-        for i in range(num_point_ops):
-            # Skip blank line between operations.
-            f.readline()
-            # Read the 3x3 rotation matrix (3 lines).
-            matrix = []
-            for row in range(3):
-                vals = f.readline().split()
-                matrix.append(
-                    [float(v) for v in vals[:3]])
-            # Read the fractional translation vector.
-            #   Non-symmorphic operations (screw axes,
-            #   glide planes) carry non-zero values
-            #   here. These are needed by buildAtomPerm
-            #   for correct real-space atom mapping.
-            trans_vals = f.readline().split()
-            trans = [float(v) for v in
-                     trans_vals[:3]]
-            point_ops.append(matrix)
-            frac_trans.append(trans)
-
-    return point_ops, frac_trans
+    return symmetry.read_conv_abc_point_ops(
+        settings.space_db, settings.space_group_name)
 
 
 def _write_mesh_kp_file(dest_path, kp_mesh,
