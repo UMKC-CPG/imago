@@ -427,9 +427,9 @@ def scheduler_options(site, workers_per_block=1):
     """Build the raw ``#SBATCH`` directives the site settings imply.
 
     Assembles the directives that are meaningful for today's serial
-    runs -- a memory guard and a GPU request -- then appends
-    ``extra_scheduler_options`` verbatim so a power user is never
-    blocked by the schema.  (CPU/NUMA binding is applied by the
+    runs -- a memory guard, a core request, and a GPU request -- then
+    appends ``extra_scheduler_options`` verbatim so a power user is
+    never blocked by the schema.  (CPU/NUMA binding is applied by the
     launcher in the deferred parallel path, not as a batch directive,
     so it is not emitted here; see :func:`_require_serial_only`.)
 
@@ -443,6 +443,20 @@ def scheduler_options(site, workers_per_block=1):
     spent here: it records the node's physical capacity and is reserved
     as a ceiling for future packing / estimation checks, not a request.
 
+    The core request is derived the same way and for the same reason:
+    the block asks for its own workers' slices and nothing wider, so
+    that sibling blocks (and other users) may share the node beside it
+    -- DESIGN 6.2.11, "a block asks for its slice, not for the node."
+    Stating it is not optional.  A block that omits the count takes
+    SLURM's one-core default, which is right for a one-worker block
+    only by luck and would leave a packed pool's workers contending
+    for a single core.  One task per node holds the whole worker pool
+    (the dispatch driver submits with one task per node), so the
+    node's cores are that task's cores and ``--cpus-per-task`` carries
+    the count.  This pairs with the provider's ``exclusive=False`` in
+    :func:`slurm_provider`: that declines the whole node, and this
+    names what we need of it.  Neither is correct alone.
+
     Returns
     -------
     str
@@ -454,6 +468,8 @@ def scheduler_options(site, workers_per_block=1):
     if memory_per_worker:
         node_memory_gb = memory_per_worker * workers_per_block
         directives.append(f"#SBATCH --mem={node_memory_gb}G")
+    node_cores = site["cores_per_worker"] * workers_per_block
+    directives.append(f"#SBATCH --cpus-per-task={node_cores}")
     gpus_per_node = site.get("gpus_per_node", 0) or 0
     if gpus_per_node > 0:
         directives.append(f"#SBATCH --gres=gpu:{gpus_per_node}")
@@ -485,8 +501,18 @@ def slurm_provider(site, choices, *, nodes_per_block, init_blocks,
     account, partition, and walltime come from the resolved choices;
     the memory, GPU, and CPU knobs ride along as scheduler directives.
     ``workers_per_block`` is how many calculations a node runs at once,
-    so the per-node memory request scales with it (one for the per-job
-    shape, the packed worker count for the pooled shape).
+    so the per-node memory and core requests both scale with it (one
+    for the per-job shape, the packed worker count for the pooled
+    shape).
+
+    ``exclusive`` is stated rather than left to Parsl, whose default
+    claims the entire node.  That default would undo the slice
+    :func:`scheduler_options` just asked for (DESIGN 6.2.11): a
+    one-core block would hold every core on the node, and sibling
+    blocks would each queue for a node of their own instead of sharing
+    one -- which is precisely the independent scheduling the per-job
+    shape promises.  Declining the node and naming the cores are two
+    halves of one request; see :func:`scheduler_options` for the other.
     """
     _require_serial_only(site)
     from parsl.providers import SlurmProvider
@@ -500,6 +526,7 @@ def slurm_provider(site, choices, *, nodes_per_block, init_blocks,
         max_blocks=max_blocks,
         worker_init="\n".join(site["worker_init"]),
         launcher=make_launcher(site),
+        exclusive=False,
         scheduler_options=scheduler_options(site, workers_per_block),
     )
 

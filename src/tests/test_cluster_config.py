@@ -282,10 +282,29 @@ def test_scheduler_options_ignores_capacity_field():
     assert "--mem" not in text
 
 
-def test_scheduler_options_empty_when_nothing_applies():
-    """A site with no memory/GPU/extra yields an empty directive
-    string."""
-    assert cc.scheduler_options(_filled_site()) == ""
+def test_scheduler_options_cores_scale_with_packed_workers():
+    """The core request is derived exactly as the memory is: one
+    worker's cores times how many calculations the node packs.  A
+    block asks for its own slices and nothing wider (DESIGN 6.2.11),
+    so the per-job shape asks for one core and a four-deep pool asks
+    for four."""
+    site = _filled_site(cores_per_worker=1)
+    assert "#SBATCH --cpus-per-task=1" in cc.scheduler_options(site)
+    assert "#SBATCH --cpus-per-task=4" in cc.scheduler_options(
+        site, workers_per_block=4)
+    # A calculation that wants several cores multiplies through.
+    assert "#SBATCH --cpus-per-task=8" in cc.scheduler_options(
+        _filled_site(cores_per_worker=2), workers_per_block=4)
+
+
+def test_scheduler_options_emits_only_what_applies():
+    """A site naming no memory, GPU, or extra directives asks for its
+    cores and nothing besides.  The core request is the floor of the
+    string rather than one more optional line: a block must always say
+    what it needs of the node (DESIGN 6.2.11), whereas the memory and
+    GPU guards apply only where the site asks for them."""
+    assert cc.scheduler_options(_filled_site()) == \
+        "#SBATCH --cpus-per-task=1"
 
 
 # ----------------------------------------------------------------
@@ -361,6 +380,32 @@ def test_pooled_config_block_geometry():
     assert executor.provider.init_blocks == 1
     assert executor.provider.max_blocks == 4
     assert executor.provider.nodes_per_block == 2
+
+
+@needs_parsl
+@pytest.mark.parametrize("shape, packed_cores",
+                         [("slurm-per-job", 1), ("slurm-pooled", 32)])
+def test_neither_shape_claims_the_whole_node(shape, packed_cores):
+    """A block asks for its slice, not for the node (DESIGN 6.2.11).
+
+    Parsl's provider would claim the entire node by default, which
+    would make the per-job shape's independent scheduling a fiction --
+    every one-core calculation would queue for a whole node of its
+    own.  Both halves of the request are checked together, since
+    declining the node without naming the cores would silently fall
+    back to SLURM's single core.
+    """
+    site = _filled_site(cores_per_node=32, cores_per_worker=1)
+    choices = {"dispatch": shape, "partition": "general",
+               "nodes": 1, "walltime": "02:00:00"}
+    provider = cc.build_dispatch_config(site, choices).executors[0].provider
+    assert provider.exclusive is False
+    assert (f"#SBATCH --cpus-per-task={packed_cores}"
+            in provider.scheduler_options)
+    # Parsl writes '#SBATCH --exclusive' into scheduler_options when it
+    #   is asked to claim the node; a site that truly needs whole nodes
+    #   asks through extra_scheduler_options instead.
+    assert "--exclusive" not in provider.scheduler_options
 
 
 @needs_parsl

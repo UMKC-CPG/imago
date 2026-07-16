@@ -2660,6 +2660,31 @@ imports its neighbours from `$IMAGO_BIN`).
       live seed re-run against the rebuilt binary closes C116 and
       unblocks C117.
 
+- [x] C119. A block asks for its slice, not for the node
+  (DESIGN 6.2.11 / PSEUDOCODE 13.7 / code).  Surfaced by the
+  C118 seed re-run, which held a 128-core node for 41 minutes
+  and used one core of it (0.8%), and left seven of its eight
+  blocks queued behind whole-node requests they never needed.
+  Two causes, both ours: the provider never named `exclusive`,
+  so Parsl's whole-node default stood; and `scheduler_options`
+  requested memory but never cores, which only "worked"
+  because exclusivity handed us the node anyway.  The two are
+  one request -- declining the node without naming the cores
+  takes SLURM's one-core default and would starve a packed
+  pool -- so DESIGN 6.2.11 now states both, deriving the cores
+  as `cores_per_worker x workers_on_the_node` exactly as the
+  memory is derived, and pointing a site that truly needs
+  whole nodes at `extra_scheduler_options` rather than adding
+  a knob.  Verified against the real `clusterrc`: per-job asks
+  `--mem=10G --cpus-per-task=1`, pooled asks `--mem=400G
+  --cpus-per-task=40`, both non-exclusive.  The partition
+  permits sharing (`OverSubscribe=NO`, `ExclusiveUser=NO`
+  bound cores, not nodes), so the seven blocks that queued had
+  nothing to wait for.  Note this is throughput and courtesy,
+  not correctness: the seed run's answers were right, and its
+  41 minutes were 40 minutes of real compute -- the waste was
+  the 127 idle cores no one else could use.
+
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 
 - [ ] C62. Implement the element-aware bispectrum per
@@ -2958,8 +2983,10 @@ and PSEUDOCODE landed before code.
   REMAINING for C68: (c) lost-vs-failed fine-graining under a
   real worker loss (validate dispatch._is_lost vs this parsl's
   ManagerLost/WorkerLost/BadState names). Plus a diversity-of-
-  options study (multi-node, workers/node, exclusive, launcher)
-  per the user goal -- off critical path, later cluster session.
+  options study (multi-node, workers/node, launcher) per the
+  user goal -- off critical path, later cluster session.
+  Whether to claim whole nodes is outside this study: C119
+  settles it in DESIGN 6.2.11.
 - [x] C69. Revise DESIGN 5.7 / PSEUDOCODE 11.4 /
   ARCHITECTURE 8.5 so the producer delegates SCF running
   to kaleidoscope (drops the bespoke run_imago_scf, COD

@@ -7516,10 +7516,18 @@ function slurm_provider(site, choices, nodes_per_block,
     _require_serial_only(site)
     # worker_init is the site's bring-up script, so a worker can
     # find imago; account/partition/walltime come from the resolved
-    # choices; the memory and GPU knobs ride along as raw scheduler
-    # directives (scheduler_options).  workers_per_block is how many
-    # calculations share a node, so the per-node memory request
-    # scales with it.
+    # choices; the memory, core, and GPU knobs ride along as raw
+    # scheduler directives (scheduler_options).  workers_per_block is
+    # how many calculations share a node, so the per-node memory and
+    # core requests both scale with it.
+    #
+    # exclusive is stated, not defaulted.  The provider's own default
+    # claims the whole node, which would undo the slice the request
+    # just asked for (DESIGN 6.2.11): a one-core block would hold
+    # every core on the node, and sibling blocks would each queue for
+    # a node of their own rather than sharing one.  scheduler_options
+    # names the cores that this then leaves us, so the two belong
+    # together -- neither is correct without the other.
     return SlurmProvider(
         partition         = choices["partition"],
         account           = site["account"],
@@ -7530,6 +7538,7 @@ function slurm_provider(site, choices, nodes_per_block,
         max_blocks        = max_blocks,
         worker_init       = join_lines(site["worker_init"]),
         launcher          = make_launcher(site),
+        exclusive         = false,
         scheduler_options = scheduler_options(
                                 site, workers_per_block))
 ```
@@ -7633,11 +7642,22 @@ function scheduler_options(site, workers_per_block = 1):
     # at once (one under the per-job shape, the node's packed worker
     # count under the pooled shape).  memory_per_node is never spent
     # here: it is capacity, not a request (DESIGN 6.2.11).
+    #
+    # The core request is derived the SAME way and for the same
+    # reason: the block asks for its own workers' slices and no more
+    # (DESIGN 6.2.11, "a block asks for its slice, not for the node").
+    # It must be stated -- a block that omits it takes the scheduler's
+    # one-core default, which silently starves a packed pool.  One
+    # task per node holds the whole worker pool (the dispatch driver
+    # submits tasks_per_node = 1), so the node's cores are the task's
+    # cores and --cpus-per-task carries the count.
     lines = []
     if site["memory_per_worker"]:
         node_memory_gb = (site["memory_per_worker"]
                           * workers_per_block)
         lines.append("#SBATCH --mem=" + node_memory_gb + "G")
+    node_cores = site["cores_per_worker"] * workers_per_block
+    lines.append("#SBATCH --cpus-per-task=" + node_cores)
     if site["gpus_per_node"] > 0: lines.append(gres_line(site))
     lines.extend(site["extra_scheduler_options"])
     return join_lines(lines)

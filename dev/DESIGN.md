@@ -7808,6 +7808,40 @@ dispatch core (6.2.3) is unchanged.
   own one-worker block, so each calculation queues and runs
   independently.  Best for large or heterogeneous units.
 
+**A block asks for its slice, not for the node.**  Under
+either shape, a block's request names exactly what its own
+workers need -- their cores and their memory -- and claims the
+node no more broadly than that.  This follows from Decision 3
+rather than adding to it: if every calculation is given one
+uniform slice, then a block holding `w` workers is asking for
+`w` slices, and the node's remaining cores are not its to
+hold.  They belong to whoever asks next, be that another block
+of the same run or another user entirely.
+
+The reasoning bites hardest on the per-job shape, whose whole
+promise -- each calculation queues and runs independently --
+holds only if the calculations can be *scheduled*
+independently.  A one-core calculation that claims a whole
+node has not queued independently: it has queued for a node,
+and each sibling behind it waits for a node of its own however
+few cores it would use.  On a cluster that permits sharing,
+one gets in and the rest stay pending while the cores they
+asked for sit idle beside the one that ran.
+
+The cores must be named explicitly, and this is the trap worth
+recording.  A block that merely declines to claim the node,
+without stating a core count, receives the scheduler's default
+of a single core -- correct for a one-worker block by accident
+and wrong for a packed one, whose workers would then contend
+for one core between them.  So the cores are derived exactly
+as the memory is, as `cores_per_worker x
+workers_on_the_node`, and the two directives are written
+together or not at all.
+
+A site whose queue policy genuinely requires whole nodes is
+served by `extra_scheduler_options`, which exists for exactly
+this kind of local rule and costs the schema no new setting.
+
 **Decision 4 -- the generator lives in the dispatcher
 package.**  The helper that turns (site facts + per-run
 choices) into a `Config` belongs in `kaleidoscope`, which
