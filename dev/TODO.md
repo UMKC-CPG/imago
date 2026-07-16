@@ -2627,22 +2627,38 @@ imports its neighbours from `$IMAGO_BIN`).
       provisional defaults into `(PolicyThresholds, max_count)`.
       A test pins `KPOINT_CLIMB_KEYS` to mesh_climb so they cannot
       drift.  Wiring into the producer main is Inc 6.
-    - [ ] Inc 6. Wire the producer main to the climb.  6a + 6b DONE
-      (uncommitted); 6c remains.  **6a** (DONE): DESIGN 5.7 +
-      PSEUDOCODE 11.4 rewritten for the climb; the chosen-facts
-      `build_entry` (Q1/Q2 resolved); an A'' diversion added
-      `symmetry.py` -- the shared `share/spaceDB` point-ops reader
-      both the kp writer and the producer read through (ARCH 2/3/7
-      started the Section-7 symmetry split in the small).  **6b**
-      (DONE): rewired `build_initial_potentials` main to the three-
-      phase climb (build / converge / harvest) with `build_climb_-
-      config`; FULL-SWEEP retirement of `build_kpoint_convergence` +
-      its helper tail + `pick_converged_unit` across code / tests /
-      PSEUDOCODE 15.6 / DESIGN; orchestration tests rewired; the
-      make_run_log_entry mesh-vs-density fix.  **6c** (NEXT, needs a
-      rebuilt binary): imago `RESOLVED_KP_CLASSES` emit (4d.5) +
-      producer axis-class self-test (4c.7) + fcc-prim check.
-      Follow-on: live seed re-run closes C116, unblocks C117.
+    - [ ] Inc 6. Wire the producer main to the climb.  The 6a-6c code
+      is DONE; only the live seed re-run remains.  **6a** (DONE):
+      DESIGN 5.7 + PSEUDOCODE 11.4 rewritten for the climb; the
+      chosen-facts `build_entry` (Q1/Q2 resolved); an A'' diversion
+      added `symmetry.py` -- the shared `share/spaceDB` point-ops
+      reader both the kp writer and the producer read through (ARCH
+      2/3/7 started the Section-7 symmetry split in the small).
+      **6b** (DONE): rewired `build_initial_potentials` main to the
+      three-phase climb (build / converge / harvest) with `build_-
+      climb_config`; FULL-SWEEP retirement of `build_kpoint_-
+      convergence` + its helper tail + `pick_converged_unit` across
+      code / tests / PSEUDOCODE 15.6 / DESIGN; orchestration tests
+      rewired; the make_run_log_entry mesh-vs-density fix.  **6c**
+      (DONE): imago emits `RESOLVED_KP_CLASSES` (4d.5) from its own
+      `computeAxisClasses` call in *both* mesh style codes -- every
+      climb run is an explicit mesh (style 1, `-scfkp`), and imago
+      must compute the classes independently of the producer or the
+      cross-check against `axis_classes_for_cell` is circular.  The
+      separate axis-class self-test (4c.7) is descoped: the live seed
+      re-run exercises the port on real cells.  **6d** (DONE): two
+      blockers the first live run surfaced.  The script install list
+      omitted `mesh_climb.py` and `symmetry.py`, so the installed
+      `structure_control` raised `ModuleNotFoundError`.  And the
+      producer reloaded one Parsl `Config` per climb round, which a
+      single-use executor forbids: PSEUDOCODE 13.5 gained
+      `make_executor`, and 11.4 / 4e now build one executor per run,
+      pin it to every dispatch, and close it once in a `finally`
+      (DESIGN 6.2.11's pooled shape; 6.2.3 <-> 3.12.5 now cross-
+      referenced, since the climb is a producer-side control loop by
+      Principle 12 rather than a wingbeat inner loop).  NEXT: the
+      live seed re-run against the rebuilt binary closes C116 and
+      unblocks C117.
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 

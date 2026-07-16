@@ -121,7 +121,8 @@ import mesh_climb
 from curation_manifest import (
     ReferenceEntry, ReferenceSolid, CurationManifest,
     load_manifest_v2, load_structure_sources, resolve_settings)
-from kaleidoscope import CalcUnit, Flight, SweepRecord, dispatch
+from kaleidoscope import (
+    CalcUnit, Flight, SweepRecord, dispatch, make_executor)
 from kaleidoscope.builders.kpoint_convergence import (
     build_mesh_unit, predict_kpoint_density, standard_key_fields)
 from kaleidoscope.cluster_config import (
@@ -1979,7 +1980,7 @@ def converge_by_climb(materials, configs, seed_densities,
 
 
 def make_dispatch_round(structures, options_by_material, workspace,
-                        *, parsl_config=None,
+                        *, parsl_config=None, executor=None,
                         prepare_fn=prepare_units,
                         dispatch_fn=dispatch,
                         completed_fn=_unit_completed,
@@ -1999,16 +2000,19 @@ def make_dispatch_round(structures, options_by_material, workspace,
     The adapter closes over each material's ``structure`` and coded
     ``options`` (keyed by the material id, which is also the unit id
     so an energy routes straight back), over the ``workspace`` the run
-    directories live under, and over the resolved dispatch
-    ``parsl_config`` -- the SAME Config the loen pre-flight ran under
-    (``None`` for the local opt-out, a real Parsl ``Config`` for a
-    cluster shape) -- so every round's units land in one tree and run
-    under one dispatch shape.  ``prepare_fn`` / ``dispatch_fn`` /
-    ``completed_fn`` / ``read_fn`` are injected -- defaulting to the
-    real driver-side prepare, the real kaleidoscope dispatch, and the
-    real status / result readers -- so a caller can unit-test the
-    adapter with the toolchain seam mocked (each live run needs a
-    real imago, C74).  ``force`` bypasses the run-reuse cache.
+    directories live under, over the resolved dispatch
+    ``parsl_config`` recorded on each round's flight (``None`` for the
+    local opt-out, a real Parsl ``Config`` for a cluster shape), and
+    over the ONE shared ``executor`` every round dispatches beneath.
+    That single executor is what the loen pre-flight and all climb
+    rounds run under, so the whole run rides one warm pool (DESIGN
+    6.2.11) and its units land in one tree.  ``prepare_fn`` /
+    ``dispatch_fn`` / ``completed_fn`` / ``read_fn`` are injected --
+    defaulting to the real driver-side prepare, the real kaleidoscope
+    dispatch, and the real status / result readers -- so a caller can
+    unit-test the adapter with the toolchain seam mocked (each live
+    run needs a real imago, C74).  ``force`` bypasses the run-reuse
+    cache.
 
     A mesh already run in an earlier round is a cache hit (DESIGN
     6.2.5), so re-dispatching it costs nothing and the climb never
@@ -2026,16 +2030,17 @@ def make_dispatch_round(structures, options_by_material, workspace,
                     options_by_material[material], mesh, material)
                 built.append((material, mesh, unit))
 
-        # The round's flight carries the workspace root and the
-        #   resolved dispatch Config, so its units live in the same
-        #   tree and run under the same shape as the pre-flight batch.
+        # The round's flight records the workspace root and the
+        #   resolved dispatch Config so its units live in the same
+        #   tree as the pre-flight batch; the shared executor passed
+        #   to dispatch is what actually runs them (one warm pool).
         flight = Flight(
             root=workspace, units=[unit for _, _, unit in built],
             parsl_config=parsl_config,
             sweep=SweepRecord(varied_axes=("kpt-mesh",),
                               fixed_axes={}))
         prepare_fn(flight, workspace)
-        dispatch_fn(flight, force=force)
+        dispatch_fn(flight, executor=executor, force=force)
 
         rungs_by_material = {material: [] for material in mesh_lists}
         for material, mesh, unit in built:
@@ -2340,34 +2345,48 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         dispatch_shape, partition, nodes, walltime, profile)
     if save_config and dispatch_choices is not None:
         write_resolved_dispatch(workspace, dispatch_choices, profile)
-    loen_flight = Flight(
-        root=workspace, units=loen_units,
-        parsl_config=parsl_config,
-        sweep=SweepRecord(varied_axes=(), fixed_axes={}))
-    if loen_units:
-        prepare_fn(loen_flight, workspace)
-        dispatch_fn(loen_flight, force=force)
 
-    # ----- Phase 2: converge.  Drive every solid through the adaptive
-    # mesh climb (converge_by_climb): serial within a solid, parallel
-    # across, one round per iteration.  The round adapter closes over
-    # each solid's structure, coded options, and the resolved Config;
-    # the loop reads each round's energies and chooses each solid's
-    # next mesh until it flattens (its converged rung) or hits the
-    # max_count ceiling (NON_CONVERGED).  A mesh re-run in a later
-    # round is a cache hit (DESIGN 6.2.5).  on_non_converged tags the
-    # solid's workspace with a prediction mismatch (DESIGN 7.8 step
-    # 3d); it is injected so the round loop stays free of the workspace.
-    dispatch_round = make_dispatch_round(
-        struct_of, options_of, workspace,
-        parsl_config=parsl_config, prepare_fn=prepare_fn,
-        dispatch_fn=dispatch_fn, force=force)
-    materials = [ref.reference_id for ref in manifest.reference_solids]
-    outcomes, rungs = converge_by_climb(
-        materials, configs, seed_densities, dispatch_round,
-        on_non_converged=lambda material:
-            guidance_harvest.tag_prediction_mismatch(
-                workspace, material))
+    # One executor for the whole run's dispatch (DESIGN 6.2.11's
+    #   pooled shape): the loen pre-flight and every climb round share
+    #   one warm pool.  Build it ONCE (make_executor) and close it
+    #   ONCE, in a finally so a mid-climb error still releases the
+    #   SLURM allocation.  Phase 3 harvest reads run dirs only and
+    #   needs no dispatch, so the pool is freed as convergence ends.
+    executor = make_executor(parsl_config)
+    try:
+        loen_flight = Flight(
+            root=workspace, units=loen_units,
+            parsl_config=parsl_config,
+            sweep=SweepRecord(varied_axes=(), fixed_axes={}))
+        if loen_units:
+            prepare_fn(loen_flight, workspace)
+            dispatch_fn(loen_flight, executor=executor, force=force)
+
+        # ----- Phase 2: converge.  Drive every solid through the
+        # adaptive mesh climb (converge_by_climb): serial within a
+        # solid, parallel across, one round per iteration.  The round
+        # adapter closes over each solid's structure, coded options,
+        # and the shared executor; the loop reads each round's
+        # energies and chooses each solid's next mesh until it
+        # flattens (its converged rung) or hits the max_count ceiling
+        # (NON_CONVERGED).  A mesh re-run in a later round is a cache
+        # hit (DESIGN 6.2.5).  on_non_converged tags the solid's
+        # workspace with a prediction mismatch (DESIGN 7.8 step 3d);
+        # it is injected so the round loop stays free of the workspace.
+        dispatch_round = make_dispatch_round(
+            struct_of, options_of, workspace,
+            parsl_config=parsl_config, executor=executor,
+            prepare_fn=prepare_fn, dispatch_fn=dispatch_fn,
+            force=force)
+        materials = [ref.reference_id
+                     for ref in manifest.reference_solids]
+        outcomes, rungs = converge_by_climb(
+            materials, configs, seed_densities, dispatch_round,
+            on_non_converged=lambda material:
+                guidance_harvest.tag_prediction_mismatch(
+                    workspace, material))
+    finally:
+        executor.close()
 
     # ----- Phase 3: harvest.  Per solid, locate the converged rung's
     # run, extract the potential at each named site, record the run,

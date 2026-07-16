@@ -47,6 +47,7 @@ from .wingbeats import (
 )
 from .dispatch import (
     dispatch,
+    make_executor,
     LocalExecutor,
     ParslExecutor,
     TaskLost,
@@ -72,7 +73,8 @@ __all__ = [
     "SweepRecord", "Flight", "WingbeatOutcome", "ReportEntry",
     "FlightReport",
     "Wingbeat", "ImagoWingbeat", "register_wingbeat", "resolve_wingbeat",
-    "WINGBEATS", "dispatch", "LocalExecutor", "ParslExecutor",
+    "WINGBEATS", "dispatch", "make_executor",
+    "LocalExecutor", "ParslExecutor",
     "TaskLost", "report_entry_from_status", "unit_run_dir",
     "validate_flight", "read_status", "write_status",
     "serialize_flight", "read_flight_toml", "flight_id_of",

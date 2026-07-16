@@ -18,7 +18,7 @@ set (SCRIPTS
    lmp2skl.py
    make_veusz_graph.py makeBDB.py makeBOND.py makeFittedRhoV.py
    makegroups.py makePDOS.py makePotDB.py make_reactions.py makeSGDB.py
-   makeSYBD.py makeinput.py matchers.py mod_struct.py
+   makeSYBD.py makeinput.py matchers.py mesh_climb.py mod_struct.py
    nanoTube.py
    org_radwavefn.py osrecurintg.py osrecurintgana.py osrecurintgnum.py
    osrecurintglib.py osrecurintg_makenum.py
@@ -26,6 +26,7 @@ set (SCRIPTS
    processPOPTC.py
    runIsoAtoms.py
    skl2isaacs.py skl2pdb.py skl2vasp.py struct2skl.py structure_control.py
+   symmetry.py
    unpackImagoDB.py
    vasp2skl.py viewCell.py
    xyz2skl.py)

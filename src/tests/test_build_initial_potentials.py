@@ -2155,7 +2155,7 @@ def test_build_initial_potentials_harvests_curated_entry(
     # The loen pre-flight is the only real dispatch (the climb is
     #   mocked); the fingerprint harvest is stubbed, so nothing reads
     #   its results.
-    def fake_dispatch(flight, force=False):
+    def fake_dispatch(flight, executor=None, force=False):
         pass
 
     build_initial_potentials(
@@ -2215,7 +2215,7 @@ def test_build_initial_potentials_derives_label_at_harvest(
         bip.guidance_harvest, "load_structure",
         lambda path: types.SimpleNamespace(num_atoms=2))
 
-    def fake_dispatch(flight, force=False):
+    def fake_dispatch(flight, executor=None, force=False):
         pass
 
     # Inject the site-identity reader: site 1 is Au species 1,
@@ -2373,7 +2373,7 @@ def test_build_initial_potentials_resolves_defaults(
     monkeypatch.setattr(bip, "predict_kpoint_density",
                         asserting_predict)
 
-    def fake_dispatch(flight, force=False):
+    def fake_dispatch(flight, executor=None, force=False):
         pass
 
     build_initial_potentials(
@@ -2449,21 +2449,27 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
     seen = {}
     real_make = bip.make_dispatch_round
 
-    def spy_make(*args, parsl_config=None, force=False, **kwargs):
+    def spy_make(*args, parsl_config=None, executor=None,
+                 force=False, **kwargs):
         seen["parsl_config"] = parsl_config
+        seen["executor"] = executor
         seen["force"] = force
         return real_make(*args, parsl_config=parsl_config,
-                         force=force, **kwargs)
+                         executor=executor, force=force, **kwargs)
 
     monkeypatch.setattr(bip, "make_dispatch_round", spy_make)
 
     bip.build_initial_potentials(
         manifest_path, pdb_root, data_root,
-        dispatch_fn=lambda flight, force=False: None,
+        dispatch_fn=lambda flight, executor=None, force=False: None,
         prepare_fn=lambda flight, workspace: None,
         force=True)
     assert seen["parsl_config"] is None
     assert seen["force"] is True
+    # The producer built ONE executor for the whole run (local ->
+    #   LocalExecutor) and threaded that same object into the round
+    #   adapter, so every round rides one pool (DESIGN 6.2.11).
+    assert type(seen["executor"]).__name__ == "LocalExecutor"
 
 
 # ==============================================================
@@ -2939,7 +2945,7 @@ def _make_round(energy_by_mesh, *, completed=None,
     return bip.make_dispatch_round(
         {"si": object()}, {"si": {"scf_basis": "fb"}}, "/ws",
         prepare_fn=lambda flight, workspace: None,
-        dispatch_fn=lambda flight, force=False: None,
+        dispatch_fn=lambda flight, executor=None, force=False: None,
         completed_fn=completed,
         read_fn=_mesh_reader(energy_by_mesh, resolved_by_mesh))
 

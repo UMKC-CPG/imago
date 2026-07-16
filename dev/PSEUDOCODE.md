@@ -1914,13 +1914,16 @@ function predict_kpoint_density(structure, dataspace, system_type,
 
 
 function make_dispatch_round(structures, options_by_material,
-                             workspace, parsl_config, force):
+                             workspace, parsl_config, executor,
+                             force):
     # The producer builds the round adapter converge_by_climb (4e.5)
     # injects, closing over each material's structure and options,
-    # the workspace root every round's units live under, and the
-    # resolved dispatch Config (13.7) every round runs beneath (the
-    # pre-flight loen batch above runs under the SAME config, so the
-    # climb rounds land in one tree and one dispatch shape with it).
+    # the workspace root every round's units live under, the
+    # resolved dispatch Config (13.7) recorded on every round's
+    # flight, and the ONE shared executor every round dispatches
+    # under (make_executor, 13.5): the pre-flight loen batch and all
+    # climb rounds run beneath the SAME executor, so the whole run
+    # shares one warm pool (DESIGN 6.2.11) and lands in one tree.
     # `force` bypasses the run-reuse cache exactly as the pre-flight
     # dispatch does.  The returned dispatch_round(mesh_lists) is what
     # the loop calls; the material key doubles as the unit id
@@ -1939,15 +1942,16 @@ function make_dispatch_round(structures, options_by_material,
                 append(built, (m, mesh, unit))
         # Carry the workspace root and the resolved Config on the
         #   round's flight, matching the pre-flight batch, so every
-        #   round's units live in the same tree and run under the
-        #   same dispatch shape.
+        #   round's units live in the same tree; the shared executor
+        #   passed to dispatch is what actually runs them (13.5).
         flight = Flight(
             units        = [unit for (_, _, unit) in built],
             root         = workspace,
             parsl_config = parsl_config,
             sweep        = Sweep(varied = ("kpt-mesh",), fixed = {}))
         prepareUnits(flight)                     # driver-side (6.2.5)
-        dispatch(flight, force = force)          # 6.2.11
+        dispatch(flight, executor = executor,    # shared pool, 13.5
+                 force = force)
 
         out = { m: [] for m in mesh_lists }
         for (m, mesh, unit) in built:
@@ -5022,37 +5026,52 @@ function buildInitialPotentials(manifest_path,
         dispatch_shape, partition, nodes, walltime, profile)
     if save_config and choices is not None:
         write_resolved_dispatch(workspace, choices, profile)
-    if loen_units is not empty:
-        loen_flight = Flight(
-            units        = loen_units,
-            root         = workspace,
-            parsl_config = parsl_config,
-            sweep        = SweepRecord(
-                varied_axes = (), fixed_axes = {}))
-        prepare_units(loen_flight)        # driver-side makeinput
-        dispatch(loen_flight, force = force)
 
-    # ===== Phase 2: converge ==========================
-    # The round adapter (4e.7) closes over each solid's structure,
-    # its coded options, and the resolved dispatch Config.  Per
-    # round it builds one mesh unit per requested mesh
-    # (build_mesh_unit), prepares them driver-side, dispatches the
-    # round, and reads each result.toml back into a Rung -- OMITTING
-    # any mesh whose run did not complete (7.7).  converge_by_climb
-    # (4e.5) then drives every solid to a verdict, one parallel
-    # round per iteration, serial within a solid.  A mesh re-run in
-    # a later round is a cache hit (6.2.5).  on_non_converged tags
-    # the solid's workspace with a prediction mismatch (7.8 3d); it
-    # is injected so the round loop stays free of the workspace.
-    dispatch_round = make_dispatch_round(
-        struct_of, options_of, workspace,
-        parsl_config = parsl_config, force = force)
-    materials = [ref.reference_id
-                 for ref in manifest.reference_solids]
-    outcomes, rungs = converge_by_climb(
-        materials, configs, seed_densities, dispatch_round,
-        on_non_converged =
-            lambda m: tag_prediction_mismatch(workspace, m))
+    # One executor for the whole run's dispatch (DESIGN 6.2.11's
+    # pooled shape, 13.5): the pre-flight and every climb round
+    # share one warm pool.  Build it ONCE and close it ONCE, in a
+    # finally so a mid-climb error still releases the SLURM
+    # allocation.  Phase 3 harvest reads run dirs only and needs no
+    # dispatch, so the pool is freed the moment convergence ends.
+    executor = make_executor(parsl_config)            # 13.5
+    try:
+        if loen_units is not empty:
+            loen_flight = Flight(
+                units        = loen_units,
+                root         = workspace,
+                parsl_config = parsl_config,
+                sweep        = SweepRecord(
+                    varied_axes = (), fixed_axes = {}))
+            prepare_units(loen_flight)    # driver-side makeinput
+            dispatch(loen_flight, executor = executor,
+                     force = force)
+
+        # ===== Phase 2: converge ======================
+        # The round adapter (4e.7) closes over each solid's
+        # structure, its coded options, and the shared executor.
+        # Per round it builds one mesh unit per requested mesh
+        # (build_mesh_unit), prepares them driver-side, dispatches
+        # the round under that one executor, and reads each
+        # result.toml back into a Rung -- OMITTING any mesh whose
+        # run did not complete (7.7).  converge_by_climb (4e.5)
+        # then drives every solid to a verdict, one parallel round
+        # per iteration, serial within a solid.  A mesh re-run in a
+        # later round is a cache hit (6.2.5).  on_non_converged
+        # tags the solid's workspace with a prediction mismatch
+        # (7.8 3d); it is injected so the round loop stays free of
+        # the workspace.
+        dispatch_round = make_dispatch_round(
+            struct_of, options_of, workspace,
+            parsl_config = parsl_config, executor = executor,
+            force = force)
+        materials = [ref.reference_id
+                     for ref in manifest.reference_solids]
+        outcomes, rungs = converge_by_climb(
+            materials, configs, seed_densities, dispatch_round,
+            on_non_converged =
+                lambda m: tag_prediction_mismatch(workspace, m))
+    finally:
+        executor.close()      # release the pool (also on error)
 
     # ===== Phase 3: harvest ===========================
     log = []
@@ -7041,11 +7060,25 @@ runs units in the current process (tests, a laptop, the
 materialize pre-flight); a `ParslExecutor` dispatches them as
 Parsl tasks onto whatever its `Config` describes (a laptop
 thread pool, or a cluster).  When the caller pins no
-executor, the driver picks one from the flight: a
-`ParslExecutor` if the flight carries a `parsl_config` (13.7),
-else a `LocalExecutor`.  Both kinds of future share one
-`result()`/exception contract, so the gather logic below is
-identical across them.
+executor, the driver builds one from the flight with
+`make_executor` (below): a `ParslExecutor` if the flight carries
+a `parsl_config` (13.7), else a `LocalExecutor`.  Both kinds of
+future share one `result()`/exception contract, so the gather
+logic below is identical across them.
+
+A client that runs *many* flights under one config builds the
+executor ONCE and pins it to every call.  A Parsl `Config`'s
+executor is single-use: constructing it starts one coordinator
+and its pool of SLURM workers (13.7), and closing it tears them
+down, so a second `dispatch()` handed the same config would try
+to restart a spent pool.  The producer's climb is exactly this
+-- a pre-flight batch and then one flight per continuation round
+(DESIGN 3.12.5), all under one config -- so it builds one
+executor with `make_executor(config)`, passes it to every
+`dispatch(...)`, and closes it once after the last.  The whole
+run then shares one warm pool that grows and shrinks with demand
+(DESIGN 6.2.11's pooled shape) instead of rebuilding it per
+round.
 
 ```
 function dispatch(flight, executor=None, force=False):
@@ -7058,10 +7091,7 @@ function dispatch(flight, executor=None, force=False):
     # caller-supplied executor is the caller's to close).
     owns_executor = (executor is None)
     if executor is None:
-        if flight.parsl_config is not None:
-            executor = ParslExecutor(flight.parsl_config)  # 13.7
-        else:
-            executor = LocalExecutor()
+        executor = make_executor(flight.parsl_config)  # below
 
     try:
         pending = []                  # list of (unit, future)
@@ -7083,6 +7113,22 @@ function dispatch(flight, executor=None, force=False):
             executor.close()      # tear down Parsl if we built it
 
     return FlightReport(entries = entries)
+```
+
+```
+function make_executor(parsl_config):
+    # The one seam that turns a resolved config into a live
+    # executor, shared so the choice lives in exactly one place.
+    # A cluster config -> a ParslExecutor (constructing it loads
+    # one coordinator and its SLURM worker pool, 13.7); the local
+    # opt-out (config None) -> an in-process LocalExecutor.  A
+    # client that dispatches many flights under one config calls
+    # this ONCE and pins the result to every dispatch (the
+    # producer's climb, 11.4), so the whole run shares one pool; a
+    # one-shot flight lets dispatch build and close its own.
+    if parsl_config is not None:
+        return ParslExecutor(parsl_config)      # 13.7
+    return LocalExecutor()
 ```
 
 ```

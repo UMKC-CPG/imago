@@ -1105,8 +1105,12 @@ subroutine initializeKPoints (inSCF)
    integer, dimension(3) :: axisClass
          ! Symmetry class of each reciprocal axis: axes coupled by
          !   the point group share a class and must share a count
-         !   (DESIGN 3.8).  Filled by computeAxisClasses and used by
-         !   selectAxialCounts in the density branch (style code 2).
+         !   (DESIGN 3.8).  Filled by computeAxisClasses in both
+         !   mesh style codes.  In the density branch (style 2) it
+         !   drives selectAxialCounts; in both branches it is
+         !   emitted as RESOLVED_KP_CLASSES so the producer's Python
+         !   axis-class port can be checked against imago's own
+         !   answer (PSEUDOCODE 4c.7, 4d.5).
 
    ! The considerations for this operation are:
 
@@ -1232,6 +1236,14 @@ subroutine initializeKPoints (inSCF)
       !   AUTO shift request from those counts (DESIGN 3.9).
       call computeRealPointOps
       call computeRecipPointOps
+      ! Unlike the density branch, the counts are already fixed, so
+      !   the axis classes are not needed to SELECT them.  They are
+      !   computed here only so the run can emit RESOLVED_KP_CLASSES
+      !   below -- imago's own account of how the point group
+      !   couples the reciprocal axes, against which the producer's
+      !   Python port of this computation is checked (PSEUDOCODE
+      !   4c.7, 4d.5).
+      call computeAxisClasses(axisClass)
       call resolveShift
       call initializeKPointMesh(1) ! Apply symmetry.
       call convertKPointsToXYZ
@@ -1256,19 +1268,26 @@ subroutine initializeKPoints (inSCF)
    !   12.5).  RESOLVED_KP_MESH is the full uniform mesh's axial
    !   counts; RESOLVED_KP_COUNT is the number of k-points
    !   actually computed -- the IBZ size after symmetry folding,
-   !   the full-mesh size otherwise.  Each record follows imago's
+   !   the full-mesh size otherwise.  RESOLVED_KP_CLASSES is the
+   !   axis-class label vector: three integers whose equality
+   !   pattern says which reciprocal axes the point group couples
+   !   (DESIGN 3.8).  It exists to validate the producer's Python
+   !   axis-class port against imago's own answer (PSEUDOCODE
+   !   4c.7), not for the run itself.  Each record follows imago's
    !   label/value convention: the tag alone on its line, the
    !   value on the next line (as KPOINT_STYLE_CODE and the other
    !   kp tags are written).  Only the mesh style codes (1 and 2)
    !   build an axial mesh; an explicit-list run (style 0) has
-   !   none, so it writes neither record and the harvester
-   !   records both as absent (DESIGN 6.1.2).
+   !   none, so it writes no record and the harvester records all
+   !   three as absent (DESIGN 6.1.2).
    if ((kPointStyleCode == 1) .or. (kPointStyleCode == 2)) then
       write (20,*) 'RESOLVED_KP_MESH'
       write (20,*) numAxialKPoints(1), numAxialKPoints(2), &
             & numAxialKPoints(3)
       write (20,*) 'RESOLVED_KP_COUNT'
       write (20,*) numKPoints
+      write (20,*) 'RESOLVED_KP_CLASSES'
+      write (20,*) axisClass(1), axisClass(2), axisClass(3)
    endif
 
    ! If the LAT integration method was requested, generate the tetrahedra

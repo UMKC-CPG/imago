@@ -1805,10 +1805,14 @@ judge, decide the next -- so the producer gains an outer loop
 around the dispatch layer rather than a single fan-out. This is
 exactly the shape Principle 12 reserves for client Python: the
 dependent, per-unit iteration lives in the producer, not in the
-dispatcher. The dispatch core stays domain-ignorant (Principles
-9 and 12): it runs whatever units it is handed and reports
-outcomes; the climb logic that reads energies and chooses the
-next mesh lives in the producer.
+dispatcher. (6.2.3 frames the alternative -- folding the
+iteration inside one unit's wingbeat -- as the default for
+adaptive convergence; this climb deliberately takes the
+producer-loop road instead, for the reason just given.) The
+dispatch core stays domain-ignorant (Principles 9 and 12): it
+runs whatever units it is handed and reports outcomes; the climb
+logic that reads energies and chooses the next mesh lives in the
+producer.
 
 The parallelism inverts cleanly. Within one material the rungs
 are serial -- rung N+1's mesh is not known until rung N's energy
@@ -6489,7 +6493,15 @@ both expressed in this one model:
   dispatches one unit; it does not need to model the
   inner loop as a DAG.  If a future client genuinely
   needs cross-unit data flow, Parsl's own futures compose
-  -- but that is not required by D13.
+  -- but that is not required by D13.  The k-point
+  convergence climb takes the *other* shape this one
+  model allows: a producer-side control loop that
+  dispatches one round per rung (3.12.5), not a wingbeat
+  inner loop.  That is a deliberate choice -- Principle
+  12 keeps the energy-reading, next-mesh logic in client
+  Python -- and 3.12.5 records the reasoning; both shapes
+  are valid, and the dispatch core is neutral between
+  them.
 
 **Complete-and-report (Principle 10)** is the dispatch
 core's contract.  Kaleidoscope gathers all futures and

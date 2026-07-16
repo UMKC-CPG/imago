@@ -42,7 +42,7 @@ import pytest
 from kaleidoscope import (
     Flight, CalcUnit, KeyFields, KeyFile, WingbeatOutcome,
     FlightReport, ReportEntry, KaleidoscopeError, SweepRecord,
-    dispatch, register_wingbeat, resolve_wingbeat,
+    dispatch, make_executor, register_wingbeat, resolve_wingbeat,
     validate_flight, unit_run_dir,
     is_cache_hit, cache_key_matches, write_cache_key,
     read_status, write_status, ImagoWingbeat,
@@ -530,6 +530,35 @@ def test_force_bypasses_cache_and_reruns(tmp_path):
     second = dispatch(flight, force=True)
     assert second.entries[0].status == "done"
     assert wingbeat.calls == 2               # forced: re-run
+
+
+def test_shared_executor_serves_repeated_dispatches(tmp_path,
+                                                    parsl_config):
+    """The producer's climb dispatches MANY flights under one
+    executor (a pre-flight batch, then one flight per round): it
+    builds the executor once with make_executor and pins it to
+    every dispatch, so a Parsl config -- single-use once closed --
+    is never reloaded (PSEUDOCODE 13.5).  A caller-pinned executor
+    must survive one dispatch and serve the next; the caller, not
+    dispatch, closes it.  This guards the multi-round regression
+    that reloading the same config triggered."""
+    register_wingbeat("fake_ok", CountingRunner())
+    executor = make_executor(parsl_config)       # one warm pool
+    try:
+        # Two rounds, distinct unit ids -> distinct run dirs, so the
+        #   second is real work, not a cache hit: it can only reach
+        #   `done` if the pinned executor was NOT torn down after the
+        #   first dispatch.
+        for round_id in ("round1", "round2"):
+            unit = CalcUnit(
+                id=round_id, structure="s.skl", wingbeat="fake_ok",
+                key_fields=KeyFields(scalars={"v": 1}))
+            flight = Flight(root=str(tmp_path), units=[unit],
+                            parsl_config=parsl_config)
+            report = dispatch(flight, executor=executor)
+            assert report.entries[0].status == "done"
+    finally:
+        executor.close()
 
 
 def test_on_outcome_callback_fires_per_unit(tmp_path):

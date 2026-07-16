@@ -166,6 +166,34 @@ class ParslExecutor:
         self._parsl.clear()
 
 
+def make_executor(parsl_config):
+    """Turn a resolved dispatch config into a live executor
+    (PSEUDOCODE 13.5).  This is the single place the choice lives,
+    so the driver and any caller that pins its own executor stay in
+    agreement about what a given config means.
+
+    A cluster ``parsl_config`` yields a :class:`ParslExecutor`;
+    constructing it loads Parsl, which starts one coordinator
+    process and its pool of SLURM workers (DESIGN 6.2.11).  The
+    local opt-out -- ``parsl_config`` is ``None`` -- yields an
+    in-process :class:`LocalExecutor` that touches no scheduler.
+
+    A client that dispatches MANY flights under one config must
+    call this ONCE and pin the result to every :func:`dispatch`.
+    The producer's climb is exactly that shape -- a pre-flight
+    batch and then one flight per continuation round (DESIGN
+    3.12.5) -- and a Parsl config's executor is single-use: once
+    closed, its coordinator and worker pool are gone, so handing
+    the same config to a second dispatch would try to restart a
+    torn-down pool.  Building the executor here and sharing it lets
+    the whole run ride one warm pool.  A one-shot flight instead
+    lets :func:`dispatch` build and close its own.
+    """
+    if parsl_config is not None:
+        return ParslExecutor(parsl_config)
+    return LocalExecutor()
+
+
 # ------------------------------------------------------------------
 #  Dispatch helpers
 # ------------------------------------------------------------------
@@ -252,10 +280,7 @@ def dispatch(flight, executor=None, force=False):
 
     owns_executor = executor is None
     if executor is None:
-        if flight.parsl_config is not None:
-            executor = ParslExecutor(flight.parsl_config)
-        else:
-            executor = LocalExecutor()
+        executor = make_executor(flight.parsl_config)
 
     results = [None] * len(flight.units)
     try:
