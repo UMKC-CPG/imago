@@ -1,5 +1,6 @@
 ---
 title: Setup
+order: 2
 ---
 # Setting up Imago
 
