@@ -2663,13 +2663,14 @@ def main(argv=None) -> int:
         help="bypass the run-reuse cache so every reference run "
              "re-executes (default: reuse any cached runs)")
     parser.add_argument(
-        "--dispatch", default="slurm-per-job",
+        "--dispatch", default=None,
         choices=["local", "slurm-pooled", "slurm-per-job"],
         help="where to run the flight: 'local' runs every unit in "
              "process and needs no cluster settings file; "
              "'slurm-pooled' streams units through one shared "
              "allocation; 'slurm-per-job' submits one scheduler job "
-             "per unit (default: slurm-per-job)")
+             "per unit (default: the cluster settings file's "
+             "default_topology value)")
     parser.add_argument(
         "--partition", default=None,
         help="scheduler queue for a cluster dispatch (default: the "

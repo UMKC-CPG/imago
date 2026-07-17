@@ -105,11 +105,20 @@ def parameters_and_defaults():
         "cores_per_worker":  1,
 
         # Defaults for the per-run choices, so a common run needs no
-        #   command-line options at all.  ``default_topology`` is the
-        #   dispatch shape used when --dispatch is not given.
+        #   command-line options at all.
         "nodes":             1,
         "walltime":          "01:00:00",
-        "default_topology":  "slurm-per-job",
+        # ``default_topology`` is the dispatch shape used when
+        #   --dispatch is not given.  The valid shapes are:
+        ##    'slurm-pooled'  -- one allocation whose packed workers
+        ##                       stream many units; best for many
+        ##                       small, similar units (e.g. seeding).
+        ##    'slurm-per-job' -- one scheduler submission per unit;
+        ##                       best for large or heterogeneous units.
+        ##    'local'         -- run in-process, no scheduler; the
+        ##                       deliberate opt-out, usually given
+        ##                       explicitly as --dispatch local.
+        "default_topology":  "slurm-pooled",
 
         # How many allocations the pooled shape may grow to when work
         #   backs up (the auto-scaling cap).

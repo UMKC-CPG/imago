@@ -7845,17 +7845,26 @@ shape is not among them: the driver's `sbatch` script is
 itself written to the data root, and it records that shape
 exactly, in the form the scheduler received it.
 
-The command-line default is `slurm-per-job`, because the whole
+The command-line default is `slurm-pooled`, because the whole
 point of this work is that the producer and the database seed
 *should* reach the scheduler rather than run on a login node
-(ARCHITECTURE 9.7): on a cluster, dispatching one scheduler
-job per unit is the right thing to do with no flags at all.
-A run launched where no site settings file is present is
-therefore a configuration error, surfaced up front, rather
-than a quiet fall-back to a serial local run -- the cluster
-behaviour is the default, and a local run is the deliberate
-opt-out.  That opt-out is `--dispatch local`, which needs no
-site facts and builds no `Config` at all; the test suite, a
+(ARCHITECTURE 9.7), and the seed and the convergence sweeps
+are the many-small-similar-units workload one warm allocation
+serves best: its packed workers stream the units with no
+per-unit queue wait, and one allocation is simpler to reason
+about and to release than many.  `slurm-per-job` stays one
+flag -- or one site default -- away for large or heterogeneous
+units.  The default is not hardcoded on the flag: `--dispatch`
+takes its value from the site file's `default_topology` when
+unset, exactly as `--partition`, `--nodes`, and `--walltime`
+take theirs, so a site chooses its own default rather than
+inheriting one the client baked in.  A run launched where no
+site settings file is present is therefore a configuration
+error, surfaced up front, rather than a quiet fall-back to a
+serial local run -- the cluster behaviour is the default, and
+a local run is the deliberate opt-out.  That opt-out is
+`--dispatch local`, which needs no site facts and builds no
+`Config` at all; the test suite, a
 laptop session, and the materialize pre-flight all request it
 explicitly, so they neither read a settings file nor touch the
 scheduler.  The library entry point mirrors this: its

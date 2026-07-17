@@ -26,11 +26,12 @@ def test_required_core_ships_unfilled():
     assert settings["account"] is None
 
 
-def test_per_job_is_the_default_topology():
-    """The default dispatch shape is slurm-per-job (DESIGN 6.2.11,
-    decision 2)."""
+def test_pooled_is_the_default_topology():
+    """The default dispatch shape is slurm-pooled -- one warm
+    allocation whose workers stream the many small, similar units of a
+    seed or sweep (DESIGN 6.2.11, decision 2)."""
     assert clusterrc.parameters_and_defaults()["default_topology"] == \
-        "slurm-per-job"
+        "slurm-pooled"
 
 
 def test_every_tier_key_is_present_with_a_usable_default():

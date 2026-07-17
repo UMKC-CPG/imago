@@ -65,8 +65,11 @@ _SETTINGS = [
      "How many nodes to request per job."),
     ("walltime", "01:00:00",
      "The most time one job may run, as HH:MM:SS."),
-    ("default_topology", "slurm-per-job",
-     "Default work spread: one job per calc, or one allocation."),
+    ("default_topology", "slurm-pooled",
+     "Default work spread when no --dispatch flag is given.  Valid: "
+     "'slurm-pooled' (one allocation whose workers stream many units), "
+     "'slurm-per-job' (one submission per unit), 'local' (in-process, "
+     "no scheduler)."),
     ("max_blocks", 1,
      "Most allocations to grow to at once when work piles up."),
     ("memory_per_node", None,

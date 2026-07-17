@@ -7383,11 +7383,12 @@ points at.
 The generator turns (site facts + per-run choices) into the
 `flight.parsl_config` the driver (13.5) loads.  It lives in
 kaleidoscope so every client shares one copy.  The
-command-line default is `slurm-per-job`: the producer and the
-seed are *meant* to reach the scheduler, so on a cluster they
-do so with no flags, and a run with no settings file present
-is a configuration error rather than a quiet local fall-back
-(DESIGN 6.2.11, decision 2).  `local` is the deliberate
+command-line default is `slurm-pooled`, taken from the site's
+`default_topology` (not hardcoded on the flag): the producer
+and the seed are *meant* to reach the scheduler, so on a
+cluster they do so with no flags, and a run with no settings
+file present is a configuration error rather than a quiet
+local fall-back (DESIGN 6.2.11, decision 2).  `local` is the deliberate
 opt-out -- it builds no `Config` (returns None), needs no
 settings file, and the driver (13.5) runs it under a
 `LocalExecutor` in process.  The test suite, a laptop, and the
@@ -7429,7 +7430,7 @@ function clusterrc.parameters_and_defaults():
         "cores_per_worker"  : 1,         # serial imago today
         "nodes"             : 1,
         "walltime"          : "01:00:00",
-        "default_topology"  : "slurm-per-job",
+        "default_topology"  : "slurm-pooled",
         "max_blocks"        : 1,         # pooled growth cap
         # Two DISTINCT memory concepts, deliberately not merged.
         #   memory_per_node is a node's physical capacity, in
@@ -7563,7 +7564,7 @@ function apply_queue_overrides(site, partition):
 ```
 # Layer 2: per-run choices.  Each CLI flag defaults from the
 # site file -- the dispatch shape from default_topology
-# (slurm-per-job) -- so a fully configured site needs no flags
+# (slurm-pooled) -- so a fully configured site needs no flags
 # at all.  The flag surface is --dispatch {local, slurm-pooled,
 # slurm-per-job}, --partition, --nodes, --walltime.  This runs
 # only for a cluster shape; the local opt-out skips it (13.7
