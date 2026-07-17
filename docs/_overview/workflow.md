@@ -1,4 +1,5 @@
 ---
+layout: default
 title: Imago Workflow
 order: 3
 ---

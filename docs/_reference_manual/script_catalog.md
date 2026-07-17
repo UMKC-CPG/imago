@@ -1,4 +1,5 @@
 ---
+layout: default
 title: Script Catalog
 order: 99
 ---
