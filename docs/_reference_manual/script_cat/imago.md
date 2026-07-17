@@ -4,7 +4,8 @@ title: imago.py
 script: imago.py
 description: The main driver for running electronic structure calculation jobs. When run in a directory prepared by the makeinput.py script, running this will run an electronic structure calculation as specified by the command line arguments and place the output files in the current working directory.
 order: 1
-parent: script_catalog
+parent: Script Catalog
+
 ---
 
 # Imago 

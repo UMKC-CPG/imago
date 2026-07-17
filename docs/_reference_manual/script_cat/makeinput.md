@@ -3,7 +3,7 @@ layout: default
 title: makeinput.py
 script: makeinput.py
 description: 'Takes a skeleton file input (default: imago.skl) and prepares all the files imago.py requires for input. Including a default slurm file for submitting to a system utilizing slurm submission.'
-parent: script_catalog
+parent: Script Catalog
 ---
 
 # MakeInput
