@@ -14,3 +14,4 @@ The Script catalog is simply a list of all the available scripts that come with 
       <h5> {{ page.script }} </h5>
       {{ page.description }}
    {% endif %}
+{% endfor %}
