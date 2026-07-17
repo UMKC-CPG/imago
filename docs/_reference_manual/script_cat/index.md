@@ -2,6 +2,7 @@
 layout: default
 title: Script Catalog
 order: 99
+has_toc: false
 ---
 
 # Script Catalog
@@ -12,7 +13,8 @@ The Script catalog is simply a list of all the available scripts that come with 
 
 {% for page in site.reference_manual %}
    {% if page.script %}
-      <h5> {{ page.script }} </h5>
-      {{ page.description }}
+   <h3><a href="{{ page.url }}"> {{ page.script }} </a></h3>
+
+   {{ page.description }}
    {% endif %}
 {% endfor %}
