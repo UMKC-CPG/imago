@@ -1592,6 +1592,17 @@ function climbOneRung(counts, classes, recipMag):
             bestClass = c
     return bump(counts, classes, bestClass, +1)
 
+function climbNRungs(counts, n, classes, recipMag):
+    # Advance `n` rungs up the ladder: the rung rule applied n times
+    # (DESIGN 3.12.2, the stride).  n = 1 is climbOneRung.  A stride
+    # crosses n ladder positions for the cost of one calculation --
+    # the bracket phase (4e.3) uses geometric strides so an unknown
+    # convergence distance is bracketed in log steps.
+    mesh = counts
+    repeat n times:
+        mesh = climbOneRung(mesh, classes, recipMag)
+    return mesh
+
 function descendOneRung(counts, classes, recipMag):
     # A lower mesh that climbOneRung steps back up to `counts`
     # (DESIGN 3.12.4).  A mesh can have more than one such lower
@@ -1644,32 +1655,199 @@ function pick_converged_climb(rungs, cell_atom_count, threshold,
     return None
 
 
+function stride_is_flat(lo_rung, hi_rung, cell_atom_count, threshold):
+    # The bracket flatness test (DESIGN 3.12.3): a stride is flat when
+    # its two endpoints' per-atom energies are within the SAME
+    # `threshold` the two-sided test uses.  Because a stride adds many
+    # k-points, a small change across it is strong evidence the energy
+    # has settled -- but only evidence: the refine phase VERIFIES with
+    # the full two-sided test, so a coincidentally flat stride (an
+    # oscillating near-metal energy) is caught there, not trusted here.
+    lo = per_atom_ev(lo_rung.energy, cell_atom_count)
+    hi = per_atom_ev(hi_rung.energy, cell_atom_count)
+    return abs(hi - lo) < threshold
+
+
 function at_ceiling(mesh, max_count):
-    # The fixed per-axis backstop (DESIGN 3.12.3).  A cost ceiling
-    # from the resource dataspace (16) layers on later; the climb
-    # stops at whichever bites first.
+    # The fixed per-axis backstop (DESIGN 3.12.3): the LARGEST axial
+    # count reaching max_count, not the product or the stride.  A cost
+    # ceiling from the resource dataspace (16) layers on later; the
+    # climb stops at whichever bites first.
     return max(mesh) >= max_count
 ```
 
 ### 4e.3 One material's next action
 
+Three search shapes (DESIGN 3.12.3 / 3.12.5) share the two-sided
+stop test (4e.2) and the rung rule (4e.1); they differ only in
+which rungs they compute.  `climb_next` dispatches on the mode,
+threading a per-material search `state` for the stateful
+bracket-refine shape; the grid and the unit-step climb ignore it.
+Every shape returns one of: `RUN(mesh)` -- run one more mesh;
+`CONVERGED(rung)` -- done, that rung; `CEILING` -- stop,
+non-converged.
+
+```
+function climb_next(rungs, state, config):
+    # rungs: the material's computed {mesh, energy}, sorted ascending.
+    # state: the per-material search state (bracket-refine only).
+    # Returns (action, state').
+    if config.mode == BRACKET_REFINE:
+        return bracketRefineNext(rungs, state, config)
+    # UNIT_STEP, or a GRID opening that did not converge and now
+    #   continues as a unit-step climb (4e.4): stateless in rungs.
+    return climbAction(rungs, config), state
+```
+
 ```
 function climbAction(rungs, config):
-    # Decide a material's next step from its accumulated rungs.
-    # RUN(mesh) -> run one more mesh; CONVERGED(index) -> done, that
-    # rung; CEILING -> stop, non-converged (DESIGN 3.12.3/3.12.5).
+    # The unit-step climb (DESIGN 3.12.3): walk one rung at a time,
+    # testing the whole accumulated ladder.  RUN one more, CONVERGED
+    # at the flat interior rung, or CEILING.
     idx = pick_converged_climb(
         rungs, config.cell_atom_count, config.threshold,
         config.flat_needed)
     if idx is not None:
-        return CONVERGED(idx)
+        return CONVERGED(rungs[idx])
     if at_ceiling(rungs[-1].mesh, config.max_count):
         return CEILING
     return RUN(climbOneRung(rungs[-1].mesh, config.classes,
                             config.recipMag))
 ```
 
-### 4e.4 Seeding, and the two dispatch modes
+The **bracket-refine** search (DESIGN 3.12.3) is a two-phase state
+machine.  Its per-material `state`:
+
+```
+# newBracketRefineState(seed) = {
+#   phase:     BRACKET,     # BRACKET | REFINE
+#   stride:    1,           # current geometric stride (BRACKET)
+#   endpoints: [seed],      # bracket endpoint meshes so far,
+#                           #   ascending; endpoints[0] is the seed,
+#                           #   endpoints[-1] the newest
+#   lo: None, hi: None,     # the interval REFINE fills, as meshes
+#   from_cap:  False }      # True iff this bracket runs up to the
+#                           #   ceiling, so an empty refine is a
+#                           #   CEILING stop, not a false bracket
+```
+
+```
+function bracketRefineNext(rungs, state, config):
+    if state.phase == BRACKET:
+        top = state.endpoints[-1]
+        if length(state.endpoints) == 1:
+            # Only the seed is computed; launch the first stride
+            #   (stride 1).  No flatness to test yet.
+            return strideUp(state, 1, config)
+        # Two or more endpoints: test the last stride's flatness.
+        prev = state.endpoints[-2]
+        if stride_is_flat(rung_at(rungs, prev), rung_at(rungs, top),
+                          config.cell_atom_count, config.threshold):
+            # First flat stride.  The converged rung lies in the LAST
+            #   NON-FLAT interval, [endpoint below prev, prev].  Fill
+            #   ONE rung above prev too, so prev is an interior
+            #   candidate with a computed upper neighbour: the
+            #   two-sided test excludes a block's endpoints, and
+            #   convergence often sits exactly at prev (the first flat
+            #   point).  If prev is the seed (the very first stride was
+            #   flat) there is also no lower endpoint, so lo extends
+            #   one rung below prev.
+            hi = climbOneRung(prev, config.classes, config.recipMag)
+            if length(state.endpoints) >= 3:
+                lo = state.endpoints[-3]
+            else:
+                lo = descendOneRung(prev, config.classes,
+                                    config.recipMag)
+            return enterRefine(rungs, state, lo, hi, False, config)
+        # Not flat: grow the stride geometrically and step up, unless
+        #   the next endpoint would pass the ceiling -- then refine
+        #   from the top endpoint up to the ceiling (DESIGN 3.12.3),
+        #   so a convergence a stride jumped over just below the cap
+        #   is still found.
+        nextStride = min(2 * state.stride, config.max_stride)
+        nxt = climbNRungs(top, nextStride, config.classes,
+                          config.recipMag)
+        if at_ceiling(nxt, config.max_count):
+            return enterRefine(rungs, state, top,
+                               ceilingMesh(top, config), True, config)
+        return strideUp(state, nextStride, config)
+
+    else:  # REFINE -- fill [lo, hi] one position at a time, then test
+        gap = nextFillMesh(rungs, state.lo, state.hi,
+                           config.classes, config.recipMag)
+        if gap is not None:
+            return RUN(gap), state              # keep filling
+        # Filled: judge the now-consecutive block with the two-sided
+        #   test.  Only the bracket's own rungs are passed, so the
+        #   sparse bracket endpoints outside it never mislead the
+        #   neighbour comparison (DESIGN 3.12.3).
+        block = [r for r in rungs
+                 if meshSize(state.lo) <= meshSize(r.mesh)
+                    and meshSize(r.mesh) <= meshSize(state.hi)]
+        idx = pick_converged_climb(block, config.cell_atom_count,
+                                   config.threshold, config.flat_needed)
+        if idx is not None:
+            return CONVERGED(block[idx]), state
+        if state.from_cap:
+            return CEILING, state               # steep even at the cap
+        # A coincidentally flat stride (an oscillating energy): no
+        #   rung verified.  Resume striding from hi (DESIGN 3.12.3).
+        return bracketRefineNext(
+            rungs, newBracketRefineState(state.hi), config)
+```
+
+```
+function strideUp(state, stride, config):
+    # Launch the next bracket endpoint `stride` rungs above the top,
+    # recording it on the endpoint list (DESIGN 3.12.2 / 3.12.3).
+    nxt = climbNRungs(state.endpoints[-1], stride, config.classes,
+                      config.recipMag)
+    state' = state with endpoints = state.endpoints + [nxt],
+             stride = stride
+    return RUN(nxt), state'
+
+function enterRefine(rungs, state, lo, hi, from_cap, config):
+    # Switch to REFINE on [lo, hi] and launch the first fill mesh; if
+    # the interval is already fully computed (its endpoints and
+    # nothing between), judge it at once (DESIGN 3.12.3).
+    state' = state with phase = REFINE, lo = lo, hi = hi,
+             from_cap = from_cap
+    gap = nextFillMesh(rungs, lo, hi, config.classes, config.recipMag)
+    if gap is None:
+        return bracketRefineNext(rungs, state', config)
+    return RUN(gap), state'
+
+function nextFillMesh(rungs, lo, hi, classes, recipMag):
+    # The lowest ladder position in [lo, hi] not yet computed, or None
+    # when the interval is fully filled (DESIGN 3.12.3, the fill).
+    mesh = lo
+    loop:
+        if mesh not among [r.mesh for r in rungs]:
+            return mesh
+        if mesh == hi:
+            return None
+        mesh = climbOneRung(mesh, classes, recipMag)
+
+function ceilingMesh(fromMesh, config):
+    # The first mesh at or above the per-axis ceiling, climbing from
+    # `fromMesh` -- the upper bound of an up-to-ceiling refine (3.12.3).
+    mesh = fromMesh
+    while not at_ceiling(mesh, config.max_count):
+        mesh = climbOneRung(mesh, config.classes, config.recipMag)
+    return mesh
+
+function rung_at(rungs, mesh):
+    # The computed {mesh, energy} at `mesh` (a bracket endpoint is
+    # always already computed when its stride is tested).
+    return the r in rungs with r.mesh == mesh
+```
+
+`meshSize(mesh)` is the full-mesh point count (product of the axial
+counts), the same monotone key the ladder is sorted by (4e.6), so a
+point-count range selects exactly the consecutive block the fill
+produced.
+
+### 4e.4 Seeding, and the three search modes
 
 ```
 function initial_meshes(density, config):
@@ -1694,30 +1872,47 @@ function initial_meshes(density, config):
             meshes = [lo] + meshes + [hi]
         return distinct(meshes)
 
-    else:                                    # climb (cold/moderate)
+    else:                     # BRACKET_REFINE or UNIT_STEP: a climb
         # Begin below the prediction so the seed acquires a lower
         # neighbour, then climb upward.  start_offset grows as
-        # confidence falls (a weaker prediction starts lower).
+        # confidence falls (a weaker prediction starts lower).  Both
+        # climbs open on this single rung; they differ only in the
+        # action (4e.3) -- bracket-refine strides, unit-step walks.
         start = seed
         repeat config.start_offset times:
             start = descendOneRung(start, config.classes,
                                    config.recipMag)
         return [start]
+
+
+function newSearchState(config, opening_meshes):
+    # The per-material search state converge_by_climb (4e.5) threads.
+    # Only the bracket-refine climb is stateful (4e.3); the grid and
+    # the unit-step climb carry an empty state they never read.  A
+    # climb's seed is its single opening mesh; a grid seeds no state.
+    if config.mode == BRACKET_REFINE:
+        return newBracketRefineState(opening_meshes[0])
+    return EMPTY_STATE
 ```
 
-`config.mode`, `config.flat_needed`, `config.grid_width`, and
-`config.start_offset` are all set from `prediction.confidence`
-by a small policy the implementation tunes (DESIGN 3.12.6): high
-confidence selects `PARALLEL_GRID`, `flat_needed = 1`, a narrow
-grid; low or under-trained confidence selects the `CLIMB` mode,
-`flat_needed = 2`, and a lower start.  An under-trained
-prediction (7.6) starts the climb from the wide-grid floor
-rather than a predicted seed (7.9).
+`config.mode`, `config.flat_needed`, `config.grid_width`,
+`config.start_offset`, and -- for the bracket-refine climb --
+`config.max_stride` are set from `prediction.confidence` and the
+curator's chosen climb shape by a small policy the implementation
+tunes (DESIGN 3.12.6): high confidence selects `PARALLEL_GRID`,
+`flat_needed = 1`, a narrow grid; low or under-trained confidence
+selects a climb -- `BRACKET_REFINE` by default, or `UNIT_STEP`
+when the curator pins the fine shape -- with `flat_needed = 2`
+and a lower start.  An under-trained prediction (7.6) starts the
+climb from the wide-grid floor rather than a predicted seed (7.9).
+`max_stride` caps the geometric stride, which keeps the bracket a
+refine has to fill small (4e.3 / DESIGN 3.12.3).
 
 The numeric knobs that policy reads -- the `confidence_high`
 threshold, the two `flat_needed` counts, `grid_width`, the two
-`start_offset` values, and the per-axis `max_count` ceiling -- are
-config, not constants (Principle 11).  They are sourced from the
+`start_offset` values, `max_stride`, the climb-shape choice, and
+the per-axis `max_count` ceiling -- are config, not constants
+(Principle 11).  They are sourced from the
 manifest `[harvest.kpoint_climb]` sub-table (DESIGN 5.7 / 3.12.6),
 each knob falling back to a documented provisional default when the
 sub-table or that knob is omitted.  The producer resolves them once
@@ -1754,6 +1949,7 @@ function converge_by_climb(materials, configs, seed_densities,
     # injected so this loop stays free of the workspace.
 
     rungs    = { m: [] for m in materials }
+    search   = {}                  # per-material search state (4e.4)
     outcomes = {}
     active   = set(materials)
     in_air   = {}                  # rungs still in flight, per m
@@ -1767,12 +1963,15 @@ function converge_by_climb(materials, configs, seed_densities,
             on_non_converged(m)
         active.discard(m)
 
-    # judge m's ladder (climbAction, 4e.3) and either retire it or
-    #   launch its single next rung.
+    # judge m's ladder (climb_next, 4e.3) and either retire it or
+    #   launch its single next rung.  climb_next threads the per-
+    #   material search state, so the bracket-refine phase persists
+    #   across landings; the grid and unit-step climbs ignore it.
     function judge(m):
-        action = climbAction(rungs[m], configs[m])
+        (action, search[m]) = climb_next(rungs[m], search[m],
+                                          configs[m])
         if action is CONVERGED:
-            outcomes[m] = rungs[m][action.index]     # a Rung, not a
+            outcomes[m] = action.rung                # the Rung, not a
             active.discard(m)                        #   mismatch
         elif action is CEILING:
             retire(m, NON_CONVERGED)                 # 7.8 3d
@@ -1786,6 +1985,9 @@ function converge_by_climb(materials, configs, seed_densities,
     first = { m: initial_meshes(seed_densities[m], configs[m])
               for m in materials }
     for m in materials:
+        # The search state (4e.4) is stateful only for the bracket-
+        #   refine climb, seeded from its opening rung.
+        search[m] = newSearchState(configs[m], first[m])
         in_air[m] = length(first[m])
     dispatcher.send(first)
 
@@ -1852,17 +2054,51 @@ function record_converged(rung, rungs, config):
     # caller's to thread into build_entry; record_converged needs
     # only the rungs and the cell's reciprocal volume.)
     converged_density = product(rung.mesh) / config.recipCellVolume
+    # The stored flatness trace is the CONSECUTIVE block of the ladder
+    # around the converged rung -- the rungs the two-sided test
+    # actually compared.  For the unit-step climb and the grid that is
+    # the whole of `rungs`; for the bracket-refine climb it is the
+    # filled bracket, dropping the sparse bracket endpoints below it
+    # (search scaffolding, DESIGN 3.12.3).  Recording only the
+    # consecutive block is what lets auto_promote_ok (15.7 / 7.8)
+    # re-judge on adjacent meshes -- a sparse endpoint left in could
+    # make the two-sided test read a false early convergence.
+    trace = consecutive_block(rungs, rung, config.classes,
+                              config.recipMag)
     return {
         converged_kpoint_density = converged_density,
         converged_mesh           = rung.mesh,       # 7.2 (Q4)
-        # The stored flatness trace is the climb's distinct-mesh
-        # ladder, so auto_promote_ok (15.7 / 7.8) re-judges on the
-        # same rungs the climb did.  It is ascending because `rungs`
-        # is, and product(mesh) rises with each rung.
+        # Ascending because `trace` is, and product(mesh) rises along
+        # the ladder.
         grid_values   = [product(r.mesh) / config.recipCellVolume
-                         for r in rungs],
-        grid_energies = [r.energy for r in rungs],
+                         for r in trace],
+        grid_energies = [r.energy for r in trace],
     }
+
+
+function consecutive_block(rungs, rung, classes, recipMag):
+    # The maximal run of `rungs` whose meshes are consecutive ladder
+    # positions (each one climbOneRung from the last) and that contains
+    # `rung` (DESIGN 3.12.3).  Walks down then up from `rung` while the
+    # immediate neighbour is present; climbOneRung(descendOneRung(m)) ==
+    # m makes descendOneRung the exact one-below step (4e.1).
+    by_mesh = { r.mesh : r for r in rungs }
+    block   = [rung]
+    m = rung.mesh                               # walk down
+    loop:
+        below = descendOneRung(m, classes, recipMag)
+        if below == m or below not in by_mesh:
+            break
+        prepend by_mesh[below] to block
+        m = below
+    m = rung.mesh                               # walk up
+    loop:
+        above = climbOneRung(m, classes, recipMag)
+        if above not in by_mesh:
+            break
+        append by_mesh[above] to block
+        m = above
+    return block
 ```
 
 `build_entry` (15.7) gains the `converged_mesh` field on the

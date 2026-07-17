@@ -1676,7 +1676,7 @@ search climbs meshes until the energy is flat, and the converged
 result is recorded back as the density that reaches that mesh.
 Each half uses the unit it is good at.
 
-#### 3.12.2 The rung rule
+#### 3.12.2 The rung rule and the stride
 
 The climb reuses machinery 3.7 already defines. Selecting axial
 counts for a density is a loop that repeatedly increments the
@@ -1711,54 +1711,122 @@ the last by construction, so the climb produces no duplicate
 meshes and the duplicate guard of 3.11 becomes a safety net
 rather than the mechanism.
 
+The rung rule fixes the *direction* of a step; *how far* to
+step is separate. The climb advances by a **stride** -- a
+number of consecutive rung-rule increments -- and computes an
+energy only at the stride's endpoints, skipping the meshes
+between. A stride of one is the fine climb just described,
+which computes every ladder position. A larger stride crosses
+many ladder positions for the cost of a single calculation,
+which is what lets the bracket search (3.12.3) cover an unknown
+convergence distance cheaply; the skipped meshes are not wasted
+work, they simply go uncomputed unless the refine step later
+asks for one. Because a stride is only the rung rule applied
+repeatedly, every mesh it lands on is still symmetry-compatible
+and distinct -- the stride changes the spacing of the
+*computed* points along the one ladder, never the ladder
+itself.
+
 The shift rides along for free: each rung's shift is chosen by
 `selectShift` (3.9) from that rung's counts, so it tracks the
 count parity as the climb proceeds (a cubic climb alternates the
 body-half shift on even meshes with Gamma-centered on odd).
 
-#### 3.12.3 The stop condition and the ceiling
+#### 3.12.3 The stop condition: bracket, then refine
 
 A rung is the converged one when its per-atom energy is within
-the k-point threshold of BOTH its neighbours on the climb -- the
-same two-sided test as 7.8 step 3c, now applied over consecutive
-*distinct* meshes. The climb therefore needs at least the
-candidate rung plus one below and one above before it can
-declare that rung converged, and it continues upward until such
-an interior rung appears. A cubic cell still moving at `[5,5,5]`
-simply climbs to `[6,6,6]`, `[7,7,7]`, and beyond until the
-two-sided test is met -- the adaptive stop is what rescues the
-case a fixed density ceiling could not.
+the k-point threshold of BOTH its neighbours on the ladder --
+the same two-sided test as 7.8 step 3c, over consecutive
+*distinct* meshes. This is the *authoritative* convergence
+call; everything below only decides which rungs to compute so
+the call can be made cheaply. The test needs the candidate rung
+plus one below and one above, so the search must place three
+computed points around a candidate before it can declare
+convergence there.
 
-How many flat interior rungs the climb requires **scales with
-the prediction's confidence**. A confident prediction (7.6) is
-an independent statement of where convergence lies, so a single
-two-sided-flat rung landing near the predicted mesh is
-corroboration from two directions and the climb stops there. A
+The default climb does not walk the ladder rung by rung. It
+**brackets, then refines**. The *bracket* phase strides from the
+seed by growing steps -- one ladder position, then two, four,
+eight (3.12.2) -- computing an energy at each stride's endpoint
+until a stride comes back flat: its two endpoints within the
+per-atom threshold. A flat stride is a small energy change
+spread over *many* added k-points, so it is strong evidence the
+energy has settled. And because the energy is steep below
+convergence and flat above, the converged rung lies in the LAST
+*non-flat* stride interval -- the one across which the energy
+went from moving to settled -- so that interval is the bracket,
+not the first flat stride above it. The *refine* phase then
+**fills the bracket** -- computes every ladder position inside
+it -- and applies the two-sided test, returning the SMALLEST
+mesh that passes. Filling rather than bisecting is deliberate:
+the bracket is small by construction, its width being the stride
+of that last non-flat interval, which the max-stride cap keeps
+short; and the two-sided test needs three *consecutive* rungs,
+which a filled interval supplies directly. At these widths a
+full fill is no more calculations than a sparse bisection's
+three-point probes, and it is simpler and reuses the stop test
+unchanged. The flatness trace the material carries -- the ladder
+the harvest re-judges -- is the *consecutive filled bracket*
+around the converged rung, the rungs the two-sided test actually
+compared; the sparse bracket endpoints are search scaffolding,
+not part of it, so the harvest re-judges a clean consecutive
+ladder exactly as a fixed grid's (7.8, 3.12.4).
+
+A flat stride can lie: an oscillating energy -- the near-metal
+case -- can dip and return across a stride and read flat by
+coincidence. Refine catches it, because no rung in a falsely
+bracketed interval passes the two-sided test, and the search
+then resumes striding from the top of the bracket. The coarse
+phase only *proposes* a bracket; the two-sided test *disposes*.
+So the search keeps against oscillation exactly the robustness
+the fine climb has by construction -- it never trusts a stride,
+only a verified interior rung.
+
+The fine **unit-step climb** is the degenerate stride-of-one
+search: it skips the bracket and computes every ladder position,
+paying the most calculations for the finest resolution and the
+most conservative reading of a noisy energy. It is kept as an
+explicit option (3.12.5) for a material a curator would rather
+not have searched by stride.
+
+How many flat interior rungs the refine phase requires **scales
+with the prediction's confidence**. A confident prediction (7.6)
+is an independent statement of where convergence lies, so a
+single two-sided-flat rung near the predicted mesh is
+corroboration from two directions and the search stops there. A
 cold or bootstrap search has no such corroboration and is
 establishing ground truth the seed database will be trusted on,
 so it requires the flatness to *persist* -- a second consecutive
 flat interior rung -- before stopping. The extra rung is cheap
-insurance against a coincidental plateau, which the mesh-space
-climb already makes rare (every rung is a distinct mesh, so the
-duplicate-mesh zeros of 3.11 cannot arise) but does not wholly
-exclude.
+insurance against a coincidental plateau. Confidence also sets
+where the climb is seeded (3.12.4): a warm seed starts near the
+answer, so the first stride is already flat and the bracket
+phase all but vanishes; a cold seed starts low, and the
+geometric stride is what keeps the long bracket cheap.
 
-Because a genuinely hard or ill-posed material could climb
-without ever flattening, the climb carries a **ceiling**, and
-two kinds compose. A fixed maximum per-axis count is the always-
-present hard backstop -- it prevents a runaway today and needs
-nothing else built. A cost ceiling drawn from the resource
-dataspace (8) is the operationally meaningful bound, since a
-count is a poor proxy for effort (a large cell at a modest mesh
-can dwarf a small cell at a fine one); it layers on once DESIGN
-8 predicts run cost. The climb stops at whichever bites first.
-A ceiling stop is reported as non-converged (7.8 step 3d / 7.9),
-exactly as a fixed grid that never flattened is today, and it
-carries the energy trace (`grid_energies`) so a curator can tell
-the two causes apart: a monotone, narrowing trace says raise the
-ceiling, while an oscillating one says the material needs
-smearing rather than a finer mesh (C117's near-metals are the
-archetype).
+Because a genuinely hard or ill-posed material could stride
+without ever flattening, the climb carries a **ceiling** that
+bounds the bracket phase, and two kinds compose. A fixed maximum
+per-axis count is the always-present hard backstop -- it
+prevents a runaway today and needs nothing else built. A cost
+ceiling drawn from the resource dataspace (8) is the
+operationally meaningful bound, since a count is a poor proxy for
+effort (a large cell at a modest mesh can dwarf a small cell at a
+fine one); it layers on once DESIGN 8 predicts run cost. The
+climb stops at whichever bites first. When the ceiling is what
+the *bracket* phase reaches -- the next stride would step past
+it before any stride read flat -- the search does not give up at
+the cap: it fills and refines the final interval, from the
+highest computed endpoint up to the ceiling, so a convergence a
+geometric stride jumped over just below the cap is still found.
+Only a material with no converged rung even in that last
+interval -- still visibly steep at the ceiling -- is reported
+as non-converged (7.8 step 3d / 7.9), exactly as a fixed grid
+that never flattened is today, and it carries the energy trace
+(`grid_energies`) so a curator can tell the two causes apart: a
+monotone, narrowing trace says raise the ceiling, while an
+oscillating one says the material needs smearing rather than a
+finer mesh (C117's near-metals are the archetype).
 
 #### 3.12.4 Seeding the climb from a prediction
 
@@ -1857,9 +1925,15 @@ minimal calculation count for lower wall-clock latency, the
 better bargain when the prediction is trustworthy. The adaptive
 serial **climb** is reserved for the cold and moderate-confidence
 cases, where the search does not know in advance how far it must
-go. Both modes share the same rung rule (3.12.2), stop test
-(3.12.3), and harvest (7.8); they differ only in whether the
-rungs are laid down all at once or one at a time.
+go; it is the bracket-then-refine search of 3.12.3 by default,
+with the fine unit-step climb available as an explicit option for
+the most conservative reading. All three shapes -- grid,
+bracket-refine, unit climb -- share the rung rule (3.12.2), the
+two-sided stop test (3.12.3), and the harvest (7.8); they differ
+only in how the ladder is sampled: the grid lays a fixed
+neighbourhood all at once, the bracket-refine climb strides then
+fills the bracket it lands in, and the unit climb walks every
+rung.
 
 #### 3.12.6 Relationship to the rest of the chain
 
@@ -1882,8 +1956,12 @@ lives, or the site rc for the cost budget -- never as hardcoded
 script constants:
 
 - The `predictor_confidence` thresholds that gate one-versus-two
-  flat rungs (3.12.3) and the parallel-grid-versus-climb dispatch
-  mode (3.12.5).
+  flat rungs (3.12.3) and the grid-versus-climb dispatch mode
+  (3.12.5).
+- The bracket phase's geometric stride growth and any cap on the
+  largest stride, plus the choice of climb shape -- bracket-
+  refine (the default) or the fine unit-step climb (3.12.2 /
+  3.12.3 / 3.12.5).
 - The value of the fixed per-axis count ceiling, and the cost
   budget once the resource dataspace (8) supplies one (3.12.3).
 - The width of the confident-mode fixed mesh grid -- how many

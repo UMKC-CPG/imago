@@ -2774,6 +2774,49 @@ imports its neighbours from `$IMAGO_BIN`).
   flag closes both entry points at the single place the recursion
   is born.
 
+- [ ] C123. Code the bracket-then-refine mesh climb (the
+  step-size rule, option 3).  DESIGN + PSEUDOCODE are DONE and
+  reviewed by /refine; code against those sections, NOT this
+  entry: DESIGN 3.12.2 (the stride), 3.12.3 (bracket, then
+  fill-not-bisect refine; up-to-the-ceiling refine; the
+  consecutive-block flatness trace), 3.12.5 (three search modes),
+  3.12.6 (knobs); PSEUDOCODE 4e.1-4e.6.  Work to do (a tracking
+  checklist, not a spec):
+  - `mesh_climb.py`: `climbNRungs` (the stride), `stride_is_flat`
+    (bracket flatness, reuses the threshold), `nextFillMesh`,
+    `ceilingMesh`, `consecutive_block`, `rung_at`; the
+    bracket-refine state machine (`bracketRefineNext` +
+    `strideUp` + `enterRefine`) over a per-material search state;
+    `newSearchState` / `newBracketRefineState`.
+  - `build_initial_potentials.py`: `climb_next` (dispatch on
+    mode), `climbAction` returns `CONVERGED(rung)` not an index;
+    `converge_by_climb` threads the per-material `search` state;
+    `record_converged` records the consecutive block (via
+    `consecutive_block`), dropping the sparse bracket endpoints.
+  - `ClimbConfig` / the policy: modes become GRID /
+    BRACKET_REFINE (default cold/moderate) / UNIT_STEP (the
+    current fine climb, kept as an explicit option); add
+    `max_stride` and the climb-shape choice.
+  - `curation_manifest.py` + `mesh_climb.resolve_climb_policy` /
+    `climb_policy_from_manifest`: `max_stride` and the shape
+    choice as `[harvest.kpoint_climb]` knobs (`KPOINT_CLIMB_KEYS`).
+  - tests: the mesh_climb helpers, the state machine (first-flat,
+    up-to-ceiling, false-bracket resume), the three modes, and
+    the consecutive-block trace.
+
+  Decisions locked (from the design discussion): fill the small
+  bracket, do NOT bisect (the max-stride cap keeps it small, and
+  the two-sided test wants consecutive rungs); geometric stride
+  1,2,4,8 capped by `max_stride`; bracket = the LAST non-flat
+  interval; the false-bracket resume guards oscillating
+  (near-metal) energies; the flat-stride refine fills one rung
+  ABOVE prev so a convergence at the bracket top is testable
+  (the /refine fix).  Provisional knob defaults (`max_stride`,
+  the confidence thresholds) are still to be fixed by the seed
+  experiment (3.12.6).  The payoff is the cold/seeding case --
+  si_cmce's ~28 rungs should fall to ~8-10; a warm seed barely
+  brackets.
+
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 
 - [ ] C62. Implement the element-aware bispectrum per
