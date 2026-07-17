@@ -2685,56 +2685,50 @@ imports its neighbours from `$IMAGO_BIN`).
   41 minutes were 40 minutes of real compute -- the waste was
   the 127 idle cores no one else could use.
 
-- [ ] C120. Retire the climb's round barrier (DESIGN 3.12.5
-  first, then PSEUDOCODE 4e.5 `converge_by_climb`, then the
-  producer).  **The design decision is OPEN -- do not code
-  until it is settled.**  3.12.5 observes that "across
-  materials the climbs are independent, so they run
-  concurrently", then specifies a shape that couples them
-  anyway: each round "submits the next rung for every material
-  still climbing ... waits for the round, judges each".  So a
-  material that lands early idles until the round's slowest
-  finishes.  Removing the barrier means changing 3.12.5 to
-  match its own premise: a chain advances the moment its own
-  rung lands.
+- [ ] C120. Retire the climb's round barrier -- CODE the
+  wait-for-any climb (option a).  The design is SETTLED and
+  written top-down; code against these sections, NOT against
+  this entry: DESIGN 3.12.5 (concurrent, no chain waits on
+  another), 6.2.3 (two-phase public surface -- send-off /
+  collect, `done()` on futures), 7.7 (the climb dispatcher);
+  PSEUDOCODE 13.5 (`send_off` / `collect` / `collect_next`,
+  `dispatch` the wrapper), 4e.5 (`converge_by_climb` rewritten),
+  4e.7 (`make_climb_dispatcher`), 11.4 (producer main);
+  ARCHITECTURE 9.7.  Work to do (a tracking checklist, not a
+  spec):
+  - `dispatch.py`: expose `send_off` and `collect`, add
+    `collect_next` (poll `done()`, take whichever lands first),
+    make `dispatch` the send-off-then-collect-all wrapper; add
+    `done()` to `_LocalFuture` (always True) and `_ParslFuture`
+    (delegate to the AppFuture); a cache hit becomes an
+    already-done future so hits and misses sit uniformly.
+  - `build_initial_potentials.py`: rewrite `converge_by_climb`
+    to the concurrent shape (per-material `in_air` + `opening`
+    sets; judge a chain the moment its own rung lands); replace
+    `make_dispatch_round` with `make_climb_dispatcher` (send /
+    next_rung over ONE flight whose unit list accretes, so
+    `flight.toml` records every rung and the per-send race is
+    gone).
+  - tests: the 4 orchestration tests + the dispatch-layer tests.
+  Decisions locked: one accreting flight; a dispatcher object
+  owning the in-flight set; hits as done futures; `on_outcome`
+  now fires in LANDING order.
 
-  What the C118 seed re-run measured, so the next reader need
-  not re-derive it: the barrier costs ~2 min of ~34 (34.3 min
-  round-based vs 32.5 min barrier-free, modelled from the
-  measured per-rung runtimes).  It is small here only because
-  `si_cmce` is 82% of all compute (1949 s of 2385 s, 28 rungs
-  against 8-9 for the others) and its rungs are inherently
-  serial, so nothing parallel can touch them.  The barrier is
-  worth retiring for the coupling itself -- it will bite when
+  Reclamation -- freeing a retired chain's workers for the
+  chains still climbing -- is DESIGNED but NOT built here; it
+  waits on a parallel imago (DESIGN 6.2.11 forward note;
+  ARCHITECTURE 9.8).  Option (a) only keeps the door open: the
+  producer tracks chains not slots (the `in_air` map does this),
+  a unit MAY carry a resource field later (not added now), and
+  the rung width must never enter the cache key.
+
+  Measured payoff, so nobody re-derives it: the barrier cost
+  ~2 min of ~34 in the C118 seed re-run -- small only because
+  `si_cmce` was 82% of compute (1949 s of 2385 s, 28 serial
+  rungs against 8-9 for the others).  It will bite when
   materials are heterogeneous rather than seven-of-eight
-  identical -- but **the step-size rule is the larger prize**
-  (see the cold-start note in C118 inc 6 and C116).
-
-  Three candidate shapes were sketched; the fork is *which
-  seam the producer reaches the dispatcher through*, which is
-  why this is a DESIGN question and not a climb-loop tweak.
-  (a) Expose `dispatch`'s two existing passes -- send-off and
-  collect -- so the producer can wait on whichever unit lands
-  first and immediately send that material's next.  (b) One
-  thread per material chain.  (c) A streaming session in the
-  core, which would also change what a flight *is* (6.2.1
-  defines it as a fixed unit list).
-
-  Mechanism facts that constrain the answer, all verified:
-  `dispatch` already runs in two passes (send all, then
-  collect all) but only the pair is public, which is precisely
-  what forces the wait; its pass 2 collects in *unit order*,
-  so the existing `on_outcome` callback fires in unit order
-  rather than as things land; `LocalExecutor.submit_unit` runs
-  synchronously, so any thread-based shape would make the
-  local opt-out run several calculations at once; the future
-  adapters expose only `result()`, so any wait-for-any shape
-  needs `done()` added to both (a natural completion of the
-  contract they already claim to mirror); and `unit_run_dir` /
-  `serialize_flight` are keyed on the flight root, so chains
-  must share one root for the cache to hit -- which is why
-  concurrent per-material flights would race on one
-  `<root>/flight.toml`.
+  identical.  **The step-size rule is the larger prize** (C118
+  inc 6, C116).
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 

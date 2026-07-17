@@ -1729,83 +1729,112 @@ rather than silently taking a default.  The provisional default
 values themselves are still to be fixed by the seed experiment
 (3.12.6).
 
-### 4e.5 Round-based orchestration across materials
+### 4e.5 Concurrent orchestration across materials
 
 ```
 function converge_by_climb(materials, configs, seed_densities,
-                           dispatch_round, on_non_converged):
-    # Drive every material through the round-based climb to a
-    # verdict -- converged, or non-converged (a ceiling, or a rung
-    # that failed to run).  Serial within a material, parallel across
-    # (DESIGN 3.12.5).  dispatch_round(mesh_lists) runs the given
-    # meshes -- one or more per material -- in a single parallel round
-    # and returns {material: [{mesh, energy}, ...]}, OMITTING any mesh
-    # whose run did not complete (7.7); the mesh->unit encoding and
-    # the read-back are 4e.7.  seed_densities[m] is m's round-0 seed
-    # density (the prediction, or the wide-grid floor when under-
-    # trained, 3.12.4 / 7.9); the confidence policy is already
-    # resolved into configs[m].  on_non_converged(m) tags a
-    # prediction mismatch (7.8 3d); it is injected so this loop stays
-    # free of the workspace.
+                           dispatcher, on_non_converged):
+    # Drive every material through the climb to a verdict --
+    # converged, or non-converged (a ceiling, or a rung that failed
+    # to run).  Serial within a material, concurrent across, and NO
+    # material waits on another: a chain climbs on the instant its
+    # own rung lands (DESIGN 3.12.5).  The injected `dispatcher`
+    # owns the in-flight set so this loop tracks only its per-
+    # material ladders (Principle 12); it exposes two calls (4e.7):
+    #   dispatcher.send(mesh_lists) -- launch one calc per (material,
+    #     mesh) WITHOUT waiting (send_off, 13.5).
+    #   dispatcher.next_rung() -- block until the next rung lands and
+    #     return (material, result), where result is a {mesh, energy}
+    #     Rung or the FAILED marker for a rung that did not complete
+    #     (7.7).
+    # seed_densities[m] is m's round-0 seed density (the prediction,
+    # or the wide-grid floor when under-trained, 3.12.4 / 7.9); the
+    # confidence policy is already resolved into configs[m].
+    # on_non_converged(m) tags a prediction mismatch (7.8 3d); it is
+    # injected so this loop stays free of the workspace.
 
-    # Round 0: every material's initial mesh(es) -- a grid, or one
-    #   (initial_meshes, 4e.4).  A material whose whole opening round
-    #   failed to run has no rung to stand on, so it is non-converged
-    #   from the start (run failure, 7.7).
+    rungs    = { m: [] for m in materials }
+    outcomes = {}
+    active   = set(materials)
+    in_air   = {}                  # rungs still in flight, per m
+    opening  = set(materials)      # still in the opening (grid) phase
+
+    # retire m with a verdict and drop it from the active set; a
+    #   non-converged stop tags the mismatch (7.8 3d).
+    function retire(m, verdict):
+        outcomes[m] = verdict
+        if verdict is NON_CONVERGED:
+            on_non_converged(m)
+        active.discard(m)
+
+    # judge m's ladder (climbAction, 4e.3) and either retire it or
+    #   launch its single next rung.
+    function judge(m):
+        action = climbAction(rungs[m], configs[m])
+        if action is CONVERGED:
+            outcomes[m] = rungs[m][action.index]     # a Rung, not a
+            active.discard(m)                        #   mismatch
+        elif action is CEILING:
+            retire(m, NON_CONVERGED)                 # 7.8 3d
+        else:                                        # RUN(mesh)
+            dispatcher.send({ m: [action.mesh] })
+            in_air[m] += 1
+
+    # Seed every material's opening rung or grid at once
+    #   (initial_meshes, 4e.4): one rung for a climb, a small grid
+    #   for the confident mode (3.12.6).
     first = { m: initial_meshes(seed_densities[m], configs[m])
               for m in materials }
-    results = dispatch_round(first)
-    rungs = {}
-    outcomes = {}
-    active = []
     for m in materials:
-        rungs[m] = sort_by_mesh(get(results, m, []))
-        if rungs[m] is empty:
-            outcomes[m] = NON_CONVERGED               # run failure
-            on_non_converged(m)
-        else:
-            active.append(m)
+        in_air[m] = length(first[m])
+    dispatcher.send(first)
 
-    while active is not empty:
-        next_mesh = {}
-        for m in list(active):
-            action = climbAction(rungs[m], configs[m])
-            if action is CONVERGED:
-                outcomes[m] = rungs[m][action.index]
-                active.remove(m)
-            elif action is CEILING:
-                outcomes[m] = NON_CONVERGED
-                on_non_converged(m)                    # 7.8 3d
-                active.remove(m)
-            else:                            # RUN(mesh)
-                next_mesh[m] = [action.mesh]
-        if next_mesh is empty:
-            break
-        # One parallel round: each still-active material's next rung.
-        more = dispatch_round(next_mesh)
-        for m in list(next_mesh):
-            requested = next_mesh[m][0]
-            ran = get(more, m, [])
-            if requested not in [r.mesh for r in ran]:
-                # The requested rung failed to run, so the climb
-                #   cannot advance: stop it non-converged (7.7).
-                outcomes[m] = NON_CONVERGED           # run failure
-                on_non_converged(m)
-                active.remove(m)
+    # Collect rungs as they land, in landing order, until nothing is
+    #   in flight.  Each landing advances exactly the one material it
+    #   belongs to; the others are untouched, so no chain is paced by
+    #   another.
+    while sum(in_air) > 0:
+        (m, result) = dispatcher.next_rung()
+        in_air[m] -= 1
+        if result is not FAILED:
+            rungs[m] = merge_distinct(rungs[m], [result])
+
+        if m in opening:
+            # The confident mode's opening grid is judged as a group,
+            #   so wait until the WHOLE grid has resolved, then judge
+            #   on whatever landed.  A material whose entire opening
+            #   failed has no rung to stand on (run failure, 7.7).  A
+            #   climb's opening is a single rung, so it is judged at
+            #   once.
+            if in_air[m] > 0:
+                continue
+            opening.discard(m)
+            if rungs[m] is empty:
+                retire(m, NON_CONVERGED)             # run failure
             else:
-                rungs[m] = merge_distinct(rungs[m], ran)
+                judge(m)
+        else:
+            # A continuation is exactly one rung.  If it failed to
+            #   run the climb cannot advance, so stop the material
+            #   rather than re-dispatch it forever (7.7); otherwise
+            #   judge the extended ladder.
+            if result is FAILED:
+                retire(m, NON_CONVERGED)             # run failure
+            else:
+                judge(m)
 
     return outcomes, rungs
 ```
 
-The loop preserves cluster throughput -- every active material
-advances one rung per round, all dispatched together -- while
-each material stays adaptive.  A material leaves `active` the
-moment it converges or hits its ceiling, so late-converging
-materials do not hold back the ones already done.  The dispatch
-core (13) is unchanged and domain-ignorant: it runs the meshes
-handed to it in a round and reports energies; the choice of the
-next mesh lives entirely here.
+No chain ever waits on another: a material advances the instant
+its own rung lands and drops out of `active` the moment it
+converges or hits its ceiling, so a late, expensive chain never
+holds back the ones already done (DESIGN 3.12.5).  A material has
+at most its opening grid in flight and, after that, exactly one
+rung, so once a material is judged nothing further lands for it.
+The dispatch core (13) stays domain-ignorant: it launches the
+meshes handed to it and reports energies as they finish; the
+choice of the next mesh lives entirely here.
 
 ### 4e.6 Recording the converged rung
 
@@ -1851,8 +1880,8 @@ Everything else in the guidance schema and predictor is unchanged
 The climb searches in mesh space, so a rung is dispatched as an
 EXPLICIT mesh, not a density.  Three small pieces bridge a mesh to
 a run and back: the calc-tag encoding, the predict-only builder that
-seeds the climb, and the round adapter `converge_by_climb` (4e.5)
-injects.  All three are specified in DESIGN 7.7.
+seeds the climb, and the climb dispatcher `converge_by_climb` (4e.5)
+drives.  All three are specified in DESIGN 7.7.
 
 ```
 function encodeMeshValue(mesh):        # DESIGN 6.2.4 / 7.7
@@ -1913,62 +1942,74 @@ function predict_kpoint_density(structure, dataspace, system_type,
     return density, confidence, under_trained, record
 
 
-function make_dispatch_round(structures, options_by_material,
-                             workspace, parsl_config, executor,
-                             force):
-    # The producer builds the round adapter converge_by_climb (4e.5)
-    # injects, closing over each material's structure and options,
-    # the workspace root every round's units live under, the
-    # resolved dispatch Config (13.7) recorded on every round's
-    # flight, and the ONE shared executor every round dispatches
-    # under (make_executor, 13.5): the pre-flight loen batch and all
-    # climb rounds run beneath the SAME executor, so the whole run
-    # shares one warm pool (DESIGN 6.2.11) and lands in one tree.
+function make_climb_dispatcher(structures, options_by_material,
+                               workspace, parsl_config, executor,
+                               force):
+    # Build the dispatcher converge_by_climb (4e.5) drives, closing
+    # over each material's structure and options, the workspace root,
+    # the resolved Config (13.7), and the ONE shared executor every
+    # send runs under (make_executor, 13.5): the pre-flight loen batch
+    # and every climb rung run beneath the SAME executor, so the whole
+    # run rides one warm pool (DESIGN 6.2.11) and lands in one tree.
     # `force` bypasses the run-reuse cache exactly as the pre-flight
-    # dispatch does.  The returned dispatch_round(mesh_lists) is what
-    # the loop calls; the material key doubles as the unit id
+    # dispatch does.  The material key doubles as the unit id
     # (materials ARE the reference ids the producer already uses).
-    function dispatch_round(mesh_lists):
-        # Build one unit per requested mesh, REMEMBERING which mesh
-        #   and material each carries, so the energy routes back
-        #   without re-decoding the calc tag (the requested mesh is
-        #   already in hand).
-        built = []                               # (m, mesh, unit)
+    #
+    # ONE flight spans the whole climb -- its root is the workspace --
+    #   and its unit list ACCRETES as rungs are decided.  Each send
+    #   re-serializes the flight, so flight.toml records every rung
+    #   asked for (13.1), and any mesh already run is a cache hit
+    #   (6.2.5).  The dispatcher owns the in-flight set and a small
+    #   map from each launched unit to its (material, mesh), so an
+    #   energy routes back without re-decoding the calc tag.
+    flight = Flight(units = [], root = workspace,
+                    parsl_config = parsl_config,
+                    sweep = Sweep(varied = ("kpt-mesh",), fixed = {}))
+    outstanding = []          # (unit, future) -- the in-flight rungs
+    origin = {}               # unit identity -> (material, mesh)
+
+    # send: build one unit per requested mesh, remember its origin,
+    #   append it to the flight's growing list, prepare ONLY the new
+    #   units (6.2.5), and launch just them (send_off re-serializes
+    #   the whole flight, 13.5).
+    function send(mesh_lists):
+        new_units = []
         for m in mesh_lists:
             for mesh in mesh_lists[m]:
                 unit = build_mesh_unit(structures[m],
                                        options_by_material[m], mesh,
                                        id = m)
-                append(built, (m, mesh, unit))
-        # Carry the workspace root and the resolved Config on the
-        #   round's flight, matching the pre-flight batch, so every
-        #   round's units live in the same tree; the shared executor
-        #   passed to dispatch is what actually runs them (13.5).
-        flight = Flight(
-            units        = [unit for (_, _, unit) in built],
-            root         = workspace,
-            parsl_config = parsl_config,
-            sweep        = Sweep(varied = ("kpt-mesh",), fixed = {}))
-        prepareUnits(flight)                     # driver-side (6.2.5)
-        dispatch(flight, executor = executor,    # shared pool, 13.5
-                 force = force)
+                origin[identity(unit)] = (m, mesh)
+                append(new_units, unit)
+                append(flight.units, unit)
+        prepareUnits(flight, new_units)          # driver-side (6.2.5)
+        launched = send_off(flight, new_units,   # phase 1, 13.5
+                            executor, force)
+        outstanding.extend(launched)
 
-        out = { m: [] for m in mesh_lists }
-        for (m, mesh, unit) in built:
-            if not completed(unit):              # failed -> OMIT so
-                continue                         #   4e.5 stops it
-            res = readResult(unit)               # result.toml (6.1.2)
-            assert res.kpoint_mesh == mesh       # honoured exactly
-            append(out[m], Rung(mesh, res.total_energy))
-        return out
-    return dispatch_round
+    # next_rung: block until the next rung lands (collect_next, 13.5),
+    #   translate it to (material, Rung-or-FAILED), and return.  A
+    #   unit that did not complete is a run failure the climb stops on
+    #   (7.7); a landed mesh must equal the one requested (7.7), or
+    #   makeinput/imago silently changed it -- fail loudly.
+    function next_rung():
+        (unit, entry, remaining) = collect_next(flight, outstanding)
+        outstanding = remaining
+        (m, mesh) = origin[identity(unit)]
+        if entry.status != "done":
+            return (m, FAILED)
+        res = readResult(unit)                   # result.toml (6.1.2)
+        assert res.kpoint_mesh == mesh           # honoured exactly
+        return (m, Rung(mesh, res.total_energy))
+
+    return dispatcher(send = send, next_rung = next_rung)
 ```
 
-The producer builds each round's meshes with `build_mesh_unit`
-(4e.7) as the climb chooses them, so the convergence search needs
+The producer builds each rung's mesh with `build_mesh_unit`
+(4e.7) as the climb chooses it, so the convergence search needs
 no single up-front flight of grid points: `predict_kpoint_density`
-(4e.7) supplies the seed, and the round adapter above dispatches
-one round at a time.
+(4e.7) supplies the seed, and the dispatcher above launches and
+collects the rungs one at a time.
 
 ---
 
@@ -4804,10 +4845,12 @@ unit per Fortran-side fingerprint; these are geometry-only,
 so they dispatch once in a small pre-flight batch before
 the climb.  The converge phase drives every solid through
 the adaptive mesh climb (`converge_by_climb`, 4e.5): serial
-within a solid, parallel across, one round per iteration,
-each round's meshes (`build_mesh_unit`, 4e.7) dispatched
-together until each solid's energy flattens (its converged
-rung) or hits the `max_count` ceiling (NON_CONVERGED).  The
+within a solid, concurrent across, each solid climbing on
+the instant its own rung lands so no solid waits on another,
+each rung's mesh (`build_mesh_unit`, 4e.7) launched as the
+climb chooses it, until each solid's energy flattens (its
+converged rung) or hits the `max_count` ceiling
+(NON_CONVERGED).  The
 harvest phase, for each converged solid, locates the
 converged rung's `kpt-mesh-<a>-<b>-<c>` run, then for each
 distinct environment the run discovered takes one
@@ -5014,8 +5057,8 @@ function buildInitialPotentials(manifest_path,
     # exist before the hit-test; prepare_units stages each unit
     # into its own `prepare/` area, separate from its run dir (the
     # "must not clobber" rule).  The CONVERGENCE units are prepared
-    # per round inside the climb's dispatch_round instead (4e.7),
-    # not here.
+    # as the climb dispatcher sends each rung instead (4e.7), not
+    # here.
     #
     # Resolve the dispatch Config once for the whole run (13.7):
     # local -> None (the driver runs in process); a cluster shape ->
@@ -5047,27 +5090,30 @@ function buildInitialPotentials(manifest_path,
                      force = force)
 
         # ===== Phase 2: converge ======================
-        # The round adapter (4e.7) closes over each solid's
-        # structure, its coded options, and the shared executor.
-        # Per round it builds one mesh unit per requested mesh
-        # (build_mesh_unit), prepares them driver-side, dispatches
-        # the round under that one executor, and reads each
-        # result.toml back into a Rung -- OMITTING any mesh whose
-        # run did not complete (7.7).  converge_by_climb (4e.5)
-        # then drives every solid to a verdict, one parallel round
-        # per iteration, serial within a solid.  A mesh re-run in a
-        # later round is a cache hit (6.2.5).  on_non_converged
-        # tags the solid's workspace with a prediction mismatch
-        # (7.8 3d); it is injected so the round loop stays free of
-        # the workspace.
-        dispatch_round = make_dispatch_round(
+        # The climb dispatcher (4e.7) closes over each solid's
+        # structure, its coded options, and the shared executor,
+        # and owns one flight whose unit list accretes as rungs are
+        # decided.  Its send(mesh_lists) builds one mesh unit per
+        # requested mesh (build_mesh_unit), prepares the new units
+        # driver-side, and launches them under that one executor
+        # WITHOUT waiting (send_off); its next_rung() blocks until
+        # the next rung lands (collect_next) and reads its
+        # result.toml back into a Rung -- returning the FAILED
+        # marker for any mesh whose run did not complete (7.7).
+        # converge_by_climb (4e.5) drives every solid to a verdict,
+        # serial within a solid and concurrent across, judging each
+        # solid the moment its own rung lands.  A mesh re-run later
+        # is a cache hit (6.2.5).  on_non_converged tags the solid's
+        # workspace with a prediction mismatch (7.8 3d); it is
+        # injected so the climb loop stays free of the workspace.
+        dispatcher = make_climb_dispatcher(
             struct_of, options_of, workspace,
             parsl_config = parsl_config, executor = executor,
             force = force)
         materials = [ref.reference_id
                      for ref in manifest.reference_solids]
         outcomes, rungs = converge_by_climb(
-            materials, configs, seed_densities, dispatch_round,
+            materials, configs, seed_densities, dispatcher,
             on_non_converged =
                 lambda m: tag_prediction_mismatch(workspace, m))
     finally:
@@ -7063,8 +7109,26 @@ thread pool, or a cluster).  When the caller pins no
 executor, the driver builds one from the flight with
 `make_executor` (below): a `ParslExecutor` if the flight carries
 a `parsl_config` (13.7), else a `LocalExecutor`.  Both kinds of
-future share one `result()`/exception contract, so the gather
-logic below is identical across them.
+future share one contract -- `result()`, which returns the
+outcome or re-raises the worker's exception, and `done()`, true
+once the result is ready -- so the gather logic below is
+identical across them.  A cache hit yields an already-done future
+too (`completed_future`), so hits and misses sit uniformly in the
+outstanding set.
+
+Dispatch is *two phases, and both are public* (DESIGN 6.2.3): a
+`send_off` that launches a chosen set of units and returns one
+future per unit without waiting, and a `collect` that resolves a
+single future into its terminal status and report entry.  The
+one-shot `dispatch` below is exactly `send_off` then `collect`
+every future in unit order -- the convenience form, so every
+existing caller is unchanged.  A control loop instead calls the
+two directly: the climb (4e.5) sends the rungs it has decided,
+then uses `collect_next` to take whichever rung lands first and
+send that chain's successor at once, never waiting out a whole
+batch.  `collect_next` is domain-ignorant -- it polls `done()`
+and knows only futures, never k-points -- so the choice of what
+to send next stays in the producer (Principle 12).
 
 A client that runs *many* flights under one config builds the
 executor ONCE and pins it to every call.  A Parsl `Config`'s
@@ -7072,46 +7136,103 @@ executor is single-use: constructing it starts one coordinator
 and its pool of SLURM workers (13.7), and closing it tears them
 down, so a second `dispatch()` handed the same config would try
 to restart a spent pool.  The producer's climb is exactly this
--- a pre-flight batch and then one flight per continuation round
-(DESIGN 3.12.5), all under one config -- so it builds one
-executor with `make_executor(config)`, passes it to every
-`dispatch(...)`, and closes it once after the last.  The whole
-run then shares one warm pool that grows and shrinks with demand
-(DESIGN 6.2.11's pooled shape) instead of rebuilding it per
-round.
+-- a pre-flight batch and then a stream of rungs sent and
+collected one at a time (DESIGN 3.12.5), all under one config --
+so it builds one executor with `make_executor(config)`, passes it
+to every `send_off`/`collect`, and closes it once after the last.
+The whole run then shares one warm pool that grows and shrinks
+with demand (DESIGN 6.2.11's pooled shape) instead of rebuilding
+it per rung.
 
 ```
-function dispatch(flight, executor=None, force=False):
+function send_off(flight, units, executor, force):
+    # Phase 1, made callable on its own: launch a chosen set of
+    # units and return one future per unit WITHOUT waiting on any
+    # of them (DESIGN 6.2.3).  `units` is what to launch now --
+    # flight.units for a one-shot fan-out, one round of newly
+    # decided rungs for the climb (4e.5).  The flight's WHOLE unit
+    # list is (re)serialized, so flight.toml records every rung
+    # asked for even as the climb's list grows (13.1).
     validate_flight(flight)            # 13.3
     makedirs(flight.root, exist_ok=True)
     serialize_flight(flight)           # 13.1
+    outstanding = []                   # list of (unit, future)
+    for unit in units:
+        outstanding.append(
+            (unit, dispatch_unit(flight, unit, executor, force)))
+    return outstanding
+```
 
-    # Choose the executor unless the caller pinned one.  We
-    # tear it down at the end only if we built it here (a
-    # caller-supplied executor is the caller's to close).
+```
+function collect(flight, unit, fut):
+    # Phase 2 for ONE unit: resolve its future, write its terminal
+    # status, build its report entry, and fire the stream hook
+    # (DESIGN 6.2.3, 6.2.6).  Per-future exception capture so one
+    # failure never propagates (Principle 10).  Public, so a
+    # control loop can collect rungs one at a time.
+    wingbeat_dir = unit_run_dir(flight, unit)
+    try:
+        fut.result()       # re-raises any worker exception
+    except ParslTaskLost:
+        # No WingbeatOutcome ever came back: cluster-side loss.
+        write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
+            status="lost", finished_at=now(),
+            message="cluster-side loss")
+    except Exception as e:
+        # App raised on the worker but the failure returned:
+        # status.toml may already say running; force failed.
+        write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
+            status="failed", finished_at=now(),
+            message=str(e))
+    # In every case status.toml is now terminal; build the report
+    # entry from it (single source of truth), then stream it in
+    # LANDING order (not unit order) so a control-loop consumer
+    # sees each rung the moment it is collected.
+    entry = report_entry_from_status(unit, wingbeat_dir)
+    if flight.on_outcome is not None:
+        flight.on_outcome(entry)
+    return entry
+```
+
+```
+function collect_next(flight, outstanding):
+    # Wait for WHICHEVER outstanding rung lands first, collect it,
+    # and return it with the shrunken outstanding list (DESIGN
+    # 6.2.3).  Domain-ignorant: it polls done() and knows only
+    # futures, never k-points, so the climb's decision of what to
+    # send next stays in the producer (Principle 12).  A cache hit
+    # is an already-done future, so it is returned first, no wait.
+    loop forever:
+        for (index, (unit, fut)) in enumerate(outstanding):
+            if fut.done():
+                entry = collect(flight, unit, fut)
+                remaining = outstanding with index dropped
+                return (unit, entry, remaining)
+        sleep(POLL_INTERVAL)   # nothing ready yet; brief pause
+```
+
+```
+function dispatch(flight, executor=None, force=False):
+    # The one-shot convenience form: send every unit off, then
+    # collect them all in unit order (DESIGN 6.2.3).  Behaviour is
+    # identical to the pre-split driver, so every existing caller
+    # is unchanged; the climb (4e.5) uses send_off + collect_next
+    # directly instead.  We tear the executor down at the end only
+    # if we built it here (a caller-supplied executor is the
+    # caller's to close).
     owns_executor = (executor is None)
     if executor is None:
         executor = make_executor(flight.parsl_config)  # below
-
     try:
-        pending = []                  # list of (unit, future)
-        for unit in flight.units:
-            pending.append(
-                (unit, dispatch_unit(flight, unit,
-                                     executor, force)))
-
-        # Gather.  Catch PER future; never let one failure
-        # propagate out of the loop.
-        entries = []
-        for (unit, fut) in pending:
-            entry = collect_future(flight, unit, fut)
-            entries.append(entry)
-            if flight.on_outcome is not None:
-                flight.on_outcome(entry)    # stream hook
+        outstanding = send_off(flight, flight.units,
+                               executor, force)
+        # Collect in send order, which is unit order; on_outcome
+        # fires inside collect, once per entry.
+        entries = [collect(flight, unit, fut)
+                   for (unit, fut) in outstanding]
     finally:
         if owns_executor:
             executor.close()      # tear down Parsl if we built it
-
     return FlightReport(entries = entries)
 ```
 
@@ -7140,10 +7261,11 @@ function dispatch_unit(flight, unit, executor, force):
     # independent of which executor runs the unit -- so it rides
     # here, not on a worker.
     if not force and is_cache_hit(unit, wingbeat_dir):   # 13.4
-        # Hit: no task submitted; resolve immediately from the
-        # existing status.toml.
-        return completed_future(
-            report_entry_from_status(unit, wingbeat_dir))
+        # Hit: no task submitted.  Return an already-done future
+        # (done() true, result() a no-op) so the hit sits in the
+        # outstanding set exactly like a miss; collect reads the
+        # entry back from the existing status.toml.
+        return completed_future()
     # Miss: prepare the dir, snapshot the key, mark queued,
     # and hand the unit to the executor.
     makedirs(wingbeat_dir, exist_ok=True)
@@ -7162,7 +7284,7 @@ function execute_wingbeat_task(unit, wingbeat_dir, default_wingbeat):
     # in process, ParslExecutor wraps it as a Parsl task.  It
     # takes default_wingbeat (not the whole flight, which need not
     # travel to a worker).  Returns the WingbeatOutcome; raising
-    # here surfaces to collect_future as a worker-side failure.
+    # here surfaces to collect as a worker-side failure.
     write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status="running", started_at=now())
     wingbeat = resolve_wingbeat(unit, default_wingbeat)  # ->Wingbeat
@@ -7174,27 +7296,6 @@ function execute_wingbeat_task(unit, wingbeat_dir, default_wingbeat):
         runtime_seconds=outcome.runtime_seconds,
         message=outcome.message)
     return outcome
-```
-
-```
-function collect_future(flight, unit, fut):
-    wingbeat_dir = unit_run_dir(flight, unit)
-    try:
-        fut.result()       # re-raises any worker exception
-    except ParslTaskLost:
-        # No WingbeatOutcome ever came back: cluster-side loss.
-        write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
-            status="lost", finished_at=now(),
-            message="cluster-side loss")
-    except Exception as e:
-        # App raised on the worker but the failure returned:
-        # status.toml may already say running; force failed.
-        write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
-            status="failed", finished_at=now(),
-            message=str(e))
-    # In every case status.toml is now terminal; build the
-    # report entry from it (single source of truth).
-    return report_entry_from_status(unit, wingbeat_dir)
 ```
 
 ### 13.6 Report and client-side harvest (DESIGN 6.2.6)

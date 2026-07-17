@@ -59,7 +59,7 @@ from build_initial_potentials import (
 import build_initial_potentials as bip
 import initial_potential_db as ipdb
 import mesh_climb
-from kaleidoscope import CalcUnit, Flight
+from kaleidoscope import CalcUnit, Flight, ReportEntry
 from kaleidoscope import cluster_config
 from kaleidoscope.builders.kpoint_convergence import PredictionRecord
 
@@ -1091,9 +1091,10 @@ def _write_result(workspace, unit_id, calc, *, energy,
                   iterations=7, scfv="scfV.dat"):
     """Write one COMPLETED unit's status.toml and result.toml under
     the workspace (the kaleidoscope run-dir layout).  A completed
-    run carries both: the harvest's completion gate
-    (``_unit_completed``) reads status.toml first (DESIGN 6.2.10),
-    then result.toml."""
+    run carries both: the completion gate reads status.toml first --
+    the report entry ``collect`` builds carries the terminal status,
+    checked before any result.toml is opened (DESIGN 6.2.10) -- then
+    result.toml."""
 
     run_dir = os.path.join(workspace, "wingbeats", unit_id, *calc)
     os.makedirs(run_dir, exist_ok=True)
@@ -2099,7 +2100,7 @@ def _install_climb_mocks(monkeypatch, workspace, *,
     ladder = [bip.Rung([2, 2, 2], -1.0), bip.Rung([3, 3, 3], -1.0),
               bip.Rung(list(converged_mesh), -1.0)]
 
-    def fake_converge(materials, configs, seeds, dispatch_round,
+    def fake_converge(materials, configs, seeds, dispatcher,
                       on_non_converged=None):
         outcomes = {m: bip.Rung(list(converged_mesh), -1.0)
                     for m in materials}
@@ -2444,10 +2445,10 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
     monkeypatch.setattr(bip, "save_databases", lambda *a, **k: None)
     monkeypatch.setattr(bip, "write_run_log", lambda *a, **k: None)
 
-    # Spy the round dispatcher's resolved config + force.  The climb
-    #   is mocked, so the round adapter is built but never called.
+    # Spy the climb dispatcher's resolved config + force.  The climb
+    #   is mocked, so the dispatcher is built but never driven.
     seen = {}
-    real_make = bip.make_dispatch_round
+    real_make = bip.make_climb_dispatcher
 
     def spy_make(*args, parsl_config=None, executor=None,
                  force=False, **kwargs):
@@ -2457,18 +2458,18 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
         return real_make(*args, parsl_config=parsl_config,
                          executor=executor, force=force, **kwargs)
 
-    monkeypatch.setattr(bip, "make_dispatch_round", spy_make)
+    monkeypatch.setattr(bip, "make_climb_dispatcher", spy_make)
 
     bip.build_initial_potentials(
         manifest_path, pdb_root, data_root,
         dispatch_fn=lambda flight, executor=None, force=False: None,
-        prepare_fn=lambda flight, workspace: None,
+        prepare_fn=lambda flight, workspace, units=None: None,
         force=True)
     assert seen["parsl_config"] is None
     assert seen["force"] is True
     # The producer built ONE executor for the whole run (local ->
-    #   LocalExecutor) and threaded that same object into the round
-    #   adapter, so every round rides one pool (DESIGN 6.2.11).
+    #   LocalExecutor) and threaded that same object into the climb
+    #   dispatcher, so every rung rides one pool (DESIGN 6.2.11).
     assert type(seen["executor"]).__name__ == "LocalExecutor"
 
 
@@ -2683,12 +2684,12 @@ def test_submit_honors_orchestrator_overrides(tmp_path, monkeypatch):
 #  The adaptive k-point mesh climb (PSEUDOCODE 4e.3 / 4e.5)
 #
 #  These drive climb_action and converge_by_climb with a SYNTHETIC
-#  dispatch_round -- a stand-in for the real mesh-dispatch adapter
-#  (still to be specified and built) that turns each requested mesh
-#  into a Rung by evaluating a per-material energy model.  Every
-#  material here is a cubic cell (one axis class, equal reciprocal
-#  magnitudes), so its climb is the lockstep [n,n,n] ladder and the
-#  hand-computed energies below are easy to follow.
+#  dispatcher -- a stand-in for the real climb dispatcher
+#  (make_climb_dispatcher) that turns each requested mesh into a Rung
+#  by evaluating a per-material energy model.  Every material here is
+#  a cubic cell (one axis class, equal reciprocal magnitudes), so its
+#  climb is the lockstep [n,n,n] ladder and the hand-computed energies
+#  below are easy to follow.
 # ==================================================================
 
 # Cubic geometry: all three axes share one class, so counts move in
@@ -2740,20 +2741,40 @@ def _flat_everywhere_energy(mesh):
     return -1.6 - 0.0001 * mesh[0]
 
 
-def _round_dispatcher(energy_of, counter=None):
-    """Build a synthetic ``dispatch_round``.  It runs each requested
-    mesh through the per-material ``energy_of[material]`` model and
-    returns ``{material: [Rung, ...]}``; an optional ``counter``
-    list gets one entry appended per round so a test can count how
-    many rounds the climb took."""
-    def dispatch_round(mesh_lists):
-        if counter is not None:
-            counter.append(len(mesh_lists))
-        return {
-            material: [bip.Rung(mesh, energy_of[material](mesh))
-                       for mesh in meshes]
-            for material, meshes in mesh_lists.items()}
-    return dispatch_round
+class _SyntheticDispatcher:
+    """A synthetic climb dispatcher for the ``converge_by_climb``
+    tests.  ``send(mesh_lists)`` runs each requested mesh through the
+    per-material ``energy_of[material]`` model and queues the resulting
+    ``Rung``; ``next_rung()`` returns queued rungs in FIFO (send)
+    order, so several materials interleave deterministically.  A mesh
+    named in ``fail`` (a set of ``(material, (a, b, c))`` pairs)
+    queues the ``_RUN_FAILED`` marker instead, standing in for a rung
+    whose run did not complete.  An optional ``send_counter`` list
+    gets one entry appended per ``send`` call, so a test can count how
+    many times the climb dispatched (the opening send plus one per
+    continuation rung)."""
+
+    def __init__(self, energy_of, fail=(), send_counter=None):
+        self._energy_of = energy_of
+        self._fail = {(material, tuple(mesh))
+                      for material, mesh in fail}
+        self._queue = []            # (material, result) in flight
+        self._send_counter = send_counter
+
+    def send(self, mesh_lists):
+        if self._send_counter is not None:
+            self._send_counter.append(len(mesh_lists))
+        for material, meshes in mesh_lists.items():
+            for mesh in meshes:
+                if (material, tuple(mesh)) in self._fail:
+                    self._queue.append((material, bip._RUN_FAILED))
+                else:
+                    energy = self._energy_of[material](mesh)
+                    self._queue.append(
+                        (material, bip.Rung(mesh, energy)))
+
+    def next_rung(self):
+        return self._queue.pop(0)
 
 
 # --------------------------------------------------------------
@@ -2822,10 +2843,10 @@ def test_merge_distinct_drops_a_repeated_mesh():
 
 
 # --------------------------------------------------------------
-#  converge_by_climb -- the round-based loop
+#  converge_by_climb -- the wait-for-any loop
 # --------------------------------------------------------------
 
-def test_climb_converges_over_several_rounds():
+def test_climb_converges_over_several_rungs():
     """A cold single-rung climb starts one rung below the predicted
     [3,3,3] seed and climbs the lockstep ladder until two flat rungs
     persist, converging at [6,6,6] and recording the whole ladder."""
@@ -2834,34 +2855,34 @@ def test_climb_converges_over_several_rounds():
         mesh_climb.CLIMB, flat_needed=2, grid_width=0,
         start_offset=1, max_count=20)}
     seed_densities = {"si": 27.0}            # seeds the [3,3,3] mesh
-    dispatch_round = _round_dispatcher({"si": _converging_energy})
+    dispatcher = _SyntheticDispatcher({"si": _converging_energy})
 
     outcomes, rungs = bip.converge_by_climb(
-        materials, configs, seed_densities, dispatch_round)
+        materials, configs, seed_densities, dispatcher)
 
     assert outcomes["si"].mesh == [6, 6, 6]
     ladder = [rung.mesh for rung in rungs["si"]]
     assert ladder == [[n, n, n] for n in range(2, 9)]
 
 
-def test_grid_mode_converges_in_the_first_round():
+def test_grid_mode_converges_in_the_opening():
     """A confident parallel grid lays [4,4,4], [5,5,5], [6,6,6] down
-    together and, finding a flat interior point, converges in a
-    single dispatch round."""
+    together and, finding a flat interior point, converges from that
+    single opening send with no continuation."""
     materials = ["si"]
     configs = {"si": _cubic_config(
         mesh_climb.PARALLEL_GRID, flat_needed=1, grid_width=1,
         start_offset=0, max_count=20)}
     seed_densities = {"si": 125.0}           # seeds the [5,5,5] mesh
     counter = []
-    dispatch_round = _round_dispatcher(
-        {"si": _flat_everywhere_energy}, counter)
+    dispatcher = _SyntheticDispatcher(
+        {"si": _flat_everywhere_energy}, send_counter=counter)
 
     outcomes, _ = bip.converge_by_climb(
-        materials, configs, seed_densities, dispatch_round)
+        materials, configs, seed_densities, dispatcher)
 
     assert outcomes["si"].mesh == [5, 5, 5]
-    assert len(counter) == 1                 # round 0 only
+    assert len(counter) == 1                 # opening send only
 
 
 def test_climb_stops_at_ceiling_and_tags_non_converged():
@@ -2873,19 +2894,19 @@ def test_climb_stops_at_ceiling_and_tags_non_converged():
         mesh_climb.CLIMB, flat_needed=2, grid_width=0,
         start_offset=1, max_count=5)}
     seed_densities = {"metal": 27.0}
-    dispatch_round = _round_dispatcher({"metal": _ceiling_energy})
+    dispatcher = _SyntheticDispatcher({"metal": _ceiling_energy})
     flagged = []
 
     outcomes, _ = bip.converge_by_climb(
-        materials, configs, seed_densities, dispatch_round,
+        materials, configs, seed_densities, dispatcher,
         on_non_converged=flagged.append)
 
     assert outcomes["metal"] is bip.NON_CONVERGED
     assert flagged == ["metal"]
 
 
-def test_materials_climb_independently_in_shared_rounds():
-    """Two materials climb together: one converges while the other
+def test_materials_climb_independently():
+    """Two materials climb concurrently: one converges while the other
     runs to its ceiling.  Each reaches its own verdict, and the
     mismatch callback fires only for the non-converged one."""
     materials = ["good", "bad"]
@@ -2897,12 +2918,12 @@ def test_materials_climb_independently_in_shared_rounds():
             mesh_climb.CLIMB, flat_needed=2, grid_width=0,
             start_offset=1, max_count=5)}
     seed_densities = {"good": 27.0, "bad": 27.0}
-    dispatch_round = _round_dispatcher(
+    dispatcher = _SyntheticDispatcher(
         {"good": _converging_energy, "bad": _ceiling_energy})
     flagged = []
 
     outcomes, _ = bip.converge_by_climb(
-        materials, configs, seed_densities, dispatch_round,
+        materials, configs, seed_densities, dispatcher,
         on_non_converged=flagged.append)
 
     assert outcomes["good"].mesh == [6, 6, 6]
@@ -2911,7 +2932,7 @@ def test_materials_climb_independently_in_shared_rounds():
 
 
 # ==================================================================
-#  The mesh-dispatch round adapter (PSEUDOCODE 4e.7; DESIGN 7.7)
+#  The climb dispatcher (PSEUDOCODE 4e.7; DESIGN 7.7)
 # ==================================================================
 
 def _mesh_of_unit(unit):
@@ -2935,70 +2956,99 @@ def _mesh_reader(energy_by_mesh, resolved_by_mesh=None):
     return read_fn
 
 
-def _make_round(energy_by_mesh, *, completed=None,
+def _fake_send_off(flight, units, executor, force):
+    """A no-op ``send_off``: return one ``(unit, marker)`` pair per
+    unit.  The marker stands in for the future and is unused -- the
+    fake ``collect_next`` below decides each unit's status -- so a
+    bare None suffices."""
+    return [(unit, None) for unit in units]
+
+
+def _fake_collect_next(status_by_mesh):
+    """A fake ``collect_next`` that returns the outstanding units in
+    FIFO order, tagging each with the status chosen for its mesh
+    (default ``"done"``).  A non-``"done"`` status is what the
+    dispatcher turns into a ``_RUN_FAILED`` rung."""
+    def collect_next(flight, outstanding):
+        unit, _marker = outstanding[0]
+        remaining = outstanding[1:]
+        mesh = tuple(_mesh_of_unit(unit))
+        status = status_by_mesh.get(mesh, "done")
+        entry = ReportEntry(
+            id=unit.id, calc=unit.calc, status=status, detail=None,
+            wingbeat_dir="/ws", runtime_seconds=None, message=None)
+        return unit, entry, remaining
+    return collect_next
+
+
+def _make_climb(energy_by_mesh, *, status_by_mesh=None,
                 resolved_by_mesh=None):
-    """Build a make_dispatch_round with the toolchain seam mocked:
-    no-op prepare / dispatch, a caller-chosen completion predicate,
-    and a fake result reader."""
-    if completed is None:
-        completed = lambda workspace, unit: True
-    return bip.make_dispatch_round(
+    """Build a make_climb_dispatcher with the toolchain seam mocked:
+    a no-op prepare, a fake ``send_off``, a fake ``collect_next`` that
+    assigns each mesh a status, and a fake result reader."""
+    return bip.make_climb_dispatcher(
         {"si": object()}, {"si": {"scf_basis": "fb"}}, "/ws",
-        prepare_fn=lambda flight, workspace: None,
-        dispatch_fn=lambda flight, executor=None, force=False: None,
-        completed_fn=completed,
+        prepare_fn=lambda flight, workspace, units=None: None,
+        send_off_fn=_fake_send_off,
+        collect_next_fn=_fake_collect_next(status_by_mesh or {}),
         read_fn=_mesh_reader(energy_by_mesh, resolved_by_mesh))
 
 
-def test_dispatch_round_reads_rungs_back():
-    """The adapter turns a round's meshes into completed rungs,
-    pairing each requested mesh with its run's total energy."""
-    dispatch_round = _make_round(
-        {(4, 4, 4): -1.0, (5, 5, 5): -1.1})
-    out = dispatch_round({"si": [[4, 4, 4], [5, 5, 5]]})
-    assert [(rung.mesh, rung.energy) for rung in out["si"]] \
-        == [([4, 4, 4], -1.0), ([5, 5, 5], -1.1)]
+def test_climb_dispatcher_reads_rungs_back():
+    """send launches a material's meshes; next_rung returns each as a
+    ``(material, Rung)`` pair carrying the run's total energy."""
+    dispatcher = _make_climb({(4, 4, 4): -1.0, (5, 5, 5): -1.1})
+    dispatcher.send({"si": [[4, 4, 4], [5, 5, 5]]})
+    landed = [dispatcher.next_rung(), dispatcher.next_rung()]
+    assert [(material, rung.mesh, rung.energy)
+            for material, rung in landed] \
+        == [("si", [4, 4, 4], -1.0), ("si", [5, 5, 5], -1.1)]
 
 
-def test_dispatch_round_omits_a_failed_mesh():
-    """A unit that did not complete is dropped from the round's
-    results, so the climb loop reads it as a run failure."""
-    dispatch_round = _make_round(
+def test_climb_dispatcher_marks_a_failed_mesh():
+    """A unit that did not complete comes back as
+    ``(material, _RUN_FAILED)``, so the climb loop reads it as a run
+    failure."""
+    dispatcher = _make_climb(
         {(4, 4, 4): -1.0, (5, 5, 5): -1.1},
-        completed=lambda workspace, unit:
-            _mesh_of_unit(unit) != [5, 5, 5])
-    out = dispatch_round({"si": [[4, 4, 4], [5, 5, 5]]})
-    assert [rung.mesh for rung in out["si"]] == [[4, 4, 4]]
+        status_by_mesh={(5, 5, 5): "failed"})
+    dispatcher.send({"si": [[4, 4, 4], [5, 5, 5]]})
+    landed = [dispatcher.next_rung(), dispatcher.next_rung()]
+    assert landed[0] == ("si", bip.Rung([4, 4, 4], -1.0))
+    assert landed[1] == ("si", bip._RUN_FAILED)
 
 
-def test_dispatch_round_asserts_the_mesh_is_honoured():
+def test_climb_dispatcher_asserts_the_mesh_is_honoured():
     """An explicit mesh must resolve to itself; a run that reports a
     different resolved mesh fails loudly rather than mis-recording
     the rung."""
-    dispatch_round = _make_round(
+    dispatcher = _make_climb(
         {(4, 4, 4): -1.0},
         resolved_by_mesh={(4, 4, 4): [9, 9, 9]})
+    dispatcher.send({"si": [[4, 4, 4]]})
     with pytest.raises(RuntimeError):
-        dispatch_round({"si": [[4, 4, 4]]})
+        dispatcher.next_rung()
 
 
 # --------------------------------------------------------------
 #  converge_by_climb -- fail-fast on a rung that will not run
 # --------------------------------------------------------------
 
-def test_climb_round0_failure_is_non_converged():
-    """A material whose whole opening round fails to run has no rung
-    to stand on and is reported NON_CONVERGED with the mismatch
-    callback fired."""
-    def dispatch_round(mesh_lists):
-        return {material: [] for material in mesh_lists}
+def test_climb_opening_failure_is_non_converged():
+    """A material whose opening rung fails to run has no rung to stand
+    on and is reported NON_CONVERGED with the mismatch callback
+    fired."""
     configs = {"si": _cubic_config(
         mesh_climb.CLIMB, flat_needed=2, grid_width=0,
         start_offset=1, max_count=20)}
+    # The cold climb's opening is the single [2,2,2] rung (seed 27 ->
+    #   [3,3,3], start_offset=1 -> one rung below); fail it.
+    dispatcher = _SyntheticDispatcher(
+        {"si": _converging_energy}, fail={("si", (2, 2, 2))})
     flagged = []
 
     outcomes, _ = bip.converge_by_climb(
-        ["si"], configs, {"si": 27.0}, dispatch_round,
+        ["si"], configs, {"si": 27.0}, dispatcher,
         on_non_converged=flagged.append)
 
     assert outcomes["si"] is bip.NON_CONVERGED
@@ -3009,22 +3059,16 @@ def test_climb_missing_continuation_rung_is_non_converged():
     """When a continuation rung fails to come back, the climb cannot
     advance, so the material stops NON_CONVERGED instead of
     re-dispatching the failing mesh forever."""
-    calls = {"n": 0}
-
-    def dispatch_round(mesh_lists):
-        calls["n"] += 1
-        if calls["n"] == 1:                  # round 0 runs the seed
-            return {material: [bip.Rung(mesh, 0.0)
-                               for mesh in meshes]
-                    for material, meshes in mesh_lists.items()}
-        return {material: [] for material in mesh_lists}   # then fail
     configs = {"si": _cubic_config(
         mesh_climb.CLIMB, flat_needed=2, grid_width=0,
         start_offset=1, max_count=20)}
+    # The opening [2,2,2] runs; the first continuation [3,3,3] fails.
+    dispatcher = _SyntheticDispatcher(
+        {"si": _converging_energy}, fail={("si", (3, 3, 3))})
     flagged = []
 
     outcomes, _ = bip.converge_by_climb(
-        ["si"], configs, {"si": 27.0}, dispatch_round,
+        ["si"], configs, {"si": 27.0}, dispatcher,
         on_non_converged=flagged.append)
 
     assert outcomes["si"] is bip.NON_CONVERGED

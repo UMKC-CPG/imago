@@ -1816,19 +1816,35 @@ producer.
 
 The parallelism inverts cleanly. Within one material the rungs
 are serial -- rung N+1's mesh is not known until rung N's energy
-is judged -- but across materials the climbs are independent, so
-they run concurrently. The natural shape is round-based: each
-continuation round submits the next rung for every material still
-climbing -- at most one unit per material, all dispatched
-together -- waits for the round, judges each, and drops the
-materials that converged or hit the ceiling. (The confident
-mode's opening round is the one exception to the one-per-material
-bound: it lays down its whole small grid at once, below.) Cluster
-throughput is preserved -- many chains climb at once -- while
-each chain stays adaptive. This is a heavier interaction with the
-dispatch layer than the one-shot flight of 6.2, and the
-producer/dispatch wiring for it is elaborated where predict-then-
-verify is specified (7.7).
+is judged -- but across materials the climbs are independent, and
+that independence is total: a chain's next rung depends only on
+its own last energy, never on any other chain's. So no chain need
+ever wait for another. The producer keeps one rung of every
+active chain in the air at once, waits for whichever rung lands
+first, judges that one chain, and -- the moment its energy is in
+hand -- either sends that chain's next rung or retires the chain
+because it converged or hit the ceiling. A chain that finishes a
+rung early climbs on immediately rather than idling until some
+slower chain's rung completes. Cluster throughput is preserved --
+many chains climb at once -- and no chain is ever paced by an
+unrelated one. The confident mode lays down its whole small grid
+at once (below); those grid rungs simply enter the in-flight set
+together and are judged as a group once all have landed.
+
+This is a heavier interaction with the dispatch layer than the
+one-shot flight of 6.2: the producer sends rungs and collects
+them one at a time rather than as a single fan-out, so the
+dispatch core exposes its send-off and its collect as separately
+callable steps (6.2.3). The producer/dispatch wiring for the
+climb is elaborated where predict-then-verify is specified (7.7).
+
+As a chain retires, the workers that were running its rungs fall
+idle, and because retirement is final -- a converged or
+ceiling-stopped chain never re-enters the active set -- the pool
+of idle workers only ever grows over a climb's life. Handing
+those freed workers to the chains still climbing, so a late,
+expensive chain finishes sooner, is a forward extension: it waits
+on a parallel imago and is designed, but not built, in 6.2.11.
 
 The serial dependency is worth paying only when the search is
 genuinely uncertain, so `predictor_confidence` (7.6) gates two
@@ -5201,21 +5217,24 @@ Predict in density, search in mesh, record in density.
       their run dirs persist for the harvest's fingerprint step.
       The *convergence* units are not built here -- the climb
       builds each round's meshes as it runs (step 4).
-4. **Converge.**  Drive every solid through the round-based climb
+4. **Converge.**  Drive every solid through the climb
    (`converge_by_climb`, DESIGN 3.12.5): serial within a solid,
-   parallel across.  Round 0 dispatches each solid's seed mesh(es)
-   (`initial_meshes` from the seed density and mode -- a small
-   parallel grid when confident, one starting rung when cold);
-   each later round reads the rungs so far and, for every still-
-   active solid, either accepts a converged rung, stops at the
-   `max_count` ceiling, or dispatches one more mesh.  A round's
-   meshes all dispatch together as one parallel batch through
-   kaleidoscope's wingbeat seam and run-reuse cache (DESIGN
-   6.2.5); each mesh rides an explicit axial-count k-point file
-   (`build_mesh_unit`, DESIGN 7.7), so a mesh re-run in a later
-   round is a cache hit.  A solid leaves the climb the moment it
-   converges or ceilings, so late solids never hold back the ones
-   already done.  The producer runs no SCF itself.  Each solid's
+   concurrent across, and no solid waiting on another.  Every
+   solid's seed mesh(es) launch at once (`initial_meshes` from the
+   seed density and mode -- a small grid when confident, one
+   starting rung when cold).  Thereafter the producer collects
+   rungs as they land, one at a time: each landing advances the
+   single solid it belongs to -- reading that solid's rungs so far
+   and either accepting a converged rung, stopping at the
+   `max_count` ceiling, or launching one more mesh -- and leaves
+   every other solid untouched.  Each mesh rides an explicit
+   axial-count k-point file (`build_mesh_unit`, DESIGN 7.7)
+   launched through kaleidoscope's wingbeat seam and run-reuse
+   cache (DESIGN 6.2.5), so a mesh re-run later is a cache hit.  A
+   solid leaves the climb the moment it converges or ceilings, and
+   because a solid climbs on the instant its own rung lands, a
+   late, expensive solid never holds back the ones already done.
+   The producer runs no SCF itself.  Each solid's
    outcome is either its **converged rung** (the mesh, its
    energy, and the ascending distinct-mesh ladder below it) or
    `NON_CONVERGED` -- a ceiling, or a rung that failed to run.  A
@@ -6495,8 +6514,8 @@ both expressed in this one model:
   needs cross-unit data flow, Parsl's own futures compose
   -- but that is not required by D13.  The k-point
   convergence climb takes the *other* shape this one
-  model allows: a producer-side control loop that
-  dispatches one round per rung (3.12.5), not a wingbeat
+  model allows: a producer-side control loop that sends
+  and collects one rung at a time (3.12.5), not a wingbeat
   inner loop.  That is a deliberate choice -- Principle
   12 keeps the energy-reading, next-mesh logic in client
   Python -- and 3.12.5 records the reasoning; both shapes
@@ -6514,6 +6533,33 @@ futures have resolved, kaleidoscope returns a
 `FlightReport` (6.2.6); deciding whether the aggregate
 is scientifically acceptable is the client's job, never
 kaleidoscope's.
+
+**Two phases, separately callable.**  Dispatch is two
+steps in sequence: a *send-off* that walks the units,
+reports the cache hits, and hands each miss to the
+executor -- returning one future per unit -- and a
+*collect* that resolves a single future, writes its
+terminal status, and builds its report entry.  The
+ordinary `dispatch` runs send-off and then collects every
+future in unit order, which is the right shape for a
+one-shot fan-out.  But a control-loop client cannot use
+that shape: the climb (3.12.5) must react to *whichever*
+rung lands first, not wait out a whole batch in unit
+order, so it needs to send one rung, wait on that rung
+alone, and send its successor the instant it lands.  Both
+phases are therefore public.  The client sends the units
+it has decided so far, then repeatedly collects the next
+future to finish and decides what to send next; a future
+exposes `done()` -- true once its result is ready -- so
+the client can find which of several outstanding rungs has
+landed without blocking on a particular one.  `dispatch`
+itself is nothing more than send-off followed by
+collecting all, in order: the convenience form of the two
+public steps, kept identical so every existing one-shot
+caller is unchanged.  The domain stays out of the core
+throughout (Principles 9, 12): kaleidoscope moves units
+and reports outcomes; which rung to send after an energy
+lands is the producer's decision alone.
 
 **No error correction in the core -- the custodian
 boundary.**  A natural question is whether kaleidoscope
@@ -7451,11 +7497,12 @@ dest the run actually used.
 When every unit fails this way, no `result.toml` is written, and
 opening a missing one raised `FileNotFoundError`.  A failed or
 result-less unit must be treated as **non-converged** (logged and
-skipped, 5.7), never an uncaught crash: the completion gate
-(`_unit_completed`) reads `status.toml` and skips any unit whose
-status is not a completed run before its `result.toml` is read, so
-the climb's round adapter omits it and the material stops
-non-converged (4e.5).
+skipped, 5.7), never an uncaught crash: the report entry `collect`
+builds from `status.toml` (6.2.3) carries the terminal status, and
+the climb dispatcher's `next_rung` reads it before ever opening a
+`result.toml` -- a unit whose status is not a completed run yields
+the FAILED marker, so the material stops non-converged (4e.5) and no
+missing `result.toml` is opened.
 
 *Follow-on code (for TODO).*  (a) add makeinput `-converg`;
 (b) rewrite `make_producer_options` to emit the dest-keyed, coded
@@ -7463,8 +7510,10 @@ vocabulary above; (c) export `imago.OPTION_KEYS` plus a
 `CACHE_ONLY_KEYS` set from `kaleidoscope.wingbeats`; (d) move the
 partition into `ImagoWingbeat.run` and retire the single-shared-
 options call to `run_structure`; (e) update `_KEY_SCALAR_NAMES`;
-(f) the completion gate (`_unit_completed`) reads `status.toml`
-before any `result.toml`, so a missing one cannot crash the harvest.
+(f) the completion gate reads `status.toml` before any `result.toml`
+-- `collect` records the terminal status in the report entry and the
+climb dispatcher checks it before reading a result -- so a missing one
+cannot crash the harvest.
 
 #### 6.2.11 Cluster dispatch configuration
 
@@ -7841,6 +7890,108 @@ together or not at all.
 A site whose queue policy genuinely requires whole nodes is
 served by `extra_scheduler_options`, which exists for exactly
 this kind of local rule and costs the schema no new setting.
+
+**Reclaiming a retired chain's workers (a forward note).**
+This extension is designed here but *not built*; it waits on a
+parallel imago, and (a)'s job now is only to keep the door to it
+open (the three disciplines at the end).  The climb (3.12.5)
+retires a chain the moment it converges or hits its ceiling, and
+retirement is final -- a retired chain never climbs again.  Under
+the pooled shape the run holds one allocation for its whole life,
+so as chains retire the block goes on holding every core it asked
+for while fewer and fewer of them have work to do.  Handing those
+freed cores to the chains still climbing -- so one late,
+expensive chain (the seed run's `si_cmce`, 28 rungs against the
+others' eight or nine) can finish on several cores instead of
+one -- is reclamation.  It is a *distinct* idea from the
+right-sizing Decision 3 defers, and a cheaper one: right-sizing
+predicts how much a given calculation will need, whereas
+reclamation predicts nothing and merely hands out what is
+demonstrably idle.
+
+What makes it tractable is the same finality that 3.12.5 relies
+on.  The hard half of dynamic resource-sharing is that resources
+come *and go*: a general scheme must preempt, rebalance, and
+guard against two jobs each holding half of what the other needs.
+None of that arises here, because a retired chain never returns,
+so the count of idle cores only ever grows over a climb's life.
+An allocation of freed cores made now can never need to be taken
+back, because nothing will arrive to reclaim it.  No preemption,
+no rebalancing, no fairness policy, no deadlock -- the climb's
+own shape deletes the whole difficult half of the problem.
+
+The one part that repays a careful reading is the difference
+between a *worker* and a *core*, because reclamation turns on it.
+A core is one physical processor: real, finite, the thing a
+calculation actually consumes.  A Parsl *worker* is a process
+that runs one task at a time and then asks for another; it is a
+consumer of work, not a slice of hardware.  Parsl's bookkeeping
+counts *busy workers* -- worker 7 has a task, so give it no
+other; worker 8 is idle, so it may take the next one -- and it
+never counts cores at all.  The site's `cores_per_worker` is
+arithmetic that *sizes the request* (a block of `w` workers asks
+the scheduler for `w x cores_per_worker` cores, exactly as it
+asks for `w x memory_per_worker` of memory); it is not a limit
+Parsl imposes on a running task, and nothing stops a task from
+using more cores than one.  Today every task runs imago on a
+single core, so Parsl's count of idle workers *happens* to equal
+the count of idle cores.  That equality is a coincidence of the
+one-core-per-task regime, not a fact Parsl maintains.
+
+Reclamation ends the coincidence deliberately.  When two chains
+have retired, the producer sends a surviving chain's next rung as
+one ordinary task whose wingbeat runs imago across, say, three
+cores.  Parsl still sees one busy worker and reports the other
+two idle -- and that report is *true*: those two worker processes
+have no task.  What is no longer true is that idle workers imply
+idle cores, because the three cores those workers would have used
+are the ones the wide rung is running on.  Nothing has been
+deceived; Parsl's number still means exactly what it always meant
+(idle worker processes), it has simply stopped doubling as a core
+count, which was never what it measured.  This is safe because
+Parsl acts on its idle-worker count *only when something submits
+a task*, and during a climb the sole submitter is the producer --
+the very party that did the core arithmetic and knows those cores
+are spoken for.  It will not submit against them.
+
+That safety rests on one condition, and because breaking it fails
+silently the condition must be stated: **during a climb the
+producer must be the only submitter into its pool.**  If anything
+else were to submit, Parsl would place that task on an
+"idle" worker whose cores are in use, two imago processes would
+contend for the same core, and the symptom would be a slowdown
+with no error and no log line naming its cause.  Nothing today
+submits into the climb's pool (the pre-flight is a separate
+phase), so the condition holds; it is written down because a
+future concurrent submitter would break it invisibly.
+
+There is no way to have Parsl keep the core count honestly on our
+behalf.  Its one mechanism for tasks of differing size,
+`MPIExecutor`, partitions an allocation by *whole nodes* -- it is
+built for a task that spans several machines -- whereas our pool
+is many one-core workers packed onto a *single* node, a
+granularity it cannot express.  So the core count has nowhere to
+live but the producer, which is why reclamation is a producer
+concern and not a Parsl configuration.
+
+Three disciplines, cost-free today, keep (a) able to grow this
+later; skipping them would force a retrofit:
+
+- *A unit may carry a resource request the core round-trips but
+  never interprets*, exactly as `kind` (6.2.9) is carried and not
+  read.  The width a rung wants rides on the unit; kaleidoscope
+  honours it and stays ignorant of what it means (Principle 12).
+- *The producer tracks the set of outstanding chains, not a fixed
+  worker-per-chain correspondence.*  What to send next, and how
+  wide, is computed from what has retired at the moment of
+  sending -- so the loop must not bake in "one chain, one
+  worker."
+- *The width is recorded but is never part of the cache key.*  A
+  rung run on one core and the same rung run on three are the
+  same physics and must remain one cache entry (6.2.5), or every
+  change of width would silently re-run a ladder.  The width is a
+  property of a *cost observation* (section 8), so it belongs in
+  `status.toml`, never in `cache_key.toml`.
 
 **Decision 4 -- the generator lives in the dispatcher
 package.**  The helper that turns (site facts + per-run
@@ -9641,17 +9792,22 @@ silently altered the mesh is caught rather than mis-recorded.  (It
 is the same resolved-mesh line whose companion `RESOLVED_KP_CLASSES`
 emit validates the producer's axis-class port, 2.7.)
 
-**The round adapter.**  The climb's `dispatch_round` (3.12.5) is a
-thin producer-side adapter over the ordinary dispatch layer.  Given
-one round's `{material: [mesh, ...]}`, it builds one CalcUnit per
-mesh (below), assembles them into a single flat Flight for the
-round, runs the driver-side prepare pass and dispatches it (6.2.5 /
-6.2.11), then reads each completed unit's `(mesh, total_energy)`
-back into `{material: [rung, ...]}`.  The dispatch core is unchanged
-and domain-ignorant (Principle 12): it runs whatever units it is
-handed.  A mesh already run in an earlier round is a cache hit
-(6.2.5), so re-dispatching it costs nothing and the climb never has
-to track what it has already run.
+**The climb dispatcher.**  The climb's dispatcher (3.12.5) is a
+thin producer-side adapter over the ordinary dispatch layer,
+exposing two calls the climb loop drives (4e.5).  `send(mesh_lists)`
+takes `{material: [mesh, ...]}`, builds one CalcUnit per mesh
+(below), appends them to the one Flight that spans the whole climb,
+runs the driver-side prepare pass on just those new units, and
+launches them without waiting (`send_off`, 6.2.3).  `next_rung()`
+blocks until the next rung lands (`collect_next`, 6.2.3), reads its
+completed unit's `(mesh, total_energy)` into a rung, and returns
+`(material, rung)` -- or `(material, FAILED)` for a unit that did
+not complete.  Because one Flight spans the climb and its unit list
+accretes as rungs are decided, `flight.toml` records every rung
+asked for; the dispatch core stays domain-ignorant (Principle 12),
+running whatever units it is handed.  A mesh already run is a cache
+hit (6.2.5), so re-launching it costs nothing and the climb never
+has to track what it has already run.
 
 **Splitting the builder.**  The density-era flight builder (6.2.8;
 the algorithm above) does prediction AND grid-laying in one call.
@@ -9667,8 +9823,8 @@ but lays its own rungs:
   the harvest as a plain dict the producer stamps per solid (7.8).
 - `build_mesh_unit` builds one explicit-mesh CalcUnit -- the `scfkp`
   option, the `kpt-mesh` tag, and the same cache identity (6.2.1)
-  the density units used -- and the adapter calls it once per mesh
-  per round.
+  the density units used -- and the dispatcher calls it once per
+  mesh as the climb sends it.
 
 The single-call grid builder was the density-era special case the
 climb generalizes: its confidence-widened grid becomes the confident

@@ -42,7 +42,8 @@ import pytest
 from kaleidoscope import (
     Flight, CalcUnit, KeyFields, KeyFile, WingbeatOutcome,
     FlightReport, ReportEntry, KaleidoscopeError, SweepRecord,
-    dispatch, make_executor, register_wingbeat, resolve_wingbeat,
+    dispatch, send_off, collect_next,
+    make_executor, register_wingbeat, resolve_wingbeat,
     validate_flight, unit_run_dir,
     is_cache_hit, cache_key_matches, write_cache_key,
     read_status, write_status, ImagoWingbeat,
@@ -574,6 +575,111 @@ def test_on_outcome_callback_fires_per_unit(tmp_path):
                         on_outcome=seen.append)
     dispatch(flight)
     assert [e.id for e in seen] == ["u0", "u1", "u2"]
+
+
+# ==============================================================
+#  13.5 -- the two public phases: send_off / collect_next
+#  (DESIGN 6.2.3).  These are what a control-loop client (the
+#  k-point climb) drives directly instead of the one-shot
+#  dispatch wrapper.
+# ==============================================================
+
+def test_send_off_then_collect_next_drains_all(tmp_path,
+                                               parsl_config):
+    """The two phases compose: send_off launches the units and returns
+    one (unit, future) pair each without waiting, and collect_next
+    takes whichever has landed until the outstanding list empties.
+    Every unit reaches the terminal 'done' status, on both
+    executors."""
+    register_wingbeat("fake_ok", CountingRunner())
+    units = [CalcUnit(id=f"u{i}", structure="s", wingbeat="fake_ok",
+                      key_fields=KeyFields(scalars={"v": i}))
+             for i in range(3)]
+    flight = Flight(root=str(tmp_path), units=units,
+                    parsl_config=parsl_config)
+    executor = make_executor(parsl_config)
+    try:
+        outstanding = send_off(flight, flight.units, executor,
+                               force=False)
+        assert len(outstanding) == 3
+
+        collected = []
+        while outstanding:
+            unit, entry, outstanding = collect_next(
+                flight, outstanding)
+            collected.append((unit.id, entry.status))
+    finally:
+        executor.close()
+
+    assert sorted(collected) == [("u0", "done"), ("u1", "done"),
+                                 ("u2", "done")]
+
+
+def test_send_off_futures_are_done_on_the_local_executor(tmp_path):
+    """The local executor runs each unit synchronously in send_off, so
+    every future it returns is already done() -- which is what lets a
+    local climb never reach collect_next's poll sleep."""
+    register_wingbeat("fake_ok", CountingRunner())
+    units = [CalcUnit(id=f"u{i}", structure="s", wingbeat="fake_ok",
+                      key_fields=KeyFields(scalars={"v": i}))
+             for i in range(2)]
+    flight = Flight(root=str(tmp_path), units=units)
+    executor = make_executor(None)              # LocalExecutor
+    try:
+        outstanding = send_off(flight, flight.units, executor,
+                               force=False)
+        assert all(future.done() for _unit, future in outstanding)
+    finally:
+        executor.close()
+
+
+def test_send_off_returns_a_cache_hit_as_a_done_future(tmp_path):
+    """A unit already 'done' with a matching key is a cache hit:
+    send_off submits no task and hands back an already-done future, so
+    collect_next reports it from the existing status.toml without
+    re-running the wingbeat (hits and misses sit uniformly in the
+    outstanding set)."""
+    wingbeat = CountingRunner()
+    register_wingbeat("fake_count", wingbeat)
+    unit = CalcUnit(id="u1", structure="s.skl", wingbeat="fake_count",
+                    key_fields=KeyFields(scalars={"v": 1}))
+    flight = Flight(root=str(tmp_path), units=[unit])
+    dispatch(flight)                            # first run fills cache
+    assert wingbeat.calls == 1
+
+    executor = make_executor(None)
+    try:
+        outstanding = send_off(flight, flight.units, executor,
+                               force=False)
+        assert outstanding[0][1].done() is True
+        _unit, entry, _rest = collect_next(flight, outstanding)
+    finally:
+        executor.close()
+    assert entry.status == "done"
+    assert wingbeat.calls == 1                  # hit: not re-run
+
+
+def test_collect_next_streams_the_outcome_hook(tmp_path):
+    """collect_next fires the flight's on_outcome hook as each unit is
+    collected (in landing order), so a control-loop consumer sees each
+    outcome the moment it lands rather than after the whole batch."""
+    register_wingbeat("fake_ok", CountingRunner())
+    seen = []
+    units = [CalcUnit(id=f"u{i}", structure="s", wingbeat="fake_ok",
+                      key_fields=KeyFields(scalars={"v": i}))
+             for i in range(3)]
+    flight = Flight(root=str(tmp_path), units=units,
+                    on_outcome=seen.append)
+    executor = make_executor(None)
+    try:
+        outstanding = send_off(flight, flight.units, executor,
+                               force=False)
+        while outstanding:
+            _unit, _entry, outstanding = collect_next(
+                flight, outstanding)
+    finally:
+        executor.close()
+    assert sorted(e.id for e in seen) == ["u0", "u1", "u2"]
 
 
 # ==============================================================

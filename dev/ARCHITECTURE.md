@@ -1945,22 +1945,26 @@ and the code is C100 (done).
 The producer's interaction with kaleidoscope is not always a
 single fan-out.  The predict-then-verify convergence search
 (DESIGN 3.12) runs the k-point rungs as an adaptive climb: the
-producer dispatches one round of calculations -- at most one
-mesh per material for a climb, a small grid for a confident
-prediction -- reads the energies back, decides each material's
-next mesh, and dispatches the next round, until every material
-converges or hits a ceiling.  This makes the producer an
-*iterative* kaleidoscope client (many dispatch rounds) rather
-than a single-batch one.  It does not change the flight layer:
-each round is still a flat list of independent `CalcUnit`s, and
-the loop that reads energies and chooses the next mesh lives
-entirely in the producer's Python.  That is precisely the
-division Principle 12 draws -- dependent, per-unit iteration in
-client code, the dispatcher dumb -- so the climb needs no
-dispatch-side machinery, only the producer driving kaleidoscope
-round by round.  The verify step of the guidance dataspace
-(section 10) is correspondingly a confidence-gated grid-or-
-climb, not a single fixed grid.
+producer launches every material's seed rung (a small grid for
+a confident prediction) at once, then collects rungs as they
+land and, for each landing, reads that one material's energies
+back, decides its next mesh, and launches it -- so a material
+climbs on the instant its own rung lands and no material waits
+on another, until each converges or hits a ceiling.  This makes
+the producer an *iterative* kaleidoscope client -- a running
+stream of sends and collects -- rather than a single-batch one.
+Its only addition to the flight layer is a small, additive one:
+the dispatch's two phases, send-off and collect, exposed as
+separately callable steps (DESIGN 6.2.3).  It adds no dispatch-
+side domain machinery -- each unit is still a flat, independent
+`CalcUnit`, and the loop that reads energies and chooses the
+next mesh lives entirely in the producer's Python.  That is
+precisely the division Principle 12 draws -- dependent, per-unit
+iteration in client code, the dispatcher dumb -- so the climb
+needs only the producer driving kaleidoscope one rung at a time.
+The verify step of the guidance dataspace (section 10) is
+correspondingly a confidence-gated grid-or-climb, not a single
+fixed grid.
 
 ### 9.8 Open architectural questions
 
@@ -2031,6 +2035,21 @@ What remains open:
 
   Recorded at VISION Goals 4/6/7 and DESIGN 6.2.11; the
   producer change-over and the generator are TODO C100.
+
+- **Reclaiming a retired chain's workers -- DESIGNED,
+  deferred (DESIGN 6.2.11).**  As the k-point climb retires
+  materials, the pooled block goes on holding cores whose
+  workers now have no work; handing those freed cores to the
+  chains still climbing lets a late, expensive chain finish
+  on several cores instead of one.  It is distinct from the
+  per-unit right-sizing above -- it predicts nothing, merely
+  handing out what retirement has demonstrably freed -- and,
+  like right-sizing, waits on a parallel imago.  The producer
+  keeps the core count itself (Parsl counts busy workers, not
+  cores), so it needs no dispatch-side machinery; the design,
+  the safety argument, and the three disciplines that keep
+  the climb's wait-for-any code able to grow it are all in
+  DESIGN 6.2.11.
 
 ## 10. Historical Guidance Dataspace
 

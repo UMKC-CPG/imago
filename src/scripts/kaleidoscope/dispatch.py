@@ -19,9 +19,23 @@ Two executors realize the dispatch:
   Parsl ``Config``.  Choosing the executor by the presence of
   ``parsl_config`` keeps Parsl central (VISION Goal 4) without
   making it a hard import-time dependency.
+
+Dispatch is two phases, and both are public (DESIGN 6.2.3): a
+``send_off`` that launches a chosen set of units and returns one
+future per unit without waiting, and a ``collect`` that resolves a
+single future into its terminal status and report entry.  ``dispatch``
+itself is just ``send_off`` followed by collecting every future in
+unit order -- the convenience form for a one-shot fan-out.  A
+control-loop client (the k-point climb) instead sends the rungs it
+has decided and uses ``collect_next`` to take whichever lands first
+and send that chain's successor at once, never waiting out a whole
+batch.  ``collect_next`` is domain-ignorant -- it polls each future's
+``done()`` and knows only futures, never k-points -- so the choice of
+what to send next stays in the client (Principle 12).
 """
 
 import os
+import time
 from datetime import datetime
 
 from .model import FlightReport, ReportEntry
@@ -30,6 +44,14 @@ from .workspace import (unit_run_dir, validate_flight,
                         read_status)
 from .cache import is_cache_hit, write_cache_key
 from .wingbeats import resolve_wingbeat
+
+
+# How long ``collect_next`` sleeps between scans of the outstanding
+#   futures when none has landed yet (seconds).  The local executor
+#   finishes synchronously, so its futures are already done and this
+#   sleep is never reached; only a real cluster wait pays it, where a
+#   half-second against multi-second-to-minutes rungs is negligible.
+_COLLECT_POLL_SECONDS = 0.5
 
 
 class TaskLost(Exception):
@@ -89,7 +111,9 @@ def _execute_wingbeat_task(unit, wingbeat_dir, default_wingbeat):
 class _LocalFuture:
     """A trivial future for the synchronous executor: it holds a
     value or an error and re-raises the error on ``result()``,
-    mirroring the contract of a real future."""
+    mirroring the contract of a real future -- ``result()`` and
+    ``done()``.  With no value and no error it is the already-done
+    placeholder a cache hit returns (:func:`completed_future`)."""
 
     def __init__(self, value=None, error=None):
         self._value = value
@@ -99,6 +123,13 @@ class _LocalFuture:
         if self._error is not None:
             raise self._error
         return self._value
+
+    def done(self):
+        # The work already ran synchronously (or this is a cache-hit
+        #   placeholder), so a local future is born finished.  This
+        #   is what lets a local run never reach collect_next's poll
+        #   sleep -- its futures are always ready on the first scan.
+        return True
 
 
 class LocalExecutor:
@@ -134,6 +165,13 @@ class _ParslFuture:
             if _is_lost(err):
                 raise TaskLost(str(err)) from err
             raise
+
+    def done(self):
+        # Delegate to the underlying Parsl AppFuture (a
+        #   concurrent.futures.Future), so a caller can poll for
+        #   completion without blocking on result() -- this is what
+        #   collect_next needs to find whichever rung landed first.
+        return self._app_future.done()
 
 
 class ParslExecutor:
@@ -225,12 +263,72 @@ def report_entry_from_status(unit, wingbeat_dir):
     )
 
 
-def _collect(flight, unit, future):
-    """Resolve one future, recording its terminal status.  A
-    ``TaskLost`` becomes the ``lost`` status; any other exception
+def completed_future():
+    """An already-done future for a cache hit: no task was submitted,
+    so ``result()`` is a no-op and ``done()`` is True.  Returning one
+    lets a hit sit in the outstanding set exactly like a miss; the
+    entry is rebuilt from the existing ``status.toml`` when the hit is
+    collected (DESIGN 6.2.3)."""
+    return _LocalFuture()
+
+
+def dispatch_unit(flight, unit, executor, force):
+    """Launch ONE unit and return its future (PSEUDOCODE 13.5).  A
+    cache hit submits no task and returns an already-done future
+    (:func:`completed_future`); a miss is prepared -- run directory,
+    cache-key snapshot, ``queued`` status -- and handed to the
+    executor.
+
+    ``force`` bypasses the run-reuse cache so even a still-valid
+    ``done`` unit re-launches (DESIGN 6.2.5).  It rides here, on the
+    driver, because the cache it governs is the driver's -- not the
+    executor's -- so it is independent of which executor runs the
+    unit."""
+    wingbeat_dir = unit_run_dir(flight, unit)
+    if not force and is_cache_hit(unit, wingbeat_dir):
+        return completed_future()
+    _prepare_miss(flight, unit, wingbeat_dir)
+    return executor.submit_unit(
+        unit, wingbeat_dir, flight.default_wingbeat)
+
+
+# ------------------------------------------------------------------
+#  The flight driver -- two public phases, and the one-shot wrapper
+# ------------------------------------------------------------------
+
+def send_off(flight, units, executor, force=False):
+    """Phase 1, callable on its own: launch ``units`` and return one
+    ``(unit, future)`` pair per unit WITHOUT waiting on any of them
+    (DESIGN 6.2.3).  ``units`` is the subset to launch now --
+    ``flight.units`` for a one-shot fan-out, one climb round's newly
+    decided rungs for the adaptive climb (PSEUDOCODE 4e.7).
+
+    The flight's WHOLE unit list is (re)serialized here, not just the
+    launched subset, so ``flight.toml`` records every unit asked for
+    even as a climb's list grows across successive sends (DESIGN
+    7.7)."""
+    validate_flight(flight)
+    os.makedirs(flight.root, exist_ok=True)
+    serialize_flight(flight)
+    outstanding = []                  # (unit, future)
+    for unit in units:
+        future = dispatch_unit(flight, unit, executor, force)
+        outstanding.append((unit, future))
+    return outstanding
+
+
+def collect(flight, unit, future):
+    """Phase 2 for a SINGLE unit: resolve its future, write its
+    terminal status, build its report entry, and fire the optional
+    per-unit outcome hook (DESIGN 6.2.3, 6.2.6).
+
+    A ``TaskLost`` becomes the ``lost`` status; any other exception
     (including a wingbeat that raised on the worker) becomes
-    ``failed``; a clean return leaves the terminal status the
-    task itself already wrote (DESIGN 6.2.3, 6.2.4)."""
+    ``failed``; a clean return leaves the terminal status the task
+    itself already wrote (DESIGN 6.2.3, 6.2.4).  The outcome hook
+    fires in LANDING order -- the order units are actually collected,
+    not unit order -- so a control-loop consumer (the climb) sees each
+    rung the moment it is collected."""
     wingbeat_dir = unit_run_dir(flight, unit)
     try:
         future.result()
@@ -242,72 +340,64 @@ def _collect(flight, unit, future):
         write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
                      status="failed", finished_at=now_iso(),
                      message=str(err))
-    return report_entry_from_status(unit, wingbeat_dir)
-
-
-def _fire(flight, entry):
-    """Invoke the optional per-unit outcome callback."""
+    entry = report_entry_from_status(unit, wingbeat_dir)
     if flight.on_outcome is not None:
         flight.on_outcome(entry)
+    return entry
 
 
-# ------------------------------------------------------------------
-#  The flight driver
-# ------------------------------------------------------------------
+def collect_next(flight, outstanding):
+    """Wait for WHICHEVER outstanding rung lands first, collect it,
+    and return ``(unit, entry, remaining)`` -- the landed unit, its
+    report entry, and the outstanding list with that unit removed
+    (DESIGN 6.2.3).
+
+    Domain-ignorant: it polls each future's ``done()`` and knows only
+    futures, never k-points, so a control-loop client (the climb)
+    keeps the decision of what to send next to itself (Principle 12).
+    A cache hit is an already-done future, so it is returned first
+    with no wait.  The local executor's futures are always done, so
+    the poll sleep below is reached only on a real cluster wait, where
+    a fraction of a second against multi-second rungs is negligible."""
+    while True:
+        for index, (unit, future) in enumerate(outstanding):
+            if future.done():
+                entry = collect(flight, unit, future)
+                remaining = (outstanding[:index]
+                             + outstanding[index + 1:])
+                return unit, entry, remaining
+        time.sleep(_COLLECT_POLL_SECONDS)
+
 
 def dispatch(flight, executor=None, force=False):
     """Run every unit in the flight and return a FlightReport
-    (DESIGN 6.2.3).  Cache hits are reported straight from their
-    existing ``status.toml``; misses are prepared, dispatched
-    through the executor, and gathered with per-future exception
-    capture so no single failure aborts the batch.  Entries are
-    returned in unit order.
+    (DESIGN 6.2.3): the one-shot convenience form of the two public
+    phases -- send every unit off, then collect them all in unit
+    order.  Behaviour is identical to the pre-split driver, so every
+    existing caller is unchanged; a control-loop client (the climb)
+    uses :func:`send_off` and :func:`collect_next` directly instead.
 
-    When ``executor`` is None one is chosen from the flight:
-    a ``ParslExecutor`` if it carries a ``parsl_config``, else a
+    When ``executor`` is None one is chosen from the flight: a
+    ``ParslExecutor`` if it carries a ``parsl_config``, else a
     ``LocalExecutor``.  A caller may pass an executor explicitly
-    (tests do, to pin the path).
+    (tests do, to pin the path; the climb does, to share one warm
+    pool across the whole run).
 
-    ``force`` bypasses the run-reuse cache (DESIGN 6.2.5): when
-    set, every unit is re-prepared and re-dispatched even if a
-    completed ``status.toml`` already exists, so a caller can
-    force a fresh run.  The switch lives here, on the driver,
-    because the cache it governs is owned by the driver -- not
-    by the executor and not by any one client."""
-    validate_flight(flight)
-    os.makedirs(flight.root, exist_ok=True)
-    serialize_flight(flight)
-
+    ``force`` bypasses the run-reuse cache (DESIGN 6.2.5): every unit
+    re-launches even if a completed ``status.toml`` already exists.
+    The switch lives here, on the driver, because the cache it governs
+    is owned by the driver -- not by the executor and not by any one
+    client."""
     owns_executor = executor is None
     if executor is None:
         executor = make_executor(flight.parsl_config)
-
-    results = [None] * len(flight.units)
     try:
-        # Pass 1: report hits immediately, dispatch misses.
-        pending = []                  # (index, unit, future)
-        for index, unit in enumerate(flight.units):
-            wingbeat_dir = unit_run_dir(flight, unit)
-            # ``force`` skips the cache check so the unit always
-            #   re-runs, even when a completed status.toml exists.
-            if not force and is_cache_hit(unit, wingbeat_dir):
-                entry = report_entry_from_status(unit, wingbeat_dir)
-                results[index] = entry
-                _fire(flight, entry)
-            else:
-                _prepare_miss(flight, unit, wingbeat_dir)
-                future = executor.submit_unit(
-                    unit, wingbeat_dir, flight.default_wingbeat
-                )
-                pending.append((index, unit, future))
-
-        # Pass 2: gather the dispatched units.
-        for index, unit, future in pending:
-            entry = _collect(flight, unit, future)
-            results[index] = entry
-            _fire(flight, entry)
+        outstanding = send_off(flight, flight.units, executor, force)
+        # Collect in send order, which is unit order; the outcome
+        #   hook fires inside collect, once per entry.
+        entries = [collect(flight, unit, future)
+                   for unit, future in outstanding]
     finally:
         if owns_executor:
             executor.close()
-
-    return FlightReport(entries=results)
+    return FlightReport(entries=entries)
