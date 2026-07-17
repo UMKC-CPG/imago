@@ -283,6 +283,14 @@ class ScriptSettings:
         self.loen_max_neigh = 50
         self.loen_cutoff = 9.0
         self.loen_angle_squeeze = 0.85
+        # True when this build fills the LOEN block from an explicit
+        #   -loeninput set -- i.e. it IS a loen-descriptor build.
+        #   Such a build must not run the fingerprint match, because
+        #   the match would compute a descriptor by launching another
+        #   loen-descriptor build (DESIGN 5.6.5 / 5.10.2), invoking
+        #   this build within itself.  The guard lives in
+        #   _obtain_pot_info; the default here is a normal build.
+        self.loen_input_mode = False
 
         # Exchange correlation mesh.
         self.xc_code = rc["xc_code"]
@@ -1400,6 +1408,10 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             self.loen_max_neigh = int(max_neigh)
             self.loen_cutoff = float(cutoff)
             self.loen_angle_squeeze = float(squeeze)
+            # An explicit -loeninput set marks this as a
+            #   loen-descriptor build, so the fingerprint match is
+            #   suppressed downstream (DESIGN 5.6.5 / 5.10.2).
+            self.loen_input_mode = True
         if args.pdb:
             self.pdb = 1
         if args.cif_flag:
@@ -4848,13 +4860,26 @@ def _obtain_pot_info(settings, sc):
                 #      query for the fingerprint match (precedence 2).
                 #      Skipped -- leaving all three None so the pick
                 #      falls to the override or the default entry -- when
-                #      matching is off or a -pot override already settles
-                #      the choice, which also avoids a needless loen run.
+                #      matching is off, a -pot override already settles
+                #      the choice, or this is a loen-descriptor build,
+                #      each of which also avoids a needless loen run.
+                #
+                #      The loen-build skip is what closes the recursion
+                #      (DESIGN 5.6.5 / 5.10.2): in the file-dictated
+                #      regime the match may compute a bispectrum query by
+                #      launching a loen-descriptor build -- another
+                #      makeinput run with -loeninput -- whose own pick
+                #      would launch the next, without end.  A -loeninput
+                #      build (settings.loen_input_mode) therefore never
+                #      matches; it takes the default entry, which is
+                #      correct because the bispectrum is geometric and
+                #      the potential is irrelevant to the descriptor.
                 matcher = None
                 sub_spec = None
                 query = None
                 if (fingerprinting_enabled
-                        and settings.pot_override is None):
+                        and settings.pot_override is None
+                        and not settings.loen_input_mode):
                     matcher, sub_spec, query = _resolve_species_query(
                         settings, sc, ipdb, aug_db, element, species,
                         elem_name, user_scheme_active, reduce_sub_spec,

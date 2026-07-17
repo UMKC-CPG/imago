@@ -2730,6 +2730,50 @@ imports its neighbours from `$IMAGO_BIN`).
   identical.  **The step-size rule is the larger prize** (C118
   inc 6, C116).
 
+- [ ] C121. A loen-descriptor build must skip the fingerprint
+  match (makeinput recursion fix).  DESIGN 5.6.5 + 5.10.2 first,
+  then PSEUDOCODE (the potential-resolution function), then the
+  code in `makeinput.py` (`_obtain_pot_info`).  Chain-compliant:
+  DESIGN + PSEUDOCODE before the guard is coded.
+
+  **The failure mode.**  makeinput builds the loen input -- the
+  provisional `imago.dat` a loen run reads to compute a
+  bispectrum descriptor -- by running `makeinput -loeninput`.
+  That build runs the 5.6.5 fingerprint match like any other, and
+  in the file-dictated regime the match asks the database for its
+  preferred fingerprint; when that is bispectrum, computing the
+  query runs a loen descriptor computation
+  (`loen_site_descriptors` in makegroups), whose first step is
+  another `makeinput -loeninput`.  So the build invokes itself,
+  each level nesting a `loen_pick_work/` inside the last until the
+  path overflows (`OSError Errno 36, File name too long`).  The
+  per-process descriptor cache never helps because every level is
+  a fresh subprocess.
+
+  **Why it is a second-run failure.**  An empty database has no
+  preferred bispectrum record, so the match returns early and no
+  loen run is triggered -- the first seed run into a fresh
+  database succeeds and harvests potentials WITH `preferred =
+  true` bispectrum fingerprints.  Every later run reads that
+  populated database and takes the recursive path.  (Confirmed:
+  the first success stamped `share/atomicPDB/si/s_gaussian_pot`
+  with preferred bispectrum records; the next run recursed at the
+  loen pre-flight.)
+
+  **The fix.**  A loen-descriptor build -- a makeinput run given
+  `-loeninput` -- always skips the fingerprint match and takes the
+  default-tagged entry (5.6.5 step 3).  This is correct, not a
+  compromise: the bispectrum is geometric, so the potential the
+  loen run sees is irrelevant to the descriptor it produces
+  (5.10.2).  The guard belongs in `_obtain_pot_info`, keyed on
+  `-loeninput`, alongside the existing `-nofingerprint` and `-pot`
+  skips.  `-loeninput` has exactly two callers and both are
+  loen-descriptor builds -- the producer's loen pre-flight unit
+  (`build_initial_potentials.py`) and the makegroups descriptor
+  sub-run (`makegroups._run_makeinput`) -- so one guard on that
+  flag closes both entry points at the single place the recursion
+  is born.
+
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 
 - [ ] C62. Implement the element-aware bispectrum per

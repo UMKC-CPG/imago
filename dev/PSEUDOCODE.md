@@ -4377,12 +4377,18 @@ overruling the user.
 ```
 function pickManifestEntry(species_atoms, element, db,
         pot_override, fingerprinting_enabled,
+        building_loen_input,
         user_scheme, structure, grouping_descriptors):
     # species_atoms          -- atom indices in this
     #                           (element, species) bucket
     # db                     -- the element's ElementDatabase
     # pot_override           -- the -pot LABEL value, or None
     # fingerprinting_enabled -- False under -nofingerprint
+    # building_loen_input    -- True when makeinput is building
+    #                           the loen input itself (a
+    #                           -loeninput run, DESIGN 5.10.2);
+    #                           skips the match so the build
+    #                           cannot invoke itself (below)
     # user_scheme            -- the active matcher object the
     #                           user grouped with (carries
     #                           active_sub_spec), or None.  In
@@ -4412,6 +4418,17 @@ function pickManifestEntry(species_atoms, element, db,
     # -nofingerprint (and the reduced flow, 11.3.0): skip
     # the match entirely.
     if not fingerprinting_enabled:
+        return default_entry(db)
+
+    # A loen-descriptor build skips the match too (DESIGN
+    # 5.6.5 step 2 / 5.10.2).  In the file-dictated regime the
+    # match may run a loen descriptor computation, whose own
+    # first step is a -loeninput build exactly like this one --
+    # so matching here would invoke the build within itself,
+    # without end.  Take the default entry: the bispectrum is
+    # geometric, so the potential is irrelevant to the
+    # descriptor this build feeds.
+    if building_loen_input:
         return default_entry(db)
 
     # Precedence 2: a single best-effort fingerprint match.
@@ -4641,9 +4658,12 @@ function group_by_bispectrum(skeleton_path, sub_spec,
 
     # 2. First makeinput: a provisional imago.dat with no
     #    grouping.  The LOEN_INPUT_DATA block carries the
-    #    sub_spec via matcher.to_loen_input; the potential
-    #    is irrelevant (bispectrum is geometric), so the
-    #    default-tagged entry is used and no -pot is given.
+    #    sub_spec via matcher.to_loen_input.  This is a
+    #    -loeninput build, so the fingerprint match is skipped
+    #    (building_loen_input, pickManifestEntry above) and each
+    #    atom takes the default entry -- the potential is
+    #    irrelevant (bispectrum is geometric), and the skip is
+    #    what keeps this build from invoking itself.
     run_makeinput(skeleton_path,
         loen_params = matcher.to_loen_input(sub_spec))
 
@@ -4766,6 +4786,8 @@ function emitInitialPotentials(structure, settings,
                                         .pot_override,
                 fingerprinting_enabled =
                     fingerprinting_enabled,
+                building_loen_input  =
+                    (settings.loeninput is not None),
                 user_scheme          = user_scheme,
                 structure            = structure,
                 grouping_descriptors =

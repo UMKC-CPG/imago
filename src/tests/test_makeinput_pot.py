@@ -575,3 +575,44 @@ class TestNoFingerprintFlag:
         settings = ScriptSettings.__new__(ScriptSettings)
         args = settings._args_from_options({"no_fingerprint": True})
         assert args.no_fingerprint is True
+
+
+# ============================================================
+#  -loeninput marks a loen-descriptor build (DESIGN 5.6.5 / 5.10.2)
+# ============================================================
+
+class TestLoenInputMode:
+    """A ``-loeninput`` build is a loen-descriptor build: it fills the
+    LOEN block to compute a bispectrum descriptor, so it MUST skip the
+    fingerprint match.  Were it to match, the file-dictated regime
+    could launch another loen-descriptor build to compute its query,
+    which would launch the next, without end (DESIGN 5.6.5 / 5.10.2).
+    The flag that drives the skip in ``_obtain_pot_info`` is
+    ``loen_input_mode``, and it must be set on BOTH settings paths --
+    the producer's ``from_options`` (its loen pre-flight unit) and the
+    makegroups descriptor sub-run's ``from_command_line``."""
+
+    def test_default_build_is_not_loen_mode(self):
+        # A normal build leaves the flag off, so the fingerprint match
+        #   runs as usual.
+        settings = ScriptSettings.from_options({})
+        assert settings.loen_input_mode is False
+
+    def test_loeninput_options_set_loen_mode(self):
+        # The producer's path: a loen pre-flight unit carries
+        #   "loeninput" in its options, which marks the build so
+        #   _obtain_pot_info skips the match rather than recursing.
+        settings = ScriptSettings.from_options(
+            {"loeninput": [1, 8, 8, 50, 9.0, 0.85]})
+        assert settings.loen_input_mode is True
+        # The six values still reach the LOEN block.
+        assert settings.loen_code == 1
+        assert settings.loen_twoj1 == 8
+        assert settings.loen_twoj2 == 8
+
+    def test_loeninput_cli_sets_loen_mode(self):
+        # The makegroups descriptor sub-run's path: the same flag is
+        #   set from the command line.
+        settings = ScriptSettings.from_command_line(
+            ["-loeninput", "1", "8", "8", "50", "9.0", "0.85"])
+        assert settings.loen_input_mode is True

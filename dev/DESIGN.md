@@ -4251,8 +4251,10 @@ a `-reduce`-grouped one.  Precedence, top to bottom:
    `-pot` is a deliberate override and a silent fallback
    would mask user intent.
 2. **Fingerprint match** (enabled by default; disabled for
-   the whole run by `-nofingerprint`, which sends every species
-   straight to step 3).  Match is a single best-effort lookup,
+   the whole run by `-nofingerprint`, and skipped for a
+   loen-descriptor build -- both send every species straight to
+   step 3, the loen-build case for the reason below).  Match is
+   a single best-effort lookup,
    not a search: it picks exactly one descriptor family and one
    `sub_spec`, computes one query, and accepts a miss.  Which
    family and `sub_spec` are used depends on the regime (5.6.4):
@@ -4277,6 +4279,23 @@ a `-reduce`-grouped one.  Precedence, top to bottom:
      query in-process from geometry.  No loen run is triggered
      for an element whose database carries no preferred
      bispectrum record.
+
+   A **loen-descriptor build skips this match entirely.**
+   makeinput builds the loen input itself -- the provisional
+   `imago.dat` a loen run reads to compute a bispectrum
+   descriptor (5.10.2) -- by running makeinput with `-loeninput`.
+   That build must not perform the match: in the file-dictated
+   regime the match may need a bispectrum descriptor, which is
+   computed by a loen run, whose own first step is exactly this
+   build.  A match here would therefore invoke the build within
+   itself, without end.  So a `-loeninput` build always takes the
+   default-tagged entry (step 3).  This is not a compromise --
+   the bispectrum is geometric, so the potential the loen run
+   sees is irrelevant to the descriptor it produces (5.10.2) --
+   and it closes the one path by which potential resolution could
+   reach back into itself.  This skip is the third condition that
+   sends a species to step 3, beside `-nofingerprint` and a
+   `-pot` override.
 
    In both regimes, once the family and `sub_spec` are fixed:
    ask the matcher to summarize the species' atoms into one
@@ -5530,12 +5549,16 @@ skeleton untouched.
    skeleton with no environment grouping; the types are
    whatever the skeleton already declares (for case 1,
    typically every atom its own type in P1).  This writes
-   a provisional `imago.dat`.  The potential each atom
-   receives is irrelevant -- the bispectrum is geometric
-   -- so the per-element default-tagged entry (5.6.5
-   step 3) is fine and no `-pot` is needed.  The
-   `LOEN_INPUT_DATA` block of this `imago.dat` carries the
-   matcher's `(twoj1, twoj2, ...)` parameters via
+   a provisional `imago.dat`.  Because this is a
+   `-loeninput` build, the fingerprint match is skipped and
+   each atom takes the per-element default-tagged entry
+   (5.6.5 step 2's loen-build skip -> step 3); the potential
+   is irrelevant anyway, the bispectrum being geometric.
+   The skip is what makes no `-pot` necessary -- and, more
+   than a convenience, is what keeps this build from
+   invoking itself (below).  The `LOEN_INPUT_DATA` block of
+   this `imago.dat` carries the matcher's
+   `(twoj1, twoj2, ...)` parameters via
    `BispecMatcher.to_loen_input` (5.10.5).
 2. **Run loen.**  Invoke `imago.py -loen -scf no` against
    that `imago.dat`, producing `fort.21` (5.10.3).
@@ -5560,11 +5583,21 @@ skeleton untouched.
    `imago.dat`.  The run then proceeds (SCF and harvest,
    for the producer).
 
-There is no self-invocation and nothing to guard against
-recursion: each step is a separate, ordinary process the
-orchestrator runs in order, and the only state passed
-between the two makeinput runs is the skeleton file
-itself.
+The two makeinput runs the orchestrator sequences (steps 1
+and 4) are separate, ordinary processes passing only the
+skeleton between them, so the *orchestration* does not
+recurse.  There is a subtler self-invocation to guard,
+though, and step 1's loen-build skip (5.6.5, above) is the
+guard.  Step 1's build could otherwise reach the fingerprint
+match of 5.6.5, and in the file-dictated regime that match
+runs a loen descriptor computation whose own first step is a
+makeinput build exactly like step 1 -- a genuine self-call.
+The skip closes it at the source: a `-loeninput` build never
+performs the match, so it cannot reach back into itself.
+Without the skip the build recurses without end the moment
+the database carries a preferred bispectrum record for the
+element -- each level nesting a scratch directory inside the
+last until the path length overflows.
 
 #### 5.10.3 fort.21 carries its own identity
 
