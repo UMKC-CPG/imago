@@ -241,6 +241,44 @@ def test_climb_needs_enough_rungs_above_to_confirm():
 
 
 # --------------------------------------------------------------
+#  stride_is_flat -- the bracket flatness test (DESIGN 3.12.3)
+#
+#  The bracket phase reads a stride flat when its two ENDPOINT
+#  energies are within the same per-atom threshold the two-sided
+#  pick uses.  These use ``SimpleNamespace`` rungs exposing only the
+#  ``.energy`` the test reads, and derive the boundary threshold
+#  from ``per_atom_ev`` so the assertions cannot drift from the
+#  normalization the code applies.
+# --------------------------------------------------------------
+
+def test_stride_is_flat_uses_the_two_sided_threshold():
+    """A stride is flat exactly when its endpoints' per-atom energy
+    delta is below ``threshold``; a threshold just above the delta
+    reads flat, one just below does not."""
+    low = types.SimpleNamespace(mesh=[2, 2, 2], energy=-5.0)
+    high = types.SimpleNamespace(mesh=[4, 4, 4], energy=-5.0 + 1e-5)
+    delta = abs(gh.per_atom_ev(high.energy, 1)
+                - gh.per_atom_ev(low.energy, 1))
+    assert gh.stride_is_flat(low, high, 1, delta * 1.01) is True
+    assert gh.stride_is_flat(low, high, 1, delta * 0.99) is False
+
+
+def test_stride_is_flat_normalizes_per_atom():
+    """The same total-cell energy change spread over twice the atoms
+    is half the per-atom change, so a threshold between the one-atom
+    and two-atom deltas flips the verdict -- the large cell is not
+    held to a tighter bound (DESIGN 7.8)."""
+    low = types.SimpleNamespace(mesh=[2, 2, 2], energy=-5.0)
+    high = types.SimpleNamespace(mesh=[4, 4, 4], energy=-5.0 + 2e-5)
+    one_atom_delta = abs(gh.per_atom_ev(high.energy, 1)
+                         - gh.per_atom_ev(low.energy, 1))
+    # Between the one-atom delta and the (halved) two-atom delta.
+    threshold = one_atom_delta * 0.75
+    assert gh.stride_is_flat(low, high, 1, threshold) is False
+    assert gh.stride_is_flat(low, high, 2, threshold) is True
+
+
+# --------------------------------------------------------------
 #  collapse_by_mesh -- the duplicate-rung guard (DESIGN 7.8 3c)
 # --------------------------------------------------------------
 

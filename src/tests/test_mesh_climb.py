@@ -27,10 +27,22 @@ moves exactly one class and never lowers a count.
 """
 
 import math
+from collections import namedtuple
 
 import pytest
 
 import mesh_climb
+
+# A minimal stand-in for the producer's ``Rung(mesh, energy)``: the
+#   bracket-refine mesh helpers read only ``.mesh``, so the tests
+#   carry a nominal energy the geometry never touches.
+_Rung = namedtuple("_Rung", ["mesh", "energy"])
+
+
+def _rung(mesh):
+    """A rung at ``mesh`` with a placeholder energy (unused by the
+    pure mesh helpers under test here)."""
+    return _Rung(mesh, 0.0)
 
 
 # ------------------------------------------------------------------
@@ -422,15 +434,35 @@ def test_confidence_threshold_is_inclusive():
     assert policy.mode == mesh_climb.PARALLEL_GRID
 
 
-def test_weak_prediction_selects_a_single_rung_climb():
-    """A low confidence yields the CLIMB mode: one rung at a time,
-    two flat rungs demanded, starting one rung below the seed."""
+def test_weak_prediction_selects_the_bracket_refine_climb():
+    """A low confidence yields the default serial climb -- the
+    bracket-refine shape: two flat rungs demanded, starting one rung
+    below the seed, and carrying the stride cap the bracket phase
+    reads."""
     policy = mesh_climb.resolve_climb_policy(
         confidence=0.4, under_trained=False)
-    assert policy.mode == mesh_climb.CLIMB
+    assert policy.mode == mesh_climb.BRACKET_REFINE
     assert policy.flat_needed == 2
     assert policy.grid_width == 0
     assert policy.start_offset == 1
+    assert policy.max_stride == \
+        mesh_climb.DEFAULT_POLICY_THRESHOLDS.max_stride
+
+
+def test_curator_can_pin_the_unit_step_climb():
+    """A curator who sets ``climb_shape`` to UNIT_STEP gets the fine
+    walk-every-rung climb for a non-confident prediction instead of
+    the bracketing default; a confident prediction still grids."""
+    unit_step = mesh_climb.DEFAULT_POLICY_THRESHOLDS._replace(
+        climb_shape=mesh_climb.UNIT_STEP)
+    weak = mesh_climb.resolve_climb_policy(
+        confidence=0.4, under_trained=False, thresholds=unit_step)
+    assert weak.mode == mesh_climb.UNIT_STEP
+    # The shape choice governs only the serial climb; a confident
+    #   prediction still lays a parallel grid.
+    strong = mesh_climb.resolve_climb_policy(
+        confidence=0.95, under_trained=False, thresholds=unit_step)
+    assert strong.mode == mesh_climb.PARALLEL_GRID
 
 
 def test_climb_policy_from_empty_manifest_is_the_defaults():
@@ -454,17 +486,46 @@ def test_climb_policy_from_manifest_overrides_named_knobs():
         mesh_climb.DEFAULT_POLICY_THRESHOLDS.flat_needed_cold
 
 
+def test_climb_policy_from_manifest_overrides_stride_and_shape():
+    """The bracket phase's ``max_stride`` cap and the curator's
+    ``climb_shape`` choice are manifest knobs like the rest, merged
+    over the provisional defaults."""
+    thresholds, _ = mesh_climb.climb_policy_from_manifest(
+        {"max_stride": 4, "climb_shape": mesh_climb.UNIT_STEP})
+    assert thresholds.max_stride == 4
+    assert thresholds.climb_shape == mesh_climb.UNIT_STEP
+    # An unnamed knob still keeps its default.
+    assert thresholds.confidence_high == \
+        mesh_climb.DEFAULT_POLICY_THRESHOLDS.confidence_high
+
+
+def test_climb_policy_rejects_an_unknown_climb_shape():
+    """``climb_shape`` is the one knob with a restricted value, so a
+    typo (a value that is not a known climb shape) fails loudly at
+    resolve time rather than silently falling through to a default
+    shape once the producer dispatches on it."""
+    with pytest.raises(ValueError, match="climb_shape"):
+        mesh_climb.climb_policy_from_manifest(
+            {"climb_shape": "unit-step"})       # hyphen, not the enum
+    # A valid shape is accepted.
+    thresholds, _ = mesh_climb.climb_policy_from_manifest(
+        {"climb_shape": mesh_climb.UNIT_STEP})
+    assert thresholds.climb_shape == mesh_climb.UNIT_STEP
+
+
 def test_climb_policy_from_manifest_full_override():
     """Every knob named is carried into the resolved policy."""
     thresholds, max_count = mesh_climb.climb_policy_from_manifest(
         {"confidence_high": 0.7, "grid_width": 2,
          "start_offset_moderate": 1, "start_offset_cold": 3,
          "flat_needed_confident": 1, "flat_needed_cold": 2,
+         "max_stride": 16, "climb_shape": mesh_climb.BRACKET_REFINE,
          "max_count": 24})
     assert thresholds == mesh_climb.PolicyThresholds(
         confidence_high=0.7, grid_width=2,
         start_offset_moderate=1, start_offset_cold=3,
-        flat_needed_confident=1, flat_needed_cold=2)
+        flat_needed_confident=1, flat_needed_cold=2,
+        max_stride=16, climb_shape=mesh_climb.BRACKET_REFINE)
     assert max_count == 24
 
 
@@ -474,7 +535,7 @@ def test_under_trained_forces_a_lower_cold_climb():
     bootstrap regime, DESIGN 7.9)."""
     policy = mesh_climb.resolve_climb_policy(
         confidence=0.95, under_trained=True)
-    assert policy.mode == mesh_climb.CLIMB
+    assert policy.mode == mesh_climb.BRACKET_REFINE
     assert policy.flat_needed == 2
     assert policy.start_offset == 2
 
@@ -484,13 +545,15 @@ def test_under_trained_forces_a_lower_cold_climb():
 # ==================================================================
 
 def test_climb_mode_seeds_one_mesh_below_the_prediction():
-    """In CLIMB mode the first round is a single mesh, sitting
+    """In a serial climb the first round is a single mesh, sitting
     ``start_offset`` rungs below the predicted seed, so it already
     has room to climb upward.  Density 125 on the cubic cell seeds
-    [5,5,5]; one rung down is [4,4,4]."""
+    [5,5,5]; one rung down is [4,4,4].  Both climb shapes open the
+    same way, so this stands for BRACKET_REFINE and UNIT_STEP
+    alike."""
     policy = mesh_climb.ClimbPolicy(
-        mode=mesh_climb.CLIMB, flat_needed=2, grid_width=0,
-        start_offset=1)
+        mode=mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=1, max_stride=8)
     meshes = mesh_climb.initial_meshes(
         125.0, policy, CUBIC_CLASSES, CUBIC_RECIP_MAG, 1.0)
     assert meshes == [[4, 4, 4]]
@@ -505,7 +568,7 @@ def test_grid_mode_lays_a_symmetric_ladder_around_the_seed():
     pair is climb-connected so the stop test reads across it."""
     policy = mesh_climb.ClimbPolicy(
         mode=mesh_climb.PARALLEL_GRID, flat_needed=1, grid_width=1,
-        start_offset=0)
+        start_offset=0, max_stride=8)
     meshes = mesh_climb.initial_meshes(
         125.0, policy, CUBIC_CLASSES, CUBIC_RECIP_MAG, 1.0)
     assert meshes == [[4, 4, 4], [5, 5, 5], [6, 6, 6]]
@@ -520,8 +583,155 @@ def test_grid_collapses_duplicate_floor_meshes():
     manufactured zero-delta pair reaches the stop test."""
     policy = mesh_climb.ClimbPolicy(
         mode=mesh_climb.PARALLEL_GRID, flat_needed=1, grid_width=1,
-        start_offset=0)
+        start_offset=0, max_stride=8)
     meshes = mesh_climb.initial_meshes(
         1.0, policy, CUBIC_CLASSES, CUBIC_RECIP_MAG, 1.0)
     assert meshes == [[1, 1, 1], [2, 2, 2]]
     assert len(meshes) == len({tuple(m) for m in meshes})
+
+
+# ==================================================================
+#  The stride -- climb_n_rungs (PSEUDOCODE 4e.1)
+# ==================================================================
+
+def test_climb_n_rungs_is_repeated_single_steps():
+    """A stride of ``n`` is exactly ``n`` single climbs: on the cubic
+    cell three rungs from [2,2,2] reach [5,5,5], and a stride of one
+    matches climb_one_rung."""
+    assert mesh_climb.climb_n_rungs(
+        [2, 2, 2], 3, CUBIC_CLASSES, CUBIC_RECIP_MAG) == [5, 5, 5]
+    assert mesh_climb.climb_n_rungs(
+        [2, 2, 2], 1, CUBIC_CLASSES, CUBIC_RECIP_MAG) \
+        == mesh_climb.climb_one_rung(
+            [2, 2, 2], CUBIC_CLASSES, CUBIC_RECIP_MAG)
+
+
+def test_climb_n_rungs_zero_is_the_identity():
+    """A stride of zero computes no new mesh and returns the input
+    unchanged, so a degenerate stride cannot move the climb."""
+    assert mesh_climb.climb_n_rungs(
+        [3, 3, 1], 0, HEX_CLASSES, HEX_RECIP_MAG) == [3, 3, 1]
+
+
+def test_climb_n_rungs_crosses_the_hexagonal_ladder():
+    """On the anisotropic hexagonal ladder a stride crosses several
+    distinct rungs at once: from [2,2,1] a stride of four lands on
+    [5,5,2], skipping the three computed-only-at-endpoints meshes
+    between (DESIGN 3.12.2)."""
+    assert mesh_climb.climb_n_rungs(
+        [2, 2, 1], 4, HEX_CLASSES, HEX_RECIP_MAG) == [5, 5, 2]
+
+
+# ==================================================================
+#  The up-to-ceiling walk -- ceiling_mesh (PSEUDOCODE 4e.3)
+# ==================================================================
+
+def test_ceiling_mesh_climbs_to_the_first_capped_mesh():
+    """From below the cap, ceiling_mesh climbs to the lowest ladder
+    position whose largest axis first reaches max_count: on the cubic
+    cell with cap 5, both [2,2,2] and [3,3,3] resolve to [5,5,5]."""
+    assert mesh_climb.ceiling_mesh(
+        [2, 2, 2], CUBIC_CLASSES, CUBIC_RECIP_MAG, 5) == [5, 5, 5]
+    assert mesh_climb.ceiling_mesh(
+        [3, 3, 3], CUBIC_CLASSES, CUBIC_RECIP_MAG, 5) == [5, 5, 5]
+
+
+def test_ceiling_mesh_returns_an_already_capped_mesh_unchanged():
+    """A mesh already at the cap is its own ceiling mesh -- the walk
+    stops before taking any step."""
+    assert mesh_climb.ceiling_mesh(
+        [5, 5, 5], CUBIC_CLASSES, CUBIC_RECIP_MAG, 5) == [5, 5, 5]
+
+
+def test_ceiling_mesh_on_the_anisotropic_ladder():
+    """On the hexagonal ladder the cap bites on the in-plane pair:
+    from [4,4,2] with cap 5 the next rung [5,5,2] first reaches it."""
+    assert mesh_climb.ceiling_mesh(
+        [4, 4, 2], HEX_CLASSES, HEX_RECIP_MAG, 5) == [5, 5, 2]
+
+
+# ==================================================================
+#  Rung lookup -- rung_at (PSEUDOCODE 4e.3)
+# ==================================================================
+
+def test_rung_at_finds_the_computed_rung():
+    """rung_at returns the ladder entry whose mesh matches, so a
+    bracket endpoint's energy can be read back for the stride test."""
+    rungs = [_rung([2, 2, 2]), _rung([4, 4, 4]), _rung([8, 8, 8])]
+    assert mesh_climb.rung_at(rungs, [4, 4, 4]) is rungs[1]
+
+
+def test_rung_at_raises_when_the_mesh_is_absent():
+    """Asking for a mesh that has not been computed is a search-state
+    bug (a stride tested before its endpoint landed), so rung_at
+    raises loudly rather than returning None."""
+    rungs = [_rung([2, 2, 2]), _rung([4, 4, 4])]
+    with pytest.raises(ValueError):
+        mesh_climb.rung_at(rungs, [3, 3, 3])
+
+
+# ==================================================================
+#  Filling the bracket -- next_fill_mesh (PSEUDOCODE 4e.3)
+# ==================================================================
+
+def test_next_fill_mesh_returns_the_lowest_uncomputed_rung():
+    """With only the bracket endpoints [2,2,2] and [5,5,5] computed,
+    filling walks up from the low end and asks for the lowest gap
+    first: [3,3,3], then [4,4,4] once [3,3,3] lands, then None."""
+    endpoints = [_rung([2, 2, 2]), _rung([5, 5, 5])]
+    assert mesh_climb.next_fill_mesh(
+        endpoints, [2, 2, 2], [5, 5, 5],
+        CUBIC_CLASSES, CUBIC_RECIP_MAG) == [3, 3, 3]
+
+    with_three = endpoints + [_rung([3, 3, 3])]
+    assert mesh_climb.next_fill_mesh(
+        with_three, [2, 2, 2], [5, 5, 5],
+        CUBIC_CLASSES, CUBIC_RECIP_MAG) == [4, 4, 4]
+
+
+def test_next_fill_mesh_none_when_the_interval_is_full():
+    """When every ladder position in [lo, hi] is present the interval
+    is filled and next_fill_mesh returns None, ending the fill."""
+    filled = [_rung([2, 2, 2]), _rung([3, 3, 3]), _rung([4, 4, 4])]
+    assert mesh_climb.next_fill_mesh(
+        filled, [2, 2, 2], [4, 4, 4],
+        CUBIC_CLASSES, CUBIC_RECIP_MAG) is None
+
+
+# ==================================================================
+#  The recorded flatness trace -- consecutive_block (PSEUDOCODE 4e.6)
+# ==================================================================
+
+def test_consecutive_block_drops_sparse_bracket_endpoints():
+    """A bracket-refine ladder holds sparse stride endpoints below the
+    filled bracket.  With a gap at [2,2,2] the block around the
+    converged [4,4,4] keeps only the consecutive run [3,3,3], [4,4,4],
+    [5,5,5] and drops the stray low [1,1,1] endpoint (DESIGN
+    3.12.3)."""
+    ladder = [_rung([1, 1, 1]), _rung([3, 3, 3]),
+              _rung([4, 4, 4]), _rung([5, 5, 5])]
+    block = mesh_climb.consecutive_block(
+        ladder, _rung([4, 4, 4]), CUBIC_CLASSES, CUBIC_RECIP_MAG)
+    assert [one.mesh for one in block] \
+        == [[3, 3, 3], [4, 4, 4], [5, 5, 5]]
+
+
+def test_consecutive_block_is_the_whole_ladder_when_consecutive():
+    """A unit-step climb (or a grid) has no gaps, so the block around
+    any interior rung is the entire ladder -- including the minimal
+    [1,1,1], where the downward walk stops."""
+    ladder = [_rung([1, 1, 1]), _rung([2, 2, 2]),
+              _rung([3, 3, 3]), _rung([4, 4, 4])]
+    block = mesh_climb.consecutive_block(
+        ladder, _rung([3, 3, 3]), CUBIC_CLASSES, CUBIC_RECIP_MAG)
+    assert [one.mesh for one in block] \
+        == [[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]]
+
+
+def test_consecutive_block_of_a_lone_rung_is_itself():
+    """A converged rung with neither neighbour present is its own
+    block, so a one-rung trace records just that mesh."""
+    ladder = [_rung([4, 4, 4])]
+    block = mesh_climb.consecutive_block(
+        ladder, _rung([4, 4, 4]), CUBIC_CLASSES, CUBIC_RECIP_MAG)
+    assert [one.mesh for one in block] == [[4, 4, 4]]

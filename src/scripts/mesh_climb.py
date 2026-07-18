@@ -384,6 +384,26 @@ def climb_one_rung(counts, classes, recip_mag):
     return bump(counts, classes, best_label, +1)
 
 
+def climb_n_rungs(counts, n_rungs, classes, recip_mag):
+    """Return the mesh ``n_rungs`` steps up the climb from ``counts``
+    (PSEUDOCODE 4e.1; DESIGN 3.12.2, the stride).
+
+    The rung rule applied ``n_rungs`` times: ``n_rungs == 1`` is a
+    single ``climb_one_rung`` (the fine climb), and a larger count is
+    a *stride* that crosses that many ladder positions for the cost
+    of a single calculation at its endpoint.  The bracket phase of
+    the mesh climb grows the stride geometrically (1, 2, 4, 8, ...),
+    so an unknown convergence distance is bracketed in a logarithmic
+    number of computed points rather than one calculation per rung.
+    Every intermediate mesh is still a genuine, symmetry-compatible
+    rung; a stride merely leaves the ones between its endpoints
+    uncomputed until the refine phase asks for one."""
+    mesh = counts
+    for _ in range(n_rungs):
+        mesh = climb_one_rung(mesh, classes, recip_mag)
+    return mesh
+
+
 def descend_one_rung(counts, classes, recip_mag):
     """Return a mesh one rung below ``counts`` on the climb
     (PSEUDOCODE 4e.1; DESIGN 3.12.4).
@@ -426,28 +446,44 @@ def descend_one_rung(counts, classes, recip_mag):
 #  pure mesh-and-confidence arithmetic those two callers lean on.
 # ==================================================================
 
-# The two dispatch modes (DESIGN 3.12.5).  A confident prediction
-#   lays a small grid around the seed and judges it in one round; a
-#   cold or moderate one climbs a single rung at a time.
+# The three search shapes (DESIGN 3.12.5).  A confident prediction
+#   lays a small fixed grid around the seed and judges it in one
+#   round; a cold or moderate one climbs serially -- by default the
+#   bracket-refine climb, which strides to bracket the convergence
+#   then fills the small bracket, or, when a curator pins the fine
+#   shape, the unit-step climb that walks every rung.  All three
+#   share the rung rule (4e.1) and the two-sided stop test (4e.2);
+#   they differ only in how the ladder is sampled.
 PARALLEL_GRID = "parallel_grid"
-CLIMB = "climb"
+BRACKET_REFINE = "bracket_refine"
+UNIT_STEP = "unit_step"
+
+# The climb shapes a non-confident prediction may take -- the values
+#   the curator's `climb_shape` knob (below) chooses between.
+CLIMB_SHAPES = (BRACKET_REFINE, UNIT_STEP)
 
 
 ## The confidence-derived shape of one material's climb, produced by
 ##   resolve_climb_policy and read by initial_meshes (4e.4) and the
-##   producer's per-material decision (climbAction, 4e.3):
-##     mode          PARALLEL_GRID or CLIMB -- which first round to
-##                   run (a small grid, or a single climbing rung)
+##   producer's per-material decision (climb_next, 4e.3):
+##     mode          PARALLEL_GRID, BRACKET_REFINE, or UNIT_STEP --
+##                   which first round to run and how to sample the
+##                   ladder (a small grid, a bracketing stride, or a
+##                   single climbing rung)
 ##     flat_needed   consecutive flat interior rungs the stop test
 ##                   must see before it accepts convergence (4e.2)
 ##     grid_width    rungs laid on EACH side of the seed in a
-##                   parallel grid (ignored in CLIMB mode)
+##                   parallel grid (ignored by both climb modes)
 ##     start_offset  rungs BELOW the seed a climb begins from, so the
 ##                   first rung gains a lower neighbour (ignored for
 ##                   a parallel grid)
+##     max_stride    the largest geometric stride the bracket phase
+##                   may take (ignored by the grid and the unit-step
+##                   climb, which never stride, DESIGN 3.12.3)
 ClimbPolicy = namedtuple(
     "ClimbPolicy",
-    ["mode", "flat_needed", "grid_width", "start_offset"])
+    ["mode", "flat_needed", "grid_width", "start_offset",
+     "max_stride"])
 
 
 ## The tunable knobs the confidence-to-policy map reads.  Their
@@ -465,25 +501,38 @@ ClimbPolicy = namedtuple(
 ##                            bootstrap climb (starts lower, wider)
 ##     flat_needed_confident  persistence demanded when confident (1)
 ##     flat_needed_cold       persistence demanded when cold (2)
+##     max_stride             largest geometric stride the bracket
+##                            phase may take (caps the bracket a
+##                            refine has to fill, DESIGN 3.12.3)
+##     climb_shape            which serial shape a non-confident
+##                            search takes -- BRACKET_REFINE (the
+##                            default) or UNIT_STEP (the fine climb a
+##                            curator pins for the most conservative
+##                            reading, DESIGN 3.12.5)
 PolicyThresholds = namedtuple(
     "PolicyThresholds",
     ["confidence_high", "grid_width", "start_offset_moderate",
      "start_offset_cold", "flat_needed_confident",
-     "flat_needed_cold"])
+     "flat_needed_cold", "max_stride", "climb_shape"])
 
 
 # Provisional defaults (DESIGN 3.12.6): placeholders until the seed
 #   experiment tunes them, and the fallback the manifest layer will
 #   override.  A confident search lays a +/-1-rung grid and accepts a
 #   single flat interior rung; a cold climb starts two rungs low and
-#   demands two consecutive flat rungs.
+#   demands two consecutive flat rungs.  The default non-confident
+#   shape is the bracket-refine climb, whose geometric stride grows to
+#   at most eight ladder positions (1, 2, 4, 8) so a long bracket is
+#   crossed in a handful of computed points.
 DEFAULT_POLICY_THRESHOLDS = PolicyThresholds(
     confidence_high=0.75,
     grid_width=1,
     start_offset_moderate=1,
     start_offset_cold=2,
     flat_needed_confident=1,
-    flat_needed_cold=2)
+    flat_needed_cold=2,
+    max_stride=8,
+    climb_shape=BRACKET_REFINE)
 
 
 # The fixed per-axis backstop the climb never exceeds (DESIGN
@@ -505,6 +554,25 @@ def at_ceiling(mesh, max_count):
     return max(mesh) >= max_count
 
 
+def ceiling_mesh(from_mesh, classes, recip_mag, max_count):
+    """Return the first mesh at or above the per-axis ceiling,
+    climbing from ``from_mesh`` (PSEUDOCODE 4e.3; DESIGN 3.12.3).
+
+    This is the upper bound of an *up-to-the-ceiling* refine: when
+    the bracket phase would step past the ceiling before any stride
+    read flat, the search does not give up at the cap -- it fills and
+    refines the final interval, from its highest computed endpoint up
+    to this mesh, so a convergence a geometric stride jumped over
+    just below the cap is still found.  Climbs one rung at a time
+    (:func:`climb_one_rung`) until :func:`at_ceiling` first holds, so
+    the returned mesh is the lowest ladder position that reaches the
+    per-axis backstop."""
+    mesh = from_mesh
+    while not at_ceiling(mesh, max_count):
+        mesh = climb_one_rung(mesh, classes, recip_mag)
+    return mesh
+
+
 def resolve_climb_policy(confidence, under_trained,
                          thresholds=DEFAULT_POLICY_THRESHOLDS):
     """Turn a prediction's confidence into the shape of its climb
@@ -514,14 +582,18 @@ def resolve_climb_policy(confidence, under_trained,
     ``thresholds.confidence_high`` and not flagged under-trained)
     warrants a short, tight search: lay a small parallel grid around
     the seed and accept a single flat interior rung.  A weak or
-    under-trained prediction warrants a wider one: climb a single
-    rung at a time, beginning below the seed and demanding the
-    flatness persist, so one lucky flat step cannot end it early.
+    under-trained prediction warrants a wider one: climb serially,
+    beginning below the seed and demanding the flatness persist, so
+    one lucky flat step cannot end it early.  The serial shape is the
+    curator's ``climb_shape`` choice -- the bracket-refine climb by
+    default, or the fine unit-step climb when pinned (DESIGN 3.12.5).
     An under-trained prediction (the bootstrap regime, DESIGN 7.9)
     begins the climb lower still; the producer additionally seeds it
     from the wide-grid floor rather than a predicted density, but
     that choice of seed density is the producer's, not this
-    policy's."""
+    policy's.  ``max_stride`` rides along in every policy so the
+    producer's bracket phase reads one bound whatever the mode (the
+    grid and the unit-step climb never stride, so they ignore it)."""
     confident = (not under_trained
                  and confidence >= thresholds.confidence_high)
     if confident:
@@ -529,15 +601,17 @@ def resolve_climb_policy(confidence, under_trained,
             mode=PARALLEL_GRID,
             flat_needed=thresholds.flat_needed_confident,
             grid_width=thresholds.grid_width,
-            start_offset=0)
+            start_offset=0,
+            max_stride=thresholds.max_stride)
 
     start_offset = (thresholds.start_offset_cold if under_trained
                     else thresholds.start_offset_moderate)
     return ClimbPolicy(
-        mode=CLIMB,
+        mode=thresholds.climb_shape,
         flat_needed=thresholds.flat_needed_cold,
         grid_width=0,
-        start_offset=start_offset)
+        start_offset=start_offset,
+        max_stride=thresholds.max_stride)
 
 
 def climb_policy_from_manifest(climb_settings):
@@ -557,7 +631,16 @@ def climb_policy_from_manifest(climb_settings):
     from ``[harvest.kpoint_climb]``; its keys were already validated
     against the known knob names at load
     (``curation_manifest.KPOINT_CLIMB_KEYS``), so only the merge
-    remains here."""
+    remains here.  The one knob with a restricted value,
+    ``climb_shape``, is checked here: a value that is not one of the
+    known climb shapes (``CLIMB_SHAPES``) is rejected loudly, so a
+    typo like ``"unit-step"`` fails rather than silently falling
+    through to a default shape once the producer dispatches on it."""
+    shape = climb_settings.get("climb_shape")
+    if shape is not None and shape not in CLIMB_SHAPES:
+        raise ValueError(
+            "kpoint_climb.climb_shape must be one of {0}, got "
+            "{1!r}".format(list(CLIMB_SHAPES), shape))
     threshold_overrides = {
         field: climb_settings[field]
         for field in PolicyThresholds._fields
@@ -598,9 +681,12 @@ def initial_meshes(density, policy, classes, recip_mag,
       is a genuine climb ladder -- ``climb_one_rung`` maps each lower
       rung to the next (4e.1) -- so the two-sided stop test reads
       straight across it.
-    - ``CLIMB``: a single mesh ``policy.start_offset`` rungs below
-      the seed, so the first rung already has room to climb upward
-      and acquire the upper neighbour the stop test needs.
+    - ``BRACKET_REFINE`` or ``UNIT_STEP``: a single mesh
+      ``policy.start_offset`` rungs below the seed, so the first rung
+      already has room to climb upward and acquire the upper
+      neighbour the stop test needs.  Both serial climbs open on this
+      one rung; they differ only later, in how the producer chooses
+      each next mesh (4e.3).
 
     Returns a list of axial-count meshes in ascending order, with any
     duplicate floor meshes collapsed (``_distinct_meshes``)."""
@@ -621,3 +707,108 @@ def initial_meshes(density, policy, classes, recip_mag,
     for _ in range(policy.start_offset):
         start = descend_one_rung(start, classes, recip_mag)
     return [start]
+
+
+# ==================================================================
+#  Bracket-refine mesh helpers (DESIGN 3.12.3; PSEUDOCODE 4e.3 / 4e.6)
+#
+#  The bracket-refine climb strides to bracket the convergence, then
+#  FILLS the small bracket and re-judges the now-consecutive block.
+#  These three helpers are the mesh arithmetic that filling and
+#  recording lean on; they operate on "rungs" -- a rung being any
+#  object that exposes a ``.mesh`` axial-count vector (the producer's
+#  ``Rung(mesh, energy)``), so this module stays free of the Rung
+#  type itself and dips into the ladder only through the one attribute
+#  it needs.  The bracket-refine STATE MACHINE that calls them reads
+#  energies (the stride and stop tests), so by the split this module
+#  is built on -- pure mesh arithmetic here, the energy-reading loop
+#  in the producer (ARCHITECTURE 9.7) -- it lives in the producer
+#  (``build_initial_potentials.py``), beside ``climb_action``, not
+#  here.
+# ==================================================================
+
+def rung_at(rungs, mesh):
+    """Return the already-computed rung whose mesh equals ``mesh``
+    (PSEUDOCODE 4e.3).
+
+    A bracket endpoint is always already computed by the time its
+    stride is tested for flatness, so the lookup is expected to
+    succeed; a missing mesh signals a search-state bug (a stride
+    tested before its endpoint landed) and is raised loudly rather
+    than passed on as a silent ``None``.  ``rungs`` is the material's
+    computed ladder; each entry exposes a ``.mesh`` count vector."""
+    for rung in rungs:
+        if rung.mesh == mesh:
+            return rung
+    raise ValueError(
+        "no computed rung at mesh {0!r}; the bracket search asked "
+        "for a stride endpoint that has not been run".format(mesh))
+
+
+def next_fill_mesh(rungs, lo_mesh, hi_mesh, classes, recip_mag):
+    """Return the lowest ladder position in ``[lo_mesh, hi_mesh]`` not
+    yet computed, or ``None`` when the interval is fully filled
+    (PSEUDOCODE 4e.3; DESIGN 3.12.3, the fill).
+
+    The refine phase fills its bracket one ladder position at a time,
+    lowest first, so the two-sided stop test can run over a
+    consecutive block.  Walking ``climb_one_rung`` from ``lo_mesh``
+    visits every rung of the bracket in order; the first one absent
+    from ``rungs`` is the next mesh to run, and reaching ``hi_mesh``
+    with nothing missing means the bracket is complete.  ``rungs``
+    exposes ``.mesh`` count vectors; the comparison is on the vectors
+    themselves, which are the exact meshes the climb lands on."""
+    computed = [rung.mesh for rung in rungs]
+    mesh = lo_mesh
+    while True:
+        if mesh not in computed:
+            return mesh
+        if mesh == hi_mesh:
+            return None
+        mesh = climb_one_rung(mesh, classes, recip_mag)
+
+
+def consecutive_block(rungs, rung, classes, recip_mag):
+    """Return the maximal run of ``rungs`` that are consecutive ladder
+    positions and contains ``rung`` (PSEUDOCODE 4e.6; DESIGN 3.12.3).
+
+    The flatness trace a converged material carries -- the ladder the
+    harvest re-judges -- must be *consecutive* meshes, because the
+    two-sided test compares immediate neighbours.  A bracket-refine
+    climb's ladder also holds the SPARSE stride endpoints below the
+    bracket (search scaffolding), so recording the whole ladder could
+    let the two-sided test read a false early convergence across a
+    gap.  This walks down and then up from ``rung`` while the
+    immediate neighbour on the ladder is present, dropping the sparse
+    endpoints and returning only the filled consecutive block.
+
+    ``climb_one_rung(descend_one_rung(m)) == m`` makes
+    :func:`descend_one_rung` the exact one-below step, so the downward
+    walk lands on the same meshes an upward climb would.  For a
+    unit-step climb or a parallel grid every rung is already
+    consecutive, so the block is the whole ladder.  ``rungs`` and
+    ``rung`` expose ``.mesh`` count vectors."""
+    by_mesh = {tuple(one.mesh): one for one in rungs}
+    block = [rung]
+
+    # Walk DOWN from `rung` while each one-below neighbour is present.
+    #   descend_one_rung returns its input unchanged at the minimal
+    #   mesh, which the equality guard treats as the bottom.
+    mesh = rung.mesh
+    while True:
+        below = descend_one_rung(mesh, classes, recip_mag)
+        if below == mesh or tuple(below) not in by_mesh:
+            break
+        block.insert(0, by_mesh[tuple(below)])
+        mesh = below
+
+    # Walk UP from `rung` while each one-above neighbour is present.
+    mesh = rung.mesh
+    while True:
+        above = climb_one_rung(mesh, classes, recip_mag)
+        if tuple(above) not in by_mesh:
+            break
+        block.append(by_mesh[tuple(above)])
+        mesh = above
+
+    return block

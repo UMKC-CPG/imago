@@ -1743,16 +1743,24 @@ function bracketRefineNext(rungs, state, config):
         prev = state.endpoints[-2]
         if stride_is_flat(rung_at(rungs, prev), rung_at(rungs, top),
                           config.cell_atom_count, config.threshold):
-            # First flat stride.  The converged rung lies in the LAST
-            #   NON-FLAT interval, [endpoint below prev, prev].  Fill
-            #   ONE rung above prev too, so prev is an interior
-            #   candidate with a computed upper neighbour: the
-            #   two-sided test excludes a block's endpoints, and
-            #   convergence often sits exactly at prev (the first flat
-            #   point).  If prev is the seed (the very first stride was
-            #   flat) there is also no lower endpoint, so lo extends
-            #   one rung below prev.
-            hi = climbOneRung(prev, config.classes, config.recipMag)
+            # First flat stride.  The converged rung lies at or just
+            #   above the bottom of the flat stride, prev.  Fill
+            #   flat_needed + 1 rungs above prev, so the persistence
+            #   test has flat_needed interior candidates each with a
+            #   computed neighbour on both sides (the two-sided test
+            #   excludes a block's endpoints).  The + 1 matters because
+            #   prev itself need not be settled: its own lower
+            #   neighbour may still be moving, so the first rung the
+            #   test can confirm is often prev + 1, and confirming
+            #   flat_needed rungs from there needs a computed neighbour
+            #   up through prev + flat_needed + 1.  Filling fewer would
+            #   expose too few interior candidates, which a two-
+            #   consecutive-flat search could never confirm.  If prev
+            #   is the seed (the very first stride was flat) there is
+            #   no lower endpoint either, so lo extends one rung below
+            #   prev.
+            hi = climbNRungs(prev, config.flat_needed + 1,
+                             config.classes, config.recipMag)
             if length(state.endpoints) >= 3:
                 lo = state.endpoints[-3]
             else:
@@ -1920,7 +1928,11 @@ per run by merging the sub-table over the provisional defaults into
 a `PolicyThresholds` bundle plus `max_count`; the manifest reader
 validates the sub-table's keys against the known knob names
 (`KPOINT_CLIMB_KEYS`), so a mistyped knob fails loudly at load
-rather than silently taking a default.  The provisional default
+rather than silently taking a default.  The one knob with a
+restricted VALUE, `climb_shape`, is checked too: the merge rejects
+any value that is not one of the known climb shapes (`BRACKET_REFINE`
+or `UNIT_STEP`), so a typo like `"unit-step"` fails loudly rather
+than falling through to a default shape.  The provisional default
 values themselves are still to be fixed by the seed experiment
 (3.12.6).
 

@@ -243,6 +243,39 @@ def pick_converged(energies, cell_atom_count, threshold):
                                 threshold, 1)
 
 
+def stride_is_flat(lo_rung, hi_rung, cell_atom_count, threshold):
+    """Return whether a bracket stride's two endpoints are flat
+    (PSEUDOCODE 4e.2; DESIGN 3.12.3).
+
+    The bracket phase of the mesh climb strides across many ladder
+    positions at once and computes an energy only at each stride's
+    endpoints.  A stride is "flat" when those two endpoints' per-atom
+    energies are within the SAME ``threshold`` the two-sided
+    convergence pick uses.  Because a stride adds many k-points, a
+    small energy change across it is strong evidence the energy has
+    settled -- but only evidence: the refine phase VERIFIES a
+    proposed bracket with the full two-sided test
+    (:func:`pick_converged_climb`), so a coincidentally flat stride
+    (an oscillating near-metal energy that dips and returns) is
+    caught there, not trusted here.
+
+    Lives here, beside :func:`pick_converged_climb` and
+    :func:`per_atom_ev`, so every energy-flatness test in the climb
+    normalizes on the one per-atom rule and none can drift -- the
+    same reason the two-sided pick is single-sourced here rather than
+    in the pure-geometry ``mesh_climb``.
+
+    ``lo_rung`` and ``hi_rung`` are the stride's lower and upper
+    endpoints, each an object exposing a raw total-cell ``.energy``
+    in hartree (Option B); ``threshold`` is per atom, in eV, so a
+    large cell is not held to a tighter bound than a small one
+    (DESIGN 7.8)."""
+
+    lo_per_atom = per_atom_ev(lo_rung.energy, cell_atom_count)
+    hi_per_atom = per_atom_ev(hi_rung.energy, cell_atom_count)
+    return abs(hi_per_atom - lo_per_atom) < threshold
+
+
 # Two runs of the same resolved mesh are the same calculation and
 #   must give the same total energy; ENERGY_MATCH_EPS is the gap
 #   below which they count as equal.  It is tight (near float

@@ -271,8 +271,10 @@ HARVEST_SETTING_KEYS = ("kpoint_convergence_threshold",
                         "kpoint_climb")
 
 # The tuning knobs the ``[harvest.kpoint_climb]`` sub-table may
-#   carry (DESIGN 5.7 / 3.12.6).  Six name mesh_climb's
-#   ``PolicyThresholds`` fields; ``max_count`` is the per-axis climb
+#   carry (DESIGN 5.7 / 3.12.6).  Eight name mesh_climb's
+#   ``PolicyThresholds`` fields (the confidence-to-shape knobs, the
+#   bracket phase's ``max_stride`` cap, and the curator's
+#   ``climb_shape`` choice); ``max_count`` is the per-axis climb
 #   ceiling.  Each carries a provisional built-in default
 #   (mesh_climb), so the sub-table -- and any knob -- may be
 #   omitted; the loader validates the keys so a mistyped knob fails
@@ -282,7 +284,7 @@ HARVEST_SETTING_KEYS = ("kpoint_convergence_threshold",
 KPOINT_CLIMB_KEYS = ("confidence_high", "grid_width",
                      "start_offset_moderate", "start_offset_cold",
                      "flat_needed_confident", "flat_needed_cold",
-                     "max_count")
+                     "max_stride", "climb_shape", "max_count")
 
 
 def default_run_settings() -> dict[str, Any]:

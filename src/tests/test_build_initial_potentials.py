@@ -2089,9 +2089,9 @@ def _install_climb_mocks(monkeypatch, workspace, *,
 
     config = bip.ClimbConfig(
         classes=[0, 0, 0], recip_mag=[1.0, 1.0, 1.0],
-        recip_cell_volume=0.64, mode="climb", flat_needed=1,
-        grid_width=0, start_offset=1, cell_atom_count=2,
-        threshold=1.0e-6, max_count=20)
+        recip_cell_volume=0.64, mode=mesh_climb.UNIT_STEP,
+        flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
+        cell_atom_count=2, threshold=1.0e-6, max_count=20)
     monkeypatch.setattr(bip, "build_climb_config",
                         lambda *a, **k: config)
 
@@ -2435,9 +2435,9 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
         bip, "build_climb_config",
         lambda *a, **k: bip.ClimbConfig(
             classes=[0, 0, 0], recip_mag=[1.0, 1.0, 1.0],
-            recip_cell_volume=1.0, mode="climb", flat_needed=1,
-            grid_width=0, start_offset=1, cell_atom_count=2,
-            threshold=1.0e-6, max_count=20))
+            recip_cell_volume=1.0, mode=mesh_climb.UNIT_STEP,
+            flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
+            cell_atom_count=2, threshold=1.0e-6, max_count=20))
     monkeypatch.setattr(
         bip, "converge_by_climb",
         lambda materials, *a, **k: (
@@ -2699,15 +2699,18 @@ _CUBIC_RECIP_MAG = [1.0, 1.0, 1.0]
 
 
 def _cubic_config(mode, flat_needed, grid_width, start_offset,
-                  max_count):
+                  max_count, max_stride=8):
     """A cubic-cell ClimbConfig with a per-atom flatness threshold of
     1.0 eV and one atom per cell, so a raw energy delta counts as
-    flat when it is below 1.0 / HARTREE hartree (DESIGN 7.8)."""
+    flat when it is below 1.0 / HARTREE hartree (DESIGN 7.8).  The
+    stride cap defaults to the provisional eight; the unit-step tests
+    that use this helper never stride, so it is inert for them."""
     return bip.ClimbConfig(
         classes=_CUBIC_CLASSES, recip_mag=_CUBIC_RECIP_MAG,
         recip_cell_volume=1.0, mode=mode, flat_needed=flat_needed,
         grid_width=grid_width, start_offset=start_offset,
-        cell_atom_count=1, threshold=1.0, max_count=max_count)
+        max_stride=max_stride, cell_atom_count=1, threshold=1.0,
+        max_count=max_count)
 
 
 def _converging_energy(mesh):
@@ -2785,7 +2788,7 @@ def test_climb_action_runs_next_rung_while_energy_moves():
     """With too few rungs to judge and the top below the ceiling,
     the verdict is RUN carrying the next lockstep mesh."""
     config = _cubic_config(
-        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
         start_offset=1, max_count=20)
     rungs = [bip.Rung([2, 2, 2], 0.0), bip.Rung([3, 3, 3], -1.0)]
     action = bip.climb_action(rungs, config)
@@ -2797,7 +2800,7 @@ def test_climb_action_reports_ceiling_when_backstop_reached():
     """A top rung at the per-axis backstop, still not flat, yields
     the CEILING verdict."""
     config = _cubic_config(
-        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
         start_offset=1, max_count=5)
     rungs = [bip.Rung([n, n, n], _ceiling_energy([n, n, n]))
              for n in (3, 4, 5)]
@@ -2805,17 +2808,18 @@ def test_climb_action_reports_ceiling_when_backstop_reached():
     assert action.kind == bip._ACTION_CEILING
 
 
-def test_climb_action_reports_converged_index():
+def test_climb_action_reports_the_converged_rung():
     """When the per-atom energy is flat across the interior, the
-    verdict is CONVERGED at the first flat rung's index."""
+    verdict is CONVERGED carrying the first flat rung itself -- the
+    [5,5,5] interior, not an index into the ladder."""
     config = _cubic_config(
-        mesh_climb.CLIMB, flat_needed=1, grid_width=0,
+        mesh_climb.UNIT_STEP, flat_needed=1, grid_width=0,
         start_offset=1, max_count=20)
     rungs = [bip.Rung([n, n, n], _flat_everywhere_energy([n, n, n]))
              for n in (4, 5, 6)]
     action = bip.climb_action(rungs, config)
     assert action.kind == bip._ACTION_CONVERGED
-    assert action.index == 1                 # the [5,5,5] interior
+    assert action.rung is rungs[1]           # the [5,5,5] interior
 
 
 # --------------------------------------------------------------
@@ -2852,7 +2856,7 @@ def test_climb_converges_over_several_rungs():
     persist, converging at [6,6,6] and recording the whole ladder."""
     materials = ["si"]
     configs = {"si": _cubic_config(
-        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
         start_offset=1, max_count=20)}
     seed_densities = {"si": 27.0}            # seeds the [3,3,3] mesh
     dispatcher = _SyntheticDispatcher({"si": _converging_energy})
@@ -2891,7 +2895,7 @@ def test_climb_stops_at_ceiling_and_tags_non_converged():
     callback for that material."""
     materials = ["metal"]
     configs = {"metal": _cubic_config(
-        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
         start_offset=1, max_count=5)}
     seed_densities = {"metal": 27.0}
     dispatcher = _SyntheticDispatcher({"metal": _ceiling_energy})
@@ -2912,10 +2916,10 @@ def test_materials_climb_independently():
     materials = ["good", "bad"]
     configs = {
         "good": _cubic_config(
-            mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+            mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
             start_offset=1, max_count=20),
         "bad": _cubic_config(
-            mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+            mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
             start_offset=1, max_count=5)}
     seed_densities = {"good": 27.0, "bad": 27.0}
     dispatcher = _SyntheticDispatcher(
@@ -2929,6 +2933,172 @@ def test_materials_climb_independently():
     assert outcomes["good"].mesh == [6, 6, 6]
     assert outcomes["bad"] is bip.NON_CONVERGED
     assert flagged == ["bad"]
+
+
+# --------------------------------------------------------------
+#  The bracket-refine climb (PSEUDOCODE 4e.3; DESIGN 3.12.3)
+# --------------------------------------------------------------
+
+def test_bracket_refine_converges_at_the_same_mesh_as_unit_step():
+    """The default cold search -- bracket-refine, flat_needed = 2 --
+    reaches the SAME converged mesh the fine unit-step climb does on
+    the same energy: [6,6,6], the first rung whose flatness persists
+    over two interior rungs.  This is the regression test for the
+    off-by-one refine fill: filling flat_needed + 1 rungs above the
+    flat stride's bottom lets the persistence test confirm a
+    convergence that sits one rung into the flat region (DESIGN
+    3.12.3)."""
+    materials = ["si"]
+    configs = {"si": _cubic_config(
+        mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)}
+    seed_densities = {"si": 27.0}            # seeds the [3,3,3] mesh
+    dispatcher = _SyntheticDispatcher({"si": _converging_energy})
+
+    outcomes, _ = bip.converge_by_climb(
+        materials, configs, seed_densities, dispatcher)
+
+    assert outcomes["si"].mesh == [6, 6, 6]
+
+
+def test_bracket_refine_strides_then_fills():
+    """The bracket phase strides geometrically -- one, two, four ladder
+    positions -- to bracket the convergence cheaply, then the refine
+    phase fills the bracket one rung at a time.  Starting one rung
+    below the [3,3,3] seed, it computes [2,2,2], [3,3,3], [5,5,5],
+    [9,9,9] (the strides), then fills [4,4,4], [6,6,6], [7,7,7],
+    [8,8,8] (DESIGN 3.12.2 / 3.12.3)."""
+    materials = ["si"]
+    configs = {"si": _cubic_config(
+        mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)}
+    seed_densities = {"si": 27.0}
+    sent = []
+
+    class _RecordingDispatcher(_SyntheticDispatcher):
+        def send(self, mesh_lists):
+            for material, meshes in mesh_lists.items():
+                for mesh in meshes:
+                    sent.append(list(mesh))
+            super().send(mesh_lists)
+
+    dispatcher = _RecordingDispatcher({"si": _converging_energy})
+    bip.converge_by_climb(materials, configs, seed_densities,
+                          dispatcher)
+
+    assert sent == [[2, 2, 2], [3, 3, 3], [5, 5, 5], [9, 9, 9],
+                    [4, 4, 4], [6, 6, 6], [7, 7, 7], [8, 8, 8]]
+
+
+def test_bracket_refine_stops_at_ceiling():
+    """A bracket-refine climb whose energy never goes flat strides
+    toward the ceiling, fills the final up-to-the-ceiling interval,
+    finds no converged rung, and stops NON_CONVERGED rather than
+    looping forever (DESIGN 3.12.3, the ceiling backstop)."""
+    materials = ["metal"]
+    configs = {"metal": _cubic_config(
+        mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=5)}
+    seed_densities = {"metal": 27.0}
+    dispatcher = _SyntheticDispatcher({"metal": _ceiling_energy})
+    flagged = []
+
+    outcomes, _ = bip.converge_by_climb(
+        materials, configs, seed_densities, dispatcher,
+        on_non_converged=flagged.append)
+
+    assert outcomes["metal"] is bip.NON_CONVERGED
+    assert flagged == ["metal"]
+
+
+def test_bracket_refine_resumes_after_a_false_bracket():
+    """A stride whose endpoints match by coincidence (an oscillating
+    energy that dips and returns) reads flat, but no interior rung of
+    the filled bracket passes the two-sided test.  The search does not
+    accept it: with the bracket not run up to the ceiling, it resumes
+    striding from the top of the bracket (DESIGN 3.12.3)."""
+    config = _cubic_config(
+        mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)
+    # [2,2,2] and [4,4,4] match (both 0.0), so the stride across them
+    #   read flat, but the interior [3,3,3] dips far below -- no rung
+    #   is truly settled.  The bracket [2,2,2]..[4,4,4] is fully
+    #   filled.
+    rungs = [bip.Rung([2, 2, 2], 0.0), bip.Rung([3, 3, 3], -5.0),
+             bip.Rung([4, 4, 4], 0.0)]
+    state = bip.BracketRefineState(
+        phase=bip._PHASE_REFINE, stride=2,
+        endpoints=[[2, 2, 2], [4, 4, 4]], lo=[2, 2, 2], hi=[4, 4, 4],
+        from_cap=False)
+
+    action, next_state = bip.bracket_refine_next(rungs, state, config)
+
+    # Resumed: a fresh bracket phase striding up from the old top.
+    assert action.kind == bip._ACTION_RUN
+    assert action.mesh == [5, 5, 5]
+    assert next_state.phase == bip._PHASE_BRACKET
+    assert next_state.endpoints == [[4, 4, 4], [5, 5, 5]]
+
+
+def test_climb_next_dispatches_on_mode():
+    """climb_next routes a bracket-refine material through the stateful
+    state machine (advancing its search state) and a unit-step material
+    through the stateless climb_action (leaving the state untouched)."""
+    rungs = [bip.Rung([2, 2, 2], 0.0), bip.Rung([3, 3, 3], -1.0)]
+
+    bracket = _cubic_config(
+        mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)
+    seed_state = bip.new_bracket_refine_state([2, 2, 2])
+    bracket_action, advanced = bip.climb_next(
+        [bip.Rung([2, 2, 2], 0.0)], seed_state, bracket)
+    assert bracket_action.kind == bip._ACTION_RUN
+    assert advanced.endpoints == [[2, 2, 2], [3, 3, 3]]
+
+    unit = _cubic_config(
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)
+    unit_action, unchanged = bip.climb_next(rungs, None, unit)
+    assert unit_action.kind == bip._ACTION_RUN
+    assert unit_action.mesh == [4, 4, 4]     # the next lockstep rung
+    assert unchanged is None                 # stateless: passed through
+
+
+def test_new_search_state_is_stateful_only_for_bracket_refine():
+    """Only the bracket-refine climb carries search state; the grid and
+    the unit-step climb carry an empty (None) state they never read."""
+    bracket = _cubic_config(
+        mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)
+    assert bip.new_search_state(bracket, [[3, 3, 3]]).phase \
+        == bip._PHASE_BRACKET
+    for mode in (mesh_climb.UNIT_STEP, mesh_climb.PARALLEL_GRID):
+        config = _cubic_config(
+            mode, flat_needed=2, grid_width=0, start_offset=1,
+            max_count=20)
+        assert bip.new_search_state(config, [[3, 3, 3]]) is None
+
+
+def test_record_converged_records_only_the_consecutive_block():
+    """The recorded flatness trace is the CONSECUTIVE block around the
+    converged rung, so a sparse bracket endpoint left on the ladder is
+    dropped -- keeping it could make the harvest's re-judge read a
+    false early convergence across the gap (DESIGN 3.12.3 / 4e.6)."""
+    config = _cubic_config(
+        mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=1, max_count=20)
+    # A filled block [3,3,3]..[6,6,6] plus a stray high stride endpoint
+    #   [9,9,9] with a gap below it ([7,7,7], [8,8,8] absent).
+    ladder = [bip.Rung([n, n, n], -1.0 - 0.001 * n)
+              for n in (3, 4, 5, 6, 9)]
+    converged = ladder[2]                    # the [5,5,5] rung
+    record = bip.record_converged(converged, ladder, config)
+
+    assert record["converged_mesh"] == [5, 5, 5]
+    # Point-count densities of the consecutive block only (vol = 1.0);
+    #   the sparse [9,9,9] (729) is dropped.
+    assert record["grid_values"] == [27, 64, 125, 216]
+    assert len(record["grid_energies"]) == 4
 
 
 # ==================================================================
@@ -3039,7 +3209,7 @@ def test_climb_opening_failure_is_non_converged():
     on and is reported NON_CONVERGED with the mismatch callback
     fired."""
     configs = {"si": _cubic_config(
-        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
         start_offset=1, max_count=20)}
     # The cold climb's opening is the single [2,2,2] rung (seed 27 ->
     #   [3,3,3], start_offset=1 -> one rung below); fail it.
@@ -3060,7 +3230,7 @@ def test_climb_missing_continuation_rung_is_non_converged():
     advance, so the material stops NON_CONVERGED instead of
     re-dispatching the failing mesh forever."""
     configs = {"si": _cubic_config(
-        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
         start_offset=1, max_count=20)}
     # The opening [2,2,2] runs; the first continuation [3,3,3] fails.
     dispatcher = _SyntheticDispatcher(
@@ -3086,7 +3256,7 @@ def test_record_converged_builds_density_mesh_and_grid():
     cell volume), the mesh is stored exact, and the grid is the
     ascending ladder's densities and raw energies."""
     config = _cubic_config(                  # recip_cell_volume = 1.0
-        mesh_climb.CLIMB, flat_needed=2, grid_width=0,
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
         start_offset=1, max_count=20)
     rungs = [bip.Rung([4, 4, 4], -1.0), bip.Rung([5, 5, 5], -1.1),
              bip.Rung([6, 6, 6], -1.1)]
@@ -3151,7 +3321,9 @@ def test_build_climb_config_axis_classes_and_recip_mag():
 @pytest.mark.integration
 def test_build_climb_config_under_trained_climbs_serially():
     """An under-trained prediction (the bootstrap regime, DESIGN 7.9)
-    warrants the serial CLIMB mode, not a parallel grid."""
+    warrants a serial climb, not a parallel grid -- the bracket-refine
+    shape by default -- and carries the stride cap through to the
+    config the producer's bracket phase reads."""
 
     ref = types.SimpleNamespace(kpoint_convergence_threshold=1.0e-4)
     config = bip.build_climb_config(
@@ -3159,4 +3331,6 @@ def test_build_climb_config_under_trained_climbs_serially():
         confidence=0.0, under_trained=True,
         thresholds=mesh_climb.DEFAULT_POLICY_THRESHOLDS,
         max_count=20)
-    assert config.mode == mesh_climb.CLIMB
+    assert config.mode == mesh_climb.BRACKET_REFINE
+    assert config.max_stride == \
+        mesh_climb.DEFAULT_POLICY_THRESHOLDS.max_stride

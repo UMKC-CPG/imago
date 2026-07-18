@@ -1742,7 +1742,8 @@ call; everything below only decides which rungs to compute so
 the call can be made cheaply. The test needs the candidate rung
 plus one below and one above, so the search must place three
 computed points around a candidate before it can declare
-convergence there.
+convergence there -- and one further point above for each extra
+consecutive flat rung a persistent search demands (below).
 
 The default climb does not walk the ladder rung by rung. It
 **brackets, then refines**. The *bracket* phase strides from the
@@ -1761,11 +1762,13 @@ it -- and applies the two-sided test, returning the SMALLEST
 mesh that passes. Filling rather than bisecting is deliberate:
 the bracket is small by construction, its width being the stride
 of that last non-flat interval, which the max-stride cap keeps
-short; and the two-sided test needs three *consecutive* rungs,
-which a filled interval supplies directly. At these widths a
-full fill is no more calculations than a sparse bisection's
-three-point probes, and it is simpler and reuses the stop test
-unchanged. The flatness trace the material carries -- the ladder
+short; and the two-sided test needs a short run of *consecutive*
+rungs -- three to confirm a single settled rung, one more for
+each extra rung the persistence rule demands (below) -- which a
+filled interval supplies directly. At these widths a full fill
+is no more calculations than a sparse bisection's three-point
+probes, and it is simpler and reuses the stop test unchanged.
+The flatness trace the material carries -- the ladder
 the harvest re-judges -- is the *consecutive filled bracket*
 around the converged rung, the rungs the two-sided test actually
 compared; the sparse bracket endpoints are search scaffolding,
@@ -1798,11 +1801,20 @@ cold or bootstrap search has no such corroboration and is
 establishing ground truth the seed database will be trusted on,
 so it requires the flatness to *persist* -- a second consecutive
 flat interior rung -- before stopping. The extra rung is cheap
-insurance against a coincidental plateau. Confidence also sets
-where the climb is seeded (3.12.4): a warm seed starts near the
-answer, so the first stride is already flat and the bracket
-phase all but vanishes; a cold seed starts low, and the
-geometric stride is what keeps the long bracket cheap.
+insurance against a coincidental plateau. Because that test
+judges that many consecutive interior rungs, the refine fills one
+rung MORE than that above the bottom of the flat stride, not just
+one. The extra rung matters because the bottom rung of the flat
+stride need not itself be settled -- its own lower neighbour may
+still be moving -- so the first rung the two-sided test can
+confirm is often one step higher, and confirming the flatness
+persists from there needs computed neighbours higher still.
+Filling too few above would expose too few interior candidates,
+and a persistent search could never confirm.
+Confidence also sets where the climb is seeded (3.12.4): a warm
+seed starts near the answer, so the first stride is already flat
+and the bracket phase all but vanishes; a cold seed starts low,
+and the geometric stride is what keeps the long bracket cheap.
 
 Because a genuinely hard or ill-posed material could stride
 without ever flattening, the climb carries a **ceiling** that

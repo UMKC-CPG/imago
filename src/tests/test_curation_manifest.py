@@ -368,10 +368,13 @@ def test_harvest_block_omitted_when_unset():
 def test_kpoint_climb_subtable_round_trips(tmp_path):
     # A full [harvest.kpoint_climb] tuning sub-table survives a
     #   write -> read cycle knob for knob (DESIGN 5.7 / 3.12.6).
+    #   Includes max_stride (the bracket cap) and the string-valued
+    #   climb_shape, so the emitter's string quoting round-trips too.
     climb = {"max_count": 24, "confidence_high": 0.8,
              "grid_width": 2, "start_offset_moderate": 1,
              "start_offset_cold": 3, "flat_needed_confident": 1,
-             "flat_needed_cold": 2}
+             "flat_needed_cold": 2, "max_stride": 16,
+             "climb_shape": "unit_step"}
     loaded = _write_and_load(
         _manifest(_sparse_si(), defaults=dict(_DEFAULTS),
                   harvest={"kpoint_climb": climb}), tmp_path)
