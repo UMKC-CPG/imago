@@ -1750,10 +1750,12 @@ The default climb does not walk the ladder rung by rung. It
 seed by growing steps -- one ladder position, then two, four,
 eight (3.12.2) -- computing an energy at each stride's endpoint
 until a stride comes back flat: its two endpoints within the
-per-atom threshold. A flat stride is a small energy change
-spread over *many* added k-points, so it is strong evidence the
-energy has settled. And because the energy is steep below
-convergence and flat above, the converged rung lies in the LAST
+bracket phase's per-atom flatness threshold, which is
+deliberately *looser* than the convergence test's (below). A flat
+stride is a small energy change spread over *many* added
+k-points, so it is strong evidence the energy has settled. And
+because the energy is steep below convergence and flat above,
+the converged rung lies in the LAST
 *non-flat* stride interval -- the one across which the energy
 went from moving to settled -- so that interval is the bracket,
 not the first flat stride above it. The *refine* phase then
@@ -1793,6 +1795,28 @@ phase only *proposes* a bracket; the two-sided test *disposes*.
 So the search keeps against oscillation exactly the robustness
 the fine climb has by construction -- it never trusts a stride,
 only a verified interior rung.
+
+That *propose-versus-dispose* split is why the bracket phase can
+afford a looser flatness threshold than the convergence test --
+and why it should. The bracket threshold is a fixed multiple of
+the convergence threshold (3.12.6). A stride whose endpoints have
+settled to within that looser bound has *nearly* converged, so
+bracketing there is right: it stops striding one geometric step
+sooner and never computes the next, far larger endpoint the
+strict threshold would have demanded -- the endpoint that
+dominates the cost, since a stride can double the mesh and a mesh
+costs about its point count. The refine still judges with the
+strict threshold, so a stride that reads loosely flat but has not
+truly converged is caught exactly as an oscillation is: no
+interior rung passes, and the search resumes striding upward. The
+looser bracket can therefore only ever move where the search
+*looks*, never where it *converges*. And the trade is asymmetric
+in its favour: an over-eager bracket wastes a few *cheap*
+low-mesh fills before it resumes, while the overshoot it avoids
+is a single *expensive* high-mesh calculation. The looser
+threshold shaves that overshoot whether the convergence sits low
+or high on the ladder, because it always brackets at an
+equal-or-lower endpoint than the strict test would.
 
 The fine **unit-step climb** is the degenerate stride-of-one
 search: it skips the bracket and computes every ladder position,
@@ -1983,6 +2007,10 @@ script constants:
   largest stride, plus the choice of climb shape -- bracket-
   refine (the default) or the fine unit-step climb (3.12.2 /
   3.12.3 / 3.12.5).
+- The multiple by which the bracket phase's flatness threshold is
+  looser than the convergence threshold (3.12.3), which sets how
+  eagerly a nearly-settled stride is bracketed and so how much of
+  the top-end overshoot is shaved.
 - The value of the fixed per-axis count ceiling, and the cost
   budget once the resource dataspace (8) supplies one (3.12.3).
 - The width of the confident-mode fixed mesh grid -- how many

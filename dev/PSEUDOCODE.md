@@ -1657,12 +1657,17 @@ function pick_converged_climb(rungs, cell_atom_count, threshold,
 
 function stride_is_flat(lo_rung, hi_rung, cell_atom_count, threshold):
     # The bracket flatness test (DESIGN 3.12.3): a stride is flat when
-    # its two endpoints' per-atom energies are within the SAME
-    # `threshold` the two-sided test uses.  Because a stride adds many
-    # k-points, a small change across it is strong evidence the energy
-    # has settled -- but only evidence: the refine phase VERIFIES with
-    # the full two-sided test, so a coincidentally flat stride (an
-    # oscillating near-metal energy) is caught there, not trusted here.
+    # its two endpoints' per-atom energies are within `threshold`.  The
+    # caller passes the LOOSER bracket threshold here, not the strict
+    # convergence threshold (config.stride_threshold, 4e.3): a stride
+    # that has nearly settled brackets one geometric step sooner,
+    # shaving the far larger endpoint the strict threshold would demand.
+    # Because a stride adds many k-points, a small change across it is
+    # strong evidence the energy has settled -- but only evidence: the
+    # refine phase VERIFIES with the full two-sided test at the strict
+    # threshold, so a stride that reads loosely flat but has not truly
+    # converged (an oscillating near-metal, or a nearly-settled stride
+    # above the real convergence) is caught there, not trusted here.
     lo = per_atom_ev(lo_rung.energy, cell_atom_count)
     hi = per_atom_ev(hi_rung.energy, cell_atom_count)
     return abs(hi - lo) < threshold
@@ -1741,8 +1746,11 @@ function bracketRefineNext(rungs, state, config):
             return strideUp(state, 1, config)
         # Two or more endpoints: test the last stride's flatness.
         prev = state.endpoints[-2]
+        # The bracket test uses the LOOSER stride_threshold (4e.2);
+        #   the refine below keeps the strict convergence threshold.
         if stride_is_flat(rung_at(rungs, prev), rung_at(rungs, top),
-                          config.cell_atom_count, config.threshold):
+                          config.cell_atom_count,
+                          config.stride_threshold):
             # First flat stride.  The converged rung lies at or just
             #   above the bottom of the flat stride, prev.  Fill
             #   flat_needed + 1 rungs above prev, so the persistence
@@ -1927,11 +1935,20 @@ climb from the wide-grid floor rather than a predicted seed (7.9).
 `max_stride` caps the geometric stride, which keeps the bracket a
 refine has to fill small (4e.3 / DESIGN 3.12.3).
 
+`config.stride_threshold` -- the LOOSER threshold the bracket test
+uses (4e.2 / 4e.3) -- is assembled where the producer builds the
+config (11.4 / build_climb_config): it is the solid's strict
+`kpoint_convergence_threshold` multiplied by the database-wide
+`stride_flatness_multiple` knob (>= 1, default a small multiple to
+be fixed by experiment, DESIGN 3.12.6).  The strict threshold
+stays on `config.threshold` for the refine; only the bracket
+stride test reads the looser one.
+
 The numeric knobs that policy reads -- the `confidence_high`
 threshold, the two `flat_needed` counts, `grid_width`, the two
-`start_offset` values, `max_stride`, the climb-shape choice, and
-the per-axis `max_count` ceiling -- are config, not constants
-(Principle 11).  They are sourced from the
+`start_offset` values, `max_stride`, the climb-shape choice, the
+`stride_flatness_multiple`, and the per-axis `max_count` ceiling --
+are config, not constants (Principle 11).  They are sourced from the
 manifest `[harvest.kpoint_climb]` sub-table (DESIGN 5.7 / 3.12.6),
 each knob falling back to a documented provisional default when the
 sub-table or that knob is omitted.  The producer resolves them once

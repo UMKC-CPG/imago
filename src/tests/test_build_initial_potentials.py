@@ -2091,7 +2091,8 @@ def _install_climb_mocks(monkeypatch, workspace, *,
         classes=[0, 0, 0], recip_mag=[1.0, 1.0, 1.0],
         recip_cell_volume=0.64, mode=mesh_climb.UNIT_STEP,
         flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
-        cell_atom_count=2, threshold=1.0e-6, max_count=20)
+        cell_atom_count=2, threshold=1.0e-6, stride_threshold=3.0e-6,
+        max_count=20)
     monkeypatch.setattr(bip, "build_climb_config",
                         lambda *a, **k: config)
 
@@ -2437,7 +2438,8 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
             classes=[0, 0, 0], recip_mag=[1.0, 1.0, 1.0],
             recip_cell_volume=1.0, mode=mesh_climb.UNIT_STEP,
             flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
-            cell_atom_count=2, threshold=1.0e-6, max_count=20))
+            cell_atom_count=2, threshold=1.0e-6, stride_threshold=3.0e-6,
+            max_count=20))
     monkeypatch.setattr(
         bip, "converge_by_climb",
         lambda materials, *a, **k: (
@@ -2699,18 +2701,21 @@ _CUBIC_RECIP_MAG = [1.0, 1.0, 1.0]
 
 
 def _cubic_config(mode, flat_needed, grid_width, start_offset,
-                  max_count, max_stride=8):
-    """A cubic-cell ClimbConfig with a per-atom flatness threshold of
-    1.0 eV and one atom per cell, so a raw energy delta counts as
-    flat when it is below 1.0 / HARTREE hartree (DESIGN 7.8).  The
-    stride cap defaults to the provisional eight; the unit-step tests
-    that use this helper never stride, so it is inert for them."""
+                  max_count, max_stride=8, stride_threshold=3.0):
+    """A cubic-cell ClimbConfig with a strict per-atom convergence
+    threshold of 1.0 eV and one atom per cell, so a raw energy delta
+    counts as converged when it is below 1.0 / HARTREE hartree (DESIGN
+    7.8).  The stride cap defaults to the provisional eight; the
+    bracket phase's looser stride threshold defaults to 3.0 (three
+    times the convergence threshold, the provisional multiple).  The
+    unit-step tests that use this helper never stride, so both are
+    inert for them."""
     return bip.ClimbConfig(
         classes=_CUBIC_CLASSES, recip_mag=_CUBIC_RECIP_MAG,
         recip_cell_volume=1.0, mode=mode, flat_needed=flat_needed,
         grid_width=grid_width, start_offset=start_offset,
         max_stride=max_stride, cell_atom_count=1, threshold=1.0,
-        max_count=max_count)
+        stride_threshold=stride_threshold, max_count=max_count)
 
 
 def _converging_energy(mesh):
@@ -2753,11 +2758,14 @@ def _early_plateau_energy(mesh):
     [4->8] is not (it straddles the steep [4->5] step) -- exactly the
     live cubic case, where the bracket lands high but the convergence
     is low ([6,6,6]).  This is what makes the refine's early-stop
-    matter: the rungs above [8,8,8] never need computing."""
+    matter: the rungs above [8,8,8] never need computing.  The [4->8]
+    span is a multi-electron-volt drop -- far beyond even the looser
+    stride threshold -- so the bracket lands at [8->16] whatever that
+    threshold is set to."""
     n = mesh[0]
     if n <= 4:
-        return -31.3 + 0.5 * (4 - n)         # -29.3, -30.3, -30.8, -31.3
-    return -31.4 - 0.0001 * (n - 5)          # plateau from [5,5,5] up
+        return -31.3 + 0.7 * (4 - n)         # -29.2, -29.9, -30.6, -31.3
+    return -31.6 - 0.0001 * (n - 5)          # plateau from [5,5,5] up
 
 
 class _SyntheticDispatcher:
@@ -3038,6 +3046,64 @@ def test_bracket_refine_stops_filling_once_converged():
     # The rungs above the convergence were never computed.
     for wide in ([9, 9, 9], [10, 10, 10], [11, 11, 11]):
         assert wide not in sent
+
+
+def _grey_stride_energy(mesh):
+    """A cubic energy whose [4->8] stride has nearly -- but not
+    strictly -- settled: the span is ~2.2 eV/atom, above the strict
+    convergence threshold (1.0) yet below the looser bracket threshold
+    (3.0).  A strict bracket test keeps striding and computes the far
+    [16,16,16]; a loose one reads [4->8] flat and brackets there.
+    Either way the refine confirms the true convergence at [6,6,6]."""
+    n = mesh[0]
+    if n == 1:
+        return -28.0
+    if n == 2:
+        return -30.0
+    if n <= 4:
+        return -31.0                         # [2->4] a steep 27 eV drop
+    if n == 5:
+        return -31.06                        # [4->5] still 1.6 eV: steep
+    return -31.08                            # plateau from [6,6,6] up
+
+
+def test_loose_stride_threshold_brackets_earlier():
+    """A stride that has nearly settled (delta between the strict and
+    loose thresholds) is bracketed one geometric step sooner, so the
+    far [16,16,16] is never computed -- while a strict stride test
+    would stride to it.  Both find the same convergence [6,6,6]: the
+    looser threshold moves where the search LOOKS, never where it
+    converges (DESIGN 3.12.3)."""
+
+    def _run(stride_threshold):
+        sent = []
+
+        class _RecordingDispatcher(_SyntheticDispatcher):
+            def send(self, mesh_lists):
+                for _, meshes in mesh_lists.items():
+                    for mesh in meshes:
+                        sent.append(list(mesh))
+                super().send(mesh_lists)
+
+        config = _cubic_config(
+            mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+            start_offset=0, max_count=20,
+            stride_threshold=stride_threshold)
+        dispatcher = _RecordingDispatcher({"si": _grey_stride_energy})
+        outcomes, _ = bip.converge_by_climb(
+            ["si"], {"si": config}, {"si": 1.0}, dispatcher)
+        return outcomes["si"].mesh, sent
+
+    loose_mesh, loose_sent = _run(3.0)       # the default multiple
+    strict_mesh, strict_sent = _run(1.0)     # bracket == convergence
+
+    # Same converged mesh either way.
+    assert loose_mesh == [6, 6, 6]
+    assert strict_mesh == [6, 6, 6]
+    # The loose threshold brackets at [4->8] and never computes the
+    #   far [16,16,16]; the strict one strides all the way to it.
+    assert [16, 16, 16] not in loose_sent
+    assert [16, 16, 16] in strict_sent
 
 
 def test_bracket_refine_stops_at_ceiling():
@@ -3384,3 +3450,9 @@ def test_build_climb_config_under_trained_climbs_serially():
     assert config.mode == mesh_climb.BRACKET_REFINE
     assert config.max_stride == \
         mesh_climb.DEFAULT_POLICY_THRESHOLDS.max_stride
+    # The bracket phase's stride threshold is the strict convergence
+    #   threshold loosened by the database-wide multiple.
+    assert config.threshold == 1.0e-4
+    assert config.stride_threshold == pytest.approx(
+        1.0e-4 * mesh_climb.DEFAULT_POLICY_THRESHOLDS
+        .stride_flatness_multiple)

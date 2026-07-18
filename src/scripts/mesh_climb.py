@@ -509,11 +509,21 @@ ClimbPolicy = namedtuple(
 ##                            default) or UNIT_STEP (the fine climb a
 ##                            curator pins for the most conservative
 ##                            reading, DESIGN 3.12.5)
+##     stride_flatness_multiple
+##                            how much looser the bracket phase's
+##                            flatness test is than the convergence
+##                            threshold (>= 1): the bracket reads a
+##                            stride flat within this multiple of the
+##                            strict threshold, bracketing a nearly-
+##                            settled stride one geometric step sooner
+##                            and shaving the top-end overshoot
+##                            (DESIGN 3.12.3)
 PolicyThresholds = namedtuple(
     "PolicyThresholds",
     ["confidence_high", "grid_width", "start_offset_moderate",
      "start_offset_cold", "flat_needed_confident",
-     "flat_needed_cold", "max_stride", "climb_shape"])
+     "flat_needed_cold", "max_stride", "climb_shape",
+     "stride_flatness_multiple"])
 
 
 # Provisional defaults (DESIGN 3.12.6): placeholders until the seed
@@ -523,7 +533,9 @@ PolicyThresholds = namedtuple(
 #   demands two consecutive flat rungs.  The default non-confident
 #   shape is the bracket-refine climb, whose geometric stride grows to
 #   at most eight ladder positions (1, 2, 4, 8) so a long bracket is
-#   crossed in a handful of computed points.
+#   crossed in a handful of computed points.  The bracket phase reads
+#   a stride flat within three times the convergence threshold, so a
+#   nearly-settled stride is bracketed a geometric step early.
 DEFAULT_POLICY_THRESHOLDS = PolicyThresholds(
     confidence_high=0.75,
     grid_width=1,
@@ -532,7 +544,8 @@ DEFAULT_POLICY_THRESHOLDS = PolicyThresholds(
     flat_needed_confident=1,
     flat_needed_cold=2,
     max_stride=8,
-    climb_shape=BRACKET_REFINE)
+    climb_shape=BRACKET_REFINE,
+    stride_flatness_multiple=3.0)
 
 
 # The fixed per-axis backstop the climb never exceeds (DESIGN
@@ -641,6 +654,15 @@ def climb_policy_from_manifest(climb_settings):
         raise ValueError(
             "kpoint_climb.climb_shape must be one of {0}, got "
             "{1!r}".format(list(CLIMB_SHAPES), shape))
+    # The bracket threshold is LOOSER than convergence, so the
+    #   multiple must be >= 1; a value below 1 would make the bracket
+    #   test stricter than the refine and is surely a mistake.
+    multiple = climb_settings.get("stride_flatness_multiple")
+    if multiple is not None and multiple < 1:
+        raise ValueError(
+            "kpoint_climb.stride_flatness_multiple must be >= 1 (the "
+            "bracket threshold is looser than convergence), got "
+            "{0!r}".format(multiple))
     threshold_overrides = {
         field: climb_settings[field]
         for field in PolicyThresholds._fields

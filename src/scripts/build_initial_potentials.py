@@ -1760,13 +1760,19 @@ Rung = namedtuple("Rung", ["mesh", "energy"])
 ##                        may take (bracket-refine only, DESIGN
 ##                        3.12.3)
 ##     cell_atom_count    atoms per cell (per-atom energy normalizer)
-##     threshold          per-atom eV flatness tolerance (DESIGN 7.8)
+##     threshold          per-atom eV flatness tolerance, the STRICT
+##                        convergence threshold the refine uses
+##                        (DESIGN 7.8)
+##     stride_threshold   the LOOSER per-atom tolerance the bracket
+##                        phase's stride test uses -- threshold times
+##                        the stride_flatness_multiple (DESIGN 3.12.3)
 ##     max_count          per-axis ceiling backstop (DESIGN 3.12.3)
 ClimbConfig = namedtuple(
     "ClimbConfig",
     ["classes", "recip_mag", "recip_cell_volume", "mode",
      "flat_needed", "grid_width", "start_offset", "max_stride",
-     "cell_atom_count", "threshold", "max_count"])
+     "cell_atom_count", "threshold", "stride_threshold",
+     "max_count"])
 
 
 # The three verdicts a climb step returns (DESIGN 3.12.3 / 3.12.5):
@@ -1990,11 +1996,15 @@ def bracket_refine_next(rungs, state, config):
             return _stride_up(state, 1, config)
 
         # Two or more endpoints: test whether the last stride is flat.
+        #   The bracket test uses the LOOSER stride_threshold; the
+        #   refine below keeps the strict convergence threshold, so a
+        #   stride that reads loosely flat but has not truly converged
+        #   is caught there (DESIGN 3.12.3).
         prev = state.endpoints[-2]
         if guidance_harvest.stride_is_flat(
                 mesh_climb.rung_at(rungs, prev),
                 mesh_climb.rung_at(rungs, top),
-                config.cell_atom_count, config.threshold):
+                config.cell_atom_count, config.stride_threshold):
             # First flat stride.  The converged rung lies at or just
             #   above the bottom of the flat stride, prev.  Fill
             #   flat_needed + 1 rungs above prev, so the persistence
@@ -2502,6 +2512,13 @@ def build_climb_config(ref, structure, confidence, under_trained,
     policy = mesh_climb.resolve_climb_policy(
         confidence, under_trained, thresholds)
 
+    # The bracket phase's stride test is looser than convergence by the
+    #   database-wide multiple (DESIGN 3.12.3): the strict per-solid
+    #   threshold stays on `threshold` for the refine, and the bracket
+    #   reads `stride_threshold`.
+    stride_threshold = (ref.kpoint_convergence_threshold
+                        * thresholds.stride_flatness_multiple)
+
     return ClimbConfig(
         classes=classes,
         recip_mag=recip_mag,
@@ -2513,6 +2530,7 @@ def build_climb_config(ref, structure, confidence, under_trained,
         max_stride=policy.max_stride,
         cell_atom_count=cell.num_atoms,
         threshold=ref.kpoint_convergence_threshold,
+        stride_threshold=stride_threshold,
         max_count=max_count)
 
 

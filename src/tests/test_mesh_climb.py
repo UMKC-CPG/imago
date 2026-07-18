@@ -513,6 +513,29 @@ def test_climb_policy_rejects_an_unknown_climb_shape():
     assert thresholds.climb_shape == mesh_climb.UNIT_STEP
 
 
+def test_climb_policy_merges_the_stride_flatness_multiple():
+    """The bracket phase's looseness knob merges over the default like
+    any other, and the default is a multiple greater than one (the
+    bracket test is looser than convergence)."""
+    assert mesh_climb.DEFAULT_POLICY_THRESHOLDS \
+        .stride_flatness_multiple > 1
+    thresholds, _ = mesh_climb.climb_policy_from_manifest(
+        {"stride_flatness_multiple": 5.0})
+    assert thresholds.stride_flatness_multiple == 5.0
+
+
+def test_climb_policy_rejects_a_stride_multiple_below_one():
+    """A multiple below one would make the bracket test STRICTER than
+    convergence -- surely a mistake -- so it fails loudly, while a
+    multiple of exactly one (bracket == convergence) is allowed."""
+    with pytest.raises(ValueError, match="stride_flatness_multiple"):
+        mesh_climb.climb_policy_from_manifest(
+            {"stride_flatness_multiple": 0.5})
+    thresholds, _ = mesh_climb.climb_policy_from_manifest(
+        {"stride_flatness_multiple": 1.0})
+    assert thresholds.stride_flatness_multiple == 1.0
+
+
 def test_climb_policy_from_manifest_full_override():
     """Every knob named is carried into the resolved policy."""
     thresholds, max_count = mesh_climb.climb_policy_from_manifest(
@@ -520,12 +543,13 @@ def test_climb_policy_from_manifest_full_override():
          "start_offset_moderate": 1, "start_offset_cold": 3,
          "flat_needed_confident": 1, "flat_needed_cold": 2,
          "max_stride": 16, "climb_shape": mesh_climb.BRACKET_REFINE,
-         "max_count": 24})
+         "stride_flatness_multiple": 5.0, "max_count": 24})
     assert thresholds == mesh_climb.PolicyThresholds(
         confidence_high=0.7, grid_width=2,
         start_offset_moderate=1, start_offset_cold=3,
         flat_needed_confident=1, flat_needed_cold=2,
-        max_stride=16, climb_shape=mesh_climb.BRACKET_REFINE)
+        max_stride=16, climb_shape=mesh_climb.BRACKET_REFINE,
+        stride_flatness_multiple=5.0)
     assert max_count == 24
 
 
