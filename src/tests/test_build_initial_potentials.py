@@ -2744,6 +2744,22 @@ def _flat_everywhere_energy(mesh):
     return -1.6 - 0.0001 * mesh[0]
 
 
+def _early_plateau_energy(mesh):
+    """A cubic energy that settles by [6,6,6] but whose geometric
+    stride only reads flat high up.  Every step through [4,4,4] is a
+    big electron-volt drop; from [5,5,5] the plateau is a tenth of a
+    milli-hartree per step.  So the bracket stride [8->16] is the
+    first flat one (its span sits entirely in the plateau) while
+    [4->8] is not (it straddles the steep [4->5] step) -- exactly the
+    live cubic case, where the bracket lands high but the convergence
+    is low ([6,6,6]).  This is what makes the refine's early-stop
+    matter: the rungs above [8,8,8] never need computing."""
+    n = mesh[0]
+    if n <= 4:
+        return -31.3 + 0.5 * (4 - n)         # -29.3, -30.3, -30.8, -31.3
+    return -31.4 - 0.0001 * (n - 5)          # plateau from [5,5,5] up
+
+
 class _SyntheticDispatcher:
     """A synthetic climb dispatcher for the ``converge_by_climb``
     tests.  ``send(mesh_lists)`` runs each requested mesh through the
@@ -2988,6 +3004,40 @@ def test_bracket_refine_strides_then_fills():
 
     assert sent == [[2, 2, 2], [3, 3, 3], [5, 5, 5], [9, 9, 9],
                     [4, 4, 4], [6, 6, 6], [7, 7, 7], [8, 8, 8]]
+
+
+def test_bracket_refine_stops_filling_once_converged():
+    """The refine tests the consecutive block after each fill and
+    stops at the first (smallest) converged rung, so it never computes
+    the wide rungs above the convergence (DESIGN 3.12.3).  On an energy
+    that settles by [6,6,6] but whose stride only reads flat at
+    [8->16], the bracket spans up to [11,11,11], yet the fill halts at
+    [7,7,7] the moment [6,6,6] is confirmed from [4..8] -- [9,10,11]
+    are never run (8 calcs, not 11)."""
+    materials = ["si"]
+    configs = {"si": _cubic_config(
+        mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=0, max_count=20)}
+    seed_densities = {"si": 1.0}             # seeds the [1,1,1] opening
+    sent = []
+
+    class _RecordingDispatcher(_SyntheticDispatcher):
+        def send(self, mesh_lists):
+            for material, meshes in mesh_lists.items():
+                for mesh in meshes:
+                    sent.append(list(mesh))
+            super().send(mesh_lists)
+
+    dispatcher = _RecordingDispatcher({"si": _early_plateau_energy})
+    outcomes, _ = bip.converge_by_climb(
+        materials, configs, seed_densities, dispatcher)
+
+    assert outcomes["si"].mesh == [6, 6, 6]
+    assert sent == [[1, 1, 1], [2, 2, 2], [4, 4, 4], [8, 8, 8],
+                    [16, 16, 16], [5, 5, 5], [6, 6, 6], [7, 7, 7]]
+    # The rungs above the convergence were never computed.
+    for wide in ([9, 9, 9], [10, 10, 10], [11, 11, 11]):
+        assert wide not in sent
 
 
 def test_bracket_refine_stops_at_ceiling():

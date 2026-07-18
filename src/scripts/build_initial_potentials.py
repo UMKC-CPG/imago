@@ -2038,26 +2038,36 @@ def bracket_refine_next(rungs, state, config):
                 rungs, state, top, ceiling, True, config)
         return _stride_up(state, next_stride, config)
 
-    # REFINE: fill [lo, hi] one position at a time, then judge it.
-    gap = mesh_climb.next_fill_mesh(
-        rungs, state.lo, state.hi, config.classes, config.recip_mag)
-    if gap is not None:
-        return ClimbAction(_ACTION_RUN, None, gap), state    # keep filling
-
-    # Filled: judge the now-consecutive block with the two-sided test.
-    #   Only the bracket's own rungs are passed, so the sparse bracket
-    #   endpoints outside it never mislead the neighbour comparison
-    #   (DESIGN 3.12.3).  ``_mesh_point_count`` is the monotone ladder
-    #   key, so a point-count range selects exactly that block.
-    low_count = _mesh_point_count(state.lo)
-    high_count = _mesh_point_count(state.hi)
-    block = [rung for rung in rungs
-             if low_count <= _mesh_point_count(rung.mesh) <= high_count]
+    # REFINE: fill [lo, hi] lowest-first, TESTING the consecutive block
+    #   after each fill so a convergence low in the bracket stops the
+    #   fill before the wide rungs above it are computed (DESIGN
+    #   3.12.3).  Test only the CONSECUTIVE run anchored at lo -- not
+    #   the whole [lo, hi] range -- because mid-fill the range still
+    #   has gaps (a sparse bracket endpoint sitting above an unfilled
+    #   rung), and the two-sided test would compare non-neighbours
+    #   across such a gap and could read a false convergence.  lo is
+    #   always computed by the time the first fill lands
+    #   (next_fill_mesh fills it first), so the anchor is safe.  The
+    #   fill climbs from the bottom and pick_converged_climb returns
+    #   the SMALLEST passing rung, so the converged mesh is exactly the
+    #   one a full fill would find -- only the rungs above it go
+    #   uncomputed.
+    block = mesh_climb.consecutive_block(
+        rungs, mesh_climb.rung_at(rungs, state.lo),
+        config.classes, config.recip_mag)
     index = guidance_harvest.pick_converged_climb(
         [rung.energy for rung in block],
         config.cell_atom_count, config.threshold, config.flat_needed)
     if index is not None:
         return ClimbAction(_ACTION_CONVERGED, block[index], None), state
+
+    # Not verified yet: fill the next-lowest gap if any remains.
+    gap = mesh_climb.next_fill_mesh(
+        rungs, state.lo, state.hi, config.classes, config.recip_mag)
+    if gap is not None:
+        return ClimbAction(_ACTION_RUN, None, gap), state    # keep filling
+
+    # Interval fully filled and still nothing verified.
     if state.from_cap:
         # Still visibly steep even at the cap: a genuine non-converged
         #   ceiling stop, not a false bracket (DESIGN 3.12.3).

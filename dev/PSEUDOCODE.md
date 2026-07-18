@@ -1780,22 +1780,33 @@ function bracketRefineNext(rungs, state, config):
                                ceilingMesh(top, config), True, config)
         return strideUp(state, nextStride, config)
 
-    else:  # REFINE -- fill [lo, hi] one position at a time, then test
-        gap = nextFillMesh(rungs, state.lo, state.hi,
-                           config.classes, config.recipMag)
-        if gap is not None:
-            return RUN(gap), state              # keep filling
-        # Filled: judge the now-consecutive block with the two-sided
-        #   test.  Only the bracket's own rungs are passed, so the
-        #   sparse bracket endpoints outside it never mislead the
-        #   neighbour comparison (DESIGN 3.12.3).
-        block = [r for r in rungs
-                 if meshSize(state.lo) <= meshSize(r.mesh)
-                    and meshSize(r.mesh) <= meshSize(state.hi)]
+    else:  # REFINE -- fill [lo, hi] lowest-first, TESTING as we go
+        # Judge after each fill so a convergence low in the bracket
+        #   stops the fill before the wide rungs above it are computed
+        #   (DESIGN 3.12.3).  Test only the CONSECUTIVE block anchored
+        #   at lo -- the run of computed rungs each one step up from
+        #   the last -- not the whole [lo, hi] range: mid-fill the
+        #   range still has gaps (a sparse bracket endpoint sitting
+        #   above an unfilled rung), and the two-sided test would
+        #   compare non-neighbours across such a gap and could read a
+        #   false convergence.  lo is always computed by the time the
+        #   first fill lands (nextFillMesh fills it first), so the
+        #   anchor is safe.  Because the fill climbs from the bottom
+        #   and this returns the SMALLEST passing rung, the mesh it
+        #   converges on is exactly the one a full fill would have --
+        #   only the rungs above it go uncomputed.
+        block = consecutive_block(rungs, rung_at(rungs, state.lo),
+                                  config.classes, config.recipMag)
         idx = pick_converged_climb(block, config.cell_atom_count,
                                    config.threshold, config.flat_needed)
         if idx is not None:
             return CONVERGED(block[idx]), state
+        # Not verified yet: fill the next-lowest gap if any remains.
+        gap = nextFillMesh(rungs, state.lo, state.hi,
+                           config.classes, config.recipMag)
+        if gap is not None:
+            return RUN(gap), state              # keep filling
+        # Interval fully filled and still nothing verified.
         if state.from_cap:
             return CEILING, state               # steep even at the cap
         # A coincidentally flat stride (an oscillating energy): no

@@ -1757,17 +1757,26 @@ convergence and flat above, the converged rung lies in the LAST
 *non-flat* stride interval -- the one across which the energy
 went from moving to settled -- so that interval is the bracket,
 not the first flat stride above it. The *refine* phase then
-**fills the bracket** -- computes every ladder position inside
-it -- and applies the two-sided test, returning the SMALLEST
-mesh that passes. Filling rather than bisecting is deliberate:
-the bracket is small by construction, its width being the stride
-of that last non-flat interval, which the max-stride cap keeps
+**fills the bracket from the bottom up** -- computing ladder
+positions lowest-first -- and re-applies the two-sided test to
+the growing consecutive block after each new rung, stopping at
+the FIRST mesh that passes. Because the fill climbs from the
+bottom and the test runs as it goes, that first pass is the
+SMALLEST converged mesh, and the search computes only up to it
+and the neighbours the test needs -- never the rungs above. A
+convergence low in the bracket therefore costs only the fill
+beneath it, not the whole interval: a cubic cell that settles at
+its lower edge is confirmed without computing the wide meshes
+near the top. Filling rather than bisecting is deliberate: the
+bracket is small by construction, its width being the stride of
+that last non-flat interval, which the max-stride cap keeps
 short; and the two-sided test needs a short run of *consecutive*
 rungs -- three to confirm a single settled rung, one more for
-each extra rung the persistence rule demands (below) -- which a
-filled interval supplies directly. At these widths a full fill
-is no more calculations than a sparse bisection's three-point
-probes, and it is simpler and reuses the stop test unchanged.
+each extra rung the persistence rule demands (below) -- which
+filling lowest-first supplies directly. Filling low-to-high is
+no more calculations than a sparse bisection's three-point
+probes, and it is simpler, finds the smallest converged rung by
+construction, and reuses the stop test unchanged.
 The flatness trace the material carries -- the ladder
 the harvest re-judges -- is the *consecutive filled bracket*
 around the converged rung, the rungs the two-sided test actually
