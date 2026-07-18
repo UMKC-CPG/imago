@@ -375,7 +375,8 @@ def test_kpoint_climb_subtable_round_trips(tmp_path):
              "start_offset_cold": 3, "flat_needed_confident": 1,
              "flat_needed_cold": 2, "max_stride": 16,
              "climb_shape": "unit_step",
-             "stride_flatness_multiple": 3.0}
+             "stride_flatness_multiple": 3.0,
+             "metallic_rise_multiple": 50.0}
     loaded = _write_and_load(
         _manifest(_sparse_si(), defaults=dict(_DEFAULTS),
                   harvest={"kpoint_climb": climb}), tmp_path)

@@ -2092,7 +2092,7 @@ def _install_climb_mocks(monkeypatch, workspace, *,
         recip_cell_volume=0.64, mode=mesh_climb.UNIT_STEP,
         flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
         cell_atom_count=2, threshold=1.0e-6, stride_threshold=3.0e-6,
-        max_count=20)
+        metallic_margin=5.0e-5, max_count=20)
     monkeypatch.setattr(bip, "build_climb_config",
                         lambda *a, **k: config)
 
@@ -2439,7 +2439,7 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
             recip_cell_volume=1.0, mode=mesh_climb.UNIT_STEP,
             flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
             cell_atom_count=2, threshold=1.0e-6, stride_threshold=3.0e-6,
-            max_count=20))
+            metallic_margin=5.0e-5, max_count=20))
     monkeypatch.setattr(
         bip, "converge_by_climb",
         lambda materials, *a, **k: (
@@ -2701,21 +2701,24 @@ _CUBIC_RECIP_MAG = [1.0, 1.0, 1.0]
 
 
 def _cubic_config(mode, flat_needed, grid_width, start_offset,
-                  max_count, max_stride=8, stride_threshold=3.0):
+                  max_count, max_stride=8, stride_threshold=3.0,
+                  metallic_margin=50.0):
     """A cubic-cell ClimbConfig with a strict per-atom convergence
     threshold of 1.0 eV and one atom per cell, so a raw energy delta
     counts as converged when it is below 1.0 / HARTREE hartree (DESIGN
     7.8).  The stride cap defaults to the provisional eight; the
     bracket phase's looser stride threshold defaults to 3.0 (three
-    times the convergence threshold, the provisional multiple).  The
-    unit-step tests that use this helper never stride, so both are
-    inert for them."""
+    times the convergence threshold), and the metallic early-bail
+    margin to 50.0 (fifty times it), the provisional multiples.  The
+    unit-step tests that use this helper never stride, so all three
+    are inert for them."""
     return bip.ClimbConfig(
         classes=_CUBIC_CLASSES, recip_mag=_CUBIC_RECIP_MAG,
         recip_cell_volume=1.0, mode=mode, flat_needed=flat_needed,
         grid_width=grid_width, start_offset=start_offset,
         max_stride=max_stride, cell_atom_count=1, threshold=1.0,
-        stride_threshold=stride_threshold, max_count=max_count)
+        stride_threshold=stride_threshold,
+        metallic_margin=metallic_margin, max_count=max_count)
 
 
 def _converging_energy(mesh):
@@ -3125,6 +3128,62 @@ def test_bracket_refine_stops_at_ceiling():
 
     assert outcomes["metal"] is bip.NON_CONVERGED
     assert flagged == ["metal"]
+
+
+def _metallic_energy(mesh):
+    """A cubic energy whose finer meshes RAISE the total energy -- the
+    near-metal tell (Fermi-surface oscillation).  It drops to a
+    spurious low at [4,4,4] then jumps back up and sits there, so the
+    [4->8] stride reads a large upward step (~8 eV/atom).  With a low
+    enough margin the climb bails there; with the bail disabled it
+    finds the plateau at [6,6,6] -- so the same energy shows both the
+    early bail and that a higher margin lets the climb run on."""
+    n = mesh[0]
+    if n == 1:
+        return -1.0
+    if n <= 2:
+        return -1.2
+    if n <= 4:
+        return -1.4                          # spurious minimum
+    return -1.1                              # finer meshes sit ABOVE it
+
+
+def test_bracket_refine_bails_early_on_a_rising_stride():
+    """A stride whose finer endpoint rises past the metallic margin
+    stops the climb early as NON_CONVERGED, without grinding toward the
+    ceiling: the [4->8] stride rises ~8 eV/atom, so with a margin of 2
+    the climb bails after four cheap calcs and never computes the wide
+    meshes.  With the bail effectively disabled (a huge margin) the
+    same energy climbs on and converges at its [6,6,6] plateau -- the
+    margin is the only difference (DESIGN 3.12.3)."""
+    materials = ["metal"]
+    seed_densities = {"metal": 1.0}          # opens at [1,1,1]
+
+    def _run(metallic_margin):
+        config = _cubic_config(
+            mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+            start_offset=0, max_count=20,
+            metallic_margin=metallic_margin)
+        flagged = []
+        outcomes, rungs = bip.converge_by_climb(
+            materials, {"metal": config}, seed_densities,
+            _SyntheticDispatcher({"metal": _metallic_energy}),
+            on_non_converged=flagged.append)
+        return outcomes["metal"], flagged, rungs["metal"]
+
+    # Margin 2: the ~8 eV/atom rise trips the bail after [8,8,8], so
+    #   the ladder stops at the four bracket rungs, far below the
+    #   ceiling, and the material is tagged like any mismatch.
+    outcome, flagged, rungs = _run(2.0)
+    assert outcome is bip.NON_CONVERGED
+    assert flagged == ["metal"]
+    assert [r.mesh for r in rungs] == [
+        [1, 1, 1], [2, 2, 2], [4, 4, 4], [8, 8, 8]]
+
+    # A huge margin disables the bail: the climb runs on to the
+    #   plateau and converges.
+    outcome_off, _, _ = _run(1.0e9)
+    assert outcome_off.mesh == [6, 6, 6]
 
 
 def test_bracket_refine_resumes_after_a_false_bracket():

@@ -1873,6 +1873,38 @@ monotone, narrowing trace says raise the ceiling, while an
 oscillating one says the material needs smearing rather than a
 finer mesh (C117's near-metals are the archetype).
 
+For the oscillating case the climb need not grind all the way to
+the ceiling to reach that verdict -- the oscillation announces
+itself early. Refining the k-point mesh samples the Brillouin
+zone more densely, which for an insulator lowers the energy
+smoothly toward its converged value; a near-metal instead
+oscillates as the mesh crosses the Fermi surface, and a finer
+mesh can *raise* the energy. So a stride whose finer endpoint
+sits **above** its coarser one by more than a margin -- an
+energy that went the wrong way, and by far more than convergence
+would ever wobble -- is dispositive evidence of that
+oscillation. The bracket phase watches for it and, on the first
+such rising stride, stops with the same non-converged verdict a
+ceiling stop gives, carrying the same (now shorter) oscillating
+trace. This only ever *shortens* the road to a verdict the climb
+would have reached at the ceiling anyway: it saves the expensive
+high meshes a near-metal would otherwise be dragged through
+(si_cmce's ladder ran to thousands of k-points per rung before
+the count ceiling bit). The margin is a multiple of the
+convergence threshold (3.12.6), set well above any real
+convergence wobble, so a smoothly-converging cell -- even one
+that approaches from below, its energy rising in small
+sub-threshold steps -- never trips it; only a genuine, large
+upward excursion does. The judgement is a heuristic, not the
+authoritative two-sided test, so it is deliberately conservative:
+its cost if it fires wrongly is a curator re-run of a material
+that might have converged, never a wrong recorded result, and
+the margin (and disabling it outright, by setting the margin
+arbitrarily high) is the curator's dial. It rides only on the
+bracket-refine climb; the fine unit-step climb (3.12.5), the
+conservative shape a curator pins deliberately, keeps walking to
+the ceiling.
+
 #### 3.12.4 Seeding the climb from a prediction
 
 The guidance predictor (7.6) returns a `kpoint_density` for the
@@ -2011,6 +2043,10 @@ script constants:
   looser than the convergence threshold (3.12.3), which sets how
   eagerly a nearly-settled stride is bracketed and so how much of
   the top-end overshoot is shaved.
+- The multiple of the convergence threshold by which a stride must
+  rise before the climb calls the material an oscillating near-
+  metal and stops early (3.12.3); larger is more conservative, and
+  arbitrarily large disables the early bail.
 - The value of the fixed per-axis count ceiling, and the cost
   budget once the resource dataspace (8) supplies one (3.12.3).
 - The width of the confident-mode fixed mesh grid -- how many

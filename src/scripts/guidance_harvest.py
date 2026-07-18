@@ -276,6 +276,37 @@ def stride_is_flat(lo_rung, hi_rung, cell_atom_count, threshold):
     return abs(hi_per_atom - lo_per_atom) < threshold
 
 
+def stride_rose(lo_rung, hi_rung, cell_atom_count, margin):
+    """Return whether a stride's finer endpoint sits ABOVE its coarser
+    one by more than ``margin`` -- the near-metal early-bail test
+    (PSEUDOCODE 4e.2; DESIGN 3.12.3).
+
+    Refining a k-point mesh samples the Brillouin zone more densely,
+    which lowers an insulator's total energy smoothly toward its
+    converged value.  A near-metal instead oscillates as the mesh
+    crosses the Fermi surface, and a finer mesh can *raise* the
+    energy; a large upward stride is therefore dispositive evidence
+    of that oscillation, and the bracket phase stops early on it
+    rather than grinding to the count ceiling.
+
+    Unlike :func:`stride_is_flat` this test is SIGNED and asymmetric:
+    only a rise counts, never a drop, so a normally-converging cell
+    (whose strides fall, or rise only in small sub-threshold steps)
+    never trips it.  ``margin`` is per atom, in eV, and set well above
+    any real convergence wobble (a multiple of the convergence
+    threshold, DESIGN 3.12.3), so the bail is conservative.  Lives
+    here beside :func:`stride_is_flat` for the same single-sourcing
+    reason: it normalizes on the one per-atom rule.
+
+    ``lo_rung`` is the stride's coarser (lower-mesh) endpoint and
+    ``hi_rung`` its finer (higher-mesh) endpoint, each exposing a raw
+    total-cell ``.energy`` in hartree (Option B)."""
+
+    lo_per_atom = per_atom_ev(lo_rung.energy, cell_atom_count)
+    hi_per_atom = per_atom_ev(hi_rung.energy, cell_atom_count)
+    return hi_per_atom - lo_per_atom > margin
+
+
 # Two runs of the same resolved mesh are the same calculation and
 #   must give the same total energy; ENERGY_MATCH_EPS is the gap
 #   below which they count as equal.  It is tight (near float

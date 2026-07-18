@@ -1766,24 +1766,33 @@ Rung = namedtuple("Rung", ["mesh", "energy"])
 ##     stride_threshold   the LOOSER per-atom tolerance the bracket
 ##                        phase's stride test uses -- threshold times
 ##                        the stride_flatness_multiple (DESIGN 3.12.3)
+##     metallic_margin    the per-atom upward-stride bound that flags
+##                        an oscillating near-metal and stops the
+##                        climb early -- threshold times the
+##                        metallic_rise_multiple (DESIGN 3.12.3)
 ##     max_count          per-axis ceiling backstop (DESIGN 3.12.3)
 ClimbConfig = namedtuple(
     "ClimbConfig",
     ["classes", "recip_mag", "recip_cell_volume", "mode",
      "flat_needed", "grid_width", "start_offset", "max_stride",
      "cell_atom_count", "threshold", "stride_threshold",
-     "max_count"])
+     "metallic_margin", "max_count"])
 
 
-# The three verdicts a climb step returns (DESIGN 3.12.3 / 3.12.5):
-#   run one more mesh, stop converged at a rung, or stop at the
-#   ceiling having never gone flat (non-converged).  Every search
-#   shape -- the unit-step climb (``climb_action``), the bracket-
-#   refine climb (``bracket_refine_next``), and the grid continuation
-#   -- returns one of these through ``climb_next`` (PSEUDOCODE 4e.3).
+# The verdicts a climb step returns (DESIGN 3.12.3 / 3.12.5): run one
+#   more mesh, stop converged at a rung, stop at the ceiling having
+#   never gone flat (non-converged), or stop early because a rising
+#   stride betrayed an oscillating near-metal (also non-converged).
+#   Every search shape -- the unit-step climb (``climb_action``), the
+#   bracket-refine climb (``bracket_refine_next``), and the grid
+#   continuation -- returns one of these through ``climb_next``
+#   (PSEUDOCODE 4e.3).  ``ceiling`` and ``metallic`` are one
+#   non-converged verdict reached two ways; the producer retires both
+#   the same, and the distinct kind only records WHY.
 _ACTION_RUN = "run"
 _ACTION_CONVERGED = "converged"
 _ACTION_CEILING = "ceiling"
+_ACTION_METALLIC = "metallic"
 
 # A climb-step result.  ``kind`` is one of the three verdicts above;
 #   ``rung`` is the converged ``Rung`` (set for CONVERGED only);
@@ -1995,12 +2004,25 @@ def bracket_refine_next(rungs, state, config):
             #   (stride 1).  There is no flatness to test yet.
             return _stride_up(state, 1, config)
 
-        # Two or more endpoints: test whether the last stride is flat.
-        #   The bracket test uses the LOOSER stride_threshold; the
-        #   refine below keeps the strict convergence threshold, so a
-        #   stride that reads loosely flat but has not truly converged
-        #   is caught there (DESIGN 3.12.3).
         prev = state.endpoints[-2]
+
+        # First: did the last stride RISE past the margin?  A finer
+        #   mesh that raised the energy that far is an oscillating
+        #   near-metal (Fermi-surface sampling), not convergence, so
+        #   stop early with the non-converged verdict rather than
+        #   grinding to the ceiling (DESIGN 3.12.3).  Checked before
+        #   flatness only for clarity -- a large rise is never flat.
+        if guidance_harvest.stride_rose(
+                mesh_climb.rung_at(rungs, prev),
+                mesh_climb.rung_at(rungs, top),
+                config.cell_atom_count, config.metallic_margin):
+            return ClimbAction(_ACTION_METALLIC, None, None), state
+
+        # Otherwise test whether the last stride is flat.  The bracket
+        #   test uses the LOOSER stride_threshold; the refine below
+        #   keeps the strict convergence threshold, so a stride that
+        #   reads loosely flat but has not truly converged is caught
+        #   there (DESIGN 3.12.3).
         if guidance_harvest.stride_is_flat(
                 mesh_climb.rung_at(rungs, prev),
                 mesh_climb.rung_at(rungs, top),
@@ -2190,8 +2212,11 @@ def converge_by_climb(materials, configs, seed_densities,
             #   mismatch), so it leaves active with no failure tag.
             outcomes[material] = action.rung
             active.discard(material)
-        elif action.kind == _ACTION_CEILING:
-            retire(material, NON_CONVERGED)              # 7.8 3d
+        elif action.kind in (_ACTION_CEILING, _ACTION_METALLIC):
+            # Both are the same non-converged verdict (7.8 3d): a
+            #   count-ceiling stop, or an oscillating near-metal caught
+            #   early by a rising stride (DESIGN 3.12.3).
+            retire(material, NON_CONVERGED)
         else:                                            # _ACTION_RUN
             dispatcher.send({material: [action.mesh]})
             in_air[material] += 1
@@ -2515,9 +2540,13 @@ def build_climb_config(ref, structure, confidence, under_trained,
     # The bracket phase's stride test is looser than convergence by the
     #   database-wide multiple (DESIGN 3.12.3): the strict per-solid
     #   threshold stays on `threshold` for the refine, and the bracket
-    #   reads `stride_threshold`.
+    #   reads `stride_threshold`.  The metallic early-bail margin is
+    #   assembled the same way, a larger multiple up from the strict
+    #   threshold, so only a genuine upward oscillation trips it.
     stride_threshold = (ref.kpoint_convergence_threshold
                         * thresholds.stride_flatness_multiple)
+    metallic_margin = (ref.kpoint_convergence_threshold
+                       * thresholds.metallic_rise_multiple)
 
     return ClimbConfig(
         classes=classes,
@@ -2531,6 +2560,7 @@ def build_climb_config(ref, structure, confidence, under_trained,
         cell_atom_count=cell.num_atoms,
         threshold=ref.kpoint_convergence_threshold,
         stride_threshold=stride_threshold,
+        metallic_margin=metallic_margin,
         max_count=max_count)
 
 

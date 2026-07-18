@@ -1673,6 +1673,23 @@ function stride_is_flat(lo_rung, hi_rung, cell_atom_count, threshold):
     return abs(hi - lo) < threshold
 
 
+function stride_rose(lo_rung, hi_rung, cell_atom_count, margin):
+    # The near-metal early-bail test (DESIGN 3.12.3): a SIGNED test,
+    # true when the finer endpoint's per-atom energy sits ABOVE the
+    # coarser one's by more than `margin`.  Refining the mesh lowers
+    # an insulator's energy smoothly, but a near-metal oscillates
+    # across the Fermi surface and a finer mesh can raise it, so a
+    # large upward stride is dispositive evidence of oscillation.
+    # `margin` is well above any real convergence wobble (a multiple
+    # of the convergence threshold, config.metallic_margin, 4e.3), so
+    # a smoothly-converging cell -- even one rising in small
+    # sub-threshold steps -- never trips it.  Unlike stride_is_flat
+    # this is NOT symmetric: only a RISE counts, never a drop.
+    lo = per_atom_ev(lo_rung.energy, cell_atom_count)
+    hi = per_atom_ev(hi_rung.energy, cell_atom_count)
+    return hi - lo > margin
+
+
 function at_ceiling(mesh, max_count):
     # The fixed per-axis backstop (DESIGN 3.12.3): the LARGEST axial
     # count reaching max_count, not the product or the stride.  A cost
@@ -1690,7 +1707,12 @@ threading a per-material search `state` for the stateful
 bracket-refine shape; the grid and the unit-step climb ignore it.
 Every shape returns one of: `RUN(mesh)` -- run one more mesh;
 `CONVERGED(rung)` -- done, that rung; `CEILING` -- stop,
-non-converged.
+non-converged (hit the count ceiling still steep); `METALLIC` --
+stop, non-converged (an oscillating near-metal caught early by a
+rising stride, 4e.2).  `CEILING` and `METALLIC` are the same
+non-converged verdict reached two ways; the producer (4e.5)
+retires both the same, and the distinct kind only records WHY for
+a log or later reason-surfacing.
 
 ```
 function climb_next(rungs, state, config):
@@ -1744,8 +1766,16 @@ function bracketRefineNext(rungs, state, config):
             # Only the seed is computed; launch the first stride
             #   (stride 1).  No flatness to test yet.
             return strideUp(state, 1, config)
-        # Two or more endpoints: test the last stride's flatness.
+        # Two or more endpoints.  First: did the last stride RISE by
+        #   more than the margin?  A finer mesh that raised the energy
+        #   that far is an oscillating near-metal (4e.2) -- stop early
+        #   with the non-converged verdict rather than grinding to the
+        #   ceiling (DESIGN 3.12.3).  Checked before flatness; a large
+        #   rise is never also flat, so the order is only for clarity.
         prev = state.endpoints[-2]
+        if stride_rose(rung_at(rungs, prev), rung_at(rungs, top),
+                       config.cell_atom_count, config.metallic_margin):
+            return METALLIC, state
         # The bracket test uses the LOOSER stride_threshold (4e.2);
         #   the refine below keeps the strict convergence threshold.
         if stride_is_flat(rung_at(rungs, prev), rung_at(rungs, top),
@@ -1942,13 +1972,18 @@ config (11.4 / build_climb_config): it is the solid's strict
 `stride_flatness_multiple` knob (>= 1, default a small multiple to
 be fixed by experiment, DESIGN 3.12.6).  The strict threshold
 stays on `config.threshold` for the refine; only the bracket
-stride test reads the looser one.
+stride test reads the looser one.  `config.metallic_margin` -- the
+upward-stride bail bound (4e.2 / 4e.3) -- is assembled the same
+way: the strict threshold times the `metallic_rise_multiple` knob
+(>= 1, a large multiple so only a genuine oscillation trips it,
+DESIGN 3.12.3 / 3.12.6).
 
 The numeric knobs that policy reads -- the `confidence_high`
 threshold, the two `flat_needed` counts, `grid_width`, the two
 `start_offset` values, `max_stride`, the climb-shape choice, the
-`stride_flatness_multiple`, and the per-axis `max_count` ceiling --
-are config, not constants (Principle 11).  They are sourced from the
+`stride_flatness_multiple`, the `metallic_rise_multiple`, and the
+per-axis `max_count` ceiling -- are config, not constants
+(Principle 11).  They are sourced from the
 manifest `[harvest.kpoint_climb]` sub-table (DESIGN 5.7 / 3.12.6),
 each knob falling back to a documented provisional default when the
 sub-table or that knob is omitted.  The producer resolves them once
@@ -1960,7 +1995,11 @@ rather than silently taking a default.  The one knob with a
 restricted VALUE, `climb_shape`, is checked too: the merge rejects
 any value that is not one of the known climb shapes (`BRACKET_REFINE`
 or `UNIT_STEP`), so a typo like `"unit-step"` fails loudly rather
-than falling through to a default shape.  The provisional default
+than falling through to a default shape.  The two multiples --
+`stride_flatness_multiple` and `metallic_rise_multiple` -- are
+likewise checked to be `>= 1`, since a value below one would invert
+the knob's meaning (a stricter-than-convergence bracket, or a bail
+that fires below the convergence wobble).  The provisional default
 values themselves are still to be fixed by the seed experiment
 (3.12.6).
 
@@ -2013,8 +2052,10 @@ function converge_by_climb(materials, configs, seed_densities,
         if action is CONVERGED:
             outcomes[m] = action.rung                # the Rung, not a
             active.discard(m)                        #   mismatch
-        elif action is CEILING:
-            retire(m, NON_CONVERGED)                 # 7.8 3d
+        elif action is CEILING or action is METALLIC:
+            retire(m, NON_CONVERGED)                 # 7.8 3d; a
+            #   near-metal caught early (METALLIC) retires the same as
+            #   a ceiling stop -- one non-converged verdict, two ways.
         else:                                        # RUN(mesh)
             dispatcher.send({ m: [action.mesh] })
             in_air[m] += 1

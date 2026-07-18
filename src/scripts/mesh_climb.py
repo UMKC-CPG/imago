@@ -518,12 +518,22 @@ ClimbPolicy = namedtuple(
 ##                            settled stride one geometric step sooner
 ##                            and shaving the top-end overshoot
 ##                            (DESIGN 3.12.3)
+##     metallic_rise_multiple
+##                            how large an UPWARD stride (as a multiple
+##                            of the convergence threshold, >= 1) flags
+##                            an oscillating near-metal and stops the
+##                            climb early: a finer mesh that raises the
+##                            energy this far is a Fermi-surface
+##                            oscillation, not convergence.  Large so
+##                            only a genuine oscillation trips it; set
+##                            it very high to disable the early bail
+##                            (DESIGN 3.12.3)
 PolicyThresholds = namedtuple(
     "PolicyThresholds",
     ["confidence_high", "grid_width", "start_offset_moderate",
      "start_offset_cold", "flat_needed_confident",
      "flat_needed_cold", "max_stride", "climb_shape",
-     "stride_flatness_multiple"])
+     "stride_flatness_multiple", "metallic_rise_multiple"])
 
 
 # Provisional defaults (DESIGN 3.12.6): placeholders until the seed
@@ -535,7 +545,11 @@ PolicyThresholds = namedtuple(
 #   at most eight ladder positions (1, 2, 4, 8) so a long bracket is
 #   crossed in a handful of computed points.  The bracket phase reads
 #   a stride flat within three times the convergence threshold, so a
-#   nearly-settled stride is bracketed a geometric step early.
+#   nearly-settled stride is bracketed a geometric step early.  A
+#   stride that RISES by more than fifty times the convergence
+#   threshold is judged an oscillating near-metal and stops the climb
+#   early -- a near-metal's upward excursions dwarf that bound, while
+#   a converging cell's never approach it.
 DEFAULT_POLICY_THRESHOLDS = PolicyThresholds(
     confidence_high=0.75,
     grid_width=1,
@@ -545,7 +559,8 @@ DEFAULT_POLICY_THRESHOLDS = PolicyThresholds(
     flat_needed_cold=2,
     max_stride=8,
     climb_shape=BRACKET_REFINE,
-    stride_flatness_multiple=3.0)
+    stride_flatness_multiple=3.0,
+    metallic_rise_multiple=50.0)
 
 
 # The fixed per-axis backstop the climb never exceeds (DESIGN
@@ -654,15 +669,18 @@ def climb_policy_from_manifest(climb_settings):
         raise ValueError(
             "kpoint_climb.climb_shape must be one of {0}, got "
             "{1!r}".format(list(CLIMB_SHAPES), shape))
-    # The bracket threshold is LOOSER than convergence, so the
-    #   multiple must be >= 1; a value below 1 would make the bracket
-    #   test stricter than the refine and is surely a mistake.
-    multiple = climb_settings.get("stride_flatness_multiple")
-    if multiple is not None and multiple < 1:
-        raise ValueError(
-            "kpoint_climb.stride_flatness_multiple must be >= 1 (the "
-            "bracket threshold is looser than convergence), got "
-            "{0!r}".format(multiple))
+    # Both multiples scale the convergence threshold UP, so each must
+    #   be >= 1: a stride_flatness_multiple below 1 would make the
+    #   bracket test stricter than the refine, and a
+    #   metallic_rise_multiple below 1 would bail on strides smaller
+    #   than the convergence wobble.  Either is surely a mistake.
+    for knob in ("stride_flatness_multiple", "metallic_rise_multiple"):
+        value = climb_settings.get(knob)
+        if value is not None and value < 1:
+            raise ValueError(
+                "kpoint_climb.{0} must be >= 1 (it scales the "
+                "convergence threshold up), got {1!r}".format(
+                    knob, value))
     threshold_overrides = {
         field: climb_settings[field]
         for field in PolicyThresholds._fields

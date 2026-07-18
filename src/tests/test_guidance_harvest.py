@@ -279,6 +279,42 @@ def test_stride_is_flat_normalizes_per_atom():
 
 
 # --------------------------------------------------------------
+#  stride_rose -- the near-metal early-bail test (DESIGN 3.12.3)
+#
+#  A SIGNED test: true only when the finer endpoint's per-atom energy
+#  sits ABOVE the coarser one's by more than the margin.  A rise
+#  betrays a near-metal (finer mesh raised the energy); a drop never
+#  fires.
+# --------------------------------------------------------------
+
+def test_stride_rose_fires_only_on_a_rise_past_the_margin():
+    """A finer mesh that raises the energy past the margin trips the
+    bail; the same-size DROP never does (the test is one-sided)."""
+    low = types.SimpleNamespace(mesh=[2, 2, 2], energy=-5.0)
+    higher = types.SimpleNamespace(mesh=[4, 4, 4], energy=-5.0 + 1e-4)
+    delta = gh.per_atom_ev(higher.energy, 1) - gh.per_atom_ev(
+        low.energy, 1)                       # positive: energy rose
+    assert gh.stride_rose(low, higher, 1, delta * 0.99) is True
+    assert gh.stride_rose(low, higher, 1, delta * 1.01) is False
+    # The mirror-image drop (finer mesh LOWERED the energy) never
+    #   fires, whatever the margin -- convergence goes this way.
+    lower = types.SimpleNamespace(mesh=[4, 4, 4], energy=-5.0 - 1e-4)
+    assert gh.stride_rose(low, lower, 1, 0.0) is False
+
+
+def test_stride_rose_normalizes_per_atom():
+    """Like the other energy tests, the rise is judged per atom, so a
+    given total-cell rise trips a smaller margin on a smaller cell."""
+    low = types.SimpleNamespace(mesh=[2, 2, 2], energy=-5.0)
+    high = types.SimpleNamespace(mesh=[4, 4, 4], energy=-5.0 + 2e-4)
+    one_atom_rise = gh.per_atom_ev(high.energy, 1) - gh.per_atom_ev(
+        low.energy, 1)
+    margin = one_atom_rise * 0.75            # between 1- and 2-atom
+    assert gh.stride_rose(low, high, 1, margin) is True    # 1 atom
+    assert gh.stride_rose(low, high, 2, margin) is False   # 2 atoms
+
+
+# --------------------------------------------------------------
 #  collapse_by_mesh -- the duplicate-rung guard (DESIGN 7.8 3c)
 # --------------------------------------------------------------
 
