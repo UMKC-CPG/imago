@@ -1767,14 +1767,22 @@ function bracketRefineNext(rungs, state, config):
             #   (stride 1).  No flatness to test yet.
             return strideUp(state, 1, config)
         # Two or more endpoints.  First: did the last stride RISE by
-        #   more than the margin?  A finer mesh that raised the energy
-        #   that far is an oscillating near-metal (4e.2) -- stop early
-        #   with the non-converged verdict rather than grinding to the
-        #   ceiling (DESIGN 3.12.3).  Checked before flatness; a large
-        #   rise is never also flat, so the order is only for clarity.
+        #   more than the margin, FROM a mesh dense enough to trust?  A
+        #   finer mesh that raised the energy that far is an
+        #   oscillating near-metal (4e.2) -- stop early with the
+        #   non-converged verdict rather than grinding to the ceiling
+        #   (DESIGN 3.12.3).  But a rise measured from an ultra-coarse
+        #   mesh (the single Gamma point most of all) is sampling
+        #   noise, larger than a real oscillation and firing for
+        #   insulator and metal alike, so the bail ignores it unless
+        #   the coarser endpoint's full-mesh point count clears
+        #   metallic_min_points.  Checked before flatness; a large rise
+        #   is never also flat, so the order is only for clarity.
         prev = state.endpoints[-2]
-        if stride_rose(rung_at(rungs, prev), rung_at(rungs, top),
-                       config.cell_atom_count, config.metallic_margin):
+        if (meshSize(prev) >= config.metallic_min_points
+            and stride_rose(rung_at(rungs, prev), rung_at(rungs, top),
+                            config.cell_atom_count,
+                            config.metallic_margin)):
             return METALLIC, state
         # The bracket test uses the LOOSER stride_threshold (4e.2);
         #   the refine below keeps the strict convergence threshold.
@@ -1976,14 +1984,18 @@ stride test reads the looser one.  `config.metallic_margin` -- the
 upward-stride bail bound (4e.2 / 4e.3) -- is assembled the same
 way: the strict threshold times the `metallic_rise_multiple` knob
 (>= 1, a large multiple so only a genuine oscillation trips it,
-DESIGN 3.12.3 / 3.12.6).
+DESIGN 3.12.3 / 3.12.6).  `config.metallic_min_points` -- the
+coarse-mesh floor that gate reads (4e.3) -- is a plain full-mesh
+point count (not threshold-scaled), carried straight through from
+its knob; a rise whose coarser endpoint has fewer points is
+ignored as sampling noise.
 
 The numeric knobs that policy reads -- the `confidence_high`
 threshold, the two `flat_needed` counts, `grid_width`, the two
 `start_offset` values, `max_stride`, the climb-shape choice, the
-`stride_flatness_multiple`, the `metallic_rise_multiple`, and the
-per-axis `max_count` ceiling -- are config, not constants
-(Principle 11).  They are sourced from the
+`stride_flatness_multiple`, the `metallic_rise_multiple`, the
+`metallic_min_points` floor, and the per-axis `max_count` ceiling
+-- are config, not constants (Principle 11).  They are sourced from the
 manifest `[harvest.kpoint_climb]` sub-table (DESIGN 5.7 / 3.12.6),
 each knob falling back to a documented provisional default when the
 sub-table or that knob is omitted.  The producer resolves them once
@@ -1999,9 +2011,9 @@ than falling through to a default shape.  The two multiples --
 `stride_flatness_multiple` and `metallic_rise_multiple` -- are
 likewise checked to be `>= 1`, since a value below one would invert
 the knob's meaning (a stricter-than-convergence bracket, or a bail
-that fires below the convergence wobble).  The provisional default
-values themselves are still to be fixed by the seed experiment
-(3.12.6).
+that fires below the convergence wobble), and `metallic_min_points`
+is checked `>= 1` as a point count.  The provisional default values
+themselves are still to be fixed by the seed experiment (3.12.6).
 
 ### 4e.5 Concurrent orchestration across materials
 

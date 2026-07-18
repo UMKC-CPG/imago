@@ -2092,7 +2092,7 @@ def _install_climb_mocks(monkeypatch, workspace, *,
         recip_cell_volume=0.64, mode=mesh_climb.UNIT_STEP,
         flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
         cell_atom_count=2, threshold=1.0e-6, stride_threshold=3.0e-6,
-        metallic_margin=5.0e-5, max_count=20)
+        metallic_margin=5.0e-5, metallic_min_points=4, max_count=20)
     monkeypatch.setattr(bip, "build_climb_config",
                         lambda *a, **k: config)
 
@@ -2439,7 +2439,8 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
             recip_cell_volume=1.0, mode=mesh_climb.UNIT_STEP,
             flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
             cell_atom_count=2, threshold=1.0e-6, stride_threshold=3.0e-6,
-            metallic_margin=5.0e-5, max_count=20))
+            metallic_margin=5.0e-5, metallic_min_points=4,
+            max_count=20))
     monkeypatch.setattr(
         bip, "converge_by_climb",
         lambda materials, *a, **k: (
@@ -2702,7 +2703,7 @@ _CUBIC_RECIP_MAG = [1.0, 1.0, 1.0]
 
 def _cubic_config(mode, flat_needed, grid_width, start_offset,
                   max_count, max_stride=8, stride_threshold=3.0,
-                  metallic_margin=50.0):
+                  metallic_margin=50.0, metallic_min_points=1):
     """A cubic-cell ClimbConfig with a strict per-atom convergence
     threshold of 1.0 eV and one atom per cell, so a raw energy delta
     counts as converged when it is below 1.0 / HARTREE hartree (DESIGN
@@ -2710,15 +2711,18 @@ def _cubic_config(mode, flat_needed, grid_width, start_offset,
     bracket phase's looser stride threshold defaults to 3.0 (three
     times the convergence threshold), and the metallic early-bail
     margin to 50.0 (fifty times it), the provisional multiples.  The
-    unit-step tests that use this helper never stride, so all three
-    are inert for them."""
+    coarse-mesh floor defaults to 1 (every mesh trusted) so a test's
+    rise fires regardless of where it sits; tests that exercise the
+    floor pass it explicitly.  The unit-step tests that use this
+    helper never stride, so all four are inert for them."""
     return bip.ClimbConfig(
         classes=_CUBIC_CLASSES, recip_mag=_CUBIC_RECIP_MAG,
         recip_cell_volume=1.0, mode=mode, flat_needed=flat_needed,
         grid_width=grid_width, start_offset=start_offset,
         max_stride=max_stride, cell_atom_count=1, threshold=1.0,
         stride_threshold=stride_threshold,
-        metallic_margin=metallic_margin, max_count=max_count)
+        metallic_margin=metallic_margin,
+        metallic_min_points=metallic_min_points, max_count=max_count)
 
 
 def _converging_energy(mesh):
@@ -3184,6 +3188,48 @@ def test_bracket_refine_bails_early_on_a_rising_stride():
     #   plateau and converges.
     outcome_off, _, _ = _run(1.0e9)
     assert outcome_off.mesh == [6, 6, 6]
+
+
+def _gamma_noise_energy(mesh):
+    """A cubic insulator whose single Gamma point ([1,1,1]) gives a
+    spuriously low energy: the [1,1,1] -> [2,2,2] stride RISES ~5
+    eV/atom, more than a real oscillation, purely from coarse-mesh
+    sampling.  Above that the energy is its true, flat value.  The
+    near-metal bail must not mistake this insulator for a metal."""
+    n = mesh[0]
+    if n == 1:
+        return -1.0                          # Gamma-only: spurious low
+    if n == 2:
+        return -0.8                          # rises from Gamma (noise)
+    return -1.5                              # true value, flat above
+
+
+def test_metallic_bail_ignores_a_rise_from_an_ultra_coarse_mesh():
+    """A rise measured from an ultra-coarse mesh is sampling noise, not
+    oscillation, so the bail's coarse-mesh floor ignores it: with the
+    floor at four points the [1,1,1] -> [2,2,2] rise (from a one-point
+    mesh) is skipped and the insulator converges, but drop the floor to
+    one and the same rise false-bails it NON_CONVERGED (DESIGN
+    3.12.3).  This is the si_ia-3 regression the floor fixes."""
+    materials = ["ins"]
+    seed_densities = {"ins": 1.0}            # opens at [1,1,1]
+
+    def _run(metallic_min_points):
+        config = _cubic_config(
+            mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+            start_offset=0, max_count=20, metallic_margin=2.0,
+            metallic_min_points=metallic_min_points)
+        outcomes, _ = bip.converge_by_climb(
+            materials, {"ins": config}, seed_densities,
+            _SyntheticDispatcher({"ins": _gamma_noise_energy}))
+        return outcomes["ins"]
+
+    # Floor 4: the rise from the one-point [1,1,1] is below the floor,
+    #   so it is ignored and the cell converges.
+    assert _run(4).mesh == [4, 4, 4]
+    # Floor 1: every mesh trusted, so the Gamma-noise rise false-bails
+    #   the insulator -- exactly the regression the floor removes.
+    assert _run(1) is bip.NON_CONVERGED
 
 
 def test_bracket_refine_resumes_after_a_false_bracket():

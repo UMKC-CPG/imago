@@ -1895,7 +1895,26 @@ convergence threshold (3.12.6), set well above any real
 convergence wobble, so a smoothly-converging cell -- even one
 that approaches from below, its energy rising in small
 sub-threshold steps -- never trips it; only a genuine, large
-upward excursion does. The judgement is a heuristic, not the
+upward excursion does.
+
+The margin alone is not enough, though, because the very coarsest
+meshes are unreliable in a way that has nothing to do with
+metallicity. The single Gamma point (`[1,1,1]`) is one sample of
+the whole zone; the jump from it to any real grid can move the
+energy by more than a genuine Fermi-surface oscillation ever does,
+in either direction, for an insulator as readily as a metal. A
+rise measured *from* such an ultra-coarse mesh is therefore
+sampling noise, not evidence, and trusting it mistakes a
+well-behaved insulator (whose Gamma-point energy simply happened
+to sit low) for a near-metal. So the bail ignores any rise whose
+coarser endpoint is below a small floor of k-points (3.12.6),
+measured as the full-mesh point count: only a rise from a mesh
+already dense enough to be trusted counts. This is what separates
+the two -- a real oscillation still shows itself once the mesh is
+past that floor (si_cmce's rise is measured from an eight-point
+mesh), while a coarse Gamma artifact never clears it.
+
+The judgement is a heuristic, not the
 authoritative two-sided test, so it is deliberately conservative:
 its cost if it fires wrongly is a curator re-run of a material
 that might have converged, never a wrong recorded result, and
@@ -2047,6 +2066,10 @@ script constants:
   rise before the climb calls the material an oscillating near-
   metal and stops early (3.12.3); larger is more conservative, and
   arbitrarily large disables the early bail.
+- The floor of k-points (full-mesh point count) a stride's coarser
+  endpoint must clear before a rise across it is trusted (3.12.3),
+  which keeps the near-metal bail from firing on coarse-mesh
+  (Gamma-point) sampling noise.
 - The value of the fixed per-axis count ceiling, and the cost
   budget once the resource dataspace (8) supplies one (3.12.3).
 - The width of the confident-mode fixed mesh grid -- how many

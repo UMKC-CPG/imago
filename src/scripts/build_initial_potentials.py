@@ -1770,13 +1770,18 @@ Rung = namedtuple("Rung", ["mesh", "energy"])
 ##                        an oscillating near-metal and stops the
 ##                        climb early -- threshold times the
 ##                        metallic_rise_multiple (DESIGN 3.12.3)
+##     metallic_min_points
+##                        the full-mesh point count a rising stride's
+##                        coarser endpoint must clear for the bail to
+##                        trust it, so a rise from an ultra-coarse
+##                        (Gamma) mesh is ignored (DESIGN 3.12.3)
 ##     max_count          per-axis ceiling backstop (DESIGN 3.12.3)
 ClimbConfig = namedtuple(
     "ClimbConfig",
     ["classes", "recip_mag", "recip_cell_volume", "mode",
      "flat_needed", "grid_width", "start_offset", "max_stride",
      "cell_atom_count", "threshold", "stride_threshold",
-     "metallic_margin", "max_count"])
+     "metallic_margin", "metallic_min_points", "max_count"])
 
 
 # The verdicts a climb step returns (DESIGN 3.12.3 / 3.12.5): run one
@@ -2006,16 +2011,22 @@ def bracket_refine_next(rungs, state, config):
 
         prev = state.endpoints[-2]
 
-        # First: did the last stride RISE past the margin?  A finer
-        #   mesh that raised the energy that far is an oscillating
-        #   near-metal (Fermi-surface sampling), not convergence, so
-        #   stop early with the non-converged verdict rather than
-        #   grinding to the ceiling (DESIGN 3.12.3).  Checked before
-        #   flatness only for clarity -- a large rise is never flat.
-        if guidance_harvest.stride_rose(
-                mesh_climb.rung_at(rungs, prev),
-                mesh_climb.rung_at(rungs, top),
-                config.cell_atom_count, config.metallic_margin):
+        # First: did the last stride RISE past the margin, from a mesh
+        #   dense enough to trust?  A finer mesh that raised the energy
+        #   that far is an oscillating near-metal (Fermi-surface
+        #   sampling), not convergence, so stop early rather than
+        #   grinding to the ceiling (DESIGN 3.12.3).  But a rise
+        #   measured from an ultra-coarse mesh (the single Gamma point
+        #   most of all) is sampling noise -- larger than a real
+        #   oscillation and firing for insulators too -- so it counts
+        #   only once the coarser endpoint clears metallic_min_points
+        #   full-mesh points.  Checked before flatness only for
+        #   clarity -- a large rise is never flat.
+        if (_mesh_point_count(prev) >= config.metallic_min_points
+                and guidance_harvest.stride_rose(
+                    mesh_climb.rung_at(rungs, prev),
+                    mesh_climb.rung_at(rungs, top),
+                    config.cell_atom_count, config.metallic_margin)):
             return ClimbAction(_ACTION_METALLIC, None, None), state
 
         # Otherwise test whether the last stride is flat.  The bracket
@@ -2561,6 +2572,7 @@ def build_climb_config(ref, structure, confidence, under_trained,
         threshold=ref.kpoint_convergence_threshold,
         stride_threshold=stride_threshold,
         metallic_margin=metallic_margin,
+        metallic_min_points=thresholds.metallic_min_points,
         max_count=max_count)
 
 
