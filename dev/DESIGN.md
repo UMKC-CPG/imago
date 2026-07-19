@@ -1414,6 +1414,15 @@ still at least `D * recipCellVolume` points. What changes is
 that every candidate mesh along the way respects the symmetry
 classes and stays as isotropic as the integers permit.
 
+Steps 2 and 3 -- turning a target spacing into a shared,
+per-class, rounded integer mesh -- are the reusable core of this
+map. The crystalline mesh climb's opening floor (3.12.4) applies
+exactly that core to a *fixed* spacing (the one that puts a small
+cap of points on the densest axis) rather than one derived from a
+density, and it skips step 4's density-floor raise, so the two
+paths distribute and round a spacing identically and differ only
+in the spacing they start from.
+
 ### 3.8 Symmetry-Compatible Axial Counts
 
 A uniform mesh with counts `(n_a, n_b, n_c)` and a shift `s`,
@@ -1897,22 +1906,29 @@ that approaches from below, its energy rising in small
 sub-threshold steps -- never trips it; only a genuine, large
 upward excursion does.
 
-The margin alone is not enough, though, because the very coarsest
-meshes are unreliable in a way that has nothing to do with
-metallicity. The single Gamma point (`[1,1,1]`) is one sample of
-the whole zone; the jump from it to any real grid can move the
-energy by more than a genuine Fermi-surface oscillation ever does,
-in either direction, for an insulator as readily as a metal. A
-rise measured *from* such an ultra-coarse mesh is therefore
-sampling noise, not evidence, and trusting it mistakes a
-well-behaved insulator (whose Gamma-point energy simply happened
-to sit low) for a near-metal. So the bail ignores any rise whose
-coarser endpoint is below a small floor of k-points (3.12.6),
-measured as the full-mesh point count: only a rise from a mesh
-already dense enough to be trusted counts. This is what separates
-the two -- a real oscillation still shows itself once the mesh is
-past that floor (si_cmce's rise is measured from an eight-point
-mesh), while a coarse Gamma artifact never clears it.
+The margin alone would not be enough if the climb could measure a
+rise from the very coarsest meshes, which are unreliable in a way
+that has nothing to do with metallicity. The single Gamma point
+(`[1,1,1]`) is one sample of the whole zone; the jump from it to
+any real grid can move the energy by more than a genuine Fermi-
+surface oscillation ever does, in either direction, for an
+insulator as readily as a metal. A rise measured *from* such an
+ultra-coarse mesh is sampling noise, not evidence, and trusting it
+would mistake a well-behaved insulator (whose Gamma-point energy
+simply happened to sit low) for a near-metal. The crystalline climb
+never measures one, because it does not begin there: its opening
+rung is floored at a physically meaningful resolution (3.12.4), so
+every stride the bail judges runs from a mesh already dense enough
+to trust. The floor does the separating a coarse-mesh point-count
+guard would otherwise have to -- a real oscillation still shows
+itself above the floor (si_cmce's rise is measured from a mesh well
+past it), while the coarse Gamma artifact is never on the ladder to
+be misread. And because no crystalline material reaches the
+accuracy target below that floor (3.12.4), starting above it
+discards nothing the search would have used. Non-crystalline
+system_types seed at or near Gamma by convention (7.9) and converge
+without a bracket climb, so the bail's coarse regime never arises
+for them either.
 
 The judgement is a heuristic, not the
 authoritative two-sided test, so it is deliberately conservative:
@@ -1944,6 +1960,32 @@ climb, not to change its path:
   confirm a flat interior in a rung or two. In the limit the
   climb is just "run the predicted mesh and its neighbours,
   confirm flat."
+
+For crystalline system_types the cold start also carries a
+**floor**. No crystalline material reaches the k-point accuracy the
+harvest demands on a mesh as coarse as a single Gamma point or a
+handful of points per axis, so beginning the climb there only
+spends rungs in a regime the search must leave anyway -- and worse,
+those coarsest meshes read unreliably enough (3.12.3) to mislead
+the near-metal bail. So the crystalline climb opens no lower than a
+floor rung, defined as a **cap of a few points per axis**: the
+densest reciprocal axis (the largest `|b_i|`) gets the cap count,
+and every other axis, being coarser in reciprocal space, is sampled
+to that same k-spacing and so gets fewer -- never more -- down to a
+single point. A cubic cell floors at `[4,4,4]`; an anisotropic one
+at `[4,4,2]`, `[4,3,2]`, `[4,1,1]`, and the like, capped at the
+count on every axis. The cap is a per-axis maximum, not a total
+point count, so unlike a fixed-density floor it never forces extra
+k-points onto a strongly anisotropic cell whose long real axis
+needs only a point or two. The opening rung is then the higher of
+the seed-derived rung and this floor, so a confident warm seed --
+already above the floor for any real convergence -- is untouched,
+and only the cold bootstrap is lifted out of the coarse regime.
+Non-crystalline system_types are exempt: a molecule converges at
+Gamma-only (7.9) and must not be floored up off it. This floor is
+what lets the near-metal bail drop its own coarse-mesh guard
+(3.12.3): the climb no longer visits a mesh too coarse for the bail
+to trust, so no separate point-count gate is needed.
 
 `predictor_confidence` (7.6) is the natural dial for how much
 confirmation to demand, how far below the prediction to begin,
@@ -2066,10 +2108,12 @@ script constants:
   rise before the climb calls the material an oscillating near-
   metal and stops early (3.12.3); larger is more conservative, and
   arbitrarily large disables the early bail.
-- The floor of k-points (full-mesh point count) a stride's coarser
-  endpoint must clear before a rise across it is trusted (3.12.3),
-  which keeps the near-metal bail from firing on coarse-mesh
-  (Gamma-point) sampling noise.
+- The per-axis cap that sets the crystalline climb's opening floor
+  (3.12.4) -- the most points any axis of the coarsest starting
+  mesh may carry, `4` by default (so `[4,4,4]` for a cubic cell,
+  fewer per axis for an anisotropic one). Keeping the climb above
+  this floor is what removes the need for a separate coarse-mesh
+  guard on the near-metal bail (3.12.3).
 - The value of the fixed per-axis count ceiling, and the cost
   budget once the resource dataspace (8) supplies one (3.12.3).
 - The width of the confident-mode fixed mesh grid -- how many
@@ -5019,7 +5063,7 @@ tune how the whole seed campaign searches, not one solid's physics
 with no per-solid override.  Each knob is optional; an omitted one
 takes the producer's provisional default (3.12.6), so a manifest
 that names neither the sub-table nor any knob searches with the
-built-in policy.  The seven knobs are:
+built-in policy.  The knobs are:
 
 - `max_count` (positive int): the fixed per-axis count ceiling the
   climb never exceeds, the backstop that guarantees termination
@@ -5039,6 +5083,29 @@ built-in policy.  The seven knobs are:
   before it accepts convergence -- one when confident, two when
   cold, so a single lucky flat step cannot end a cold climb early
   (3.12.3).
+- `max_stride` (positive int): the cap on the bracket phase's
+  geometric stride growth, which keeps the interval a refine must
+  then fill short (3.12.3).
+- `climb_shape` (one of `bracket-refine`, `unit-step`): which
+  search the low and under-trained cases run -- the bracket-then-
+  refine climb by default, or the fine unit-step walk when a
+  curator pins the most conservative reading (3.12.3 / 3.12.5).
+- `stride_flatness_multiple` (real >= 1): the multiple by which
+  the bracket phase's flatness threshold is looser than the
+  convergence threshold, setting how eagerly a nearly-settled
+  stride is bracketed and so how much top-end overshoot is shaved
+  (3.12.3).
+- `metallic_rise_multiple` (real >= 1): the multiple of the
+  convergence threshold by which a stride must rise before the
+  climb calls the material an oscillating near-metal and stops
+  early; an arbitrarily large value disables the bail (3.12.3).
+- `crystalline_floor_axis_count` (positive int): the per-axis cap
+  on a crystalline climb's opening floor mesh -- the most points
+  any one axis of the coarsest starting mesh may carry, `4` by
+  default, so a cubic cell floors at `[4,4,4]` and an anisotropic
+  one lower per axis (3.12.4).  Holding the climb above this floor
+  is what lets the near-metal bail drop a separate coarse-mesh
+  guard (3.12.3).
 
 **Per-entry fields (`[[reference_solid.entry]]`).**  An entry
 is an *optional customization* on an auto-discovered environment, not

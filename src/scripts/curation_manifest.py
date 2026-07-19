@@ -276,20 +276,21 @@ HARVEST_SETTING_KEYS = ("kpoint_convergence_threshold",
 #   bracket phase's ``max_stride`` cap, the curator's ``climb_shape``
 #   choice, the ``stride_flatness_multiple`` that loosens the bracket
 #   test, the ``metallic_rise_multiple`` that stops an oscillating
-#   near-metal early, and the ``metallic_min_points`` floor that keeps
-#   that bail off coarse-mesh noise); ``max_count`` is the per-axis
-#   climb ceiling.  Each carries a provisional built-in default
-#   (mesh_climb), so the sub-table -- and any knob -- may be omitted;
-#   the loader validates the keys so a mistyped knob fails loudly
-#   rather than silently defaulting.  Database-wide: no per-solid
-#   override (unlike the threshold).  A test asserts this list stays
-#   in step with mesh_climb.
+#   near-metal early, and the ``crystalline_floor_axis_count`` per-axis
+#   cap that opens a crystalline climb above the coarse regime);
+#   ``max_count`` is the per-axis climb ceiling.  Each carries a
+#   provisional built-in default (mesh_climb), so the sub-table -- and
+#   any knob -- may be omitted; the loader validates the keys so a
+#   mistyped knob fails loudly rather than silently defaulting.
+#   Database-wide: no per-solid override (unlike the threshold).  A
+#   test asserts this list stays in step with mesh_climb.
 KPOINT_CLIMB_KEYS = ("confidence_high", "grid_width",
                      "start_offset_moderate", "start_offset_cold",
                      "flat_needed_confident", "flat_needed_cold",
                      "max_stride", "climb_shape",
                      "stride_flatness_multiple",
-                     "metallic_rise_multiple", "metallic_min_points",
+                     "metallic_rise_multiple",
+                     "crystalline_floor_axis_count",
                      "max_count")
 
 

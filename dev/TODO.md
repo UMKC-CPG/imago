@@ -2811,6 +2811,37 @@ imports its neighbours from `$IMAGO_BIN`).
   end-to-end.  The payoff is the cold/seeding case -- si_cmce's
   ~28 rungs should fall to ~8-10; a warm seed barely brackets.
 
+- [ ] C124. Code the crystalline opening floor and retire the
+  coarse-mesh gate on the near-metal bail, per DESIGN 3.12.4 /
+  PSEUDOCODE 4c.2 + 4e.3 + 4e.4.  Found from the seed re-run:
+  si_ia-3 (BC8 insulator) false-bailed NON_CONVERGED because its
+  cold climb opened at `[1,1,1]` and the `[1,1,1] -> [2,2,2]`
+  Gamma-sampling rise tripped the near-metal bail; the point-count
+  gate meant to suppress it did not.  The fix floors a crystalline
+  climb's opening at a per-axis cap (`crystalline_floor_axis_count`,
+  default 4: densest axis gets the cap, others scale down), so the
+  climb never visits the unreliable coarse regime and the bail
+  needs no gate.  Surface (all bounded, inline):
+  - `mesh_climb.py`: factor `counts_at_spacing` out of
+    `select_axial_counts`; add `crystalline_floor_mesh`; swap the
+    `metallic_min_points` PolicyThresholds field / default /
+    validation for `crystalline_floor_axis_count`; `initial_meshes`
+    gains an `opening_floor` arg and applies the max in the climb
+    branch.
+  - `build_initial_potentials.py`: `ClimbConfig` field
+    `metallic_min_points` -> `opening_floor`; `build_climb_config`
+    computes it (crystalline -> `crystalline_floor_mesh`, else
+    None); drop the coarse-mesh guard in `bracket_refine_next`; the
+    seeding call passes `config.opening_floor`.
+  - `curation_manifest.py`: `KPOINT_CLIMB_KEYS` swaps the knob.
+  - tests: replace the coarse-gate test with a floor test (keep
+    `_gamma_noise_energy`); `_cubic_config` + monkeypatched
+    `ClimbConfig` builders take `opening_floor`; assert
+    `build_climb_config` floors a cubic cell at `[4,4,4]`, an
+    anisotropic one lower per axis, and a non-crystalline one to
+    None.  Then a live seed re-run confirms si_ia-3 back to
+    `[6,6,6]` and si_cmce still bails cheaply.
+
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 
 - [ ] C62. Implement the element-aware bispectrum per

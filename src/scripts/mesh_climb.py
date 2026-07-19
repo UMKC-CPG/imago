@@ -315,11 +315,54 @@ def select_axial_counts(density, recip_mag, recip_cell_volume,
     if density <= 0:
         return [1, 1, 1]
 
-    # Continuous isotropic counts at a common spacing h:
-    #   h = (prod|b_i| / (recipCellVolume * D))^(1/3),
-    #   x_i = |b_i| / h.
+    # Continuous isotropic counts at a common spacing h derived from
+    #   the target density: h = (prod|b_i| / (recipCellVolume * D))
+    #   ^(1/3).  counts_at_spacing then distributes and rounds it.
     spacing = (recip_mag[0] * recip_mag[1] * recip_mag[2]
                / (recip_cell_volume * density)) ** (1.0 / 3.0)
+    counts = counts_at_spacing(spacing, recip_mag, classes)
+
+    # Raise WHOLE classes until the full-mesh product meets the
+    #   floor.  Never raise a single axis inside a multi-axis class
+    #   -- that would break symmetry compatibility.
+    floor = density * recip_cell_volume
+    while (counts[0] * counts[1] * counts[2]) < floor:
+        best_label = min(
+            distinct_classes(classes),
+            key=lambda label: spacing_spread(
+                bump(counts, classes, label, +1), recip_mag))
+        counts = bump(counts, classes, best_label, +1)
+
+    return counts
+
+
+def counts_at_spacing(spacing, recip_mag, classes):
+    """Return the isotropic integer mesh at reciprocal k-spacing
+    ``spacing`` -- one count per ``|b_i| / spacing`` on each axis,
+    shared per symmetry class and rounded to a positive integer
+    (PSEUDOCODE 4c.2, ``countsAtSpacing``).
+
+    This is the spacing-to-mesh core shared by two callers that
+    differ only in the spacing they choose and what follows it:
+    :func:`select_axial_counts` derives ``spacing`` from a target
+    volume density and then raises whole classes until the density
+    floor is met, while :func:`crystalline_floor_mesh` passes a
+    fixed floor spacing and takes the result as-is.  Single-sourcing
+    the distribution here keeps both paths rounding a spacing the
+    same way (DESIGN 3.7).
+
+    Parameters
+    ----------
+    spacing
+        The target reciprocal-space spacing ``h`` between adjacent
+        k-points along an axis; a smaller value yields a denser mesh.
+    recip_mag
+        The three reciprocal-axis magnitudes ``|b_i|``.
+    classes
+        The axis-class labels (from ``axis_classes_for_cell`` /
+        ``compute_axis_classes``); axes in one class share a count.
+    """
+    # Continuous per-axis count x_i = |b_i| / h.
     continuous = [recip_mag[axis] / spacing for axis in range(3)]
 
     # Force one shared real count per class.  Coupled axes already
@@ -334,20 +377,45 @@ def select_axial_counts(density, recip_mag, recip_cell_volume,
 
     # Nearest positive integer, per class (already equal within a
     #   class, so the class stays uniform).
-    counts = [max(1, round(continuous[axis])) for axis in range(3)]
+    return [max(1, round(continuous[axis])) for axis in range(3)]
 
-    # Raise WHOLE classes until the full-mesh product meets the
-    #   floor.  Never raise a single axis inside a multi-axis class
-    #   -- that would break symmetry compatibility.
-    floor = density * recip_cell_volume
-    while (counts[0] * counts[1] * counts[2]) < floor:
-        best_label = min(
-            distinct_classes(classes),
-            key=lambda label: spacing_spread(
-                bump(counts, classes, label, +1), recip_mag))
-        counts = bump(counts, classes, best_label, +1)
 
-    return counts
+def crystalline_floor_mesh(recip_mag, classes, floor_axis_count):
+    """Return the crystalline mesh climb's opening-floor rung
+    (PSEUDOCODE 4c.2, ``crystallineFloorMesh``; DESIGN 3.12.4).
+
+    The floor is a per-axis CAP.  Set the k-spacing so the densest
+    reciprocal axis (the largest ``|b_i|``) gets exactly
+    ``floor_axis_count`` points, then sample every other axis to
+    that same spacing.  A coarser axis (smaller ``|b_i|``) therefore
+    gets fewer points -- never more -- down to a single point.  So a
+    cubic cell floors at ``[4,4,4]`` and an anisotropic one at
+    ``[4,4,2]``, ``[4,3,2]``, ``[4,1,1]``, and the like, never
+    exceeding the cap on any axis.  No density-floor raise follows
+    (unlike :func:`select_axial_counts`): the cap is the whole point.
+
+    No crystalline material reaches the k-point accuracy the harvest
+    demands on a mesh this coarse, so flooring a cold climb here only
+    lifts it out of the unreliable coarse regime the near-metal bail
+    (DESIGN 3.12.3) would otherwise have to guard against -- it never
+    skips a mesh a real search would have converged on.
+
+    Parameters
+    ----------
+    recip_mag
+        The three reciprocal-axis magnitudes ``|b_i|``.
+    classes
+        The axis-class labels; axes in one class share a count.
+    floor_axis_count
+        The per-axis cap -- the count the densest axis receives, and
+        the most any axis may carry (the ``crystalline_floor_axis_
+        count`` knob, default 4).
+    """
+    # The spacing that puts exactly floor_axis_count points on the
+    #   densest axis; counts_at_spacing scales the others down from
+    #   there and never above the cap.
+    spacing = max(recip_mag) / floor_axis_count
+    return counts_at_spacing(spacing, recip_mag, classes)
 
 
 # ==================================================================
@@ -528,21 +596,22 @@ ClimbPolicy = namedtuple(
 ##                            only a genuine oscillation trips it; set
 ##                            it very high to disable the early bail
 ##                            (DESIGN 3.12.3)
-##     metallic_min_points    the full-mesh point count a rising
-##                            stride's COARSER endpoint must clear for
-##                            the near-metal bail to trust it (>= 1):
-##                            a rise measured from an ultra-coarse mesh
-##                            (the single Gamma point most of all) is
-##                            sampling noise, larger than a real
-##                            oscillation, so it is ignored below this
-##                            floor (DESIGN 3.12.3)
+##     crystalline_floor_axis_count
+##                            the per-axis CAP on a crystalline climb's
+##                            opening mesh (>= 1): the densest
+##                            reciprocal axis gets this many points and
+##                            every other axis scales DOWN from there,
+##                            so the climb never opens in the coarse
+##                            regime that would mislead the near-metal
+##                            bail.  [4,4,4] on a cubic cell by default
+##                            (DESIGN 3.12.4)
 PolicyThresholds = namedtuple(
     "PolicyThresholds",
     ["confidence_high", "grid_width", "start_offset_moderate",
      "start_offset_cold", "flat_needed_confident",
      "flat_needed_cold", "max_stride", "climb_shape",
      "stride_flatness_multiple", "metallic_rise_multiple",
-     "metallic_min_points"])
+     "crystalline_floor_axis_count"])
 
 
 # Provisional defaults (DESIGN 3.12.6): placeholders until the seed
@@ -560,9 +629,10 @@ PolicyThresholds = namedtuple(
 #   fifty times the convergence threshold is judged an oscillating
 #   near-metal and stops the climb early -- a near-metal's upward
 #   excursions dwarf that bound, while a converging cell's never
-#   approach it -- but only once its coarser endpoint holds at least
-#   four full-mesh points, so a rise from the Gamma point (sampling
-#   noise, not oscillation) is ignored.
+#   approach it.  A crystalline climb opens no coarser than a
+#   four-point cap on its densest axis, so it never samples the
+#   unreliable Gamma-only regime the bail would misread and needs no
+#   separate coarse-mesh guard (DESIGN 3.12.4).
 DEFAULT_POLICY_THRESHOLDS = PolicyThresholds(
     confidence_high=0.75,
     grid_width=1,
@@ -574,7 +644,7 @@ DEFAULT_POLICY_THRESHOLDS = PolicyThresholds(
     climb_shape=BRACKET_REFINE,
     stride_flatness_multiple=5.0,
     metallic_rise_multiple=50.0,
-    metallic_min_points=4)
+    crystalline_floor_axis_count=4)
 
 
 # The fixed per-axis backstop the climb never exceeds (DESIGN
@@ -695,13 +765,13 @@ def climb_policy_from_manifest(climb_settings):
                 "kpoint_climb.{0} must be >= 1 (it scales the "
                 "convergence threshold up), got {1!r}".format(
                     knob, value))
-    # The coarse-mesh floor is a k-point count, so it too must be at
-    #   least one point.
-    min_points = climb_settings.get("metallic_min_points")
-    if min_points is not None and min_points < 1:
+    # The crystalline floor's per-axis cap is a k-point count, so it
+    #   too must be at least one point.
+    floor_axis = climb_settings.get("crystalline_floor_axis_count")
+    if floor_axis is not None and floor_axis < 1:
         raise ValueError(
-            "kpoint_climb.metallic_min_points must be >= 1 (a "
-            "full-mesh point count), got {0!r}".format(min_points))
+            "kpoint_climb.crystalline_floor_axis_count must be >= 1 "
+            "(a per-axis k-point count), got {0!r}".format(floor_axis))
     threshold_overrides = {
         field: climb_settings[field]
         for field in PolicyThresholds._fields
@@ -727,7 +797,7 @@ def _distinct_meshes(meshes):
 
 
 def initial_meshes(density, policy, classes, recip_mag,
-                   recip_cell_volume):
+                   recip_cell_volume, opening_floor=None):
     """Return the mesh or meshes to run in the climb's first round
     (PSEUDOCODE 4e.4; DESIGN 3.12.4-3.12.5).
 
@@ -749,6 +819,15 @@ def initial_meshes(density, policy, classes, recip_mag,
       one rung; they differ only later, in how the producer chooses
       each next mesh (4e.3).
 
+    ``opening_floor`` is the crystalline climb's floor rung (DESIGN
+    3.12.4), or ``None`` for a non-crystalline solid.  When present,
+    a serial climb opens no lower than it: the opening rung becomes
+    the higher (by full-mesh point count) of the seed-derived rung
+    and the floor, so a cold bootstrap that would open in the coarse
+    regime is lifted up to the floor, while a warm seed already above
+    it is untouched.  It never applies to the confident grid, which
+    is seeded above the floor by any real prediction.
+
     Returns a list of axial-count meshes in ascending order, with any
     duplicate floor meshes collapsed (``_distinct_meshes``)."""
     seed = select_axial_counts(density, recip_mag,
@@ -767,7 +846,21 @@ def initial_meshes(density, policy, classes, recip_mag,
     start = seed
     for _ in range(policy.start_offset):
         start = descend_one_rung(start, classes, recip_mag)
+    # Crystalline floor (DESIGN 3.12.4): open no lower than the floor
+    #   rung, comparing by full-mesh point count so a warm seed above
+    #   it wins and a cold bootstrap below it is lifted up.
+    if (opening_floor is not None
+            and _floor_point_count(opening_floor)
+            > _floor_point_count(start)):
+        start = list(opening_floor)
     return [start]
+
+
+def _floor_point_count(mesh):
+    """The full-mesh k-point count of an axial-count mesh -- the
+    product of its three counts.  Used to compare a seed-derived
+    opening rung against the crystalline floor (DESIGN 3.12.4)."""
+    return mesh[0] * mesh[1] * mesh[2]
 
 
 # ==================================================================

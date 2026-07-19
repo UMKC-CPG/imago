@@ -1770,18 +1770,18 @@ Rung = namedtuple("Rung", ["mesh", "energy"])
 ##                        an oscillating near-metal and stops the
 ##                        climb early -- threshold times the
 ##                        metallic_rise_multiple (DESIGN 3.12.3)
-##     metallic_min_points
-##                        the full-mesh point count a rising stride's
-##                        coarser endpoint must clear for the bail to
-##                        trust it, so a rise from an ultra-coarse
-##                        (Gamma) mesh is ignored (DESIGN 3.12.3)
+##     opening_floor      the crystalline climb's floor rung -- the
+##                        coarsest mesh it may open on, a per-axis cap
+##                        (mesh_climb.crystalline_floor_mesh) -- or
+##                        None for a non-crystalline solid, which
+##                        seeds at or near Gamma (DESIGN 3.12.4)
 ##     max_count          per-axis ceiling backstop (DESIGN 3.12.3)
 ClimbConfig = namedtuple(
     "ClimbConfig",
     ["classes", "recip_mag", "recip_cell_volume", "mode",
      "flat_needed", "grid_width", "start_offset", "max_stride",
      "cell_atom_count", "threshold", "stride_threshold",
-     "metallic_margin", "metallic_min_points", "max_count"])
+     "metallic_margin", "opening_floor", "max_count"])
 
 
 # The verdicts a climb step returns (DESIGN 3.12.3 / 3.12.5): run one
@@ -2011,22 +2011,20 @@ def bracket_refine_next(rungs, state, config):
 
         prev = state.endpoints[-2]
 
-        # First: did the last stride RISE past the margin, from a mesh
-        #   dense enough to trust?  A finer mesh that raised the energy
-        #   that far is an oscillating near-metal (Fermi-surface
-        #   sampling), not convergence, so stop early rather than
-        #   grinding to the ceiling (DESIGN 3.12.3).  But a rise
-        #   measured from an ultra-coarse mesh (the single Gamma point
-        #   most of all) is sampling noise -- larger than a real
-        #   oscillation and firing for insulators too -- so it counts
-        #   only once the coarser endpoint clears metallic_min_points
-        #   full-mesh points.  Checked before flatness only for
-        #   clarity -- a large rise is never flat.
-        if (_mesh_point_count(prev) >= config.metallic_min_points
-                and guidance_harvest.stride_rose(
-                    mesh_climb.rung_at(rungs, prev),
-                    mesh_climb.rung_at(rungs, top),
-                    config.cell_atom_count, config.metallic_margin)):
+        # First: did the last stride RISE past the margin?  A finer
+        #   mesh that raised the energy that far is an oscillating
+        #   near-metal (Fermi-surface sampling), not convergence, so
+        #   stop early rather than grinding to the ceiling (DESIGN
+        #   3.12.3).  No coarse-mesh guard is needed: a crystalline
+        #   climb is floored above the unreliable coarse regime
+        #   (config.opening_floor, DESIGN 3.12.4), so every stride
+        #   here already runs from a mesh dense enough to trust.
+        #   Checked before flatness only for clarity -- a large rise
+        #   is never flat.
+        if guidance_harvest.stride_rose(
+                mesh_climb.rung_at(rungs, prev),
+                mesh_climb.rung_at(rungs, top),
+                config.cell_atom_count, config.metallic_margin):
             return ClimbAction(_ACTION_METALLIC, None, None), state
 
         # Otherwise test whether the last stride is flat.  The bracket
@@ -2245,7 +2243,8 @@ def converge_by_climb(materials, configs, seed_densities,
             config.start_offset, config.max_stride)
         first[material] = mesh_climb.initial_meshes(
             seed_densities[material], policy, config.classes,
-            config.recip_mag, config.recip_cell_volume)
+            config.recip_mag, config.recip_cell_volume,
+            opening_floor=config.opening_floor)
         search[material] = new_search_state(config, first[material])
         in_air[material] = len(first[material])
     dispatcher.send(first)
@@ -2559,6 +2558,19 @@ def build_climb_config(ref, structure, confidence, under_trained,
     metallic_margin = (ref.kpoint_convergence_threshold
                        * thresholds.metallic_rise_multiple)
 
+    # The crystalline climb's opening floor (DESIGN 3.12.4): the
+    #   coarsest mesh it may open on, a per-axis cap the densest axis
+    #   receives and the others scale down from, built from the same
+    #   reciprocal geometry and classes the seeding reads.  None for a
+    #   non-crystalline solid, which seeds at or near Gamma (7.9) and
+    #   must not be floored up off it.
+    if ref.system_type == "crystalline":
+        opening_floor = mesh_climb.crystalline_floor_mesh(
+            recip_mag, classes,
+            thresholds.crystalline_floor_axis_count)
+    else:
+        opening_floor = None
+
     return ClimbConfig(
         classes=classes,
         recip_mag=recip_mag,
@@ -2572,7 +2584,7 @@ def build_climb_config(ref, structure, confidence, under_trained,
         threshold=ref.kpoint_convergence_threshold,
         stride_threshold=stride_threshold,
         metallic_margin=metallic_margin,
-        metallic_min_points=thresholds.metallic_min_points,
+        opening_floor=opening_floor,
         max_count=max_count)
 
 

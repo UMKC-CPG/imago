@@ -555,22 +555,24 @@ def test_climb_policy_rejects_a_metallic_multiple_below_one():
             {"metallic_rise_multiple": 0.5})
 
 
-def test_climb_policy_merges_the_metallic_min_points_floor():
-    """The coarse-mesh floor merges over the default, which keeps the
-    near-metal bail off the ultra-coarse (Gamma) region -- more than
-    a single k-point."""
-    assert mesh_climb.DEFAULT_POLICY_THRESHOLDS.metallic_min_points > 1
+def test_climb_policy_merges_the_crystalline_floor_axis_count():
+    """The crystalline floor cap merges over the default, which opens
+    a crystalline climb above the ultra-coarse (Gamma) region -- more
+    than a single k-point on its densest axis."""
+    assert (mesh_climb.DEFAULT_POLICY_THRESHOLDS
+            .crystalline_floor_axis_count > 1)
     thresholds, _ = mesh_climb.climb_policy_from_manifest(
-        {"metallic_min_points": 8})
-    assert thresholds.metallic_min_points == 8
+        {"crystalline_floor_axis_count": 8})
+    assert thresholds.crystalline_floor_axis_count == 8
 
 
-def test_climb_policy_rejects_a_min_points_floor_below_one():
-    """The floor is a k-point count, so a value below one is a
-    mistake and fails loudly."""
-    with pytest.raises(ValueError, match="metallic_min_points"):
+def test_climb_policy_rejects_a_floor_axis_count_below_one():
+    """The floor cap is a per-axis k-point count, so a value below
+    one is a mistake and fails loudly."""
+    with pytest.raises(ValueError,
+                       match="crystalline_floor_axis_count"):
         mesh_climb.climb_policy_from_manifest(
-            {"metallic_min_points": 0})
+            {"crystalline_floor_axis_count": 0})
 
 
 def test_climb_policy_from_manifest_full_override():
@@ -581,7 +583,8 @@ def test_climb_policy_from_manifest_full_override():
          "flat_needed_confident": 1, "flat_needed_cold": 2,
          "max_stride": 16, "climb_shape": mesh_climb.BRACKET_REFINE,
          "stride_flatness_multiple": 5.0,
-         "metallic_rise_multiple": 40.0, "metallic_min_points": 8,
+         "metallic_rise_multiple": 40.0,
+         "crystalline_floor_axis_count": 8,
          "max_count": 24})
     assert thresholds == mesh_climb.PolicyThresholds(
         confidence_high=0.7, grid_width=2,
@@ -589,7 +592,7 @@ def test_climb_policy_from_manifest_full_override():
         flat_needed_confident=1, flat_needed_cold=2,
         max_stride=16, climb_shape=mesh_climb.BRACKET_REFINE,
         stride_flatness_multiple=5.0, metallic_rise_multiple=40.0,
-        metallic_min_points=8)
+        crystalline_floor_axis_count=8)
     assert max_count == 24
 
 

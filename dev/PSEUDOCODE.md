@@ -1097,23 +1097,10 @@ function selectAxialCounts(density, recipMag,
         return [1, 1, 1]
 
     # Continuous isotropic counts at a common spacing h:
-    #   h = (prod|b_i| / (recipCellVolume * D))^(1/3),
-    #   x_i = |b_i| / h.
+    #   h = (prod|b_i| / (recipCellVolume * D))^(1/3).
     h = (recipMag(1) * recipMag(2) * recipMag(3)
          / (recipCellVolume * density)) ^ (1/3)
-    x = [recipMag(i) / h for i in 1..3]
-
-    # Force one shared real count per class.  Coupled axes
-    # already have equal |b_i| (hence equal x); the mean
-    # guards against round-off before rounding.
-    for each distinct class label c:
-        members = [i for i in 1..3 if classes(i) == c]
-        shared  = mean(x(i) for i in members)
-        for i in members: x(i) = shared
-
-    # Nearest positive integer, per class (already equal
-    # within a class, so the class stays uniform).
-    n = [max(1, round(x(i))) for i in 1..3]
+    n = countsAtSpacing(h, recipMag, classes)
 
     # Raise WHOLE classes until the full-mesh product meets
     # the floor.  Never raise a single axis inside a multi-
@@ -1129,6 +1116,38 @@ function selectAxialCounts(density, recipMag,
         for i in members(bestClass): n(i) = n(i) + 1
 
     return n
+
+function countsAtSpacing(h, recipMag, classes):
+    # The isotropic integer mesh at k-spacing h: one count per
+    # |b_i| / h on each axis, shared per class and rounded to a
+    # positive integer.  Shared by the density path
+    # (selectAxialCounts, above) and the crystalline floor
+    # (crystallineFloorMesh, below), so both distribute and round
+    # a spacing identically -- the two only differ in the spacing
+    # they pass and whether a product-floor bump follows.
+    x = [recipMag(i) / h for i in 1..3]
+    # Force one shared real count per class.  Coupled axes
+    # already have equal |b_i| (hence equal x); the mean
+    # guards against round-off before rounding.
+    for each distinct class label c:
+        members = [i for i in 1..3 if classes(i) == c]
+        shared  = mean(x(i) for i in members)
+        for i in members: x(i) = shared
+    # Nearest positive integer, per class (already equal
+    # within a class, so the class stays uniform).
+    return [max(1, round(x(i))) for i in 1..3]
+
+function crystallineFloorMesh(recipMag, classes, floorAxisCount):
+    # The crystalline climb's opening-floor rung (DESIGN 3.12.4).
+    # Set the k-spacing so the DENSEST reciprocal axis (the largest
+    # |b_i|) gets exactly floorAxisCount points; every other axis,
+    # coarser in reciprocal space, is sampled to that SAME spacing
+    # and so gets fewer -- never more -- floored at one point.  A
+    # cubic cell floors at [4,4,4]; an anisotropic one at [4,4,2],
+    # [4,3,2], [4,1,1], ..., never exceeding the cap on any axis.
+    # No product-floor bump follows: the cap is the whole point.
+    h = max(recipMag) / floorAxisCount
+    return countsAtSpacing(h, recipMag, classes)
 
 function spacingSpread(n, recipMag):
     s = [recipMag(i) / n(i) for i in 1..3]
@@ -1767,22 +1786,19 @@ function bracketRefineNext(rungs, state, config):
             #   (stride 1).  No flatness to test yet.
             return strideUp(state, 1, config)
         # Two or more endpoints.  First: did the last stride RISE by
-        #   more than the margin, FROM a mesh dense enough to trust?  A
-        #   finer mesh that raised the energy that far is an
-        #   oscillating near-metal (4e.2) -- stop early with the
-        #   non-converged verdict rather than grinding to the ceiling
-        #   (DESIGN 3.12.3).  But a rise measured from an ultra-coarse
-        #   mesh (the single Gamma point most of all) is sampling
-        #   noise, larger than a real oscillation and firing for
-        #   insulator and metal alike, so the bail ignores it unless
-        #   the coarser endpoint's full-mesh point count clears
-        #   metallic_min_points.  Checked before flatness; a large rise
-        #   is never also flat, so the order is only for clarity.
+        #   more than the margin?  A finer mesh that raised the energy
+        #   that far is an oscillating near-metal (4e.2) -- stop early
+        #   with the non-converged verdict rather than grinding to the
+        #   ceiling (DESIGN 3.12.3).  No coarse-mesh guard is needed:
+        #   the crystalline climb is floored above the unreliable
+        #   coarse regime (4e.4 / DESIGN 3.12.4), so every stride here
+        #   already runs from a mesh dense enough to trust.  Checked
+        #   before flatness; a large rise is never also flat, so the
+        #   order is only for clarity.
         prev = state.endpoints[-2]
-        if (meshSize(prev) >= config.metallic_min_points
-            and stride_rose(rung_at(rungs, prev), rung_at(rungs, top),
-                            config.cell_atom_count,
-                            config.metallic_margin)):
+        if stride_rose(rung_at(rungs, prev), rung_at(rungs, top),
+                       config.cell_atom_count,
+                       config.metallic_margin):
             return METALLIC, state
         # The bracket test uses the LOOSER stride_threshold (4e.2);
         #   the refine below keeps the strict convergence threshold.
@@ -1947,6 +1963,18 @@ function initial_meshes(density, config):
         repeat config.start_offset times:
             start = descendOneRung(start, config.classes,
                                    config.recipMag)
+        # Crystalline floor (DESIGN 3.12.4): no crystalline material
+        # converges on a mesh coarser than the floor rung, so a cold
+        # bootstrap that would open below it is lifted up to it -- out
+        # of the unreliable coarse regime the near-metal bail (4e.3)
+        # must otherwise guard against.  config.opening_floor is the
+        # floor mesh for a crystalline solid (built once in the config,
+        # 11.4) or None for a non-crystalline one, which seeds at or
+        # near Gamma by convention (7.9) and must not be floored up.  A
+        # warm seed already above the floor is untouched.
+        if config.opening_floor is not None
+           and meshSize(config.opening_floor) > meshSize(start):
+            start = config.opening_floor
         return [start]
 
 
@@ -1984,18 +2012,23 @@ stride test reads the looser one.  `config.metallic_margin` -- the
 upward-stride bail bound (4e.2 / 4e.3) -- is assembled the same
 way: the strict threshold times the `metallic_rise_multiple` knob
 (>= 1, a large multiple so only a genuine oscillation trips it,
-DESIGN 3.12.3 / 3.12.6).  `config.metallic_min_points` -- the
-coarse-mesh floor that gate reads (4e.3) -- is a plain full-mesh
-point count (not threshold-scaled), carried straight through from
-its knob; a rise whose coarser endpoint has fewer points is
-ignored as sampling noise.
+DESIGN 3.12.3 / 3.12.6).  `config.opening_floor` -- the crystalline
+climb's floor rung (4e.4 / DESIGN 3.12.4) -- is built once where the
+producer builds the config (11.4 / build_climb_config): for a
+crystalline solid it is `crystallineFloorMesh`, whose densest axis
+holds `crystalline_floor_axis_count` points and whose other axes
+scale down by their `|b_i|` ratios, so it is `[4,4,4]` on a cubic
+cell and never exceeds the cap on any axis of an anisotropic one;
+for a non-crystalline solid it is None.  Because the climb never
+opens below that rung, the near-metal bail needs no coarse-mesh
+guard of its own (4e.3).
 
 The numeric knobs that policy reads -- the `confidence_high`
 threshold, the two `flat_needed` counts, `grid_width`, the two
 `start_offset` values, `max_stride`, the climb-shape choice, the
 `stride_flatness_multiple`, the `metallic_rise_multiple`, the
-`metallic_min_points` floor, and the per-axis `max_count` ceiling
--- are config, not constants (Principle 11).  They are sourced from the
+`crystalline_floor_axis_count`, and the per-axis `max_count`
+ceiling -- are config, not constants (Principle 11).  They are sourced from the
 manifest `[harvest.kpoint_climb]` sub-table (DESIGN 5.7 / 3.12.6),
 each knob falling back to a documented provisional default when the
 sub-table or that knob is omitted.  The producer resolves them once
@@ -2011,9 +2044,10 @@ than falling through to a default shape.  The two multiples --
 `stride_flatness_multiple` and `metallic_rise_multiple` -- are
 likewise checked to be `>= 1`, since a value below one would invert
 the knob's meaning (a stricter-than-convergence bracket, or a bail
-that fires below the convergence wobble), and `metallic_min_points`
-is checked `>= 1` as a point count.  The provisional default values
-themselves are still to be fixed by the seed experiment (3.12.6).
+that fires below the convergence wobble), and
+`crystalline_floor_axis_count` is checked `>= 1` as a per-axis
+count.  The provisional default values themselves are still to be
+fixed by the seed experiment (3.12.6).
 
 ### 4e.5 Concurrent orchestration across materials
 
@@ -5650,6 +5684,22 @@ function build_climb_config(ref, structure, confidence,
     policy = resolve_climb_policy(confidence, under_trained,
                                   thresholds)
 
+    # The crystalline floor rung (DESIGN 3.12.4 / 4e.4): the mesh
+    # whose densest axis holds crystalline_floor_axis_count points
+    # and whose other axes scale DOWN from there by their |b_i|
+    # ratios (never exceeding the cap), so [4,4,4] on a cubic cell
+    # and [4,4,2] / [4,3,2] / [4,1,1] on an anisotropic one.  None
+    # for a non-crystalline solid, which seeds at or near Gamma (7.9)
+    # and must not be floored up off it.  Built from the same recip
+    # geometry and classes the seeding will read, so the floor is a
+    # rung the climb can actually open on.
+    if ref.system_type == "crystalline":
+        opening_floor = crystallineFloorMesh(
+            recip_mag, classes,
+            thresholds.crystalline_floor_axis_count)
+    else:
+        opening_floor = None
+
     return ClimbConfig(
         classes           = classes,
         recip_mag         = recip_mag,
@@ -5658,6 +5708,7 @@ function build_climb_config(ref, structure, confidence,
         flat_needed       = policy.flat_needed,
         grid_width        = policy.grid_width,
         start_offset      = policy.start_offset,
+        opening_floor     = opening_floor,
         cell_atom_count   = cell.num_atoms,
         threshold         = ref.kpoint_convergence_threshold,
         max_count         = max_count)
@@ -6000,14 +6051,22 @@ RUN_SETTING_KEYS = ("basis", "functional",
 DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 5.0e-4    # 0.5 meV/atom
 
 # The adaptive-climb tuning knobs that may live in the optional
-#   [harvest.kpoint_climb] sub-table (DESIGN 5.7 / 3.12.6).  Six
-#   name the confidence-to-policy PolicyThresholds (4e.4); max_count
-#   is the per-axis ceiling (4e.2).  Each carries a provisional
-#   built-in default (mesh_climb), so the sub-table -- and any knob
-#   -- may be omitted.  Database-wide: no per-solid override.
+#   [harvest.kpoint_climb] sub-table (DESIGN 5.7 / 3.12.6).  All but
+#   max_count name the confidence-to-policy PolicyThresholds (4e.4):
+#   the confidence split, the grid width and two start offsets, the
+#   two flat-rung persistence counts, the stride cap and climb shape,
+#   the two threshold multiples (stride-flatness and metallic-rise),
+#   and the crystalline_floor_axis_count that sets the opening floor
+#   (3.12.4).  max_count is the per-axis ceiling (4e.2).  Each carries
+#   a provisional built-in default (mesh_climb), so the sub-table --
+#   and any knob -- may be omitted.  Database-wide: no per-solid
+#   override.
 KPOINT_CLIMB_KEYS = ("confidence_high", "grid_width",
     "start_offset_moderate", "start_offset_cold",
-    "flat_needed_confident", "flat_needed_cold", "max_count")
+    "flat_needed_confident", "flat_needed_cold",
+    "max_stride", "climb_shape", "stride_flatness_multiple",
+    "metallic_rise_multiple", "crystalline_floor_axis_count",
+    "max_count")
 
 
 function apply_manifest_defaults(manifest):

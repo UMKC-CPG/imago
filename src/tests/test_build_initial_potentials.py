@@ -2092,7 +2092,7 @@ def _install_climb_mocks(monkeypatch, workspace, *,
         recip_cell_volume=0.64, mode=mesh_climb.UNIT_STEP,
         flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
         cell_atom_count=2, threshold=1.0e-6, stride_threshold=3.0e-6,
-        metallic_margin=5.0e-5, metallic_min_points=4, max_count=20)
+        metallic_margin=5.0e-5, opening_floor=None, max_count=20)
     monkeypatch.setattr(bip, "build_climb_config",
                         lambda *a, **k: config)
 
@@ -2439,7 +2439,7 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
             recip_cell_volume=1.0, mode=mesh_climb.UNIT_STEP,
             flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
             cell_atom_count=2, threshold=1.0e-6, stride_threshold=3.0e-6,
-            metallic_margin=5.0e-5, metallic_min_points=4,
+            metallic_margin=5.0e-5, opening_floor=None,
             max_count=20))
     monkeypatch.setattr(
         bip, "converge_by_climb",
@@ -2703,7 +2703,7 @@ _CUBIC_RECIP_MAG = [1.0, 1.0, 1.0]
 
 def _cubic_config(mode, flat_needed, grid_width, start_offset,
                   max_count, max_stride=8, stride_threshold=3.0,
-                  metallic_margin=50.0, metallic_min_points=1):
+                  metallic_margin=50.0, opening_floor=None):
     """A cubic-cell ClimbConfig with a strict per-atom convergence
     threshold of 1.0 eV and one atom per cell, so a raw energy delta
     counts as converged when it is below 1.0 / HARTREE hartree (DESIGN
@@ -2711,10 +2711,11 @@ def _cubic_config(mode, flat_needed, grid_width, start_offset,
     bracket phase's looser stride threshold defaults to 3.0 (three
     times the convergence threshold), and the metallic early-bail
     margin to 50.0 (fifty times it), the provisional multiples.  The
-    coarse-mesh floor defaults to 1 (every mesh trusted) so a test's
-    rise fires regardless of where it sits; tests that exercise the
-    floor pass it explicitly.  The unit-step tests that use this
-    helper never stride, so all four are inert for them."""
+    crystalline opening floor defaults to None (the climb opens on its
+    seed-derived rung, unfloored) so a test's coarse rise fires
+    regardless of where it sits; tests that exercise the floor pass a
+    floor mesh explicitly.  The unit-step tests that use this helper
+    never stride, so all four are inert for them."""
     return bip.ClimbConfig(
         classes=_CUBIC_CLASSES, recip_mag=_CUBIC_RECIP_MAG,
         recip_cell_volume=1.0, mode=mode, flat_needed=flat_needed,
@@ -2722,7 +2723,7 @@ def _cubic_config(mode, flat_needed, grid_width, start_offset,
         max_stride=max_stride, cell_atom_count=1, threshold=1.0,
         stride_threshold=stride_threshold,
         metallic_margin=metallic_margin,
-        metallic_min_points=metallic_min_points, max_count=max_count)
+        opening_floor=opening_floor, max_count=max_count)
 
 
 def _converging_energy(mesh):
@@ -3204,32 +3205,34 @@ def _gamma_noise_energy(mesh):
     return -1.5                              # true value, flat above
 
 
-def test_metallic_bail_ignores_a_rise_from_an_ultra_coarse_mesh():
-    """A rise measured from an ultra-coarse mesh is sampling noise, not
-    oscillation, so the bail's coarse-mesh floor ignores it: with the
-    floor at four points the [1,1,1] -> [2,2,2] rise (from a one-point
-    mesh) is skipped and the insulator converges, but drop the floor to
-    one and the same rise false-bails it NON_CONVERGED (DESIGN
-    3.12.3).  This is the si_ia-3 regression the floor fixes."""
+def test_crystalline_floor_opens_above_the_coarse_regime():
+    """A crystalline climb floored at [4,4,4] opens above the ultra-
+    coarse (Gamma) region, so the [1,1,1] / [2,2,2] sampling noise
+    (_gamma_noise_energy) is never on its ladder and the insulator
+    converges at [4,4,4].  Without the floor (opening_floor=None, the
+    non-crystalline path) the climb opens at [1,1,1], strides into the
+    spurious rise, and the near-metal bail -- now carrying no coarse-
+    mesh guard of its own -- false-bails it NON_CONVERGED.  This is the
+    si_ia-3 regression the floor fixes (DESIGN 3.12.4)."""
     materials = ["ins"]
-    seed_densities = {"ins": 1.0}            # opens at [1,1,1]
+    seed_densities = {"ins": 1.0}        # opens at [1,1,1] unfloored
 
-    def _run(metallic_min_points):
+    def _run(opening_floor):
         config = _cubic_config(
             mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
             start_offset=0, max_count=20, metallic_margin=2.0,
-            metallic_min_points=metallic_min_points)
+            opening_floor=opening_floor)
         outcomes, _ = bip.converge_by_climb(
             materials, {"ins": config}, seed_densities,
             _SyntheticDispatcher({"ins": _gamma_noise_energy}))
         return outcomes["ins"]
 
-    # Floor 4: the rise from the one-point [1,1,1] is below the floor,
-    #   so it is ignored and the cell converges.
-    assert _run(4).mesh == [4, 4, 4]
-    # Floor 1: every mesh trusted, so the Gamma-noise rise false-bails
-    #   the insulator -- exactly the regression the floor removes.
-    assert _run(1) is bip.NON_CONVERGED
+    # Floored at [4,4,4]: the climb never visits [1,1,1] / [2,2,2], so
+    #   the coarse-noise rise is never measured and the cell converges.
+    assert _run([4, 4, 4]).mesh == [4, 4, 4]
+    # Unfloored: opens at [1,1,1], the coarse rise reaches the ungated
+    #   bail, and the insulator false-bails -- the regression removed.
+    assert _run(None) is bip.NON_CONVERGED
 
 
 def test_bracket_refine_resumes_after_a_false_bracket():
@@ -3509,7 +3512,8 @@ def test_build_climb_config_axis_classes_and_recip_mag():
     read row-wise instead of down its columns."""
 
     thresholds = mesh_climb.DEFAULT_POLICY_THRESHOLDS
-    ref = types.SimpleNamespace(kpoint_convergence_threshold=1.0e-4)
+    ref = types.SimpleNamespace(kpoint_convergence_threshold=1.0e-4,
+                                system_type="crystalline")
 
     cubic = bip.build_climb_config(
         ref, os.path.join(_FIXTURE_STRUCTURES, "si_diamond.skl"),
@@ -3524,6 +3528,10 @@ def test_build_climb_config_axis_classes_and_recip_mag():
     assert cubic.mode == mesh_climb.PARALLEL_GRID
     assert cubic.threshold == 1.0e-4
     assert cubic.max_count == 20
+    # A cubic crystalline cell floors at the cap on every axis:
+    #   [4,4,4] at the default crystalline_floor_axis_count of 4
+    #   (DESIGN 3.12.4).
+    assert cubic.opening_floor == [4, 4, 4]
 
     hexagonal = bip.build_climb_config(
         ref, os.path.join(_FIXTURE_STRUCTURES, "beo_hexagonal.skl"),
@@ -3537,6 +3545,22 @@ def test_build_climb_config_axis_classes_and_recip_mag():
         hexagonal.recip_mag[1])
     assert hexagonal.recip_mag[2] != pytest.approx(
         hexagonal.recip_mag[1])
+    # The floor caps the densest axis at 4 and scales the others
+    #   down per class -- so the max axis is exactly 4, no axis
+    #   exceeds it, and the coupled in-plane pair shares a count.
+    assert max(hexagonal.opening_floor) == 4
+    assert hexagonal.opening_floor[0] == hexagonal.opening_floor[1]
+
+    # A non-crystalline solid is NOT floored: it seeds at or near
+    #   Gamma by convention (DESIGN 7.9) and must not be lifted off
+    #   it, so opening_floor is None regardless of the cell.
+    molecular = types.SimpleNamespace(
+        kpoint_convergence_threshold=1.0e-4, system_type="molecular")
+    non_crystalline = bip.build_climb_config(
+        molecular, os.path.join(_FIXTURE_STRUCTURES, "si_diamond.skl"),
+        confidence=0.9, under_trained=False,
+        thresholds=thresholds, max_count=20)
+    assert non_crystalline.opening_floor is None
 
 
 @pytest.mark.integration
@@ -3546,7 +3570,8 @@ def test_build_climb_config_under_trained_climbs_serially():
     shape by default -- and carries the stride cap through to the
     config the producer's bracket phase reads."""
 
-    ref = types.SimpleNamespace(kpoint_convergence_threshold=1.0e-4)
+    ref = types.SimpleNamespace(kpoint_convergence_threshold=1.0e-4,
+                                system_type="crystalline")
     config = bip.build_climb_config(
         ref, os.path.join(_FIXTURE_STRUCTURES, "si_diamond.skl"),
         confidence=0.0, under_trained=True,
