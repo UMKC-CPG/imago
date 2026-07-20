@@ -1877,68 +1877,93 @@ Only a material with no converged rung even in that last
 interval -- still visibly steep at the ceiling -- is reported
 as non-converged (7.8 step 3d / 7.9), exactly as a fixed grid
 that never flattened is today, and it carries the energy trace
-(`grid_energies`) so a curator can tell the two causes apart: a
-monotone, narrowing trace says raise the ceiling, while an
-oscillating one says the material needs smearing rather than a
-finer mesh (C117's near-metals are the archetype).
+(`grid_energies`) so a curator can read why it stopped. A
+monotone, narrowing trace at the ceiling is a slow but genuine
+insulator that simply wants a finer mesh -- raise the ceiling. An
+*oscillating* trace should almost never reach this point, because
+an oscillating energy is the signature of a metal, and a metal is
+recognised and settled far sooner, by its gap, as the next
+paragraphs describe.
 
-For the oscillating case the climb need not grind all the way to
-the ceiling to reach that verdict -- the oscillation announces
-itself early. Refining the k-point mesh samples the Brillouin
-zone more densely, which for an insulator lowers the energy
-smoothly toward its converged value; a near-metal instead
-oscillates as the mesh crosses the Fermi surface, and a finer
-mesh can *raise* the energy. So a stride whose finer endpoint
-sits **above** its coarser one by more than a margin -- an
-energy that went the wrong way, and by far more than convergence
-would ever wobble -- is dispositive evidence of that
-oscillation. The bracket phase watches for it and, on the first
-such rising stride, stops with the same non-converged verdict a
-ceiling stop gives, carrying the same (now shorter) oscillating
-trace. This only ever *shortens* the road to a verdict the climb
-would have reached at the ceiling anyway: it saves the expensive
-high meshes a near-metal would otherwise be dragged through
-(si_cmce's ladder ran to thousands of k-points per rung before
-the count ceiling bit). The margin is a multiple of the
-convergence threshold (3.12.6), set well above any real
-convergence wobble, so a smoothly-converging cell -- even one
-that approaches from below, its energy rising in small
-sub-threshold steps -- never trips it; only a genuine, large
-upward excursion does.
+Metals are what would otherwise be dragged to that ceiling, and
+they are recognised directly, from the quantity that defines
+them. A metal has no band gap; its energy oscillates as the mesh
+crosses the Fermi surface and never settles, which is precisely
+why chasing its convergence is futile. The gap is already
+computed at every rung -- part of each rung's result -- so the
+search reads it for free rather than inferring metallicity from a
+side effect. This is the direct signal an earlier design lacked.
+That design watched instead for a finer mesh that *raised* the
+energy past a margin, treating a large upward step as the
+fingerprint of a Fermi-surface oscillation. The proxy fails for
+the common near-metal whose oscillation is small: its energy
+wanders by more than the convergence threshold yet by far less
+than any margin set safely above real convergence wobble, so it
+is never flagged and the climb is dragged to the ceiling after
+all. si_cmce did exactly this -- twenty-plus rungs, its energy
+reversing by a few times the threshold, never once by the
+fifty-fold margin the proxy needed. Reading the gap sidesteps the
+proxy entirely: a vanishing gap *is* metallicity, not a symptom
+of it to be read out of the energy's behaviour.
 
-The margin alone would not be enough if the climb could measure a
-rise from the very coarsest meshes, which are unreliable in a way
-that has nothing to do with metallicity. The single Gamma point
-(`[1,1,1]`) is one sample of the whole zone; the jump from it to
-any real grid can move the energy by more than a genuine Fermi-
-surface oscillation ever does, in either direction, for an
-insulator as readily as a metal. A rise measured *from* such an
-ultra-coarse mesh is sampling noise, not evidence, and trusting it
-would mistake a well-behaved insulator (whose Gamma-point energy
-simply happened to sit low) for a near-metal. The crystalline climb
-never measures one, because it does not begin there: its opening
-rung is floored at a physically meaningful resolution (3.12.4), so
-every stride the bail judges runs from a mesh already dense enough
-to trust. The floor does the separating a coarse-mesh point-count
-guard would otherwise have to -- a real oscillation still shows
-itself above the floor (si_cmce's rise is measured from a mesh well
-past it), while the coarse Gamma artifact is never on the ladder to
-be misread. And because no crystalline material reaches the
-accuracy target below that floor (3.12.4), starting above it
-discards nothing the search would have used. Non-crystalline
-system_types seed at or near Gamma by convention (7.9) and converge
-without a bracket climb, so the bail's coarse regime never arises
-for them either.
+So the stop logic gains a single rule, checked as each rung is
+computed: the first rung whose gap is essentially zero -- below a
+small threshold (3.12.6) -- declares the material a metal, and
+the search stops. It settles at that rung, or one step above for
+a slightly denser sampling, and records the result as a metal: a
+deliberately rough starting potential. The test is *live*, not a
+scan of a fixed mesh. A near-metal can show a small but non-zero
+gap on a coarse mesh and have it close only as the mesh refines,
+so the trigger is the first rung that actually reads zero,
+wherever on the climb that falls -- a material that opens at a
+gap of, say, 0.15 eV and reads zero two rungs later is declared a
+metal there, and settles there. The justification is the
+deliverable itself (6.2, 3.12). The initial-potential database
+wants a *rough* good starting point for a later self-consistent
+calculation, not a converged energy. A metal's energy cannot be
+converged in k-points by any mesh worth paying for -- that is the
+whole difficulty -- but its potential at a modest, floor-level
+mesh is a perfectly serviceable starting guess, and far better
+than the isolated-atom potential it replaces. Refining a metal's
+mesh beyond that buys nothing the deliverable needs.
 
-The judgement is a heuristic, not the
-authoritative two-sided test, so it is deliberately conservative:
-its cost if it fires wrongly is a curator re-run of a material
-that might have converged, never a wrong recorded result, and
-the margin (and disabling it outright, by setting the margin
-arbitrarily high) is the curator's dial. It rides only on the
-bracket-refine climb; the fine unit-step climb (3.12.5), the
-conservative shape a curator pins deliberately, keeps walking to
-the ceiling.
+The gap test leans on the opening floor (3.12.4), for the same
+reason the retired proxy did but more simply. The single Gamma
+point (`[1,1,1]`) samples the whole zone at one place and can
+misreport a gap in either direction; a rung that coarse is not a
+mesh whose gap can be believed. The crystalline climb never opens
+there -- its first rung is floored at a physically meaningful
+resolution (3.12.4) -- so every gap the test reads comes from a
+mesh already dense enough to trust, and no coarse-mesh guard is
+needed to keep a Gamma-point artifact from being misread.
+Non-crystalline system_types seed at or near Gamma by convention
+(7.9) and converge without a bracket climb, so this metal
+short-circuit is a crystalline-path concern only. An insulator
+never triggers it: at floor-and-above meshes its gap reads
+clearly non-zero and stays there, so it converges by the
+two-sided test above, its gap never nearing the trigger. The seed
+solids bear this out -- the one metal reads essentially zero
+throughout, while every insulator, down to the narrowest-gapped,
+sits several times the threshold above it.
+
+Like the bracket phase's looser flatness threshold, the metal
+test is a heuristic with a deliberately cheap failure mode. Its
+one dial is the gap threshold (3.12.6), set low enough that no
+real insulator crosses it yet high enough to catch a true metal's
+essentially-zero reading. Were it ever to fire wrongly, the cost
+is a curator's re-run of a single material, never a wrong
+recorded energy: it would record a rough potential where a finer
+search might have been possible, not an incorrect number. And it
+*retires* machinery rather than adding it -- with metallicity
+read straight from the gap, the rising-stride proxy and the
+coarse-mesh guard it needed are both gone, and the search wants
+no separate oscillation or stall test on top. It branches once,
+on the gap, and gives each material the treatment that suits it:
+the insulator its two-sided convergence, the metal a prompt,
+rough, floor-level stop. Like the bail it replaces, this stop
+belongs to the automatic bracket-refine climb; the fine unit-step
+climb (3.12.5), the conservative shape a curator pins on purpose,
+still walks every rung to the ceiling.
 
 #### 3.12.4 Seeding the climb from a prediction
 
@@ -1966,8 +1991,9 @@ For crystalline system_types the cold start also carries a
 harvest demands on a mesh as coarse as a single Gamma point or a
 handful of points per axis, so beginning the climb there only
 spends rungs in a regime the search must leave anyway -- and worse,
-those coarsest meshes read unreliably enough (3.12.3) to mislead
-the near-metal bail. So the crystalline climb opens no lower than a
+those coarsest meshes report their gap unreliably enough (3.12.3)
+to mislead the metal test. So the crystalline climb opens no lower
+than a
 floor rung, defined as a **cap of a few points per axis**: the
 densest reciprocal axis (the largest `|b_i|`) gets the cap count,
 and every other axis, being coarser in reciprocal space, is sampled
@@ -1983,9 +2009,9 @@ already above the floor for any real convergence -- is untouched,
 and only the cold bootstrap is lifted out of the coarse regime.
 Non-crystalline system_types are exempt: a molecule converges at
 Gamma-only (7.9) and must not be floored up off it. This floor is
-what lets the near-metal bail drop its own coarse-mesh guard
-(3.12.3): the climb no longer visits a mesh too coarse for the bail
-to trust, so no separate point-count gate is needed.
+what lets the metal test read a trustworthy gap at every rung
+(3.12.3): the climb no longer visits a mesh too coarse to judge a
+gap on, so no separate coarse-mesh gate is needed.
 
 `predictor_confidence` (7.6) is the natural dial for how much
 confirmation to demand, how far below the prediction to begin,
@@ -2104,16 +2130,17 @@ script constants:
   looser than the convergence threshold (3.12.3), which sets how
   eagerly a nearly-settled stride is bracketed and so how much of
   the top-end overshoot is shaved.
-- The multiple of the convergence threshold by which a stride must
-  rise before the climb calls the material an oscillating near-
-  metal and stops early (3.12.3); larger is more conservative, and
-  arbitrarily large disables the early bail.
+- The gap threshold below which a rung's computed band gap counts
+  as essentially zero, so the climb calls the material a metal and
+  settles at once on a rough, floor-level mesh (3.12.3); low enough
+  that no real insulator crosses it, high enough to catch a true
+  metal's near-zero reading.
 - The per-axis cap that sets the crystalline climb's opening floor
   (3.12.4) -- the most points any axis of the coarsest starting
   mesh may carry, `4` by default (so `[4,4,4]` for a cubic cell,
   fewer per axis for an anisotropic one). Keeping the climb above
-  this floor is what removes the need for a separate coarse-mesh
-  guard on the near-metal bail (3.12.3).
+  this floor is what lets the gap test (3.12.3) read a
+  trustworthy gap at the opening rung, with no coarse-mesh guard.
 - The value of the fixed per-axis count ceiling, and the cost
   budget once the resource dataspace (8) supplies one (3.12.3).
 - The width of the confident-mode fixed mesh grid -- how many
@@ -5095,17 +5122,18 @@ built-in policy.  The knobs are:
   convergence threshold, setting how eagerly a nearly-settled
   stride is bracketed and so how much top-end overshoot is shaved
   (3.12.3).
-- `metallic_rise_multiple` (real >= 1): the multiple of the
-  convergence threshold by which a stride must rise before the
-  climb calls the material an oscillating near-metal and stops
-  early; an arbitrarily large value disables the bail (3.12.3).
+- `metal_gap_threshold` (real > 0, eV): the band-gap value below
+  which a rung is read as gapless, so the climb declares the
+  material a metal and settles at once on a rough, floor-level
+  mesh; low enough that no real insulator crosses it, high enough
+  to catch a true metal's near-zero gap (3.12.3).
 - `crystalline_floor_axis_count` (positive int): the per-axis cap
   on a crystalline climb's opening floor mesh -- the most points
   any one axis of the coarsest starting mesh may carry, `4` by
   default, so a cubic cell floors at `[4,4,4]` and an anisotropic
   one lower per axis (3.12.4).  Holding the climb above this floor
-  is what lets the near-metal bail drop a separate coarse-mesh
-  guard (3.12.3).
+  is what lets the metal test read a trustworthy gap at every
+  rung, with no separate coarse-mesh guard (3.12.3).
 
 **Per-entry fields (`[[reference_solid.entry]]`).**  An entry
 is an *optional customization* on an auto-discovered environment, not

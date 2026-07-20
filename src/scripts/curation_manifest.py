@@ -275,8 +275,8 @@ HARVEST_SETTING_KEYS = ("kpoint_convergence_threshold",
 #   ``PolicyThresholds`` fields (the confidence-to-shape knobs, the
 #   bracket phase's ``max_stride`` cap, the curator's ``climb_shape``
 #   choice, the ``stride_flatness_multiple`` that loosens the bracket
-#   test, the ``metallic_rise_multiple`` that stops an oscillating
-#   near-metal early, and the ``crystalline_floor_axis_count`` per-axis
+#   test, the ``metal_gap_threshold`` gap below which a rung is judged
+#   a metal, and the ``crystalline_floor_axis_count`` per-axis
 #   cap that opens a crystalline climb above the coarse regime);
 #   ``max_count`` is the per-axis climb ceiling.  Each carries a
 #   provisional built-in default (mesh_climb), so the sub-table -- and
@@ -289,7 +289,7 @@ KPOINT_CLIMB_KEYS = ("confidence_high", "grid_width",
                      "flat_needed_confident", "flat_needed_cold",
                      "max_stride", "climb_shape",
                      "stride_flatness_multiple",
-                     "metallic_rise_multiple",
+                     "metal_gap_threshold",
                      "crystalline_floor_axis_count",
                      "max_count")
 

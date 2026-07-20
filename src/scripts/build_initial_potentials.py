@@ -1736,11 +1736,15 @@ def prepare_units(flight: Flight, workspace: str, units=None) -> None:
 #  read-back) is below.
 # ==================================================================
 
-# One rung of a climb: a resolved mesh (axial counts ``[a, b, c]``)
-#   and the total-cell energy the engine returned for it (raw
-#   hartree, the basis ``pick_converged_climb`` normalizes to eV per
-#   atom before judging flatness, DESIGN 7.8).
-Rung = namedtuple("Rung", ["mesh", "energy"])
+# One rung of a climb: a resolved mesh (axial counts ``[a, b, c]``),
+#   the total-cell energy the engine returned for it (raw hartree,
+#   the basis ``pick_converged_climb`` normalizes to eV per atom
+#   before judging flatness, DESIGN 7.8), and the run's band ``gap``
+#   in eV (from the result's ``gap_ev``) that the metal test reads
+#   (``is_gapless``, PSEUDOCODE 4e.2).  ``gap`` defaults to None for
+#   the convergence-only fixtures that never set it; is_gapless reads
+#   a None gap as non-metallic.
+Rung = namedtuple("Rung", ["mesh", "energy", "gap"], defaults=[None])
 
 
 ## Everything one material's climb needs, gathered per material
@@ -1766,10 +1770,13 @@ Rung = namedtuple("Rung", ["mesh", "energy"])
 ##     stride_threshold   the LOOSER per-atom tolerance the bracket
 ##                        phase's stride test uses -- threshold times
 ##                        the stride_flatness_multiple (DESIGN 3.12.3)
-##     metallic_margin    the per-atom upward-stride bound that flags
-##                        an oscillating near-metal and stops the
-##                        climb early -- threshold times the
-##                        metallic_rise_multiple (DESIGN 3.12.3)
+##     metal_gap_threshold
+##                        the band gap (eV) at or below which a rung
+##                        reads as gapless, so the climb calls the
+##                        material a metal and settles on a rough
+##                        floor-level mesh -- an absolute gap in eV,
+##                        the metal_gap_threshold knob taken directly
+##                        (DESIGN 3.12.3)
 ##     opening_floor      the crystalline climb's floor rung -- the
 ##                        coarsest mesh it may open on, a per-axis cap
 ##                        (mesh_climb.crystalline_floor_mesh) -- or
@@ -1781,32 +1788,33 @@ ClimbConfig = namedtuple(
     ["classes", "recip_mag", "recip_cell_volume", "mode",
      "flat_needed", "grid_width", "start_offset", "max_stride",
      "cell_atom_count", "threshold", "stride_threshold",
-     "metallic_margin", "opening_floor", "max_count"])
+     "metal_gap_threshold", "opening_floor", "max_count"])
 
 
 # The verdicts a climb step returns (DESIGN 3.12.3 / 3.12.5): run one
-#   more mesh, stop converged at a rung, stop at the ceiling having
-#   never gone flat (non-converged), or stop early because a rising
-#   stride betrayed an oscillating near-metal (also non-converged).
-#   Every search shape -- the unit-step climb (``climb_action``), the
-#   bracket-refine climb (``bracket_refine_next``), and the grid
-#   continuation -- returns one of these through ``climb_next``
-#   (PSEUDOCODE 4e.3).  ``ceiling`` and ``metallic`` are one
-#   non-converged verdict reached two ways; the producer retires both
-#   the same, and the distinct kind only records WHY.
+#   more mesh, stop converged at an insulator's flat rung, stop as a
+#   metal recognised by its vanishing gap and settled at a rough
+#   floor-level rung, or stop at the ceiling having never gone flat
+#   (non-converged).  Every search shape -- the unit-step climb
+#   (``climb_action``), the bracket-refine climb
+#   (``bracket_refine_next``), and the grid continuation -- returns
+#   one of these through ``climb_next`` (PSEUDOCODE 4e.3).  CONVERGED
+#   and METAL both RECORD a result rung (the metal's rough by intent,
+#   not a k-converged energy); only ``ceiling`` is the non-converged
+#   verdict the producer retires.
 _ACTION_RUN = "run"
 _ACTION_CONVERGED = "converged"
 _ACTION_CEILING = "ceiling"
-_ACTION_METALLIC = "metallic"
+_ACTION_METAL = "metal"
 
-# A climb-step result.  ``kind`` is one of the three verdicts above;
-#   ``rung`` is the converged ``Rung`` (set for CONVERGED only);
+# A climb-step result.  ``kind`` is one of the four verdicts above;
+#   ``rung`` is the settled ``Rung`` (set for CONVERGED and METAL);
 #   ``mesh`` is the next mesh to run (set for RUN only).  CONVERGED
-#   carries the rung itself, not an index, so the caller need not
-#   track which ladder the index points into -- the bracket-refine
-#   climb judges a filled sub-block, whose indices differ from the
-#   full ladder's (PSEUDOCODE 4e.3).  The fields a verdict does not
-#   use are ``None``.
+#   and METAL carry the rung itself, not an index, so the caller need
+#   not track which ladder the index points into -- the bracket-
+#   refine climb judges a filled sub-block, whose indices differ from
+#   the full ladder's (PSEUDOCODE 4e.3).  The fields a verdict does
+#   not use are ``None``.
 ClimbAction = namedtuple("ClimbAction", ["kind", "rung", "mesh"])
 
 # The outcome a material carries when it stops at the ceiling without
@@ -1877,7 +1885,7 @@ def climb_action(rungs, config):
     climb from its top rung (``climb_next``, PSEUDOCODE 4e.3).
 
     ``rungs`` are this material's distinct meshes run so far, sorted
-    ascending, each a ``Rung(mesh, energy)``."""
+    ascending, each a ``Rung(mesh, energy, gap)``."""
     index = guidance_harvest.pick_converged_climb(
         [rung.energy for rung in rungs],
         config.cell_atom_count, config.threshold, config.flat_needed)
@@ -2002,6 +2010,18 @@ def bracket_refine_next(rungs, state, config):
 
     Returns ``(action, next_state)``.  ``rungs`` is the material's
     computed ladder, ascending; ``state`` its bracket-refine state."""
+    # A metal is recognised by its gap, ahead of any convergence work
+    #   (DESIGN 3.12.3): if any computed rung reads gapless, stop and
+    #   settle at the densest rung reached so far -- a rough metal
+    #   potential, not a k-converged energy.  A metal reads gap ~ 0
+    #   from the floor up, so this usually fires on the opening rung;
+    #   a near-metal that shows a small gap coarse and closes it finer
+    #   fires on the rung where the gap first vanishes.  Rides on this
+    #   automatic climb only -- the fine unit-step climb walks every
+    #   rung to the ceiling (climb_action).
+    if any(guidance_harvest.is_gapless(rung, config.metal_gap_threshold)
+           for rung in rungs):
+        return ClimbAction(_ACTION_METAL, rungs[-1], None), state
     if state.phase == _PHASE_BRACKET:
         top = state.endpoints[-1]
         if len(state.endpoints) == 1:
@@ -2011,27 +2031,13 @@ def bracket_refine_next(rungs, state, config):
 
         prev = state.endpoints[-2]
 
-        # First: did the last stride RISE past the margin?  A finer
-        #   mesh that raised the energy that far is an oscillating
-        #   near-metal (Fermi-surface sampling), not convergence, so
-        #   stop early rather than grinding to the ceiling (DESIGN
-        #   3.12.3).  No coarse-mesh guard is needed: a crystalline
-        #   climb is floored above the unreliable coarse regime
-        #   (config.opening_floor, DESIGN 3.12.4), so every stride
-        #   here already runs from a mesh dense enough to trust.
-        #   Checked before flatness only for clarity -- a large rise
-        #   is never flat.
-        if guidance_harvest.stride_rose(
-                mesh_climb.rung_at(rungs, prev),
-                mesh_climb.rung_at(rungs, top),
-                config.cell_atom_count, config.metallic_margin):
-            return ClimbAction(_ACTION_METALLIC, None, None), state
-
-        # Otherwise test whether the last stride is flat.  The bracket
-        #   test uses the LOOSER stride_threshold; the refine below
-        #   keeps the strict convergence threshold, so a stride that
-        #   reads loosely flat but has not truly converged is caught
-        #   there (DESIGN 3.12.3).
+        # Test whether the last stride is flat.  The bracket test uses
+        #   the LOOSER stride_threshold; the refine below keeps the
+        #   strict convergence threshold, so a stride that reads
+        #   loosely flat but has not truly converged is caught there
+        #   (DESIGN 3.12.3).  No near-metal check here: a metal is
+        #   caught by the gap test at the top of this function, before
+        #   any stride is judged.
         if guidance_harvest.stride_is_flat(
                 mesh_climb.rung_at(rungs, prev),
                 mesh_climb.rung_at(rungs, top),
@@ -2216,15 +2222,17 @@ def converge_by_climb(materials, configs, seed_densities,
         #   unit-step climb pass an empty state through untouched.
         action, search[material] = climb_next(
             rungs[material], search[material], configs[material])
-        if action.kind == _ACTION_CONVERGED:
-            # A converged rung is the outcome itself (not a
-            #   mismatch), so it leaves active with no failure tag.
+        if action.kind in (_ACTION_CONVERGED, _ACTION_METAL):
+            # A settled rung is the outcome itself (not a mismatch),
+            #   so it leaves active with no failure tag.  A METAL's
+            #   rung is a rough metal potential (DESIGN 3.12.3), a
+            #   CONVERGED's a k-converged insulator energy; both are
+            #   usable results recorded the same way.
             outcomes[material] = action.rung
             active.discard(material)
-        elif action.kind in (_ACTION_CEILING, _ACTION_METALLIC):
-            # Both are the same non-converged verdict (7.8 3d): a
-            #   count-ceiling stop, or an oscillating near-metal caught
-            #   early by a rising stride (DESIGN 3.12.3).
+        elif action.kind == _ACTION_CEILING:
+            # The non-converged verdict (7.8 3d): a hard insulator
+            #   still steep at the count ceiling, dropped.
             retire(material, NON_CONVERGED)
         else:                                            # _ACTION_RUN
             dispatcher.send({material: [action.mesh]})
@@ -2381,7 +2389,8 @@ class _ClimbDispatcher:
                 f"{material!r} resolved {list(resolved)}; an "
                 f"explicit scfkp mesh must be honoured exactly "
                 f"(DESIGN 7.7)")
-        return material, Rung(list(mesh), result["total_energy"])
+        return material, Rung(list(mesh), result["total_energy"],
+                              result.get("gap_ev"))
 
 
 def make_climb_dispatcher(structures, options_by_material, workspace,
@@ -2550,13 +2559,12 @@ def build_climb_config(ref, structure, confidence, under_trained,
     # The bracket phase's stride test is looser than convergence by the
     #   database-wide multiple (DESIGN 3.12.3): the strict per-solid
     #   threshold stays on `threshold` for the refine, and the bracket
-    #   reads `stride_threshold`.  The metallic early-bail margin is
-    #   assembled the same way, a larger multiple up from the strict
-    #   threshold, so only a genuine upward oscillation trips it.
+    #   reads `stride_threshold`.  The metal test reads a band gap,
+    #   not a scaled threshold, so `metal_gap_threshold` is the knob
+    #   taken directly -- an absolute gap in eV (DESIGN 3.12.3 /
+    #   3.12.6).
     stride_threshold = (ref.kpoint_convergence_threshold
                         * thresholds.stride_flatness_multiple)
-    metallic_margin = (ref.kpoint_convergence_threshold
-                       * thresholds.metallic_rise_multiple)
 
     # The crystalline climb's opening floor (DESIGN 3.12.4): the
     #   coarsest mesh it may open on, a per-axis cap the densest axis
@@ -2583,7 +2591,7 @@ def build_climb_config(ref, structure, confidence, under_trained,
         cell_atom_count=cell.num_atoms,
         threshold=ref.kpoint_convergence_threshold,
         stride_threshold=stride_threshold,
-        metallic_margin=metallic_margin,
+        metal_gap_threshold=thresholds.metal_gap_threshold,
         opening_floor=opening_floor,
         max_count=max_count)
 

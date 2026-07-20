@@ -276,35 +276,27 @@ def stride_is_flat(lo_rung, hi_rung, cell_atom_count, threshold):
     return abs(hi_per_atom - lo_per_atom) < threshold
 
 
-def stride_rose(lo_rung, hi_rung, cell_atom_count, margin):
-    """Return whether a stride's finer endpoint sits ABOVE its coarser
-    one by more than ``margin`` -- the near-metal early-bail test
-    (PSEUDOCODE 4e.2; DESIGN 3.12.3).
+def is_gapless(rung, gap_threshold):
+    """Return whether a rung is metallic -- its computed band gap at
+    or below ``gap_threshold`` -- the metal test (PSEUDOCODE 4e.2;
+    DESIGN 3.12.3).
 
-    Refining a k-point mesh samples the Brillouin zone more densely,
-    which lowers an insulator's total energy smoothly toward its
-    converged value.  A near-metal instead oscillates as the mesh
-    crosses the Fermi surface, and a finer mesh can *raise* the
-    energy; a large upward stride is therefore dispositive evidence
-    of that oscillation, and the bracket phase stops early on it
-    rather than grinding to the count ceiling.
+    A metal has no band gap: its total energy oscillates as the
+    k-point mesh crosses the Fermi surface and never settles, so
+    chasing k-point convergence on it is futile.  The gap is read
+    straight from the rung's own result -- a DIRECT metal signal,
+    unlike the retired rising-stride proxy that inferred metallicity
+    from a finer mesh raising the energy and so missed the common
+    small-amplitude oscillator whose rise never cleared the margin.
 
-    Unlike :func:`stride_is_flat` this test is SIGNED and asymmetric:
-    only a rise counts, never a drop, so a normally-converging cell
-    (whose strides fall, or rise only in small sub-threshold steps)
-    never trips it.  ``margin`` is per atom, in eV, and set well above
-    any real convergence wobble (a multiple of the convergence
-    threshold, DESIGN 3.12.3), so the bail is conservative.  Lives
-    here beside :func:`stride_is_flat` for the same single-sourcing
-    reason: it normalizes on the one per-atom rule.
-
-    ``lo_rung`` is the stride's coarser (lower-mesh) endpoint and
-    ``hi_rung`` its finer (higher-mesh) endpoint, each exposing a raw
-    total-cell ``.energy`` in hartree (Option B)."""
-
-    lo_per_atom = per_atom_ev(lo_rung.energy, cell_atom_count)
-    hi_per_atom = per_atom_ev(hi_rung.energy, cell_atom_count)
-    return hi_per_atom - lo_per_atom > margin
+    ``gap_threshold`` is an absolute band gap in eV (not a per-atom
+    energy): low enough that no real insulator crosses it, high enough
+    to catch a true metal's near-zero reading (DESIGN 3.12.6).
+    ``rung`` exposes a ``.gap`` in eV, taken from its result's
+    ``gap_ev``; a rung whose gap is unknown (``None``) is treated as
+    NON-metallic, so a missing reading never spuriously stops a
+    climb."""
+    return rung.gap is not None and rung.gap <= gap_threshold
 
 
 # Two runs of the same resolved mesh are the same calculation and

@@ -2092,7 +2092,7 @@ def _install_climb_mocks(monkeypatch, workspace, *,
         recip_cell_volume=0.64, mode=mesh_climb.UNIT_STEP,
         flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
         cell_atom_count=2, threshold=1.0e-6, stride_threshold=3.0e-6,
-        metallic_margin=5.0e-5, opening_floor=None, max_count=20)
+        metal_gap_threshold=0.05, opening_floor=None, max_count=20)
     monkeypatch.setattr(bip, "build_climb_config",
                         lambda *a, **k: config)
 
@@ -2439,7 +2439,7 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
             recip_cell_volume=1.0, mode=mesh_climb.UNIT_STEP,
             flat_needed=1, grid_width=0, start_offset=1, max_stride=8,
             cell_atom_count=2, threshold=1.0e-6, stride_threshold=3.0e-6,
-            metallic_margin=5.0e-5, opening_floor=None,
+            metal_gap_threshold=0.05, opening_floor=None,
             max_count=20))
     monkeypatch.setattr(
         bip, "converge_by_climb",
@@ -2703,26 +2703,27 @@ _CUBIC_RECIP_MAG = [1.0, 1.0, 1.0]
 
 def _cubic_config(mode, flat_needed, grid_width, start_offset,
                   max_count, max_stride=8, stride_threshold=3.0,
-                  metallic_margin=50.0, opening_floor=None):
+                  metal_gap_threshold=0.05, opening_floor=None):
     """A cubic-cell ClimbConfig with a strict per-atom convergence
     threshold of 1.0 eV and one atom per cell, so a raw energy delta
     counts as converged when it is below 1.0 / HARTREE hartree (DESIGN
     7.8).  The stride cap defaults to the provisional eight; the
     bracket phase's looser stride threshold defaults to 3.0 (three
-    times the convergence threshold), and the metallic early-bail
-    margin to 50.0 (fifty times it), the provisional multiples.  The
-    crystalline opening floor defaults to None (the climb opens on its
-    seed-derived rung, unfloored) so a test's coarse rise fires
-    regardless of where it sits; tests that exercise the floor pass a
-    floor mesh explicitly.  The unit-step tests that use this helper
-    never stride, so all four are inert for them."""
+    times the convergence threshold).  The metal test's gap threshold
+    defaults to 0.05 eV; the convergence fixtures leave a rung's gap
+    unset (None), so the metal test never fires and only the tests
+    that supply gaps exercise it.  The crystalline opening floor
+    defaults to None (the climb opens on its seed-derived rung,
+    unfloored); tests that exercise the floor pass a floor mesh
+    explicitly.  The unit-step tests that use this helper never
+    stride, so those knobs are inert for them."""
     return bip.ClimbConfig(
         classes=_CUBIC_CLASSES, recip_mag=_CUBIC_RECIP_MAG,
         recip_cell_volume=1.0, mode=mode, flat_needed=flat_needed,
         grid_width=grid_width, start_offset=start_offset,
         max_stride=max_stride, cell_atom_count=1, threshold=1.0,
         stride_threshold=stride_threshold,
-        metallic_margin=metallic_margin,
+        metal_gap_threshold=metal_gap_threshold,
         opening_floor=opening_floor, max_count=max_count)
 
 
@@ -2789,8 +2790,13 @@ class _SyntheticDispatcher:
     many times the climb dispatched (the opening send plus one per
     continuation rung)."""
 
-    def __init__(self, energy_of, fail=(), send_counter=None):
+    def __init__(self, energy_of, fail=(), send_counter=None,
+                 gap_of=None):
         self._energy_of = energy_of
+        # Per-material gap model (mesh -> band gap in eV) for the metal
+        #   test; absent -> a rung's gap is None (non-metallic), so the
+        #   convergence fixtures need not supply one.
+        self._gap_of = gap_of or {}
         self._fail = {(material, tuple(mesh))
                       for material, mesh in fail}
         self._queue = []            # (material, result) in flight
@@ -2805,8 +2811,10 @@ class _SyntheticDispatcher:
                     self._queue.append((material, bip._RUN_FAILED))
                 else:
                     energy = self._energy_of[material](mesh)
+                    gap_fn = self._gap_of.get(material)
+                    gap = gap_fn(mesh) if gap_fn is not None else None
                     self._queue.append(
-                        (material, bip.Rung(mesh, energy)))
+                        (material, bip.Rung(mesh, energy, gap)))
 
     def next_rung(self):
         return self._queue.pop(0)
@@ -3135,104 +3143,91 @@ def test_bracket_refine_stops_at_ceiling():
     assert flagged == ["metal"]
 
 
-def _metallic_energy(mesh):
-    """A cubic energy whose finer meshes RAISE the total energy -- the
-    near-metal tell (Fermi-surface oscillation).  It drops to a
-    spurious low at [4,4,4] then jumps back up and sits there, so the
-    [4->8] stride reads a large upward step (~8 eV/atom).  With a low
-    enough margin the climb bails there; with the bail disabled it
-    finds the plateau at [6,6,6] -- so the same energy shows both the
-    early bail and that a higher margin lets the climb run on."""
+def _metal_energy(mesh):
+    """A cubic energy that oscillates with mesh rather than settling --
+    the near-metal tell.  Its exact shape is immaterial to the metal
+    test, which reads the GAP, not the energy; it stands in as a
+    plausible metallic energy so the climb has something to run."""
     n = mesh[0]
-    if n == 1:
-        return -1.0
     if n <= 2:
         return -1.2
     if n <= 4:
-        return -1.4                          # spurious minimum
-    return -1.1                              # finer meshes sit ABOVE it
+        return -1.4
+    return -1.1
 
 
-def test_bracket_refine_bails_early_on_a_rising_stride():
-    """A stride whose finer endpoint rises past the metallic margin
-    stops the climb early as NON_CONVERGED, without grinding toward the
-    ceiling: the [4->8] stride rises ~8 eV/atom, so with a margin of 2
-    the climb bails after four cheap calcs and never computes the wide
-    meshes.  With the bail effectively disabled (a huge margin) the
-    same energy climbs on and converges at its [6,6,6] plateau -- the
-    margin is the only difference (DESIGN 3.12.3)."""
+def test_bracket_refine_settles_a_metal_on_its_gap():
+    """A climb whose rungs read a vanishing gap is recognised as a
+    metal and settled AT ONCE on its opening (floor-level) rung -- a
+    RECORDED result, not a NON_CONVERGED drop -- rather than chasing a
+    convergence a metal never reaches (DESIGN 3.12.3)."""
     materials = ["metal"]
     seed_densities = {"metal": 1.0}          # opens at [1,1,1]
+    config = _cubic_config(
+        mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=0, max_count=20)
+    flagged = []
+    outcomes, rungs = bip.converge_by_climb(
+        materials, {"metal": config}, seed_densities,
+        _SyntheticDispatcher(
+            {"metal": _metal_energy},
+            gap_of={"metal": lambda mesh: 0.0}),
+        on_non_converged=flagged.append)
 
-    def _run(metallic_margin):
-        config = _cubic_config(
-            mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
-            start_offset=0, max_count=20,
-            metallic_margin=metallic_margin)
-        flagged = []
-        outcomes, rungs = bip.converge_by_climb(
-            materials, {"metal": config}, seed_densities,
-            _SyntheticDispatcher({"metal": _metallic_energy}),
-            on_non_converged=flagged.append)
-        return outcomes["metal"], flagged, rungs["metal"]
-
-    # Margin 2: the ~8 eV/atom rise trips the bail after [8,8,8], so
-    #   the ladder stops at the four bracket rungs, far below the
-    #   ceiling, and the material is tagged like any mismatch.
-    outcome, flagged, rungs = _run(2.0)
-    assert outcome is bip.NON_CONVERGED
-    assert flagged == ["metal"]
-    assert [r.mesh for r in rungs] == [
-        [1, 1, 1], [2, 2, 2], [4, 4, 4], [8, 8, 8]]
-
-    # A huge margin disables the bail: the climb runs on to the
-    #   plateau and converges.
-    outcome_off, _, _ = _run(1.0e9)
-    assert outcome_off.mesh == [6, 6, 6]
+    # Settled as a metal on the opening rung: a recorded Rung (not the
+    #   NON_CONVERGED sentinel, no mismatch tag), and just one cheap
+    #   calc -- nowhere near the ceiling.
+    assert outcomes["metal"].mesh == [1, 1, 1]
+    assert flagged == []
+    assert [r.mesh for r in rungs["metal"]] == [[1, 1, 1]]
 
 
-def _gamma_noise_energy(mesh):
-    """A cubic insulator whose single Gamma point ([1,1,1]) gives a
-    spuriously low energy: the [1,1,1] -> [2,2,2] stride RISES ~5
-    eV/atom, more than a real oscillation, purely from coarse-mesh
-    sampling.  Above that the energy is its true, flat value.  The
-    near-metal bail must not mistake this insulator for a metal."""
-    n = mesh[0]
-    if n == 1:
-        return -1.0                          # Gamma-only: spurious low
-    if n == 2:
-        return -0.8                          # rises from Gamma (noise)
-    return -1.5                              # true value, flat above
+def _flat_insulator_energy(mesh):
+    """A cubic insulator flat in energy from [3,3,3] up, so a climb
+    floored at [4,4,4] converges quickly; the coarse values below the
+    floor are immaterial here -- this test turns on the GAP, below."""
+    return -1.5 if mesh[0] >= 3 else -1.0 - 0.1 * mesh[0]
+
+
+def _gamma_gap_artifact(mesh):
+    """A cubic insulator whose single Gamma point ([1,1,1]) reports a
+    SPURIOUS zero gap -- a coarse-mesh artifact, not real metallicity
+    -- while every denser mesh reports its true, open gap.  The metal
+    test must not read the [1,1,1] artifact as a metal."""
+    return 0.0 if mesh[0] == 1 else 1.5
 
 
 def test_crystalline_floor_opens_above_the_coarse_regime():
     """A crystalline climb floored at [4,4,4] opens above the ultra-
-    coarse (Gamma) region, so the [1,1,1] / [2,2,2] sampling noise
-    (_gamma_noise_energy) is never on its ladder and the insulator
-    converges at [4,4,4].  Without the floor (opening_floor=None, the
-    non-crystalline path) the climb opens at [1,1,1], strides into the
-    spurious rise, and the near-metal bail -- now carrying no coarse-
-    mesh guard of its own -- false-bails it NON_CONVERGED.  This is the
-    si_ia-3 regression the floor fixes (DESIGN 3.12.4)."""
+    coarse (Gamma) region, so the [1,1,1] spurious zero-gap
+    (_gamma_gap_artifact) is never on its ladder and the cell
+    converges as the insulator it is.  Without the floor
+    (opening_floor=None, the non-crystalline path) the climb opens at
+    [1,1,1], the metal test reads the artifact gap, and it
+    false-settles the insulator as a METAL there.  This is the si_ia-3
+    class of regression the floor fixes -- the floor keeps the gap the
+    metal test reads trustworthy (DESIGN 3.12.4)."""
     materials = ["ins"]
     seed_densities = {"ins": 1.0}        # opens at [1,1,1] unfloored
 
     def _run(opening_floor):
         config = _cubic_config(
             mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
-            start_offset=0, max_count=20, metallic_margin=2.0,
-            opening_floor=opening_floor)
+            start_offset=0, max_count=20, opening_floor=opening_floor)
         outcomes, _ = bip.converge_by_climb(
             materials, {"ins": config}, seed_densities,
-            _SyntheticDispatcher({"ins": _gamma_noise_energy}))
+            _SyntheticDispatcher(
+                {"ins": _flat_insulator_energy},
+                gap_of={"ins": _gamma_gap_artifact}))
         return outcomes["ins"]
 
-    # Floored at [4,4,4]: the climb never visits [1,1,1] / [2,2,2], so
-    #   the coarse-noise rise is never measured and the cell converges.
-    assert _run([4, 4, 4]).mesh == [4, 4, 4]
-    # Unfloored: opens at [1,1,1], the coarse rise reaches the ungated
-    #   bail, and the insulator false-bails -- the regression removed.
-    assert _run(None) is bip.NON_CONVERGED
+    # Floored at [4,4,4]: never visits [1,1,1], so the spurious gap is
+    #   never read; the cell converges at or above the floor.
+    floored = _run([4, 4, 4])
+    assert floored is not bip.NON_CONVERGED and floored.mesh[0] >= 4
+    # Unfloored: opens at [1,1,1], reads the artifact zero-gap, and
+    #   false-settles as a METAL there rather than converging.
+    assert _run(None).mesh == [1, 1, 1]
 
 
 def test_bracket_refine_resumes_after_a_false_bracket():

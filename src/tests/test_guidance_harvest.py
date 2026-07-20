@@ -279,39 +279,31 @@ def test_stride_is_flat_normalizes_per_atom():
 
 
 # --------------------------------------------------------------
-#  stride_rose -- the near-metal early-bail test (DESIGN 3.12.3)
+#  is_gapless -- the metal test (DESIGN 3.12.3)
 #
-#  A SIGNED test: true only when the finer endpoint's per-atom energy
-#  sits ABOVE the coarser one's by more than the margin.  A rise
-#  betrays a near-metal (finer mesh raised the energy); a drop never
-#  fires.
+#  True when a rung's computed band gap (eV) is at or below the gap
+#  threshold: a metal has no gap, and its energy oscillates rather
+#  than converging, so the climb settles it at once on a rough mesh
+#  rather than chasing a convergence it never reaches.  Judges ONE
+#  rung, reading its gap directly.
 # --------------------------------------------------------------
 
-def test_stride_rose_fires_only_on_a_rise_past_the_margin():
-    """A finer mesh that raises the energy past the margin trips the
-    bail; the same-size DROP never does (the test is one-sided)."""
-    low = types.SimpleNamespace(mesh=[2, 2, 2], energy=-5.0)
-    higher = types.SimpleNamespace(mesh=[4, 4, 4], energy=-5.0 + 1e-4)
-    delta = gh.per_atom_ev(higher.energy, 1) - gh.per_atom_ev(
-        low.energy, 1)                       # positive: energy rose
-    assert gh.stride_rose(low, higher, 1, delta * 0.99) is True
-    assert gh.stride_rose(low, higher, 1, delta * 1.01) is False
-    # The mirror-image drop (finer mesh LOWERED the energy) never
-    #   fires, whatever the margin -- convergence goes this way.
-    lower = types.SimpleNamespace(mesh=[4, 4, 4], energy=-5.0 - 1e-4)
-    assert gh.stride_rose(low, lower, 1, 0.0) is False
+def test_is_gapless_fires_at_or_below_the_gap_threshold():
+    """A rung whose gap is at or below the threshold reads as a metal;
+    one above it does not."""
+    metal = types.SimpleNamespace(mesh=[4, 4, 4], gap=0.0)
+    at_edge = types.SimpleNamespace(mesh=[4, 4, 4], gap=0.05)
+    insulator = types.SimpleNamespace(mesh=[4, 4, 4], gap=0.5)
+    assert gh.is_gapless(metal, 0.05) is True
+    assert gh.is_gapless(at_edge, 0.05) is True       # at the edge
+    assert gh.is_gapless(insulator, 0.05) is False
 
 
-def test_stride_rose_normalizes_per_atom():
-    """Like the other energy tests, the rise is judged per atom, so a
-    given total-cell rise trips a smaller margin on a smaller cell."""
-    low = types.SimpleNamespace(mesh=[2, 2, 2], energy=-5.0)
-    high = types.SimpleNamespace(mesh=[4, 4, 4], energy=-5.0 + 2e-4)
-    one_atom_rise = gh.per_atom_ev(high.energy, 1) - gh.per_atom_ev(
-        low.energy, 1)
-    margin = one_atom_rise * 0.75            # between 1- and 2-atom
-    assert gh.stride_rose(low, high, 1, margin) is True    # 1 atom
-    assert gh.stride_rose(low, high, 2, margin) is False   # 2 atoms
+def test_is_gapless_reads_an_unknown_gap_as_non_metallic():
+    """A rung whose gap is unknown (None) is never flagged a metal, so
+    a missing reading never spuriously stops a climb."""
+    unknown = types.SimpleNamespace(mesh=[4, 4, 4], gap=None)
+    assert gh.is_gapless(unknown, 0.05) is False
 
 
 # --------------------------------------------------------------

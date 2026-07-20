@@ -586,31 +586,30 @@ ClimbPolicy = namedtuple(
 ##                            settled stride one geometric step sooner
 ##                            and shaving the top-end overshoot
 ##                            (DESIGN 3.12.3)
-##     metallic_rise_multiple
-##                            how large an UPWARD stride (as a multiple
-##                            of the convergence threshold, >= 1) flags
-##                            an oscillating near-metal and stops the
-##                            climb early: a finer mesh that raises the
-##                            energy this far is a Fermi-surface
-##                            oscillation, not convergence.  Large so
-##                            only a genuine oscillation trips it; set
-##                            it very high to disable the early bail
-##                            (DESIGN 3.12.3)
+##     metal_gap_threshold
+##                            the band gap (eV, > 0) at or below which
+##                            a rung reads as gapless, so the climb
+##                            calls the material a metal and settles on
+##                            a rough floor-level mesh: an absolute gap
+##                            read straight from the rung, low enough
+##                            that no real insulator crosses it, high
+##                            enough to catch a true metal's near-zero
+##                            reading (DESIGN 3.12.3 / 3.12.6)
 ##     crystalline_floor_axis_count
 ##                            the per-axis CAP on a crystalline climb's
 ##                            opening mesh (>= 1): the densest
 ##                            reciprocal axis gets this many points and
 ##                            every other axis scales DOWN from there,
 ##                            so the climb never opens in the coarse
-##                            regime that would mislead the near-metal
-##                            bail.  [4,4,4] on a cubic cell by default
-##                            (DESIGN 3.12.4)
+##                            regime that would make the metal test
+##                            misread a gap.  [4,4,4] on a cubic cell
+##                            by default (DESIGN 3.12.4)
 PolicyThresholds = namedtuple(
     "PolicyThresholds",
     ["confidence_high", "grid_width", "start_offset_moderate",
      "start_offset_cold", "flat_needed_confident",
      "flat_needed_cold", "max_stride", "climb_shape",
-     "stride_flatness_multiple", "metallic_rise_multiple",
+     "stride_flatness_multiple", "metal_gap_threshold",
      "crystalline_floor_axis_count"])
 
 
@@ -625,14 +624,14 @@ PolicyThresholds = namedtuple(
 #   a stride flat within five times the convergence threshold, so a
 #   nearly-settled stride is bracketed a geometric step early (the
 #   seed experiment found three too tight to catch the [4->8] stride
-#   at the default 5e-4 threshold).  A stride that RISES by more than
-#   fifty times the convergence threshold is judged an oscillating
-#   near-metal and stops the climb early -- a near-metal's upward
-#   excursions dwarf that bound, while a converging cell's never
-#   approach it.  A crystalline climb opens no coarser than a
-#   four-point cap on its densest axis, so it never samples the
-#   unreliable Gamma-only regime the bail would misread and needs no
-#   separate coarse-mesh guard (DESIGN 3.12.4).
+#   at the default 5e-4 threshold).  A rung whose band gap is
+#   0.05 eV or less is judged a metal, and the climb settles at once
+#   on a rough floor-level mesh rather than chasing a convergence a
+#   metal never reaches; 0.05 eV sits above a true metal's near-zero
+#   gap and well below any real insulator's.  A crystalline climb
+#   opens no coarser than a four-point cap on its densest axis, so the
+#   gap the metal test reads always comes from a mesh dense enough to
+#   trust and needs no separate coarse-mesh guard (DESIGN 3.12.4).
 DEFAULT_POLICY_THRESHOLDS = PolicyThresholds(
     confidence_high=0.75,
     grid_width=1,
@@ -643,7 +642,7 @@ DEFAULT_POLICY_THRESHOLDS = PolicyThresholds(
     max_stride=8,
     climb_shape=BRACKET_REFINE,
     stride_flatness_multiple=5.0,
-    metallic_rise_multiple=50.0,
+    metal_gap_threshold=0.05,
     crystalline_floor_axis_count=4)
 
 
@@ -753,18 +752,23 @@ def climb_policy_from_manifest(climb_settings):
         raise ValueError(
             "kpoint_climb.climb_shape must be one of {0}, got "
             "{1!r}".format(list(CLIMB_SHAPES), shape))
-    # Both multiples scale the convergence threshold UP, so each must
-    #   be >= 1: a stride_flatness_multiple below 1 would make the
-    #   bracket test stricter than the refine, and a
-    #   metallic_rise_multiple below 1 would bail on strides smaller
-    #   than the convergence wobble.  Either is surely a mistake.
-    for knob in ("stride_flatness_multiple", "metallic_rise_multiple"):
-        value = climb_settings.get(knob)
-        if value is not None and value < 1:
-            raise ValueError(
-                "kpoint_climb.{0} must be >= 1 (it scales the "
-                "convergence threshold up), got {1!r}".format(
-                    knob, value))
+    # stride_flatness_multiple scales the convergence threshold UP, so
+    #   it must be >= 1: below 1 would make the bracket test stricter
+    #   than the refine, surely a mistake.
+    flatness = climb_settings.get("stride_flatness_multiple")
+    if flatness is not None and flatness < 1:
+        raise ValueError(
+            "kpoint_climb.stride_flatness_multiple must be >= 1 (it "
+            "scales the convergence threshold up), got "
+            "{0!r}".format(flatness))
+    # metal_gap_threshold is an absolute band gap in eV, so it must be
+    #   positive: a zero or negative threshold could never flag a
+    #   metal (a real band gap is non-negative).
+    gap_threshold = climb_settings.get("metal_gap_threshold")
+    if gap_threshold is not None and gap_threshold <= 0:
+        raise ValueError(
+            "kpoint_climb.metal_gap_threshold must be > 0 (an "
+            "absolute band gap in eV), got {0!r}".format(gap_threshold))
     # The crystalline floor's per-axis cap is a k-point count, so it
     #   too must be at least one point.
     floor_axis = climb_settings.get("crystalline_floor_axis_count")
@@ -871,7 +875,7 @@ def _floor_point_count(mesh):
 #  These three helpers are the mesh arithmetic that filling and
 #  recording lean on; they operate on "rungs" -- a rung being any
 #  object that exposes a ``.mesh`` axial-count vector (the producer's
-#  ``Rung(mesh, energy)``), so this module stays free of the Rung
+#  ``Rung(mesh, energy, gap)``), so this module stays free of the Rung
 #  type itself and dips into the ladder only through the one attribute
 #  it needs.  The bracket-refine STATE MACHINE that calls them reads
 #  energies (the stride and stop tests), so by the split this module

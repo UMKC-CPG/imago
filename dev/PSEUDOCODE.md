@@ -1692,21 +1692,19 @@ function stride_is_flat(lo_rung, hi_rung, cell_atom_count, threshold):
     return abs(hi - lo) < threshold
 
 
-function stride_rose(lo_rung, hi_rung, cell_atom_count, margin):
-    # The near-metal early-bail test (DESIGN 3.12.3): a SIGNED test,
-    # true when the finer endpoint's per-atom energy sits ABOVE the
-    # coarser one's by more than `margin`.  Refining the mesh lowers
-    # an insulator's energy smoothly, but a near-metal oscillates
-    # across the Fermi surface and a finer mesh can raise it, so a
-    # large upward stride is dispositive evidence of oscillation.
-    # `margin` is well above any real convergence wobble (a multiple
-    # of the convergence threshold, config.metallic_margin, 4e.3), so
-    # a smoothly-converging cell -- even one rising in small
-    # sub-threshold steps -- never trips it.  Unlike stride_is_flat
-    # this is NOT symmetric: only a RISE counts, never a drop.
-    lo = per_atom_ev(lo_rung.energy, cell_atom_count)
-    hi = per_atom_ev(hi_rung.energy, cell_atom_count)
-    return hi - lo > margin
+function is_gapless(rung, gap_threshold):
+    # The metal test (DESIGN 3.12.3): true when a rung's computed
+    # band gap is essentially zero -- at or below `gap_threshold`
+    # (config.metal_gap_threshold, 4e.3), an eV value low enough that
+    # no real insulator crosses it yet high enough to catch a true
+    # metal's near-zero reading.  A metal has no gap: its energy
+    # oscillates as the mesh crosses the Fermi surface and never
+    # settles, so chasing k-point convergence on it is futile.  The
+    # gap is read straight from the rung's result -- a DIRECT metal
+    # signal, unlike the retired proxy that inferred metallicity from
+    # a finer mesh raising the energy and so missed the common
+    # small-amplitude oscillator.  This judges ONE rung, not a stride.
+    return rung.gap <= gap_threshold
 
 
 function at_ceiling(mesh, max_count):
@@ -1725,17 +1723,20 @@ which rungs they compute.  `climb_next` dispatches on the mode,
 threading a per-material search `state` for the stateful
 bracket-refine shape; the grid and the unit-step climb ignore it.
 Every shape returns one of: `RUN(mesh)` -- run one more mesh;
-`CONVERGED(rung)` -- done, that rung; `CEILING` -- stop,
-non-converged (hit the count ceiling still steep); `METALLIC` --
-stop, non-converged (an oscillating near-metal caught early by a
-rising stride, 4e.2).  `CEILING` and `METALLIC` are the same
-non-converged verdict reached two ways; the producer (4e.5)
-retires both the same, and the distinct kind only records WHY for
-a log or later reason-surfacing.
+`CONVERGED(rung)` -- done, an insulator settled at that rung;
+`METAL(rung)` -- stop, a metal recognised by its vanishing gap
+(4e.2) and settled at that rung as a deliberately rough starting
+potential; `CEILING` -- stop, non-converged (a hard insulator that
+hit the count ceiling still steep).  `CONVERGED` and `METAL` both
+RECORD a result rung -- the metal's is rough by intent, not a
+k-converged energy -- and differ only in the reason tag; `CEILING`
+alone is the non-converged verdict the producer (4e.5) retires.
 
 ```
 function climb_next(rungs, state, config):
-    # rungs: the material's computed {mesh, energy}, sorted ascending.
+    # rungs: the material's computed {mesh, energy, gap}, sorted
+    #   ascending; gap is the rung's band gap (eV), read for the
+    #   metal test (4e.2), alongside the energy the stop test reads.
     # state: the per-material search state (bracket-refine only).
     # Returns (action, state').
     if config.mode == BRACKET_REFINE:
@@ -1779,29 +1780,30 @@ machine.  Its per-material `state`:
 
 ```
 function bracketRefineNext(rungs, state, config):
+    # A metal is recognised by its gap, ahead of any convergence
+    #   work (DESIGN 3.12.3): if any computed rung reads gapless, stop
+    #   and settle at the densest rung reached so far -- a rough metal
+    #   potential, not a k-converged energy.  A metal reads gap ~ 0
+    #   from the floor up, so this usually fires on the opening rung;
+    #   a near-metal that shows a small gap coarse and closes it finer
+    #   fires on the rung where the gap first vanishes.  Settling at
+    #   the current rung keeps it cheap; a +1 denser sample is a dial
+    #   (3.12.6).  Rides on this automatic climb only -- the fine
+    #   unit-step climb (climbAction) walks every rung to the ceiling.
+    if any(is_gapless(r, config.metal_gap_threshold) for r in rungs):
+        return METAL(rungs[-1]), state
     if state.phase == BRACKET:
         top = state.endpoints[-1]
         if length(state.endpoints) == 1:
             # Only the seed is computed; launch the first stride
             #   (stride 1).  No flatness to test yet.
             return strideUp(state, 1, config)
-        # Two or more endpoints.  First: did the last stride RISE by
-        #   more than the margin?  A finer mesh that raised the energy
-        #   that far is an oscillating near-metal (4e.2) -- stop early
-        #   with the non-converged verdict rather than grinding to the
-        #   ceiling (DESIGN 3.12.3).  No coarse-mesh guard is needed:
-        #   the crystalline climb is floored above the unreliable
-        #   coarse regime (4e.4 / DESIGN 3.12.4), so every stride here
-        #   already runs from a mesh dense enough to trust.  Checked
-        #   before flatness; a large rise is never also flat, so the
-        #   order is only for clarity.
+        # Two or more endpoints.  The bracket test uses the LOOSER
+        #   stride_threshold (4e.2); the refine below keeps the strict
+        #   convergence threshold.  (No near-metal check here: a metal
+        #   is caught by the gap test at the top of this function,
+        #   before any stride is judged.)
         prev = state.endpoints[-2]
-        if stride_rose(rung_at(rungs, prev), rung_at(rungs, top),
-                       config.cell_atom_count,
-                       config.metallic_margin):
-            return METALLIC, state
-        # The bracket test uses the LOOSER stride_threshold (4e.2);
-        #   the refine below keeps the strict convergence threshold.
         if stride_is_flat(rung_at(rungs, prev), rung_at(rungs, top),
                           config.cell_atom_count,
                           config.stride_threshold):
@@ -2008,11 +2010,12 @@ config (11.4 / build_climb_config): it is the solid's strict
 `stride_flatness_multiple` knob (>= 1, default a small multiple to
 be fixed by experiment, DESIGN 3.12.6).  The strict threshold
 stays on `config.threshold` for the refine; only the bracket
-stride test reads the looser one.  `config.metallic_margin` -- the
-upward-stride bail bound (4e.2 / 4e.3) -- is assembled the same
-way: the strict threshold times the `metallic_rise_multiple` knob
-(>= 1, a large multiple so only a genuine oscillation trips it,
-DESIGN 3.12.3 / 3.12.6).  `config.opening_floor` -- the crystalline
+stride test reads the looser one.  `config.metal_gap_threshold` --
+the eV band gap at or below which a rung reads as gapless (4e.2 /
+4e.3) -- is the database-wide `metal_gap_threshold` knob taken
+directly: an absolute gap in eV, not a multiple of the convergence
+threshold (DESIGN 3.12.3 / 3.12.6).  `config.opening_floor` -- the
+crystalline
 climb's floor rung (4e.4 / DESIGN 3.12.4) -- is built once where the
 producer builds the config (11.4 / build_climb_config): for a
 crystalline solid it is `crystallineFloorMesh`, whose densest axis
@@ -2020,13 +2023,13 @@ holds `crystalline_floor_axis_count` points and whose other axes
 scale down by their `|b_i|` ratios, so it is `[4,4,4]` on a cubic
 cell and never exceeds the cap on any axis of an anisotropic one;
 for a non-crystalline solid it is None.  Because the climb never
-opens below that rung, the near-metal bail needs no coarse-mesh
-guard of its own (4e.3).
+opens below that rung, the gap test reads a trustworthy gap at
+every rung and needs no coarse-mesh guard of its own (4e.3).
 
 The numeric knobs that policy reads -- the `confidence_high`
 threshold, the two `flat_needed` counts, `grid_width`, the two
 `start_offset` values, `max_stride`, the climb-shape choice, the
-`stride_flatness_multiple`, the `metallic_rise_multiple`, the
+`stride_flatness_multiple`, the `metal_gap_threshold`, the
 `crystalline_floor_axis_count`, and the per-axis `max_count`
 ceiling -- are config, not constants (Principle 11).  They are sourced from the
 manifest `[harvest.kpoint_climb]` sub-table (DESIGN 5.7 / 3.12.6),
@@ -2040,14 +2043,14 @@ rather than silently taking a default.  The one knob with a
 restricted VALUE, `climb_shape`, is checked too: the merge rejects
 any value that is not one of the known climb shapes (`BRACKET_REFINE`
 or `UNIT_STEP`), so a typo like `"unit-step"` fails loudly rather
-than falling through to a default shape.  The two multiples --
-`stride_flatness_multiple` and `metallic_rise_multiple` -- are
-likewise checked to be `>= 1`, since a value below one would invert
-the knob's meaning (a stricter-than-convergence bracket, or a bail
-that fires below the convergence wobble), and
-`crystalline_floor_axis_count` is checked `>= 1` as a per-axis
-count.  The provisional default values themselves are still to be
-fixed by the seed experiment (3.12.6).
+than falling through to a default shape.  The
+`stride_flatness_multiple` is likewise checked to be `>= 1`, since
+a value below one would invert its meaning (a stricter-than-
+convergence bracket); the `metal_gap_threshold` is checked `> 0`
+as an absolute band gap in eV; and `crystalline_floor_axis_count`
+is checked `>= 1` as a per-axis count.  The provisional default
+values themselves are still to be fixed by the seed experiment
+(3.12.6).
 
 ### 4e.5 Concurrent orchestration across materials
 
@@ -2064,7 +2067,8 @@ function converge_by_climb(materials, configs, seed_densities,
     #   dispatcher.send(mesh_lists) -- launch one calc per (material,
     #     mesh) WITHOUT waiting (send_off, 13.5).
     #   dispatcher.next_rung() -- block until the next rung lands and
-    #     return (material, result), where result is a {mesh, energy}
+    #     return (material, result), where result is a {mesh, energy,
+    #     gap}
     #     Rung or the FAILED marker for a rung that did not complete
     #     (7.7).
     # seed_densities[m] is m's round-0 seed density (the prediction,
@@ -2095,13 +2099,15 @@ function converge_by_climb(materials, configs, seed_densities,
     function judge(m):
         (action, search[m]) = climb_next(rungs[m], search[m],
                                           configs[m])
-        if action is CONVERGED:
-            outcomes[m] = action.rung                # the Rung, not a
-            active.discard(m)                        #   mismatch
-        elif action is CEILING or action is METALLIC:
-            retire(m, NON_CONVERGED)                 # 7.8 3d; a
-            #   near-metal caught early (METALLIC) retires the same as
-            #   a ceiling stop -- one non-converged verdict, two ways.
+        if action is CONVERGED or action is METAL:
+            outcomes[m] = action.rung                # record the rung;
+            active.discard(m)                        #   a METAL's is a
+            #   rough metal potential (DESIGN 3.12.3), a CONVERGED's a
+            #   k-converged insulator energy -- both usable results,
+            #   distinguished only by their reason tag for the record.
+        elif action is CEILING:
+            retire(m, NON_CONVERGED)                 # 7.8 3d; a hard
+            #   insulator still steep at the count ceiling, dropped.
         else:                                        # RUN(mesh)
             dispatcher.send({ m: [action.mesh] })
             in_air[m] += 1
@@ -6055,8 +6061,8 @@ DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 5.0e-4    # 0.5 meV/atom
 #   max_count name the confidence-to-policy PolicyThresholds (4e.4):
 #   the confidence split, the grid width and two start offsets, the
 #   two flat-rung persistence counts, the stride cap and climb shape,
-#   the two threshold multiples (stride-flatness and metallic-rise),
-#   and the crystalline_floor_axis_count that sets the opening floor
+#   the stride-flatness multiple and the metal_gap_threshold, and
+#   the crystalline_floor_axis_count that sets the opening floor
 #   (3.12.4).  max_count is the per-axis ceiling (4e.2).  Each carries
 #   a provisional built-in default (mesh_climb), so the sub-table --
 #   and any knob -- may be omitted.  Database-wide: no per-solid
@@ -6065,7 +6071,7 @@ KPOINT_CLIMB_KEYS = ("confidence_high", "grid_width",
     "start_offset_moderate", "start_offset_cold",
     "flat_needed_confident", "flat_needed_cold",
     "max_stride", "climb_shape", "stride_flatness_multiple",
-    "metallic_rise_multiple", "crystalline_floor_axis_count",
+    "metal_gap_threshold", "crystalline_floor_axis_count",
     "max_count")
 
 

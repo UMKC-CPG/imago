@@ -2811,7 +2811,7 @@ imports its neighbours from `$IMAGO_BIN`).
   end-to-end.  The payoff is the cold/seeding case -- si_cmce's
   ~28 rungs should fall to ~8-10; a warm seed barely brackets.
 
-- [ ] C124. Code the crystalline opening floor and retire the
+- [x] C124. Code the crystalline opening floor and retire the
   coarse-mesh gate on the near-metal bail, per DESIGN 3.12.4 /
   PSEUDOCODE 4c.2 + 4e.3 + 4e.4.  Found from the seed re-run:
   si_ia-3 (BC8 insulator) false-bailed NON_CONVERGED because its
@@ -2839,8 +2839,119 @@ imports its neighbours from `$IMAGO_BIN`).
     `ClimbConfig` builders take `opening_floor`; assert
     `build_climb_config` floors a cubic cell at `[4,4,4]`, an
     anisotropic one lower per axis, and a non-crystalline one to
-    None.  Then a live seed re-run confirms si_ia-3 back to
-    `[6,6,6]` and si_cmce still bails cheaply.
+    None.  Committed e896eac.  The live seed re-run (2026-07-20,
+    job 15019795) confirmed the floor's primary purpose: every
+    insulator opened at its floor and converged -- si_ia-3 back
+    to ~`[6,6,6]` with the false bail gone, and all six `fd-3m`
+    diamond-Si allotropes at ~`[6,6,6]`.  It also overturned the
+    prediction above that si_cmce "still bails cheaply": removing
+    the coarse gate exposed a near-metal *runaway* instead,
+    captured and analysed as C125 below.
+
+- [ ] C125. Close the near-metal dead zone the C124 seed re-run
+  exposed -- RESOLVED, by classifying metals directly on the gap.
+  CODE-COMPLETE down the whole chain (DESIGN 3.12.3/3.12.4/3.12.6/5.7
+  -> PSEUDOCODE 4e.2/4e.3 + knobs -> code); 991 non-integration tests
+  pass.  Code: `guidance_harvest.is_gapless` (replaces `stride_rose`);
+  producer `_ACTION_METAL` settles + RECORDS the rung (only `ceiling`
+  is non-converged now), gap check atop `bracket_refine_next`, `Rung`
+  gains `gap` (from `gap_ev`), `build_climb_config` passes the knob
+  directly; `metallic_rise_multiple` -> `metal_gap_threshold` (eV,
+  default 0.05, checked `> 0`) across mesh_climb / curation_manifest.
+  Pending: commit; a live seed re-run to confirm si_cmce now settles
+  as a metal at its floor (a rough recorded potential) instead of
+  running away.  DEFERRED (minimal-for-now): a metal is recorded as a
+  plain rung, no distinguishing flag -- the harvest (7.8) / dataspace
+  (7.2) metal-flag + predictor-learning question is left for later.
+  C124 worked as intended and, in doing so, removed the
+  *accidental* early stop that used to terminate the si_cmce
+  near-metal -- the coarse `[1,1,1] -> [2,2,2]` Gamma-artifact
+  rise, which tripped the near-metal bail for a reason unrelated
+  to metallicity.  With that gone, si_cmce (42-atom Cmce, floor
+  `[2,4,4]`) climbed 21 rungs to `[6,10,11]` without ever
+  converging or bailing, and was cancelled only because it was
+  still short of the per-axis ceiling (`DEFAULT_MAX_COUNT = 20`).
+
+  **Root cause -- a dead zone between the two stop tests.**  Along
+  the refining (finer-mesh) direction si_cmce's energy oscillates
+  with amplitude ~1-3x the convergence threshold (`5e-4`
+  eV/atom): too rough for the flatness test to latch (it needs a
+  stride below 1x) yet too gentle for the near-metal bail to fire
+  (it needs a finer-raises-energy stride above 50x = `0.025`
+  eV/atom).  The large `+135x` / `+25x` strides in its trace are
+  bracket-fills to *coarser* meshes, which the one-sided bail
+  rightly ignores.  So neither test bites and the climb runs to
+  the count ceiling, dragging through exactly the expensive
+  high-mesh rungs the bail is meant to avoid.
+
+  **This falsifies a specific DESIGN 3.12.3 claim** (~lines
+  1898-1902: the bail "saves the expensive high meshes a
+  near-metal would otherwise be dragged through -- si_cmce's
+  ladder ran to thousands of k-points per rung before the count
+  ceiling bit").  The bail never fires for si_cmce, so the
+  section's si_cmce example must be revised as part of the fix.
+
+  **Smearing was tried and ruled out (2026-07-20).**  Thermal
+  smearing is wired end to end (engine
+  `THERMAL_SMEARING_SIGMA` / makeinput `-thermsmear` + rc
+  `therm_smear_main` / producer `gaussian-<width>` token), so
+  turning it on is a value choice, not construction.  Three live
+  si_cmce runs settle it: `0.0` (off) -> runaway, 21 rungs;
+  `0.026` (room-temperature kT) -> still runaway, 16+ rungs, the
+  oscillation only slightly damped; `0.1` (~4x room T) -> still
+  not converging, its per-step energy changes NEARLY IDENTICAL to
+  the `0.026` run (same `+7.4x` reversal at `4-6-7`).  Quadrupling
+  the width barely moved the wobble, so a wider Gaussian smear is
+  not the lever.  Smearing stays available via the token, but the
+  default stays OFF, which keeps every insulator exact.
+
+  **Resolution -- classify on the gap, then settle.**  The gap is
+  already computed and stored (`gap_ev` in every `result.toml`)
+  and separates the cases cleanly: si_cmce reads ~`0.000` at
+  nearly every mesh, while si_ia-3 (`0.24`-`0.92`) and diamond Si
+  (`1.1`-`1.9`) stay well above.  It is a DIRECT metal signal,
+  better than the indirect rising-energy proxy the bail uses.  And
+  the deliverable is a ROUGH starting potential, not a converged
+  energy: a metal's energy never settles cleanly with mesh, but
+  its potential at a modest mesh is a fine starting guess -- far
+  better than the isolated-atom potential we use now.  So chasing
+  convergence on a metal is wasted effort.  The rule:
+  - As the climb proceeds, check the gap at each mesh.  The FIRST
+    mesh whose gap is essentially zero (below a small threshold)
+    declares the system a metal.  This is a LIVE trigger, not a
+    pre-scan: a near-metal may show a small non-zero gap at coarse
+    meshes and collapse to zero at a finer one.  The collapse to
+    zero always eventually returns (or is already there) for a
+    true metal, and that returning zero is the trigger -- so a
+    material that starts at, say, `0.15` and later reads `0`
+    settles at that later mesh.
+  - On the trigger, STOP the convergence chase and settle at the
+    current mesh (or one step further for a slightly better
+    sampling), recording the result as a metal / rough potential.
+    This guarantees cheap termination -- no runaway, no smearing,
+    no stall heuristic.  si_cmce's gap is ~0 already at its floor
+    `[2,4,4]`, so it would settle within a rung or two.
+  - Insulators are unchanged: they never read gap ~0 at floor-and-
+    above meshes, so they never enter the metal path and converge
+    by the existing flatness rule.
+
+  **What this simplifies away.**  The gap classifier can RETIRE
+  the indirect rising-energy near-metal bail, and it makes the
+  stall / two-sided-oscillation ideas we weighed earlier
+  unnecessary: branch once on the gap and treat metals and
+  insulators each simply.  (C124 already removed the coarse-mesh
+  gate.)
+
+  **Two small decisions to settle in DESIGN.**  (i) the gap
+  threshold for "essentially zero" -- ~`0.05` eV cleanly separates
+  a real metal from a small-gap insulator (si_ia-3's converged
+  ~`0.25` eV sits safely above); (ii) settle at the triggering
+  mesh, or `+1` step.
+
+  **Chain / next step.**  Rewrite DESIGN 3.12.3 around gap-based
+  metal detection -- replacing the falsified bail narrative -- then
+  PSEUDOCODE 4e.3, then code.  Evidence preserved under
+  `share/curation/workspace/wingbeats/si_cmce_64_1999/`.
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 

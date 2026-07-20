@@ -33,9 +33,9 @@ import pytest
 
 import mesh_climb
 
-# A minimal stand-in for the producer's ``Rung(mesh, energy)``: the
-#   bracket-refine mesh helpers read only ``.mesh``, so the tests
-#   carry a nominal energy the geometry never touches.
+# A minimal stand-in for the producer's ``Rung(mesh, energy, gap)``:
+#   the bracket-refine mesh helpers read only ``.mesh``, so the tests
+#   carry a nominal energy the geometry never touches (and no gap).
 _Rung = namedtuple("_Rung", ["mesh", "energy"])
 
 
@@ -536,23 +536,24 @@ def test_climb_policy_rejects_a_stride_multiple_below_one():
     assert thresholds.stride_flatness_multiple == 1.0
 
 
-def test_climb_policy_merges_the_metallic_rise_multiple():
-    """The near-metal bail's looseness knob merges over the default,
-    which is a large multiple (only a genuine oscillation, well above
-    the convergence wobble, trips the early bail)."""
+def test_climb_policy_merges_the_metal_gap_threshold():
+    """The metal test's gap threshold merges over the default, which
+    is a small positive band gap in eV (above a true metal's near-zero
+    gap, below any real insulator's)."""
     assert mesh_climb.DEFAULT_POLICY_THRESHOLDS \
-        .metallic_rise_multiple >= 1
+        .metal_gap_threshold > 0
     thresholds, _ = mesh_climb.climb_policy_from_manifest(
-        {"metallic_rise_multiple": 20.0})
-    assert thresholds.metallic_rise_multiple == 20.0
+        {"metal_gap_threshold": 0.1})
+    assert thresholds.metal_gap_threshold == 0.1
 
 
-def test_climb_policy_rejects_a_metallic_multiple_below_one():
-    """A metallic multiple below one would bail on strides smaller
-    than the convergence wobble -- a mistake -- so it fails loudly."""
-    with pytest.raises(ValueError, match="metallic_rise_multiple"):
+def test_climb_policy_rejects_a_non_positive_metal_gap_threshold():
+    """A zero or negative gap threshold could never flag a metal (a
+    real band gap is non-negative) -- a mistake -- so it fails loudly.
+    """
+    with pytest.raises(ValueError, match="metal_gap_threshold"):
         mesh_climb.climb_policy_from_manifest(
-            {"metallic_rise_multiple": 0.5})
+            {"metal_gap_threshold": 0.0})
 
 
 def test_climb_policy_merges_the_crystalline_floor_axis_count():
@@ -583,7 +584,7 @@ def test_climb_policy_from_manifest_full_override():
          "flat_needed_confident": 1, "flat_needed_cold": 2,
          "max_stride": 16, "climb_shape": mesh_climb.BRACKET_REFINE,
          "stride_flatness_multiple": 5.0,
-         "metallic_rise_multiple": 40.0,
+         "metal_gap_threshold": 0.1,
          "crystalline_floor_axis_count": 8,
          "max_count": 24})
     assert thresholds == mesh_climb.PolicyThresholds(
@@ -591,7 +592,7 @@ def test_climb_policy_from_manifest_full_override():
         start_offset_moderate=1, start_offset_cold=3,
         flat_needed_confident=1, flat_needed_cold=2,
         max_stride=16, climb_shape=mesh_climb.BRACKET_REFINE,
-        stride_flatness_multiple=5.0, metallic_rise_multiple=40.0,
+        stride_flatness_multiple=5.0, metal_gap_threshold=0.1,
         crystalline_floor_axis_count=8)
     assert max_count == 24
 
