@@ -179,6 +179,7 @@ class ReferenceSolid:
     kpoint_integration: str | None = None
     kpoint_spec: dict[str, Any] | None = None
     scf_threshold: float | None = None
+    cell: str | None = None
     cod_id: int | None = None
     cod_revision: str | None = None
     structure_path: str | None = None
@@ -241,6 +242,17 @@ DEFAULT_BASIS = "fb"
 DEFAULT_FUNCTIONAL = "wigner"
 DEFAULT_KPOINT_INTEGRATION = "gaussian"
 DEFAULT_SCF_THRESHOLD = 1.0e-6
+
+# The cell a reference run computes in (DESIGN 5.7): ``"full"``
+#   is the conventional cell of the structure's space group,
+#   ``"prim"`` its primitive reduction.  This is a COST setting,
+#   not a physics one -- the harvested potential and every
+#   fingerprint are cell-invariant -- so it selects no predictor
+#   sub-model.  A primitive cell of an n-fold centred lattice
+#   holds n times fewer atoms and takes n times more k-points at
+#   a fixed density, and the net work scales as 1/n^2.
+VALID_CELLS = ("full", "prim")
+DEFAULT_CELL = "full"
 DEFAULT_REDUCE_SUB_SPEC = {
     "level": 2, "thick": 0.5, "cutoff": 5.0, "tolerance": 0.05}
 DEFAULT_BISPECTRUM_SUB_SPEC = {
@@ -254,11 +266,23 @@ DEFAULT_BISPECTRUM_SUB_SPEC = {
 #   may be omitted entirely.
 DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 5.0e-4
 
-# The five run settings that may live in the top-level [defaults]
+# The six run settings that may live in the top-level [defaults]
 #   block and be inherited per solid (DESIGN 5.7).  system_type is
 #   NOT among them: it is structure metadata, named per solid.
 RUN_SETTING_KEYS = ("basis", "functional", "kpoint_integration",
-                    "kpoint_spec", "scf_threshold")
+                    "kpoint_spec", "scf_threshold", "cell")
+
+# The run settings exempt from rule 2's resolvability requirement
+#   (DESIGN 5.7).  The rule exists so that nothing the producer
+#   EMITS rides on an implicit default (VISION Principle 11); the
+#   other five settings are each recorded on the entries a run
+#   produces, but ``cell`` is recorded nowhere -- it selects no
+#   sub-model and no harvested value depends on it -- so a
+#   manifest that never names a cell leaves no provenance gap,
+#   only accepts the conventional cell.  The exemption ends the
+#   moment ``cell`` is recorded on an entry: it becomes emitted
+#   knowledge and rejoins the rule.
+EXEMPT_RUN_SETTING_KEYS = ("cell",)
 
 # The harvest settings that may live in the top-level [harvest]
 #   block (DESIGN 5.7).  Unlike the run settings these govern how
@@ -298,8 +322,13 @@ def default_run_settings() -> dict[str, Any]:
     """The shared ``[defaults]`` run settings the authoring tools
     emit (DESIGN 5.7): the full basis, the Wigner functional,
     Gaussian k-point integration, no fixed k-point density (the
-    producer predicts and verifies it), and the 1e-6 SCF
-    threshold."""
+    producer predicts and verifies it), the 1e-6 SCF threshold,
+    and the conventional cell.
+
+    ``cell`` is emitted here even though it is exempt from the
+    resolvability rule: a manifest need not name it, but an
+    authoring tool writing a fresh one should say what it chose
+    rather than leave the reader to know the built-in default."""
 
     return {
         "basis": DEFAULT_BASIS,
@@ -307,6 +336,7 @@ def default_run_settings() -> dict[str, Any]:
         "kpoint_integration": DEFAULT_KPOINT_INTEGRATION,
         "kpoint_spec": {},
         "scf_threshold": DEFAULT_SCF_THRESHOLD,
+        "cell": DEFAULT_CELL,
     }
 
 
@@ -363,6 +393,12 @@ def resolve_settings(solid: ReferenceSolid,
         kpoint_integration=pick("kpoint_integration"),
         kpoint_spec=pick("kpoint_spec"),
         scf_threshold=pick("scf_threshold"),
+        # `cell` alone among the run settings may be absent from
+        #   BOTH the solid and [defaults] (it is exempt from rule
+        #   2), so it falls back to the built-in default here --
+        #   the same solid -> defaults -> built-in shape the
+        #   harvest setting above uses.
+        cell=pick("cell") or DEFAULT_CELL,
         kpoint_convergence_threshold=threshold)
 
 
@@ -568,6 +604,11 @@ def load_manifest_v2(path: str,
                      f"manifest rule 2: [[reference_solid]] "
                      f"missing field: {field_name}")
         for field_name in RUN_SETTING_KEYS:
+            # An exempt setting carries a built-in default and is
+            #   recorded nowhere, so omitting it leaves no
+            #   provenance gap (DESIGN 5.7).
+            if field_name in EXEMPT_RUN_SETTING_KEYS:
+                continue
             _require(field_name in ref or field_name in raw_defaults,
                      path,
                      f"manifest rule 2: [[reference_solid "
@@ -576,6 +617,18 @@ def load_manifest_v2(path: str,
                      f"and from [defaults])")
 
         rid = ref["reference_id"]
+
+        # ----- Rule 2 (domain): a named cell must be one of the two
+        # valid values, wherever it is named.  A typo would
+        # otherwise reach structure_control, which refuses any token
+        # that is neither "full" nor "prim" -- but only after the
+        # COD fetch, so catching it at load is both earlier and
+        # clearer about where the bad value came from.
+        for source in (ref, raw_defaults):
+            if "cell" in source:
+                _require(source["cell"] in VALID_CELLS, path,
+                         f"manifest rule 2: cell {source['cell']!r} "
+                         f"is not one of {VALID_CELLS}")
 
         # ----- Rule 5 (charset): reference_id is embedded verbatim
         # in every derived entry label and typed into -pot, so it
@@ -730,6 +783,7 @@ def load_manifest_v2(path: str,
             kpoint_spec=(dict(ref["kpoint_spec"])
                          if "kpoint_spec" in ref else None),
             scf_threshold=ref.get("scf_threshold"),
+            cell=ref.get("cell"),
             cod_id=ref.get("cod_id"),
             cod_revision=ref.get("cod_revision"),
             structure_path=ref.get("structure_path"),
@@ -785,7 +839,16 @@ def load_structure_sources(path: str) -> list[ReferenceSolid]:
     harmless placeholders, because this relaxed view is never
     dispatched, only materialized.  That lets a half-written manifest
     still be pre-flighted, and lets the authoring tool
-    (``expand_manifest``) read the same sketch back to complete it."""
+    (``expand_manifest``) read the same sketch back to complete it.
+
+    ``cell`` is the one exception among the run settings, because it
+    is the one this relaxed view actually consumes: it names the
+    cached skeleton the conversion writes (DESIGN 5.7).  Leaving it
+    at a placeholder would have the pre-flight write a file the real
+    run then fails to recognise, quietly re-fetching and re-
+    converting every structure the pre-flight had already prepared.
+    So it resolves here exactly as the full loader resolves it --
+    solid, then ``[defaults]``, then the built-in default."""
 
     if not os.path.isfile(path):
         raise FileNotFoundError(
@@ -800,6 +863,10 @@ def load_structure_sources(path: str) -> list[ReferenceSolid]:
     _require(raw.get("schema_version") == 2, path,
              f"manifest rule 1: schema_version must equal 2 "
              f"(found {raw.get('schema_version')!r})")
+
+    # Only `cell` is read from [defaults] here -- the one run
+    #   setting this relaxed view consumes (see the docstring).
+    raw_defaults = raw.get("defaults", {})
 
     seen_ref_ids: set[str] = set()
     sources: list[ReferenceSolid] = []
@@ -854,11 +921,19 @@ def load_structure_sources(path: str) -> list[ReferenceSolid]:
             #   the resolved path -- no need to duplicate that here.
             structure_path = ref["structure_path"]
 
+        # `cell` resolves for real (solid -> [defaults] -> built-in):
+        #   it names the cached skeleton, so a placeholder here would
+        #   desync the pre-flight from the run that follows it.
+        cell = ref.get("cell", raw_defaults.get("cell", DEFAULT_CELL))
+        _require(cell in VALID_CELLS, path,
+                 f"manifest rule 2: cell {cell!r} is not one of "
+                 f"{VALID_CELLS}")
+
         sources.append(ReferenceSolid(
             reference_id=rid,
             system_type=ref.get("system_type", ""), basis="",
             functional="", kpoint_integration="", kpoint_spec={},
-            scf_threshold=0.0, cod_id=cod_id,
+            scf_threshold=0.0, cell=cell, cod_id=cod_id,
             cod_revision=cod_revision,
             structure_path=structure_path,
             source_description=ref.get("source_description")))
@@ -1085,6 +1160,8 @@ def format_manifest(manifest: CurationManifest) -> str:
         if solid.scf_threshold is not None:
             lines.append(
                 _field("scf_threshold", solid.scf_threshold))
+        if solid.cell is not None:
+            lines.append(_field("cell", solid.cell))
         if solid.source_description is not None:
             lines.append(_field("source_description",
                                 solid.source_description))

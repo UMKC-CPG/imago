@@ -2299,6 +2299,86 @@ shipped.
   count.  Decide the default and whether it becomes a manifest
   knob.  DESIGN 5.7 (materialize_structure) / ARCH 9.5 (cif2skl).
 
+  **IN PROGRESS 2026-07-21.  Both wrinkles above turned out to be
+  already resolved -- neither the way this entry assumed.**
+
+  (1) The reduction needs no spglib and no `cif2skl` work: the
+  skeleton carries a `full` / `prim` token on a line of its own,
+  `structure_control` reads it (`do_full_cell`), and the reduction
+  is done with the space-group operations already in hand.  It runs
+  one way only (`full -> prim`), which is the direction needed,
+  since `cif2skl` writes the conventional cell.  The whole climb
+  path was already prim-ready too: `axis_classes_for_cell` has an
+  explicit `"prim"` branch conjugating the conventional-abc point
+  ops into the loaded basis (DESIGN 2.7), and the producer already
+  computes `cell_mode` from the loaded skeleton and recomputes the
+  reciprocal lattice from the final cell.  Only ONE line forced the
+  conventional cell: a hardcoded `"full\n"` in `cif2skl`.
+
+  (2) C118 settled the k-mesh question by construction.  The
+  density ladder that prompted the worry is gone, and the climb
+  picks meshes from a reciprocal-space SPACING (`counts_at_spacing`:
+  `|b_i| / h`) derived from a volume density.  A primitive cell has
+  an n-fold larger reciprocal cell and so receives n-fold more
+  k-points at the same density -- the physically equivalent
+  sampling, with nothing to decide.
+
+  **The knob is built** (this commit): `cell` joins `[defaults]` as
+  a sixth run setting, `"full"` (default) or `"prim"`, per-solid
+  overridable.  It is a COST setting, not a physics one -- the
+  harvested potential and every fingerprint are cell-invariant --
+  so DESIGN 5.7 records that it selects no predictor sub-model,
+  that a recorded `converged_mesh` is NOT comparable across cells,
+  and that a curator's own `structure_path` skeleton keeps its own
+  token.  Alone among the run settings it is exempt from rule 2's
+  resolvability requirement, with the exemption's expiry stated:
+  the moment `cell` is recorded on an entry it becomes emitted
+  knowledge (VISION Principle 11) and rejoins the rule.
+
+  **A cache trap was found and fixed with it.**  The materialized
+  skeleton was cached as `<reference_id>.skl` and reused whenever
+  present, so changing the cell and re-running would silently hand
+  back the earlier cell's file -- no error, a well-formed skeleton,
+  the wrong answer reported as success.  A full-vs-prim comparison
+  would then have compared full against full and read as a
+  confirmation.  Cached skeletons are now `<reference_id>-<cell>.skl`,
+  and DESIGN 5.7 states the general rule: the cached name carries
+  every manifest setting that changes what the conversion writes.
+  The relaxed `--materialize-only` reader resolves `cell` for real
+  rather than leaving it at a placeholder, so a pre-flight and the
+  run that follows it still share one cache.
+
+  **First evidence, no cluster time needed.**  New `cif2skl` tests
+  drive the reduction through `structure_control` end to end: fcc
+  gold goes 4 -> 1 atom and diamond silicon 8 -> 2, with the stored
+  asymmetric unit identical either way.  So the reduction is
+  correct at least for F-centred cubic.  A regression test also
+  pins the ordering the conversion depends on: the space-group
+  candidates must be built and verified as `full` (the CIF's atom
+  list is a conventional list), and only the winner is rebuilt with
+  the caller's cell.
+
+  **NEXT: the live comparison.**  Same manifest twice, `cell =
+  "full"` and `cell = "prim"`, into two `--pdb-root`s (which
+  separates the structure cache, the workspace, and the database in
+  one flag).  The eight seed solids already span three centrings --
+  F (six diamond allotropes), I (si_ia-3), C (si_cmce) -- so they
+  exercise the reduction broadly with nothing new to curate.
+  Compare fingerprints and coefficients for cell-invariance, and
+  converged mesh and wall time for the payoff, which scales as
+  `1/n^2` (both dominant cost terms carry atom count cubed against
+  one factor of k-point count): about 16x for the diamond cells and
+  4x for the other two.  THEN decide the default.
+
+  **Deferred until that decision:** recording `cell` in each entry's
+  provenance.  A database otherwise cannot say which cell produced
+  a potential, which is what makes mixing unanswerable -- but it is
+  a required-field change, hence a schema bump (5.2.5) with an
+  honestly derivable migration (everything written so far is
+  `full`).  No point bumping the schema for a knob we might not
+  keep; if we do keep it, that migration is the first real exercise
+  of the C105 machinery.
+
 #### Seed-run refinement -- producer code tasks (design settled)
 
 The four code tasks that follow implement the DESIGN decisions

@@ -279,6 +279,78 @@ class TestRule1SchemaVersion:
             load_manifest_v2(path)
 
 
+class TestCellRunSetting:
+    """DESIGN 5.7: `cell` selects the conventional cell or its
+    primitive reduction.  A cost setting, not a physics one, so it
+    is exempt from rule 2's resolvability requirement and carries a
+    built-in default."""
+
+    def test_a_manifest_naming_no_cell_resolves_to_full(
+            self, tmp_path):
+        # The exemption in practice: _VALID_COD_MANIFEST names no
+        #   cell anywhere, and must still load -- every manifest
+        #   written before this setting existed does the same.
+        path = _write(tmp_path, _VALID_COD_MANIFEST)
+        manifest = load_manifest_v2(path)
+        apply_manifest_defaults(manifest)
+        solid = manifest.reference_solids[0]
+        assert solid.cell == "full"
+
+    def test_a_defaults_cell_is_inherited(self, tmp_path):
+        path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
+            "schema_version = 2\n\n",
+            "schema_version = 2\n\n[defaults]\ncell = \"prim\"\n\n"))
+        manifest = load_manifest_v2(path)
+        apply_manifest_defaults(manifest)
+        solid = manifest.reference_solids[0]
+        assert solid.cell == "prim"
+
+    def test_a_per_solid_cell_overrides_defaults(self, tmp_path):
+        path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
+            "schema_version = 2\n\n",
+            "schema_version = 2\n\n[defaults]\ncell = \"prim\"\n\n"
+        ).replace(
+            'system_type = "crystalline"\n',
+            'system_type = "crystalline"\ncell = "full"\n'))
+        manifest = load_manifest_v2(path)
+        apply_manifest_defaults(manifest)
+        solid = manifest.reference_solids[0]
+        assert solid.cell == "full"
+
+    def test_an_unknown_cell_is_refused_at_load(self, tmp_path):
+        # Caught here rather than by structure_control after the COD
+        #   fetch, which is both earlier and clearer about the
+        #   source of the bad value.
+        path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
+            'system_type = "crystalline"\n',
+            'system_type = "crystalline"\ncell = "primitive"\n'))
+        with pytest.raises(ValueError, match="cell 'primitive'"):
+            load_manifest_v2(path)
+
+    def test_an_unknown_cell_in_defaults_is_refused(self, tmp_path):
+        path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
+            "schema_version = 2\n\n",
+            "schema_version = 2\n\n[defaults]\ncell = \"tiny\"\n\n"))
+        with pytest.raises(ValueError, match="cell 'tiny'"):
+            load_manifest_v2(path)
+
+    def test_the_relaxed_reader_resolves_cell_too(self, tmp_path):
+        # --materialize-only shares its skeleton cache with the real
+        #   run, so it must name the file the same way.  A
+        #   placeholder here would have the pre-flight write
+        #   "<id>-None.skl" and the run then re-fetch everything.
+        path = _write(tmp_path, _SOURCES_ONLY_MANIFEST.replace(
+            "schema_version = 2\n",
+            "schema_version = 2\n\n[defaults]\ncell = \"prim\"\n"))
+        sources = load_structure_sources(path)
+        assert [s.cell for s in sources] == ["prim", "prim"]
+
+    def test_the_relaxed_reader_defaults_cell_to_full(self, tmp_path):
+        path = _write(tmp_path, _SOURCES_ONLY_MANIFEST)
+        sources = load_structure_sources(path)
+        assert [s.cell for s in sources] == ["full", "full"]
+
+
 class TestRule2RequiredSolidFields:
     def test_missing_reference_id_raises(self, tmp_path):
         path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
@@ -1082,7 +1154,8 @@ def _ref(**overrides) -> ReferenceSolid:
         basis="fb", functional="wigner",
         kpoint_integration="linear-tetrahedral",
         kpoint_spec={"density": 60.0, "shift": [0.0, 0.0, 0.0]},
-        scf_threshold=1.0e-6, cod_id=None, cod_revision=None,
+        scf_threshold=1.0e-6, cell="full",
+        cod_id=None, cod_revision=None,
         structure_path="au.skel",
         entries=[ReferenceEntry(
             element="Au", atom_site=1, label="default_solid",
@@ -1795,8 +1868,9 @@ def test_materialize_structure_converts_cod_to_skl(
         with open(dest, "w") as handle:
             handle.write("# fake cif\n")
 
-    def fake_convert(cif_path, skl_path, title=None):
-        calls["convert"] = (cif_path, skl_path, title)
+    def fake_convert(cif_path, skl_path, title=None,
+                     cell_mode="full"):
+        calls["convert"] = (cif_path, skl_path, title, cell_mode)
         with open(skl_path, "w") as handle:
             handle.write("title\nx\nend\n")
         return "227_a"
@@ -1808,7 +1882,11 @@ def test_materialize_structure_converts_cod_to_skl(
                cod_revision="291735", reference_id="au_fcc")
     path = materialize_structure(
         ref, manifest_dir=str(tmp_path), pdb_root=pdb_root)
-    assert path.endswith("au_fcc.skl")
+    # The cached skeleton carries the cell in its NAME (DESIGN
+    #   5.7): two cells of one solid must not alias, or a run under
+    #   the second is silently handed the first's file.
+    assert path.endswith("au_fcc-full.skl")
+    assert calls["convert"][3] == "full"            # cell_mode
     assert os.path.exists(path)
     assert calls["fetch"][0] == 9008463
     assert calls["convert"][0].endswith("au_fcc.cif")
@@ -1825,7 +1903,7 @@ def test_materialize_cod_conversion_failure_is_fatal(
         bip, "_fetch_cod_structure",
         lambda cod_id, rev, dest: open(dest, "w").write("# cif\n"))
 
-    def boom(cif_path, skl_path, title=None):
+    def boom(cif_path, skl_path, title=None, cell_mode="full"):
         raise cif2skl.CifConversionError("no variant verified")
 
     monkeypatch.setattr(cif2skl, "convert", boom)
@@ -1939,7 +2017,8 @@ class TestMaterializeOnly:
             with open(dest, "w") as handle:
                 handle.write("# fake cif\n")
 
-        def fake_convert(cif_path, skl_path, title=None):
+        def fake_convert(cif_path, skl_path, title=None,
+                         cell_mode="full"):
             with open(skl_path, "w") as handle:
                 handle.write("title\nx\nend\n")
             return "227_a"
@@ -1961,7 +2040,7 @@ class TestMaterializeOnly:
             "si_diamond", "a_si"}
         # The cod_id solid's CIF + skl land in the redirect mirror.
         assert (mirror / "si_diamond.cif").exists()
-        assert (mirror / "si_diamond.skl").exists()
+        assert (mirror / "si_diamond-full.skl").exists()
         # The structure_path solid resolves against the manifest dir.
         diamond = next(r for r in report
                        if r["reference_id"] == "si_diamond")
@@ -1977,7 +2056,7 @@ class TestMaterializeOnly:
             bip, "_fetch_cod_structure",
             lambda cod_id, rev, dest: open(dest, "w").write("# c\n"))
 
-        def boom(cif_path, skl_path, title=None):
+        def boom(cif_path, skl_path, title=None, cell_mode="full"):
             raise cif2skl.CifConversionError("no variant verified")
 
         monkeypatch.setattr(cif2skl, "convert", boom)
@@ -2006,7 +2085,8 @@ class TestMaterializeOnly:
             lambda cod_id, rev, dest: open(dest, "w").write("# c\n"))
         monkeypatch.setattr(
             cif2skl, "convert",
-            lambda c, s, title=None: open(s, "w").write("t\n") or "1")
+            lambda c, s, title=None, cell_mode="full":
+                open(s, "w").write("t\n") or "1")
 
         def explode(*a, **k):
             raise AssertionError("full build must not run")

@@ -5175,6 +5175,68 @@ resolvable from the manifest at all.  The rest are per solid.
   `-thermsmear` option, written into `THERMAL_SMEARING_SIGMA`, in
   eV).  A bare `"gaussian"` names no width, so makeinput keeps its
   rc-sourced default (no smearing).
+- `cell` (string): which cell the reference run computes in --
+  `"full"` (the conventional cell of the structure's space
+  group) or `"prim"` (its primitive reduction).  It becomes the
+  `full` / `prim` token in the materialized `imago.skl`, which
+  `structure_control` reads to decide whether to reduce; the
+  reduction is performed by the space-group operations already
+  in hand, not by re-deriving symmetry, and runs one way only
+  (`full -> prim`, since the atoms a full cell adds come from
+  those operations).
+
+  This setting changes **cost, not physics**.  The harvested
+  quantity is a per-species, per-environment potential, and a
+  fingerprint is a local descriptor evaluated under periodic
+  boundary conditions, so both are cell-invariant: the same
+  structure yields the same entries either way.  What changes is
+  the size of the problem.  A primitive cell of an n-fold centred
+  lattice holds n times fewer atoms and, at a fixed k-point
+  density, takes n times more k-points -- and because both
+  dominant cost terms (the real-space pair integrals, and the
+  Bloch sum with its diagonalization) carry a factor of atom
+  count cubed against one factor of k-point count, the net work
+  scales as `1/n^2`.  For an F-centred cubic cell (n = 4) that is
+  a sixteen-fold reduction.
+
+  Two consequences follow from *cost, not physics*.  First,
+  `cell` is **not** a predictor sub-model selector, unlike
+  `basis` / `functional` / `kpoint_integration`: a prediction may
+  freely mix entries converged in either cell, because the
+  quantity being predicted -- a k-point *density*, defined per
+  unit reciprocal volume (3.7) -- is itself cell-invariant.
+  Second, the `converged_mesh` an entry records is **not**
+  invariant: it counts points along that cell's own reciprocal
+  axes, so a `prim` mesh and a `full` mesh are not comparable as
+  bare triples and must be read against the cell that produced
+  them.
+
+  `cell` governs only structures the producer *materializes*.  A
+  curator-supplied `structure_path` skeleton already carries its
+  own `full` / `prim` token, and that token stands: the producer
+  writes a curator's file, never rewrites it.
+
+  Alone among the run settings, `cell` is **exempt from the
+  resolvability rule** (rule 2) and carries a built-in default of
+  `"full"`.  The rule exists so that nothing the producer
+  *emits* rides on an implicit default (VISION Principle 11), and
+  the other five are each recorded on the entries a run produces
+  -- they select the predictor's sub-model, or they land in
+  provenance.  `cell` is recorded nowhere: it selects no
+  sub-model, and no harvested value depends on it.  A manifest
+  that never mentions a cell is therefore not leaving a
+  provenance gap, only accepting the conventional cell.
+
+  That exemption has a precise expiry.  The moment `cell` is
+  recorded on an entry -- the natural next step, since a database
+  otherwise cannot say which cell produced a given potential --
+  it becomes emitted knowledge, Principle 11 applies in full, and
+  it must join the other five as a required, resolvable setting.
+  Because recording it also adds a required provenance field,
+  that change is a schema version bump (5.2.5) carrying an
+  honestly derivable migration: every file written before the
+  bump was produced from a conventional cell, so the missing
+  field fills with `"full"`.
 
 The one *harvest* setting a solid may carry is not a run setting
 and resolves against the `[harvest]` block, not `[defaults]`:
@@ -5509,6 +5571,25 @@ returns its path:
   resolved to a `spaceDB` setting is a hard error (no silent P1
   fallback for a crystal); the curator then supplies a
   pre-converted `structure_path` skl instead.
+
+Both artifacts -- the fetched CIF and the converted skeleton --
+are cached on disk, and a converted skeleton is reused when it is
+already present rather than rewritten.  **The cached skeleton's
+name must therefore carry every manifest setting that changes
+what the conversion writes**, or a later run under different
+settings will silently be handed the earlier run's file.  Today
+that is exactly one setting, `cell`, so the skeleton is named
+`<reference_id>-<cell>.skl`; the fetched CIF needs no such
+qualifier, since `cod_id` and `cod_revision` already pin its
+bytes and no manifest setting alters them.
+
+The rule matters more than the present instance.  A cache keyed
+too coarsely does not fail loudly -- it returns a stale artifact
+that is perfectly well-formed, so the run succeeds and reports
+the wrong thing.  A comparison of two settings would then find
+them identical *because* the second never happened, which reads
+as a confirmation rather than an error.  Any future setting that
+reaches the conversion joins the name for that reason.
 
 This step is the producer's only network access and is
 **deliberately decoupled from any run cache**: its sole job is to

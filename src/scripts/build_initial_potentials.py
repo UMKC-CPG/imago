@@ -584,13 +584,31 @@ def materialize_structure(ref: ReferenceSolid, manifest_dir: str,
         cache_dir = structure_cache_dir(pdb_root)
     cif_path = os.path.join(
         cache_dir, ref.reference_id + _cod_extension(ref))
-    skl_path = os.path.join(cache_dir, ref.reference_id + ".skl")
+    # The cached SKELETON's name carries every manifest setting that
+    #   changes what the conversion writes -- today just `cell`
+    #   (DESIGN 5.7).  Without the qualifier a later run under a
+    #   different cell is handed the earlier run's file: no error, a
+    #   well-formed skeleton, and the wrong answer reported as a
+    #   success.  The CIF needs no qualifier, since cod_id and
+    #   cod_revision already pin its bytes.
+    # Both manifest readers guarantee a resolved cell, so an unset
+    #   one means a caller bypassed them.  Refuse rather than write
+    #   a "<id>-None.skl" that would look like a real cached file.
+    if ref.cell is None:
+        raise ValueError(
+            f"{ref.reference_id}: cell is unresolved; a reference "
+            f"solid must come from load_manifest_v2 or "
+            f"load_structure_sources, which both resolve it")
+    skl_path = os.path.join(
+        cache_dir, f"{ref.reference_id}-{ref.cell}.skl")
     if not os.path.exists(skl_path):
         os.makedirs(cache_dir, exist_ok=True)
         if not os.path.exists(cif_path):
             _fetch_cod_structure(ref.cod_id, ref.cod_revision, cif_path)
         try:
-            cif2skl.convert(cif_path, skl_path, title=ref.reference_id)
+            cif2skl.convert(cif_path, skl_path,
+                            title=ref.reference_id,
+                            cell_mode=ref.cell)
         except cif2skl.CifConversionError as exc:
             raise RuntimeError(
                 f"COD structure for {ref.reference_id!r} "
@@ -1738,11 +1756,11 @@ def write_run_log(path: str, imago_commit: str, timestamp: str,
 def apply_manifest_defaults(manifest: CurationManifest) -> None:
     """Fold the top-level ``[defaults]`` and ``[harvest]`` blocks into
     each reference solid, in place, so the rest of the producer reads
-    one fully resolved value per field -- the five run settings
+    one fully resolved value per field -- the six run settings
     (``basis``, ``functional``, ``kpoint_integration``,
-    ``kpoint_spec``, ``scf_threshold``) and the harvest setting
-    (``kpoint_convergence_threshold``) -- and never has to consult the
-    shared blocks again (DESIGN 5.7).
+    ``kpoint_spec``, ``scf_threshold``, ``cell``) and the harvest
+    setting (``kpoint_convergence_threshold``) -- and never has to
+    consult the shared blocks again (DESIGN 5.7).
 
     A solid that names its own value keeps it; a solid that omits a
     run setting inherits the ``[defaults]`` value, and the harvest
@@ -1751,6 +1769,10 @@ def apply_manifest_defaults(manifest: CurationManifest) -> None:
     solid (manifest rule 2), so after this pass no field is left
     ``None`` -- the downstream ``refresh_isolated_entries`` call and
     the two per-solid loops can treat every setting as present.
+    ``cell`` is exempt from that rule and so may be absent from both
+    the solid and ``[defaults]``; ``resolve_settings`` supplies its
+    built-in default, which keeps the no-field-left-``None``
+    guarantee intact.
     """
 
     manifest.reference_solids = [

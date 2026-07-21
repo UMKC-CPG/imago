@@ -6017,11 +6017,21 @@ function load_manifest_v2(path):
                 "manifest rule 2: [[reference_solid"
                 + "]] missing field: " + f)
         for f in RUN_SETTING_KEYS:
+            if f in EXEMPT_RUN_SETTING_KEYS:
+                continue
             require(f in ref or f in raw_defaults, path,
                 "manifest rule 2: [[reference_solid "
                 + ref.get("reference_id", "?")
                 + "]] run setting " + f + " not resolvable"
                 + " (absent here and from [defaults])")
+        # `cell` is EXEMPT: it carries a built-in default
+        # (DEFAULT_CELL) and is recorded nowhere -- it selects no
+        # predictor sub-model and no harvested value depends on
+        # it -- so a manifest that never names a cell leaves no
+        # provenance gap, only accepts the conventional cell.
+        # The exemption ends the moment `cell` is recorded on an
+        # entry: it becomes emitted knowledge and rejoins the
+        # rule (DESIGN 5.7).
         # The harvest setting kpoint_convergence_threshold is
         # EXEMPT from this resolvability rule: it carries a
         # built-in default (5e-4 eV/atom; DESIGN 5.7 / 7.8), so a
@@ -6029,6 +6039,19 @@ function load_manifest_v2(path):
         # accepted -- apply_manifest_defaults supplies the default.
 
         rid = ref["reference_id"]
+
+        # Rule 2 (domain): a named cell must be one of the two
+        # valid values, wherever it is named.  A typo would
+        # otherwise reach structure_control, which refuses any
+        # token that is neither `full` nor `prim` -- but only
+        # after the fetch, so catching it at load is both earlier
+        # and clearer.
+        for source in (ref, raw_defaults):
+            if "cell" in source:
+                require(source["cell"] in VALID_CELLS, path,
+                    "manifest rule 2: cell must be one of "
+                    + " / ".join(VALID_CELLS) + " (found "
+                    + str(source["cell"]) + ")")
 
         # Rule 2 (domain): system_type must be one of
         # the four valid values; the guidance predictor
@@ -6159,11 +6182,27 @@ function load_manifest_v2(path):
     return parse_manifest_object(raw, raw_defaults, raw_harvest)
 
 
-# The five run settings that may live in [defaults] and be
+# The six run settings that may live in [defaults] and be
 #   inherited per solid (DESIGN 5.7).  system_type is NOT among
 #   them -- it is structure metadata, always named per solid.
 RUN_SETTING_KEYS = ("basis", "functional",
-    "kpoint_integration", "kpoint_spec", "scf_threshold")
+    "kpoint_integration", "kpoint_spec", "scf_threshold",
+    "cell")
+
+# The cell a reference run computes in (DESIGN 5.7): the
+#   conventional cell of the structure's space group, or its
+#   primitive reduction.  A cost setting, not a physics one --
+#   the harvested potential and every fingerprint are
+#   cell-invariant -- so it is NOT a predictor sub-model
+#   selector.  The default is the conventional cell.
+VALID_CELLS  = ("full", "prim")
+DEFAULT_CELL = "full"
+
+# The run settings exempt from rule 2's resolvability requirement,
+#   because they are recorded nowhere and so leave no provenance
+#   gap when omitted (DESIGN 5.7).  A key leaves this set the
+#   moment the producer starts emitting it.
+EXEMPT_RUN_SETTING_KEYS = ("cell",)
 
 # The producer's built-in k-point flatness tolerance, used when a
 #   solid names neither its own kpoint_convergence_threshold nor a
@@ -6243,7 +6282,11 @@ function materialize_structure(ref):
     if ref.structure_path is not None:
         # Disk read; the loader already resolved the
         # path under the manifest directory (rule 4).
-        # No network.
+        # No network.  The curator's skeleton carries its
+        # OWN full/prim token and that token stands --
+        # ref.cell governs only what the producer writes,
+        # and the producer never rewrites a curator's file
+        # (DESIGN 5.7).
         return ref.structure_path
 
     # cod_id ref: fetch the pinned revision once to a
@@ -6252,14 +6295,32 @@ function materialize_structure(ref):
     # never falls back to another revision, because a
     # silent fallback would desync the build from the
     # pinned manifest (DESIGN 5.7).
-    local = ("share/atomicBDB/cache/structures/"
-             + ref.reference_id + cod_extension(ref))
-    if not file_exists(local):
-        fetch_cod_structure(
-            cod_id       = ref.cod_id,
-            cod_revision = ref.cod_revision,
-            dest         = local)
-    return local
+    cache = "share/atomicBDB/cache/structures/"
+    cif = cache + ref.reference_id + cod_extension(ref)
+    # The CACHED SKELETON's name carries every manifest
+    # setting that changes what the conversion writes --
+    # today just `cell` (DESIGN 5.7).  Without the
+    # qualifier a later run under a different cell is
+    # handed the earlier run's file: no error, a
+    # well-formed skeleton, and the wrong answer reported
+    # as a success.  The CIF needs no qualifier, since
+    # cod_id + cod_revision already pin its bytes.
+    skl = cache + ref.reference_id + "-" + ref.cell + ".skl"
+
+    if not file_exists(skl):
+        if not file_exists(cif):
+            fetch_cod_structure(
+                cod_id       = ref.cod_id,
+                cod_revision = ref.cod_revision,
+                dest         = cif)
+        # Convert with the space group PRESERVED, writing
+        # ref.cell as the skeleton's full/prim token.  A
+        # CIF whose space group cannot be resolved to a
+        # spaceDB setting is a hard error -- no silent P1
+        # fallback for a crystal (DESIGN 5.7).
+        cif_to_skeleton(cif, skl, cell = ref.cell,
+                        title = ref.reference_id)
+    return skl
 
 
 function load_structure_sources(path):

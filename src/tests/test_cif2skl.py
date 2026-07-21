@@ -151,3 +151,73 @@ class TestRefusalsAndOverride:
         _, forced = cif_to_skeleton(
             _cif("si_fd3m_origin1.cif"), space_override=auto)
         assert forced == auto
+
+
+class TestCellMode:
+    """The ``full`` / ``prim`` token the converted skeleton carries
+    (DESIGN 5.7).  ``prim`` asks ``structure_control`` to reduce the
+    space group's conventional cell to its primitive one."""
+
+    def _cell_token(self, skl_path):
+        """The skeleton's full/prim token -- the lone line reading
+        exactly ``full`` or ``prim``."""
+
+        with open(skl_path) as handle:
+            for line in handle:
+                if line.strip() in ("full", "prim"):
+                    return line.strip()
+        raise AssertionError(f"no full/prim token in {skl_path}")
+
+    def test_the_default_is_the_conventional_cell(self, tmp_path):
+        out = str(tmp_path / "au.skl")
+        convert(_cif("au_fcc_225.cif"), out)
+        assert self._cell_token(out) == "full"
+
+    def test_prim_writes_the_prim_token(self, tmp_path):
+        out = str(tmp_path / "au.skl")
+        convert(_cif("au_fcc_225.cif"), out, cell_mode="prim")
+        assert self._cell_token(out) == "prim"
+
+    def test_prim_reduces_an_f_centred_cell_fourfold(
+            self, tmp_path, _sc_import):
+        # The reduction itself, end to end: fcc gold expands to four
+        #   atoms in the conventional cell and one in the primitive,
+        #   the n = 4 of an F-centred lattice.  The asymmetric unit
+        #   stored on disk is identical either way -- only the token
+        #   differs -- so this exercises structure_control's
+        #   reduction, not the converter's arithmetic.
+        conventional = str(tmp_path / "au-full.skl")
+        primitive = str(tmp_path / "au-prim.skl")
+        convert(_cif("au_fcc_225.cif"), conventional)
+        convert(_cif("au_fcc_225.cif"), primitive, cell_mode="prim")
+        assert (_count_asymmetric_atoms(conventional)
+                == _count_asymmetric_atoms(primitive))
+
+        full_cell = _sc_import()
+        full_cell.read_input_file(conventional)
+        reduced = _sc_import()
+        reduced.read_input_file(primitive)
+        assert full_cell.num_atoms == 4
+        assert reduced.num_atoms == 1
+
+    def test_prim_reduces_diamond_silicon(self, tmp_path, _sc_import):
+        # The same for the diamond structure the seed manifest is
+        #   built from: eight atoms conventional, two primitive.
+        primitive = str(tmp_path / "si-prim.skl")
+        convert(_cif("si_fd3m_origin1.cif"), primitive,
+                cell_mode="prim")
+        reduced = _sc_import()
+        reduced.read_input_file(primitive)
+        assert reduced.num_atoms == 2
+
+    def test_verification_still_runs_on_the_conventional_cell(
+            self, tmp_path):
+        # The space-group check compares the expansion against the
+        #   CIF's own atom list, which is a CONVENTIONAL list, so the
+        #   candidate loop must build as `full` whatever cell the
+        #   caller asked for.  Were the token applied before
+        #   verification, every candidate would miss and this would
+        #   raise CifConversionError instead of resolving.
+        _, token = cif_to_skeleton(_cif("si_fd3m_origin1.cif"),
+                                   cell_mode="prim")
+        assert token.startswith("227")

@@ -207,8 +207,19 @@ def _candidate_tokens(it_number, setting, spacedb_dir):
     return tokens
 
 
-def _skeleton_lines(cell, symbols, frac, space_token, title):
-    """Build the imago.skl text (asymmetric unit + space token)."""
+def _skeleton_lines(cell, symbols, frac, space_token, title,
+                    cell_mode="full"):
+    """Build the imago.skl text (asymmetric unit + space token).
+
+    ``cell_mode`` is the ``full`` / ``prim`` token written on its own
+    line: ``full`` keeps the space group's conventional cell,
+    ``prim`` asks ``structure_control`` to reduce it to the
+    primitive one.  It defaults to ``full`` because the space-group
+    verification below must see the conventional expansion -- that
+    is what the CIF's own atom list is compared against -- so the
+    candidate loop always builds with the default and only the
+    finally-written skeleton carries the caller's choice.
+    """
 
     a, b, c, alpha, beta, gamma = cell
     lines = [
@@ -220,7 +231,8 @@ def _skeleton_lines(cell, symbols, frac, space_token, title):
         x, y, z = frac[index]
         lines.append(
             f"{symbols[index]} {x:.10f} {y:.10f} {z:.10f}\n")
-    lines += [f"space {space_token}\n", "supercell 1 1 1\n", "full\n"]
+    lines += [f"space {space_token}\n", "supercell 1 1 1\n",
+              f"{cell_mode}\n"]
     return lines
 
 
@@ -260,9 +272,22 @@ def _coord_close(value_a, value_b):
     return min(difference, 1.0 - difference) < _MATCH_TOLERANCE
 
 
-def cif_to_skeleton(cif_path, space_override=None, title=None):
+def cif_to_skeleton(cif_path, space_override=None, title=None,
+                    cell_mode="full"):
     """Resolve ``cif_path``'s space group and return ``(skeleton_lines,
     space_token)`` for the asymmetric-unit skeleton.
+
+    ``cell_mode`` is the ``full`` / ``prim`` token the returned
+    skeleton carries -- the manifest's ``cell`` setting (DESIGN
+    5.7), named ``cell_mode`` here because ``cell`` already means
+    the lattice parameters throughout this module.  It is applied
+    only *after* a setting has
+    been verified: the verification expands the asymmetric unit and
+    compares it atom-for-atom against the CIF's own list, which is a
+    conventional-cell list, so a primitive skeleton would fail every
+    candidate and the conversion would report an unresolvable space
+    group.  The candidates are therefore always built and checked as
+    ``full``, and the winning one is rebuilt with the caller's cell.
 
     Raises :class:`CifConversionError` when no spaceDB setting reproduces
     the CIF's expansion (or when the forced ``space_override`` does not).
@@ -298,6 +323,13 @@ def cif_to_skeleton(cif_path, space_override=None, title=None):
         except Exception:           # noqa: BLE001 -- a bad token is a
             continue                #   miss, not a crash; try the next
         if _expansion_matches(full_symbols, full_frac, structure):
+            # Verified as `full`; hand back the caller's cell.  A
+            #   rebuild rather than a patched line, so the token is
+            #   written in exactly one place.
+            if cell_mode != "full":
+                lines = _skeleton_lines(
+                    cell, asym_symbols, asym_frac, token, title,
+                    cell_mode=cell_mode)
             return lines, token
 
     if space_override is not None:
@@ -312,12 +344,17 @@ def cif_to_skeleton(cif_path, space_override=None, title=None):
         f"force a spaceDB setting.")
 
 
-def convert(cif_path, skl_path, space_override=None, title=None):
+def convert(cif_path, skl_path, space_override=None, title=None,
+            cell_mode="full"):
     """Convert ``cif_path`` to an imago.skl at ``skl_path`` and return
-    the resolved space-group token."""
+    the resolved space-group token.
+
+    ``cell_mode`` is the ``full`` / ``prim`` token the written
+    skeleton carries (DESIGN 5.7)."""
 
     lines, token = cif_to_skeleton(
-        cif_path, space_override=space_override, title=title)
+        cif_path, space_override=space_override, title=title,
+        cell_mode=cell_mode)
     with open(skl_path, "w", newline="\n") as handle:
         handle.writelines(lines)
     return token
