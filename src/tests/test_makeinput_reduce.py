@@ -397,6 +397,68 @@ def test_compute_query_emits_shell_codes():
     assert atom_one.levels[1].member_names == ["O"]
 
 
+def test_compute_query_refuses_a_cell_too_small_for_the_recipe():
+    """A cell with fewer atoms than the recipe has levels cannot
+    supply them, and must say so.
+
+    The shell walk enumerates atoms IN THE CELL under minimum image
+    rather than building a periodic neighbour list, so a two-atom
+    cell has exactly one other atom: level 1 consumes it and level 2
+    has nothing to start from.  This is how a primitive reduction of
+    diamond silicon (8 atoms conventional, 2 primitive) reaches the
+    matcher.  Before the guard it surfaced as an unhelpful
+    "'>=' not supported between instances of 'int' and 'NoneType'",
+    because the exhausted search left the atom index at 0 and
+    min_dist[atom][0] is the 1-indexed padding slot.
+    """
+
+    two_levels = dict(_ONE_SHELL, level=2)
+    min_dist = [
+        [None, None, None],
+        [None, 0.0,  2.33],
+        [None, 2.33, 0.0],
+    ]
+    structure = _structure_view(
+        min_dist,
+        element_id=[None, 1, 1],
+        element_name=[None, "Si", "Si"],
+        species_id=[None, 1, 1],
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        ReduceMatcher().compute_query(structure, two_levels)
+    message = str(excinfo.value)
+    # Name the level that failed, the cell that could not supply it,
+    #   and both ways out.
+    assert "level 2 of 2" in message
+    assert "2 atoms" in message
+    assert "lower the recipe's 'level'" in message
+    assert "more atoms" in message
+
+
+def test_compute_query_allows_exactly_enough_atoms():
+    """The boundary: a recipe of N levels needs N other atoms, and a
+    cell holding exactly that many succeeds.  Guards against an
+    off-by-one that would refuse a cell that is in fact sufficient."""
+
+    two_levels = dict(_ONE_SHELL, level=2)
+    min_dist = [
+        [None, None, None, None],
+        [None, 0.0,  2.0,  3.0],
+        [None, 2.0,  0.0,  2.5],
+        [None, 3.0,  2.5,  0.0],
+    ]
+    structure = _structure_view(
+        min_dist,
+        element_id=[None, 1, 1, 1],
+        element_name=[None, "Si", "Si", "Si"],
+        species_id=[None, 1, 1, 1],
+    )
+    fingerprints = ReduceMatcher().compute_query(structure, two_levels)
+    assert fingerprints[1].levels[1].distance == pytest.approx(2.0)
+    assert fingerprints[1].levels[2].distance == pytest.approx(3.0)
+
+
 def test_distance_zero_for_equivalent_and_inf_otherwise():
     """``distance`` is 0 for shell codes that pass all three tests and
     infinite the moment any test fails -- element, level distance,

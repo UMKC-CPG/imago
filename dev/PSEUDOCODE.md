@@ -4448,6 +4448,31 @@ class ReduceMatcher extends Matcher:
         # across Python-side and loen-side families
         # (loen naturally writes one row per site of
         # the whole structure).
+        #
+        # EXHAUSTION.  The shell walk starts each level
+        # from the closest atom not yet assigned to a
+        # shell, and it enumerates atoms IN THE CELL
+        # under minimum image -- it does not build a
+        # periodic neighbour list.  So a cell holding
+        # fewer atoms than the recipe asks for levels
+        # runs out: a 2-atom cell has one other atom,
+        # which level 1 consumes, leaving level 2 with
+        # nothing to start from.  REFUSE, naming the
+        # level, the cell's atom count, and the two
+        # ways out (a shallower recipe, or a cell with
+        # more atoms).  Refusing is the honest answer
+        # rather than emitting an empty shell: an empty
+        # shell is a value the walk did not find, and
+        # inventing one would put a descriptor in the
+        # database that no structure produced.
+        #
+        # That the answer depends on the cell at all is
+        # a DEFECT in this descriptor -- DESIGN 5.2
+        # calls the shell code transferable across
+        # structures -- tracked as TODO C126.  This
+        # refusal makes the defect loud where it used
+        # to be an unhandled None comparison; it does
+        # not fix it.
         return run_reduce_in_python(structure,
             sub_spec)
 

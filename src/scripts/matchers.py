@@ -342,6 +342,32 @@ class ReduceMatcher(Matcher):
                               min_dist[atom][closest_atom]):
                             closest_atom = other
 
+                # Exhaustion: every atom is already assigned, so this
+                # level has nothing to start from.  The walk
+                # enumerates atoms IN THE CELL under minimum image
+                # rather than building a periodic neighbour list, so
+                # a cell with fewer atoms than the recipe has levels
+                # simply runs out -- a 2-atom cell has one other
+                # atom, which level 1 consumes.  Refuse, naming both
+                # ways out.  Emitting an empty shell instead would
+                # put a descriptor in the database that no structure
+                # produced.  (Without this guard `closest_atom`
+                # stays 0 and `min_dist[atom][0]` -- the 1-indexed
+                # padding slot -- is None, which surfaces as an
+                # unhelpful "'>=' not supported ... NoneType".)
+                if closest_atom == 0:
+                    raise ValueError(
+                        f"reduce level {level} of {num_levels} has "
+                        f"no atom left to start it: the cell holds "
+                        f"{num_atoms} atoms and atom {atom} "
+                        f"exhausted them after level {level - 1}.  "
+                        f"The shell walk enumerates atoms in the "
+                        f"cell, so a cell cannot supply more levels "
+                        f"than it has atoms -- lower the recipe's "
+                        f"'level', or use a cell with more atoms "
+                        f"(a primitive reduction is the usual way "
+                        f"to arrive here).")
+
                 closest_dist = min_dist[atom][closest_atom]
                 level_distance[level] = closest_dist
 

@@ -3200,6 +3200,90 @@ imports its neighbours from `$IMAGO_BIN`).
   PSEUDOCODE 4e.3, then code.  Evidence preserved under
   `share/curation/workspace/wingbeats/si_cmce_64_1999/`.
 
+- [ ] C126. The reduce shell code counts atoms IN THE CELL, so it is
+  not the transferable descriptor DESIGN says it is.  Found
+  2026-07-21 by the C109 full-vs-prim comparison, which the defect
+  crashed outright.  DESIGN + CODE; DESIGN 5.2 (the `shell_code`
+  record) / 5.6.5 (the consumer's match) / 5.10 (the family split).
+
+  **What was measured.**  The same material, the same reduce recipe,
+  two cells of it -- reading the neighbour geometry
+  `ReduceMatcher.compute_query` actually sees (`min_dist` after
+  `set_limit_dist(5.0)`), for diamond silicon `si_fd-3m_227_2001`:
+
+      conventional (8 atoms):  2.33 x4,  3.80 x3
+      primitive    (2 atoms):  2.33 x1
+
+  `structure.min_dist` is an `N x N` MINIMUM-IMAGE matrix over the
+  atoms of the cell.  `set_limit_dist` sizes the periodic search so
+  each PAIR gets its shortest periodic distance, but the matrix
+  still has one row per atom in the cell: no periodic neighbour list
+  is ever built.  So the shell walk enumerates CELL CONTENTS, and
+  the descriptor it produces is a property of the cell as much as of
+  the environment.
+
+  **Why that is a defect and not a documented limitation.**  DESIGN
+  5.2 introduces the `shell_code` as the cross-structure descriptor
+  and justifies its element-only neighbour multiset precisely so
+  that it "would transfer to the query structures this stored
+  fingerprint is later matched against (5.6.5)".  Transferability is
+  the stated purpose.  A descriptor that reports four neighbours or
+  one for the same atom, depending on how the curator drew the cell,
+  does not have it.
+
+  **It is already wrong in the cell we ship.**  Diamond silicon has
+  4 nearest neighbours and 12 second neighbours.  The conventional
+  cell reports 4 and 3: the twelve second neighbours are periodic
+  images of only three distinct cell atoms, so the second shell is
+  truncated by a factor of four.  The first shell is right only
+  because an 8-atom cell happens to contain all four of them.  Every
+  reduce record harvested so far is therefore a cell artifact that
+  agrees with the physics by luck of cell size, not a coordination
+  environment.
+
+  **The bispectrum is NOT affected, and this was verified rather
+  than assumed.**  The loen descriptors of the two cells are
+  bit-identical across all nine channels
+  (`0.4249608E+01 ... 0.3259187E+01`), because the Fortran engine
+  builds a real neighbour list under periodic boundary conditions
+  out to the sub_spec cutoff.  So the dedup key (5.2.3 keys on the
+  preferred bispectrum) and the transferable descriptor every
+  harvested entry carries are sound; the damage is confined to the
+  reduce family.
+
+  **Interim state (done, commit with this entry).**  The exhaustion
+  case now REFUSES with a message naming the level, the cell's atom
+  count, and the two ways out, instead of crashing with
+  `'>=' not supported between instances of 'int' and 'NoneType'`
+  (the exhausted search left the atom index at 0, and
+  `min_dist[atom][0]` is the 1-indexed padding slot).  Note the
+  crash was never prim-specific: ANY cell with `num_atoms <= level`
+  hit it, including a 2-atom conventional cell.  Refusing rather
+  than emitting an empty shell is deliberate -- an empty shell is a
+  value the walk did not find, and inventing one would put a
+  descriptor in the database that no structure produced.
+
+  **The work.**  Decide what the reduce descriptor is FOR, then make
+  it that.  If it is meant to be transferable (DESIGN's claim), the
+  shell walk must run over a periodic neighbour list built to the
+  sub_spec cutoff -- the same geometry the bispectrum already uses
+  -- rather than over cell atoms, and every stored reduce record is
+  then invalidated and must be re-harvested.  If it is meant to stay
+  a cheap within-one-structure grouping key (which is what
+  `group_reduce` uses it for, and where cell-dependence is harmless
+  because the comparison never leaves one structure), then DESIGN
+  5.2 must stop calling it transferable and 5.6.5 must stop matching
+  it across structures.  Those are different descriptors and the
+  chain currently claims both.
+
+  **Chain note.**  The shell walk is specified at NO level -- neither
+  DESIGN nor PSEUDOCODE describes the closest-atom / thick-band
+  algorithm; it was ported from the historical `group_reduce` and
+  PSEUDOCODE 11.3 only delegates to `run_reduce_in_python`.  That
+  absence is why a cell-dependence this basic went unreviewed.
+  Whichever way the decision above goes, the walk itself needs
+  writing down.
+
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 
 - [ ] C62. Implement the element-aware bispectrum per
