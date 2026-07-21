@@ -45,10 +45,16 @@ format:
   entry, describing the local environment of the reference atom
   site at the moment that entry's potential was harvested.
 
-There is no on-disk compatibility with v1 files: :func:`load`
-rejects any ``schema_version != 2``.  No v1 files exist in
-production; the producer (``build_initial_potentials.py``)
-regenerates every file as v2.
+A file's ``schema_version`` is settled by the version gate,
+:func:`apply_schema_migrations`, before any other rule runs: a
+file at the current version passes straight through, an older one
+is migrated forward when every field the intervening bumps added
+can be honestly derived, and anything else is refused with a
+message naming the versions involved and a concrete recovery.  No
+migration exists today, so a v1 file is refused -- but it is
+refused as an out-of-date file rather than as one missing a
+field, which is the whole point of routing rule 1 through a gate
+(DESIGN 5.2.5).
 
 Public surface
 --------------
@@ -73,6 +79,14 @@ ElementDatabase
     ``schema_version``, ``element_symbol``, ``nuclear_z``,
     ``nuclear_alpha``, ``covalent_radius``, plus the list of
     :class:`PotentialEntry` objects parsed from the file.
+
+apply_schema_migrations(raw, path) -> dict
+    The version gate (DESIGN 5.2.5).  Brings parsed file data up
+    to ``CURRENT_SCHEMA_VERSION`` or refuses it with an
+    actionable message.  Called by :func:`load` ahead of every
+    other rule; public because the versioning policy is part of
+    the spec surface and a migration tool would drive it
+    directly.
 
 load(path, known_methods=None) -> ElementDatabase
     Read and validate a per-element TOML file.  Enforces the
@@ -129,8 +143,59 @@ save(db, path) -> None
 
 import os
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+
+# ============================================================
+#  Schema version table (DESIGN 5.2.5; PSEUDOCODE 11.1)
+# ============================================================
+
+# The schema version this build reads and writes.  Changing the
+# set of required fields -- adding one, dropping one, or changing
+# the type of one -- is a version bump, because rule 1 is the only
+# check that runs before any field-level check and so the only
+# place a reader can diagnose an out-of-date file.  A required
+# field added without moving this number leaves an older file
+# looking valid while failing a field check, which reports a
+# symptom instead of the cause (DESIGN 5.2.5).
+CURRENT_SCHEMA_VERSION = 2
+
+# Sentinel standing in place of a derivation for a newly required
+# field that an older file simply does not record.  A plausible
+# default is NOT a derivation: filling one in would leave the file
+# well-formed and wrong, and no later check could catch it, so the
+# gate refuses such a file instead of guessing (DESIGN 5.2.5).
+NOT_DERIVABLE = object()
+
+
+@dataclass
+class SchemaMigration:
+    """One entry in :data:`SCHEMA_MIGRATIONS`, describing a single
+    schema version bump.
+
+    ``derivations`` maps each field the bump newly requires to the
+    rule that supplies it in an older file: either a callable that
+    rewrites the parsed data into the newer shape, or
+    :data:`NOT_DERIVABLE` when no honest fill exists.  A callable
+    takes the whole parsed mapping and returns it, so a derivation
+    may act on the top level or reach into every ``[[potential]]``
+    block as the field requires.
+    """
+
+    derivations: dict[str, Callable[[dict], dict] | object]
+
+
+# One entry per bump, keyed by the version that bump PRODUCES.
+#
+# Empty today: version 2 is current, and the v1 -> v2 bump predates
+# any database worth carrying forward, so no migration was ever
+# written for it.  A v1 file therefore takes the "no migration
+# path" refusal in :func:`apply_schema_migrations` -- the same
+# reject-and-regenerate outcome DESIGN 5.2 always specified, now
+# reported in version terms with a recovery named.
+SCHEMA_MIGRATIONS: dict[int, SchemaMigration] = {}
 
 
 # ============================================================
@@ -266,6 +331,86 @@ class ElementDatabase:
 #  Reader (DESIGN 5.2; PSEUDOCODE 11.1)
 # ============================================================
 
+def apply_schema_migrations(raw: dict[str, Any],
+                            path: str) -> dict[str, Any]:
+    """Bring parsed file data up to :data:`CURRENT_SCHEMA_VERSION`,
+    or refuse it with an actionable message (DESIGN 5.2.5).
+
+    This is the version gate, and it runs before any other
+    validation rule.  Four outcomes are possible, depending on the
+    ``schema_version`` the file carries:
+
+    1. **Current** -- returned unchanged.
+    2. **Older, every added field derivable** -- each intervening
+       bump is replayed in ascending order, so a file may cross
+       several versions in one load, and the result is stamped
+       with the current version.  The next :func:`save` then
+       writes the file forward, which costs the caller nothing:
+       the producer refreshes the ``isolated`` baseline on every
+       run, so any file it touches is rewritten current.
+    3. **Older, some added field not derivable** -- refused,
+       naming the field that blocked the migration.
+    4. **Newer than this build** -- refused.  The recovery here is
+       the opposite of case 3's: the database is correct and the
+       *code* is behind, so the message says to update Imago and
+       explicitly warns against regenerating a file a newer build
+       wrote properly.
+
+    Every refusal names the file path, the version the file
+    carries, the version this build writes, and a concrete
+    recovery.  A bare missing-field message is never the right
+    report for a version problem -- that is exactly the failure
+    this gate exists to replace.
+
+    :param raw: the parsed TOML mapping; ``schema_version`` must
+        already be known present (:func:`load` checks it first,
+        since the gate cannot speak in versions without one).
+    :param path: the file path, for error messages.
+    :returns: the mapping, at the current schema version.
+    :raises ValueError: on outcomes 3 and 4.
+    """
+
+    found = raw["schema_version"]
+    if found == CURRENT_SCHEMA_VERSION:
+        return raw
+
+    if found > CURRENT_SCHEMA_VERSION:
+        raise ValueError(
+            f"{path}: schema_version {found!r} was written by a "
+            f"newer Imago; this build reads and writes version "
+            f"{CURRENT_SCHEMA_VERSION}.  Update Imago to read "
+            f"this file; do not regenerate it.")
+
+    # Replay every bump between the file's version and ours.  A
+    # gap in the table means no migration path exists, which is
+    # the same refusal as a non-derivable field: the file must be
+    # regenerated rather than read.
+    for version in range(found + 1, CURRENT_SCHEMA_VERSION + 1):
+        if version not in SCHEMA_MIGRATIONS:
+            raise ValueError(
+                f"{path}: schema_version {found!r}; this build "
+                f"writes version {CURRENT_SCHEMA_VERSION}, and "
+                f"no migration to version {version} exists.  "
+                f"Regenerate this file with "
+                f"build_initial_potentials.py.")
+
+        migration = SCHEMA_MIGRATIONS[version]
+        for field_name, rule in migration.derivations.items():
+            if rule is NOT_DERIVABLE:
+                raise ValueError(
+                    f"{path}: schema_version {found!r}; this "
+                    f"build writes version "
+                    f"{CURRENT_SCHEMA_VERSION}.  Field "
+                    f"{field_name!r}, required from version "
+                    f"{version}, cannot be inferred from a "
+                    f"version-{found} file.  Regenerate this "
+                    f"file with build_initial_potentials.py.")
+            raw = rule(raw)
+
+    raw["schema_version"] = CURRENT_SCHEMA_VERSION
+    return raw
+
+
 def load(path: str,
          known_methods: set[str] | None = None
          ) -> ElementDatabase:
@@ -274,7 +419,11 @@ def load(path: str,
     Implements PSEUDOCODE 11.1 and enforces the set of validation
     rules from DESIGN 5.2 (schema v2):
 
-    1. ``schema_version`` must equal ``2``.
+    1. ``schema_version`` must equal ``CURRENT_SCHEMA_VERSION``
+       by the time the remaining rules run.  A file arriving at
+       another version goes through
+       :func:`apply_schema_migrations` first, which migrates it
+       forward or refuses it (DESIGN 5.2.5).
     2. ``element_symbol`` matches the parent directory name
        (case-insensitive).
     3. Every required field is present, at both the top level
@@ -324,12 +473,29 @@ def load(path: str,
     with open(path, "rb") as handle:
         raw = tomllib.load(handle)
 
+    # ----- Rule 1, via the version gate (DESIGN 5.2.5).
+    # The gate speaks in versions, so it needs the version to
+    # speak at all: check that one key on its own, ahead of the
+    # sweep below.
+    if "schema_version" not in raw:
+        raise ValueError(
+            f"{path}: missing top-level field: schema_version")
+    raw = apply_schema_migrations(raw, path)
+
     # ----- Rule 3 (top-level half): required keys present.
     # Check before any value-level rule so that the error
     # message names the missing field rather than failing
     # later with a value mismatch on an absent key.
+    #
+    # This runs AFTER the gate, and only makes sense there.  An
+    # out-of-date file is very likely to be missing a field this
+    # sweep requires, and reporting that would name a symptom
+    # rather than the cause -- precisely the failure the gate
+    # replaces.  Past the gate, `raw` is known to be at the
+    # current version, so a field missing here means a corrupt or
+    # hand-edited file, and the bare message is the right report.
     top_required = (
-        "schema_version", "element_symbol", "nuclear_z",
+        "element_symbol", "nuclear_z",
         "nuclear_alpha", "covalent_radius",
     )
     for field_name in top_required:
@@ -337,15 +503,6 @@ def load(path: str,
             raise ValueError(
                 f"{path}: missing top-level field: "
                 f"{field_name}")
-
-    # ----- Rule 1: schema_version must equal 2.
-    # There is no on-disk compatibility with v1 files (DESIGN
-    # 5.2); the producer regenerates every file as v2, so any
-    # other version is a hard error rather than a migration.
-    if raw["schema_version"] != 2:
-        raise ValueError(
-            f"{path}: unsupported schema_version "
-            f"{raw['schema_version']!r} (expected 2)")
 
     # ----- Rule 2: element_symbol must match parent dir.
     expected_elem = os.path.basename(

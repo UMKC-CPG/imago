@@ -1113,7 +1113,19 @@ The database reader/writer is encapsulated in a small
 helper module (proposed `src/scripts/initial_potential_db.py`)
 so that any future format swap or schema-version bump is a
 one-file change rather than a spread of edits across the
-three scripts above.
+three scripts above.  The version table and the per-bump
+field derivations that DESIGN 5.2.5 specifies live there
+too, for the same reason.
+
+- `src/scripts/potential_migrate.py`: future bulk
+  schema-migration tool, rewriting an installed
+  `share/atomicPDB/` tree in place.  Mirrors
+  `guidance_migrate.py` (10) and `resource_migrate.py`
+  (11), and like them is not in day-1 scope: the reader's
+  in-memory migration plus the producer's next save
+  already carries forward every file a run touches
+  (DESIGN 5.2.5), so this tool is only needed for files
+  no producer run will revisit.
 
 The curation-manifest schema -- its dataclasses, the strict
 `load_manifest_v2` and relaxed `load_structure_sources` readers,

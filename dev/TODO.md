@@ -1876,9 +1876,8 @@ shipped.
   new `_FULL_OCCUPANCY_TOLERANCE` (1e-2) treats occupancy within 1%
   of full as full, while genuine partial occupancy (disorder /
   vacancies, well below the band) is still refused. CODE; ARCH 9.5.
-- [ ] C91. **Side-quest (NEXT TO DEVELOP): populate the
-  augmented potential database with real fingerprint
-  records.**  Today every
+- [x] C91. **Side-quest: populate the augmented potential
+  database with real fingerprint records.**  Today every
   `share/atomicPDB/<elem>/s_gaussian_pot.toml` is
   Phase-1-shaped -- a single `default = true` entry and zero
   `[[potential.fingerprint]]` records (an audit of all 103
@@ -1908,6 +1907,22 @@ shipped.
   lets C61's positive path also be confirmed against the
   wild database and surfaces any producer<->consumer schema
   drift that hand-built fixtures would miss.
+
+  **DONE 2026-07-20**, by the clean production run (orchestrator
+  job 15032332, build `61429b9`, smearing off).  The eight-solid
+  Si manifest ran end to end and
+  `share/atomicPDB/si/s_gaussian_pot.toml` now carries seven
+  reference-derived entries beside `isolated`, each bearing a
+  `reduce` and a `bispectrum` record -- fourteen fingerprints in
+  all -- so the Phase-2 consumer path finally has live data to
+  match against.  Seven and not eight because
+  `si_fd-3m_227_1962_3` fell within the similarity floor of an
+  already-stored diamond entry and was dropped by
+  `insert_or_skip`: the DESIGN 5.2.3 dedup behaving exactly as
+  specified.  That the other five diamond allotropes were each
+  judged novel is a floor-calibration observation for C88/C103,
+  not a defect -- small lattice-constant differences currently
+  read as distinct environments.
 - [ ] C61. Add end-to-end Phase-2 tests.  For the
   in-makeinput path: a small reference runs through
   reduce bucketing + entry-pick + emit producing a
@@ -2078,7 +2093,7 @@ shipped.
   The box stayed unchecked past the work because the matching
   PSEUDOCODE 11.6 sync was still outstanding; that sync is C114,
   which is now done as well.
-- [ ] C105. On-disk potential-file schema migration / version
+- [x] C105. On-disk potential-file schema migration / version
   guard (initial_potential_db).  Surfaced 2026-07-01 during the
   C91 Si seed: the incremental producer loads each existing
   `share/atomicPDB/<elem>/s_gaussian_pot.toml` through the strict
@@ -2102,6 +2117,51 @@ shipped.
   resource dataspaces, which have their own `*_migrate.py` tools
   (ARCH 10 / 11) -- the initial-potential DB should grow the same
   story.  CODE; DESIGN 5.2/5.5.
+
+  **DONE 2026-07-21.**  Reading the code first reframed the task:
+  the version guard already existed (rule 1) and did NOT fire,
+  because `type_assignment` was added to the required Imago
+  provenance set without moving `schema_version` off 2.  The file
+  was a legal-looking v2 that failed a v2 field check, so no guard
+  could have caught it.  The fix therefore starts with a policy,
+  not a migrator: **the required-field set IS the version**, and
+  changing it is a bump.  Written top-down as new DESIGN 5.2.5
+  (versioning rule, the reader's four outcomes, the honesty test
+  for a derivation, the error contract, where the machinery
+  lives), rippled into DESIGN 5.2's key table and 5.4's rule 1,
+  ARCHITECTURE 8.7 (which now names the future
+  `potential_migrate.py` beside `guidance_migrate` /
+  `resource_migrate`), then PSEUDOCODE 11.1, then the code.
+
+  Policy chosen: **migrate when honest, else refuse.**  Each bump
+  declares, per newly required field, either a derivation from
+  what an older file already carries or `NOT_DERIVABLE`; a
+  plausible default is not a derivation, because an invented value
+  leaves the file well-formed and wrong where no later check can
+  catch it.  `type_assignment` is the worked example of
+  not-derivable -- nothing else in an older file records which
+  scheme drew the type partition, so filling it would silently
+  mislabel every fingerprint's native/witness role.
+
+  Code (`initial_potential_db.py`): `CURRENT_SCHEMA_VERSION`, the
+  `NOT_DERIVABLE` sentinel, a `SchemaMigration` dataclass and the
+  `SCHEMA_MIGRATIONS` table (empty -- version 2 is current), and
+  the `apply_schema_migrations` gate.  `load` checks
+  `schema_version`'s presence on its own and runs the gate BEFORE
+  the required-field sweep, which is the ordering the whole fix
+  turns on: an out-of-date file is diagnosed as out of date rather
+  than as missing a field.  Every refusal names the file, both
+  versions, and a recovery; a newer-than-us file is told to update
+  Imago and explicitly warned NOT to regenerate.  Seven tests
+  cover the four outcomes plus the two ordering guarantees; 997
+  non-integration tests pass, and all 103 installed element
+  databases load through the gate unchanged.
+
+  Deferred, as ARCHITECTURE 8.7 now records: the bulk
+  `potential_migrate.py`.  It is a convenience, not a correctness
+  requirement -- in-memory migration plus the producer's next save
+  already carries forward every file a run touches -- so it earns
+  its keep only for files no producer run will revisit.
 - [ ] C106. Single-source the producer's fingerprint-declaration
   set so the build and harvest sides cannot drift (DESIGN
   5.7/5.10).  Back-burner.  Scenario that surfaced it (2026-07-02,
@@ -2413,7 +2473,7 @@ imports its neighbours from `$IMAGO_BIN`).
   the convergence tolerance with nothing on screen.  Fixed with
   three tests (one fails as `assert 0.0005 == 0.00025`).
 
-- [ ] C116. The k-density ladder is not a refinement sequence, and
+- [x] C116. The k-density ladder is not a refinement sequence, and
   `pick_converged` assumes it is.  A requested k-point density does
   not map monotonically onto the mesh imago actually integrates
   over: raising the density can leave the mesh unchanged, and can
@@ -2495,7 +2555,19 @@ imports its neighbours from `$IMAGO_BIN`).
   (consumer); then PSEUDOCODE 11.4 and code.  Cf. C117, whose
   near-metal oscillation rides on top of this same noise.
 
-- [ ] C117. Decide the k-point integration scheme for near-metallic
+  **CLOSED 2026-07-20 -- superseded, not patched.**  The candidate
+  fix above (index the ladder by resolved mesh) was overtaken by
+  the answer C118 gave: retire the requested-density ladder
+  altogether and climb through symmetry-compatible MESHES, which
+  removes the defect at its root because every rung is a mesh by
+  construction and no two consecutive rungs can resolve alike.
+  The adjacent ask landed too -- `result.toml` now carries the
+  mesh and the gap the calculation actually used, so the
+  acceptance rule reads them directly rather than inferring
+  anything from a requested density.  Two live seed runs confirm
+  it end to end (jobs 15026798 and 15032332).
+
+- [x] C117. Decide the k-point integration scheme for near-metallic
   reference solids.  Observed 2026-07-09 in the same seed run:
   `si_cmce_64_1999` (16-atom Cmce cell) is the one solid of eight
   that did not converge, and its gap oscillates between metal and
@@ -2524,7 +2596,27 @@ imports its neighbours from `$IMAGO_BIN`).
   guidance predictor's sub-model and a database must not mix
   sub-models silently.  DESIGN 5.7 / 7.6; CURATION.
 
-- [ ] C118. Implement the adaptive mesh climb (DESIGN 3.12 /
+  **DECIDED 2026-07-20: the default stays bare `gaussian` -- no
+  smearing -- and near-metals are handled by classification, not
+  by broadening.**  C116's half of the compounding was removed
+  first, exactly as this entry demanded, so what remained could be
+  attributed cleanly.  Smearing was then tested directly on
+  si_cmce rather than argued about: three live runs at widths
+  `0.0`, `0.026` (room-temperature kT) and `0.1` eV.  The wobble
+  barely moved -- quadrupling the width from `0.026` to `0.1`
+  reproduced nearly the same per-step energy changes, including
+  the same `+7.4x` reversal at mesh `[4,6,7]` -- so a wider
+  Gaussian is not the lever, and the occupation-jump hypothesis
+  above is not the dominant term.  Smearing also costs accuracy
+  where it is not needed: against the clean run, wide-gap diamond
+  Si shifted by `-0.02` meV/atom (noise) but small-gap si_ia-3
+  carried a real `+1.40` meV/atom bias at `0.1` eV.  Leaving the
+  default off therefore keeps every insulator exact, and C125's
+  gap test disposes of the metals the smearing was meant to tame.
+  The per-solid `gaussian-<width>` override remains available for
+  a curator who wants it; the seed manifest uses none.
+
+- [x] C118. Implement the adaptive mesh climb (DESIGN 3.12 /
   PSEUDOCODE 4e).  The convergence search moves from a fixed
   density grid to a climb through symmetry-compatible meshes,
   seeded by the guidance prediction and stopped when the energy
@@ -2660,6 +2752,16 @@ imports its neighbours from `$IMAGO_BIN`).
       live seed re-run against the rebuilt binary closes C116 and
       unblocks C117.
 
+  **DONE.**  The live seed re-runs that this entry was waiting on
+  have all been made, and the climb has since been tuned (C123),
+  floored (C124), and taught to recognise metals (C125) against
+  what they showed.  The final clean production run (job 15032332)
+  converged or settled all eight reference solids and harvested
+  every one, which is the outcome the climb was built to reach
+  after the fixed density grid returned 0/8.  C116 is closed above
+  and C117 is decided above, as this entry predicted they would
+  be.
+
 - [x] C119. A block asks for its slice, not for the node
   (DESIGN 6.2.11 / PSEUDOCODE 13.7 / code).  Surfaced by the
   C118 seed re-run, which held a 128-core node for 41 minutes
@@ -2685,7 +2787,7 @@ imports its neighbours from `$IMAGO_BIN`).
   41 minutes were 40 minutes of real compute -- the waste was
   the 127 idle cores no one else could use.
 
-- [ ] C120. Retire the climb's round barrier -- CODE the
+- [x] C120. Retire the climb's round barrier -- CODE the
   wait-for-any climb (option a).  The design is SETTLED and
   written top-down; code against these sections, NOT against
   this entry: DESIGN 3.12.5 (concurrent, no chain waits on
@@ -2730,7 +2832,14 @@ imports its neighbours from `$IMAGO_BIN`).
   identical.  **The step-size rule is the larger prize** (C118
   inc 6, C116).
 
-- [ ] C121. A loen-descriptor build must skip the fingerprint
+  **DONE, committed 5cb6e0d.**  Every item on the checklist above
+  shipped as written, and the concurrent shape has since carried
+  five live seed runs without a barrier stall.  Reclamation is
+  still designed-but-not-built, as this entry scoped it; the door
+  stayed open, since the producer tracks chains rather than slots
+  and the rung width never entered the cache key.
+
+- [x] C121. A loen-descriptor build must skip the fingerprint
   match (makeinput recursion fix).  DESIGN 5.6.5 + 5.10.2 first,
   then PSEUDOCODE (the potential-resolution function), then the
   code in `makeinput.py` (`_obtain_pot_info`).  Chain-compliant:
@@ -2773,6 +2882,12 @@ imports its neighbours from `$IMAGO_BIN`).
   sub-run (`makegroups._run_makeinput`) -- so one guard on that
   flag closes both entry points at the single place the recursion
   is born.
+
+  **DONE, committed f3ec42a**, chain-compliant (DESIGN then
+  PSEUDOCODE then the guard).  The second-run failure it describes
+  is gone: the Si database now holds preferred bispectrum records
+  from the first seed run, and every run since has read that
+  populated database and built its loen inputs without recursing.
 
 - [x] C123. Code the bracket-then-refine mesh climb (the
   step-size rule, option 3).  DONE against DESIGN 3.12.2/3/5/6 and
@@ -2848,7 +2963,7 @@ imports its neighbours from `$IMAGO_BIN`).
     the coarse gate exposed a near-metal *runaway* instead,
     captured and analysed as C125 below.
 
-- [ ] C125. Close the near-metal dead zone the C124 seed re-run
+- [x] C125. Close the near-metal dead zone the C124 seed re-run
   exposed -- RESOLVED, by classifying metals directly on the gap.
   CODE-COMPLETE down the whole chain (DESIGN 3.12.3/3.12.4/3.12.6/5.7
   -> PSEUDOCODE 4e.2/4e.3 + knobs -> code); 991 non-integration tests
@@ -2858,11 +2973,21 @@ imports its neighbours from `$IMAGO_BIN`).
   gains `gap` (from `gap_ev`), `build_climb_config` passes the knob
   directly; `metallic_rise_multiple` -> `metal_gap_threshold` (eV,
   default 0.05, checked `> 0`) across mesh_climb / curation_manifest.
-  Pending: commit; a live seed re-run to confirm si_cmce now settles
-  as a metal at its floor (a rough recorded potential) instead of
-  running away.  DEFERRED (minimal-for-now): a metal is recorded as a
-  plain rung, no distinguishing flag -- the harvest (7.8) / dataspace
-  (7.2) metal-flag + predictor-learning question is left for later.
+  Committed 61429b9.  DEFERRED (minimal-for-now): a metal is recorded
+  as a plain rung, no distinguishing flag -- the harvest (7.8) /
+  dataspace (7.2) metal-flag + predictor-learning question is left
+  for later, and should be settled before the guidance predictor is
+  ever trained on a database that contains metals.
+
+  **VALIDATED LIVE 2026-07-20**, twice.  Job 15026798 confirmed the
+  fix directly: si_cmce read a gap of `0.0` at its very first rung,
+  was declared a metal, and settled at the floor mesh `[2,4,4]` after
+  a single rung instead of the 21 it had run away through -- and it
+  was RECORDED, taking the producer from 6/8 to 8/8 harvested.  The
+  seven insulators were untouched, converging at `[6,6,6]` as before,
+  which is the outcome the gap threshold was chosen to give.  Job
+  15032332 then repeated it as a clean production run with smearing
+  off, harvesting 8/8 into `share/atomicPDB/` (see C91).
   C124 worked as intended and, in doing so, removed the
   *accidental* early stop that used to terminate the si_cmce
   near-metal -- the coarse `[1,1,1] -> [2,2,2]` Gamma-artifact

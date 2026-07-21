@@ -50,9 +50,14 @@ import os
 import pytest
 
 from initial_potential_db import (
+    CURRENT_SCHEMA_VERSION,
+    NOT_DERIVABLE,
+    SCHEMA_MIGRATIONS,
     FingerprintRecord,
     PotentialEntry,
+    SchemaMigration,
     ElementDatabase,
+    apply_schema_migrations,
     load,
     save,
     lookup,
@@ -277,20 +282,144 @@ class TestLoadHappyPath:
 # ============================================================
 
 class TestRule1SchemaVersion:
-    """Rule 1: schema_version must equal 2."""
+    """Rule 1, enforced by the version gate (DESIGN 5.2.5).
 
-    def test_wrong_schema_version_raises(self, tmp_path):
+    The gate has four outcomes -- current, migrate, refuse as
+    not-derivable, refuse as too new -- and each gets a test.  The
+    two migration outcomes need a bump to exercise, and the real
+    table is empty (version 2 is current and no bump has been
+    declared), so those tests install a synthetic version-2
+    migration and treat a hand-made v1 file as the older input.
+    """
+
+    def _v1_file(self, tmp_path, drop_covalent_radius=False):
+        """Write a v1 file: a valid v2 file with its version
+        number moved back, optionally missing a top-level field
+        so a derivation has something real to supply."""
+
         path = _path_for(tmp_path, "Au")
         save(_valid_db("Au"), path)
-        # Substitute a non-v2 schema_version in the file.  A v1
-        # value must be rejected too -- there is no on-disk
-        # back-compatibility (DESIGN 5.2).
         text = open(path).read().replace(
             "schema_version  = 2\n",
             "schema_version  = 1\n")
+        if drop_covalent_radius:
+            text = "".join(
+                line for line in text.splitlines(keepends=True)
+                if not line.startswith("covalent_radius"))
         _write_toml(path, text)
+        return path
+
+    def test_older_file_without_a_migration_path_is_refused(
+            self, tmp_path):
+        # Outcome 3, by way of an empty table: with no migration
+        # to version 2 declared, a v1 file cannot be carried
+        # forward.  This is the reject-and-regenerate behaviour
+        # DESIGN 5.2 always specified -- what changed is that the
+        # message must now diagnose the VERSION and name a
+        # recovery, not report some downstream missing field.
+        path = self._v1_file(tmp_path)
+        with pytest.raises(ValueError) as excinfo:
+            load(path)
+        message = str(excinfo.value)
+        assert "schema_version 1" in message
+        assert f"version {CURRENT_SCHEMA_VERSION}" in message
+        assert "no migration to version 2 exists" in message
+        assert "build_initial_potentials.py" in message
+
+    def test_newer_file_says_to_update_imago_not_regenerate(
+            self, tmp_path):
+        # Outcome 4.  The recovery is the OPPOSITE of an old
+        # file's: the database is correct and this build is
+        # behind, so regenerating would destroy good data.  The
+        # message must say so explicitly.
+        path = _path_for(tmp_path, "Au")
+        save(_valid_db("Au"), path)
+        _write_toml(path, open(path).read().replace(
+            "schema_version  = 2\n",
+            "schema_version  = 99\n"))
+        with pytest.raises(ValueError) as excinfo:
+            load(path)
+        message = str(excinfo.value)
+        assert "newer Imago" in message
+        assert "do not regenerate it" in message
+
+    def test_a_derivable_field_migrates_and_loads(
+            self, tmp_path, monkeypatch):
+        # Outcome 2: a v1 file missing `covalent_radius` loads
+        # when the bump declares how to supply it.  The gate must
+        # run BEFORE the required-field sweep for this to work at
+        # all -- otherwise the sweep rejects the file on the very
+        # field the migration exists to fill.
+        def supply_covalent_radius(raw):
+            raw["covalent_radius"] = 1.0
+            return raw
+
+        monkeypatch.setitem(
+            SCHEMA_MIGRATIONS, 2,
+            SchemaMigration(derivations={
+                "covalent_radius": supply_covalent_radius}))
+        path = self._v1_file(tmp_path, drop_covalent_radius=True)
+
+        db = load(path)
+        assert db.covalent_radius == 1.0
+        # Stamped current in memory, so the next save writes the
+        # file forward and the migration is paid only once.
+        assert db.schema_version == CURRENT_SCHEMA_VERSION
+
+    def test_a_non_derivable_field_is_refused_by_name(
+            self, tmp_path, monkeypatch):
+        # Outcome 3 proper.  A field an older file does not
+        # record must never be guessed: an invented value would
+        # leave the file well-formed and WRONG, which no later
+        # check could catch (DESIGN 5.2.5).  The refusal names
+        # the blocking field so the curator knows what was lost.
+        monkeypatch.setitem(
+            SCHEMA_MIGRATIONS, 2,
+            SchemaMigration(derivations={
+                "type_assignment": NOT_DERIVABLE}))
+        path = self._v1_file(tmp_path)
+        with pytest.raises(ValueError) as excinfo:
+            load(path)
+        message = str(excinfo.value)
+        assert "'type_assignment'" in message
+        assert "cannot be inferred" in message
+        assert "build_initial_potentials.py" in message
+
+    def test_a_current_file_passes_through_untouched(self):
+        # Outcome 1.  The gate is a no-op on a current file, and
+        # must not copy or rewrite the mapping.
+        raw = {"schema_version": CURRENT_SCHEMA_VERSION}
+        assert apply_schema_migrations(raw, "some/path") is raw
+
+    def test_missing_schema_version_reports_that_field(
+            self, tmp_path):
+        # The gate cannot speak in versions without a version, so
+        # `load` checks that one key on its own, ahead of the
+        # sweep, and reports it plainly.
+        path = _path_for(tmp_path, "Au")
+        save(_valid_db("Au"), path)
+        _write_toml(path, "".join(
+            line for line in open(path).readlines()
+            if not line.startswith("schema_version")))
         with pytest.raises(
-                ValueError, match="unsupported schema_version"):
+                ValueError,
+                match="missing top-level field: schema_version"):
+            load(path)
+
+    def test_a_current_file_still_reports_a_bare_missing_field(
+            self, tmp_path):
+        # The gate must not mask genuine corruption.  Past it, a
+        # file is known current, so a field missing HERE means a
+        # damaged or hand-edited file -- and the plain
+        # missing-field message is then the correct report.
+        path = _path_for(tmp_path, "Au")
+        save(_valid_db("Au"), path)
+        _write_toml(path, "".join(
+            line for line in open(path).readlines()
+            if not line.startswith("nuclear_alpha")))
+        with pytest.raises(
+                ValueError,
+                match="missing top-level field: nuclear_alpha"):
             load(path)
 
 

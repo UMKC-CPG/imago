@@ -3570,7 +3570,7 @@ emitter (11.2), the runtime lookup invoked from
 Python under `src/scripts/`. The Fortran side does not
 change.
 
-### 11.1 TOML Reader (DESIGN 5.2, 5.4)
+### 11.1 TOML Reader (DESIGN 5.2, 5.2.5, 5.4)
 
 Parses a per-element `s_gaussian_pot.toml` file and
 applies the validation rules from DESIGN 5.2
@@ -3591,26 +3591,128 @@ rule 9 is skipped.  This decouples the library from
 the registry without weakening the rule for real
 runs.
 
+Rule 1 (the schema version) is enforced by the version
+gate of DESIGN 5.2.5 rather than by a bare equality
+test, and it runs BEFORE the general required-field
+sweep.  The ordering is the whole point: a file older
+than this build is very likely to be missing a field
+that sweep requires, and the gate exists so that such a
+file is told it is out of date instead of being told a
+symptom.  Only `schema_version`'s own presence is
+checked ahead of the gate, since the gate cannot speak
+without it.
+
 ```
+CURRENT_SCHEMA_VERSION = 2
+
+# The version table (DESIGN 5.2.5).  One entry per bump,
+# keyed by the version that bump PRODUCES.  Each entry
+# lists the fields that bump newly requires, mapping
+# each to a derivation -- a function rewriting older
+# parsed data into the newer shape -- or to
+# NOT_DERIVABLE when no honest fill exists.  A field is
+# NOT_DERIVABLE whenever an older file simply does not
+# record what the new field asserts; a plausible default
+# is not a derivation (DESIGN 5.2.5).
+#
+# Empty today: version 2 is current, and the v1 -> v2
+# bump predates any database worth carrying forward, so
+# no migration was ever written for it.  A v1 file
+# therefore takes the "no migration path" refusal below,
+# which is the reject-and-regenerate behaviour DESIGN
+# 5.2 already specified -- now reported in version terms
+# with a recovery named.
+SCHEMA_MIGRATIONS = {}
+
+
+function apply_schema_migrations(raw, path):
+    found = raw["schema_version"]
+
+    # Outcome 1: current.  Nothing to do.
+    if found == CURRENT_SCHEMA_VERSION:
+        return raw
+
+    # Outcome 4: the file is ahead of the code.  The
+    # recovery is the opposite of outcome 3's -- the
+    # database is right and this build is behind -- so
+    # say so rather than inviting a regeneration that
+    # would DESTROY correct data.
+    if found > CURRENT_SCHEMA_VERSION:
+        fail(path, "schema_version " + str(found)
+             + " was written by a newer Imago; this "
+             + "build reads and writes version "
+             + str(CURRENT_SCHEMA_VERSION)
+             + ".  Update Imago to read this file; do "
+             + "not regenerate it.")
+
+    # Outcomes 2 and 3: replay every bump between the
+    # file's version and ours, in ascending order, so a
+    # file may cross several versions in one load.
+    for version in range(found + 1,
+                         CURRENT_SCHEMA_VERSION + 1):
+        if version not in SCHEMA_MIGRATIONS:
+            fail(path, "schema_version " + str(found)
+                 + "; this build writes version "
+                 + str(CURRENT_SCHEMA_VERSION)
+                 + ", and no migration to version "
+                 + str(version) + " exists.  "
+                 + "Regenerate this file with "
+                 + "build_initial_potentials.py.")
+
+        for (field, rule) in
+                SCHEMA_MIGRATIONS[version].derivations:
+            # Outcome 3: refuse rather than guess.  An
+            # invented value would leave the file
+            # well-formed and WRONG, which no later
+            # check could catch (DESIGN 5.2.5).
+            if rule is NOT_DERIVABLE:
+                fail(path, "schema_version " + str(found)
+                     + "; this build writes version "
+                     + str(CURRENT_SCHEMA_VERSION)
+                     + ".  Field '" + field + "', "
+                     + "required from version "
+                     + str(version) + ", cannot be "
+                     + "inferred from a version-"
+                     + str(found) + " file.  "
+                     + "Regenerate this file with "
+                     + "build_initial_potentials.py.")
+            raw = rule(raw)
+
+    # Outcome 2 completed.  Stamp the migrated data with
+    # the current version so the next save (11.2), which
+    # emits db.schema_version, writes the file forward.
+    # The producer refreshes the isolated baseline on
+    # every run (11.4), so any file it touches is
+    # rewritten current and the migration is paid once.
+    raw["schema_version"] = CURRENT_SCHEMA_VERSION
+    return raw
+
+
 function load(path, known_methods = None):
     raw = tomllib.load(path)
+
+    # Rule 1, via the version gate.  Its own presence
+    # check comes first and separately: the gate speaks
+    # in versions, so it needs the version to speak at
+    # all.
+    require("schema_version" in raw, path,
+        "missing top-level field: schema_version")
+    raw = apply_schema_migrations(raw, path)
 
     # Rule 3 (top-level half): every required
     # top-level key must be present.  Check before
     # any value-level rule so the error message
     # names the missing field rather than failing
-    # later with a value mismatch.
-    for f in ("schema_version", "element_symbol",
+    # later with a value mismatch.  Safe to run after
+    # the gate, and only safe there: `raw` is now known
+    # to be at the current version, so a field missing
+    # HERE is a corrupt or hand-edited file, not an old
+    # one, and the bare message is the right report.
+    for f in ("element_symbol",
               "nuclear_z", "nuclear_alpha",
               "covalent_radius"):
         require(f in raw, path,
             "missing top-level field: " + f)
-
-    # Rule 1: schema version must equal 2.
-    require(raw["schema_version"] == 2,
-        path, "unsupported schema_version "
-              + str(raw["schema_version"])
-              + " (expected 2)")
     # Rule 2: element symbol must match parent dir.
     expected_elem = basename(dirname(path))
     require(lower(raw["element_symbol"])
@@ -4180,10 +4282,11 @@ same way as in the full flow: the preflight marks
 `databases[elem] = None` and the driver (11.3.g, steps 6
 and 8) emits it via the legacy `pot1`/`coeff1` path, with
 no library entry consulted.  There is no schema-v1 case
-to consider here -- the reader rejects any
-`schema_version != 2` (DESIGN 5.2), and the producer
-(11.4) writes every on-disk file as v2, so a loaded
-database is always v2 and always carries a `default` tag.
+to consider here -- the reader's version gate (11.1)
+either brings an older file up to the current version or
+refuses it outright, and the producer (11.4) writes every
+on-disk file at the current version, so a loaded database
+is always current and always carries a `default` tag.
 
 The reduced entry pick is the fingerprint-disabled
 restriction of 11.3.d:
