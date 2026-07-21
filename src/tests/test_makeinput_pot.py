@@ -435,10 +435,17 @@ def _si_dimer_settings():
         atom_species_id=[None, 1, 1],
         atom_element_name=[None, "Si", "Si"],
         _min_dist_made=True)
-    sc = types.SimpleNamespace(min_dist=[
-        None,
-        [None, 0.0, 2.35],
-        [None, 2.35, 0.0]])
+    # Two Si atoms 2.35 Angstrom apart.  The reduce walk builds its
+    #   shells from the extended-cell geometry (DESIGN 5.11), so the
+    #   pair is given as positions; isolated rather than periodic, so
+    #   the extended list is the two atoms and each image is itself.
+    sc = types.SimpleNamespace(
+        direct_xyz=[None, [None, 0.0, 0.0, 0.0],
+                    [None, 2.35, 0.0, 0.0]],
+        num_atoms_ext=2,
+        ext_direct_xyz_list=[None, [None, 0.0, 0.0, 0.0],
+                             [None, 2.35, 0.0, 0.0]],
+        ext_to_central_item_map=[None, 1, 2])
     return settings, sc
 
 

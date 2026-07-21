@@ -51,7 +51,47 @@ pytestmark = pytest.mark.unit
 #  Fixture builders
 # ==============================================================
 
-def _make_reduce_state(min_dist, element_id, element_name,
+def _geometry(positions, images=None):
+    """Build the extended-cell geometry the reduce walk reads
+    (DESIGN 5.11) from explicit Cartesian positions.
+
+    The walk counts periodic IMAGES, so it reads the central atom's
+    position, the extended-cell coordinate list, and the map from an
+    image back to the atom it copies.  These fixtures are laid out as
+    isolated clusters rather than periodic cells, so the extended list
+    IS the atom list and each image maps to itself; a fixture that
+    needs genuine periodic multiplicity passes ``images`` explicitly as
+    ``[(position, central_atom), ...]``.
+
+    Coordinate triples are 1-indexed to match ``StructureControl``,
+    whose ``direct_xyz[atom]`` and ``ext_direct_xyz_list[image]`` both
+    read ``[None, x, y, z]``.
+
+    Parameters
+    ----------
+    positions : list
+        1-indexed Cartesian positions, ``positions[atom] = (x, y, z)``.
+    images : list, optional
+        ``(position, central_atom)`` pairs for the extended cell.
+        Defaults to one image per atom, at the atom's own position.
+    """
+
+    def indexed(position):
+        return [None, position[0], position[1], position[2]]
+
+    if images is None:
+        images = [(position, atom)
+                  for atom, position in enumerate(positions[1:], 1)]
+
+    return dict(
+        direct_xyz=[None] + [indexed(p) for p in positions[1:]],
+        num_atoms_ext=len(images),
+        ext_direct_xyz_list=[None] + [indexed(p) for p, _ in images],
+        ext_to_central_item_map=[None] + [c for _, c in images],
+    )
+
+
+def _make_reduce_state(positions, element_id, element_name,
                        species_id, reduce_spec):
     """Fabricate the ``(settings, sc)`` pair ``group_reduce`` needs.
 
@@ -62,9 +102,9 @@ def _make_reduce_state(min_dist, element_id, element_name,
 
     Parameters
     ----------
-    min_dist : list[list[float]]
-        The symmetric, 1-indexed minimum-image distance matrix placed
-        on the fake ``StructureControl`` as ``sc.min_dist``.
+    positions : list
+        1-indexed Cartesian positions, passed to :func:`_geometry` to
+        build the extended-cell arrays the shell walk reads.
     element_id, element_name, species_id : list
         1-indexed per-atom element index, element name, and the
         *input* species index (the assignment reduce starts from).
@@ -87,7 +127,7 @@ def _make_reduce_state(min_dist, element_id, element_name,
         num_species=[0] * (num_elements + 1),
         num_types=None,
     )
-    sc = types.SimpleNamespace(min_dist=min_dist)
+    sc = types.SimpleNamespace(**_geometry(positions))
     return settings, sc
 
 
@@ -96,6 +136,31 @@ def _make_reduce_state(min_dist, element_id, element_name,
 # and a 5% level-distance tolerance.
 _ONE_SHELL = {"level": 1, "thick": 0.1, "cutoff": 5.0,
               "tolerance": 0.05, "op": "species"}
+
+# Two isolated Si-O dimers set 10 Angstrom apart: atom 1 (Si) bonds
+#   atom 3 (O) at 2.0 and atom 2 (Si) bonds atom 4 (O) at 2.0, while
+#   every cross distance is 8.0 or more and so falls outside the 5.0
+#   cutoff.  Both Si atoms therefore see an identical single-O shell,
+#   and so do both O atoms.  Laid out as explicit geometry because the
+#   walk builds its shells from positions (DESIGN 5.11).
+_TWO_EQUIVALENT_DIMERS = [
+    None,
+    (0.0, 0.0, 0.0),          # atom 1, Si
+    (10.0, 0.0, 0.0),         # atom 2, Si
+    (2.0, 0.0, 0.0),          # atom 3, O -- bonded to atom 1
+    (12.0, 0.0, 0.0),         # atom 4, O -- bonded to atom 2
+]
+
+# The same two dimers, but the second bond stretched to 2.6 Angstrom.
+#   The level-distance test allows only 0.05 * 2.0 = 0.1 of slack, so
+#   the two Si atoms can no longer be one species, nor the two O atoms.
+_TWO_DISTINCT_DIMERS = [
+    None,
+    (0.0, 0.0, 0.0),          # atom 1, Si -- bond 2.0
+    (10.0, 0.0, 0.0),         # atom 2, Si -- bond 2.6
+    (2.0, 0.0, 0.0),          # atom 3, O
+    (12.6, 0.0, 0.0),         # atom 4, O
+]
 
 
 # ==============================================================
@@ -117,16 +182,8 @@ def test_group_reduce_groups_equivalent_environments(tmp_path,
 
     monkeypatch.chdir(tmp_path)
 
-    #            self  1    2    3    4
-    min_dist = [
-        [None, None, None, None, None],   # index 0 placeholder
-        [None, 0.0,  3.0,  2.0,  2.6],    # atom 1
-        [None, 3.0,  0.0,  2.6,  2.0],    # atom 2
-        [None, 2.0,  2.6,  0.0,  3.0],    # atom 3
-        [None, 2.6,  2.0,  3.0,  0.0],    # atom 4
-    ]
     settings, sc = _make_reduce_state(
-        min_dist,
+        _TWO_EQUIVALENT_DIMERS,
         element_id=[None, 1, 1, 2, 2],
         element_name=[None, "Si", "Si", "O", "O"],
         species_id=[None, 1, 1, 1, 1],
@@ -159,16 +216,8 @@ def test_group_reduce_splits_distinct_environments(tmp_path,
 
     monkeypatch.chdir(tmp_path)
 
-    #            self  1    2    3    4
-    min_dist = [
-        [None, None, None, None, None],   # index 0 placeholder
-        [None, 0.0,  3.5,  2.0,  3.0],    # atom 1
-        [None, 3.5,  0.0,  3.0,  2.6],    # atom 2
-        [None, 2.0,  3.0,  0.0,  3.5],    # atom 3
-        [None, 3.0,  2.6,  3.5,  0.0],    # atom 4
-    ]
     settings, sc = _make_reduce_state(
-        min_dist,
+        _TWO_DISTINCT_DIMERS,
         element_id=[None, 1, 1, 2, 2],
         element_name=[None, "Si", "Si", "O", "O"],
         species_id=[None, 1, 1, 1, 1],
@@ -188,11 +237,11 @@ def test_group_reduce_splits_distinct_environments(tmp_path,
 # species.  Used by the scope tests, where only part of the cell is
 # regrouped.
 _FOUR_EQUIVALENT_SI = [
-    [None, None, None, None, None],
-    [None, 0.0,  2.0,  4.0,  4.0],   # atom 1 -> nn atom 2 at 2.0
-    [None, 2.0,  0.0,  4.0,  4.0],   # atom 2 -> nn atom 1 at 2.0
-    [None, 4.0,  4.0,  0.0,  2.0],   # atom 3 -> nn atom 4 at 2.0
-    [None, 4.0,  4.0,  2.0,  0.0],   # atom 4 -> nn atom 3 at 2.0
+    None,
+    (0.0, 0.0, 0.0),          # atom 1 -> nn atom 2 at 2.0
+    (2.0, 0.0, 0.0),          # atom 2 -> nn atom 1 at 2.0
+    (10.0, 0.0, 0.0),         # atom 3 -> nn atom 4 at 2.0
+    (12.0, 0.0, 0.0),         # atom 4 -> nn atom 3 at 2.0
 ]
 
 
@@ -351,7 +400,8 @@ def test_reduce_matcher_registered():
     assert matcher.default_similarity_floor == 0.05
 
 
-def _structure_view(min_dist, element_id, element_name, species_id):
+def _structure_view(positions, element_id, element_name, species_id,
+                    images=None):
     """A minimal duck-typed structure for the matcher: the attribute
     names match both makeinput's internal view and StructureControl."""
 
@@ -362,7 +412,7 @@ def _structure_view(min_dist, element_id, element_name, species_id):
         atom_element_id=list(element_id),
         atom_species_id=list(species_id),
         atom_element_name=list(element_name),
-        min_dist=min_dist,
+        **_geometry(positions, images),
     )
 
 
@@ -371,15 +421,8 @@ def test_compute_query_emits_shell_codes():
     each carrying its central element, the per-level distance, and the
     (element, species) multiset of that shell's neighbors."""
 
-    min_dist = [
-        [None, None, None, None, None],
-        [None, 0.0,  3.0,  2.0,  2.6],
-        [None, 3.0,  0.0,  2.6,  2.0],
-        [None, 2.0,  2.6,  0.0,  3.0],
-        [None, 2.6,  2.0,  3.0,  0.0],
-    ]
     structure = _structure_view(
-        min_dist,
+        _TWO_EQUIVALENT_DIMERS,
         element_id=[None, 1, 1, 2, 2],
         element_name=[None, "Si", "Si", "O", "O"],
         species_id=[None, 1, 1, 1, 1],
@@ -397,29 +440,22 @@ def test_compute_query_emits_shell_codes():
     assert atom_one.levels[1].member_names == ["O"]
 
 
-def test_compute_query_refuses_a_cell_too_small_for_the_recipe():
-    """A cell with fewer atoms than the recipe has levels cannot
-    supply them, and must say so.
+def test_compute_query_refuses_a_cutoff_too_short_for_the_recipe():
+    """A cutoff that does not reach far enough to seed every requested
+    level must say so rather than emit an empty shell.
 
-    The shell walk enumerates atoms IN THE CELL under minimum image
-    rather than building a periodic neighbour list, so a two-atom
-    cell has exactly one other atom: level 1 consumes it and level 2
-    has nothing to start from.  This is how a primitive reduction of
-    diamond silicon (8 atoms conventional, 2 primitive) reaches the
-    matcher.  Before the guard it surfaced as an unhelpful
-    "'>=' not supported between instances of 'int' and 'NoneType'",
-    because the exhausted search left the atom index at 0 and
-    min_dist[atom][0] is the 1-indexed padding slot.
+    The walk seeds each level at the closest neighbour not yet assigned
+    to a shell.  Here two atoms sit 2.33 Angstrom apart with nothing
+    else inside a 3.0 Angstrom cutoff, so level 1 consumes the only
+    neighbour and level 2 has nothing left.  Refusing keeps a
+    descriptor no structure produced out of the database (DESIGN 5.11);
+    the message names the level, how many neighbours were available,
+    and the two ways out.
     """
 
-    two_levels = dict(_ONE_SHELL, level=2)
-    min_dist = [
-        [None, None, None],
-        [None, 0.0,  2.33],
-        [None, 2.33, 0.0],
-    ]
+    two_levels = dict(_ONE_SHELL, level=2, cutoff=3.0)
     structure = _structure_view(
-        min_dist,
+        [None, (0.0, 0.0, 0.0), (2.33, 0.0, 0.0)],
         element_id=[None, 1, 1],
         element_name=[None, "Si", "Si"],
         species_id=[None, 1, 1],
@@ -428,12 +464,42 @@ def test_compute_query_refuses_a_cell_too_small_for_the_recipe():
     with pytest.raises(ValueError) as excinfo:
         ReduceMatcher().compute_query(structure, two_levels)
     message = str(excinfo.value)
-    # Name the level that failed, the cell that could not supply it,
-    #   and both ways out.
     assert "level 2 of 2" in message
-    assert "2 atoms" in message
-    assert "lower the recipe's 'level'" in message
-    assert "more atoms" in message
+    assert "1 neighbors" in message
+    assert "3.0 Angstrom cutoff" in message
+    assert "Raise the recipe's 'cutoff'" in message
+    assert "lower its 'level'" in message
+
+
+def test_compute_query_counts_each_periodic_image_separately():
+    """The property the whole descriptor rests on: a neighbour is
+    counted once per periodic IMAGE, not once per cell atom.
+
+    A single cell atom that appears four times around the central atom
+    -- the situation of a small periodic cell, where one neighbour's
+    images surround the site -- must produce a four-member shell.  The
+    cell-atom walk this replaced would have reported one, and so gave
+    the same material different descriptors in different cells
+    (DESIGN 5.11.1).
+    """
+
+    # Atom 2 has four images at 2.0 Angstrom around atom 1, the way a
+    #   tetrahedrally coordinated site sees one neighbour's replicas.
+    images = [((0.0, 0.0, 0.0), 1),
+              ((2.0, 0.0, 0.0), 2),
+              ((-2.0, 0.0, 0.0), 2),
+              ((0.0, 2.0, 0.0), 2),
+              ((0.0, -2.0, 0.0), 2)]
+    structure = _structure_view(
+        [None, (0.0, 0.0, 0.0), (2.0, 0.0, 0.0)],
+        element_id=[None, 1, 2],
+        element_name=[None, "Si", "O"],
+        species_id=[None, 1, 1],
+        images=images,
+    )
+    shell = ReduceMatcher().compute_query(structure, _ONE_SHELL)[1]
+    assert shell.levels[1].distance == pytest.approx(2.0)
+    assert shell.levels[1].member_names == ["O", "O", "O", "O"]
 
 
 def test_compute_query_allows_exactly_enough_atoms():
@@ -442,14 +508,8 @@ def test_compute_query_allows_exactly_enough_atoms():
     off-by-one that would refuse a cell that is in fact sufficient."""
 
     two_levels = dict(_ONE_SHELL, level=2)
-    min_dist = [
-        [None, None, None, None],
-        [None, 0.0,  2.0,  3.0],
-        [None, 2.0,  0.0,  2.5],
-        [None, 3.0,  2.5,  0.0],
-    ]
     structure = _structure_view(
-        min_dist,
+        [None, (0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (3.0, 0.0, 0.0)],
         element_id=[None, 1, 1, 1],
         element_name=[None, "Si", "Si", "Si"],
         species_id=[None, 1, 1, 1],
@@ -464,15 +524,8 @@ def test_distance_zero_for_equivalent_and_inf_otherwise():
     infinite the moment any test fails -- element, level distance,
     neighbor count, or neighbor composition."""
 
-    min_dist = [
-        [None, None, None, None, None],
-        [None, 0.0,  3.0,  2.0,  2.6],
-        [None, 3.0,  0.0,  2.6,  2.0],
-        [None, 2.0,  2.6,  0.0,  3.0],
-        [None, 2.6,  2.0,  3.0,  0.0],
-    ]
     structure = _structure_view(
-        min_dist,
+        _TWO_EQUIVALENT_DIMERS,
         element_id=[None, 1, 1, 2, 2],
         element_name=[None, "Si", "Si", "O", "O"],
         species_id=[None, 1, 1, 1, 1],
@@ -505,15 +558,8 @@ def test_build_payload_is_element_only_shell_code():
     distance and neighbor element symbols, all lowercased, with NO
     species component (which would not transfer across structures)."""
 
-    min_dist = [
-        [None, None, None, None, None],
-        [None, 0.0,  3.0,  2.0,  2.6],
-        [None, 3.0,  0.0,  2.6,  2.0],
-        [None, 2.0,  2.6,  0.0,  3.0],
-        [None, 2.6,  2.0,  3.0,  0.0],
-    ]
     structure = _structure_view(
-        min_dist,
+        _TWO_EQUIVALENT_DIMERS,
         element_id=[None, 1, 1, 2, 2],
         element_name=[None, "Si", "Si", "O", "O"],
         species_id=[None, 1, 1, 1, 1],
@@ -557,13 +603,8 @@ def _si_with_one_o():
     holds one oxygen neighbor at 2.0 Angstrom, built through the real
     compute_query so the shape matches production exactly."""
 
-    min_dist = [
-        [None, None, None],
-        [None, 0.0,  2.0],
-        [None, 2.0,  0.0],
-    ]
     structure = _structure_view(
-        min_dist,
+        [None, (0.0, 0.0, 0.0), (2.0, 0.0, 0.0)],
         element_id=[None, 1, 2],
         element_name=[None, "Si", "O"],
         species_id=[None, 1, 1],
@@ -631,3 +672,53 @@ def test_match_distance_bispectrum_is_l2():
     matcher = BispecMatcher()
     assert matcher.match_distance([1.0, 2.0], [1.0, 2.0]) == 0.0
     assert matcher.match_distance([0.0, 0.0], [3.0, 4.0]) == pytest.approx(5.0)
+
+
+# ==============================================================
+#  Cell-invariance on a real structure (DESIGN 5.11 -- the C126
+#  regression: the descriptor must not depend on the cell)
+# ==============================================================
+
+_FIXTURES = os.path.join(os.path.dirname(__file__),
+                         "fixtures", "structures")
+
+
+def _reduce_shells(sc_class, skl_path, sub_spec):
+    """Atom 1's (distance, sorted element multiset) per level, read
+    through the real StructureControl and the production matcher."""
+
+    sc = sc_class()
+    sc.read_input_file(skl_path)
+    sc.set_limit_dist(sub_spec["cutoff"])
+    sc.create_min_dist_matrix()
+    code = ReduceMatcher().compute_query(sc, sub_spec)[1]
+    return [(round(level.distance, 3), sorted(level.member_names))
+            for level in code.levels[1:]]
+
+
+def test_reduce_shells_are_the_physical_coordination(_sc_import):
+    """On real diamond silicon the walk reports the physical shells --
+    four nearest and twelve second neighbours -- not the cell-atom
+    counts the old walk gave (four and three from an eight-atom cell).
+
+    This is the property C126 was opened for: a shell is a count of
+    periodic images, so it describes the environment, not the cell.
+    Reads the shipped conventional-cell fixture; the primitive-cell
+    half of the invariance claim is exercised live in the C109 runs,
+    which cannot ship as a unit fixture (they need a materialized
+    primitive skeleton).
+    """
+
+    sub_spec = {"level": 2, "thick": 0.5, "cutoff": 5.0,
+                "tolerance": 0.05}
+    shells = _reduce_shells(
+        _sc_import, os.path.join(_FIXTURES, "si_diamond.skl"),
+        sub_spec)
+
+    # Four nearest and twelve second neighbours -- the multiplicities
+    #   are the point; the exact distances follow the fixture's lattice
+    #   constant and are only sanity-bounded here.
+    assert shells[0][1] == ["si"] * 4
+    assert shells[1][1] == ["si"] * 12
+    assert 2.3 < shells[0][0] < 2.4
+    assert 3.7 < shells[1][0] < 3.9

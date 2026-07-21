@@ -2770,8 +2770,8 @@ def group_reduce(settings, sc, reduce_idx):
     #   comparison the two inline phases used to do.  The matcher reads
     #   the current per-atom identity from settings -- which an earlier
     #   grouping flag in this pass may already have changed -- and the
-    #   periodic minimum-distance geometry from the StructureControl, so
-    #   the shells honor periodic boundary conditions exactly as before.
+    #   periodic neighbour geometry from the StructureControl, so the
+    #   shells count neighbours as they exist in space (DESIGN 5.11).
     matcher = ReduceMatcher()
     structure = ReduceStructureView(
         num_atoms=num_atoms,
@@ -2779,7 +2779,10 @@ def group_reduce(settings, sc, reduce_idx):
         atom_element_id=settings.atom_element_id,
         atom_species_id=settings.atom_species_id,
         atom_element_name=settings.atom_element_name,
-        min_dist=sc.min_dist,
+        direct_xyz=sc.direct_xyz,
+        num_atoms_ext=sc.num_atoms_ext,
+        ext_direct_xyz_list=sc.ext_direct_xyz_list,
+        ext_to_central_item_map=sc.ext_to_central_item_map,
     )
     fingerprints = matcher.compute_query(structure, r)
 
@@ -4516,19 +4519,23 @@ def _file_reduce_query(settings, sc, matcher, sub_spec, element,
     cache_key = _subspec_cache_key(sub_spec)
     per_atom = descriptor_cache.get(cache_key)
     if per_atom is None:
-        # Reduce shells are built from the periodic minimum-distance
-        # geometry; build that matrix now if no earlier grouping
-        # flag already did (a purely crystalline run never needed it
-        # before this point).
+        # Reduce shells are built from the periodic neighbour
+        # geometry (DESIGN 5.11); build the distance matrix now if
+        # no earlier grouping flag already did (a purely crystalline
+        # run never needed it before this point), because the same
+        # pass populates the extended-cell arrays the walk reads.
         if not getattr(settings, "_min_dist_made", False):
             make_min_dist_matrices(settings, sc)
         structure_view = ReduceStructureView(
-            num_atoms         = settings.num_atoms,
-            num_elements      = settings.num_elements,
-            atom_element_id   = settings.atom_element_id,
-            atom_species_id   = settings.atom_species_id,
-            atom_element_name = settings.atom_element_name,
-            min_dist          = sc.min_dist,
+            num_atoms               = settings.num_atoms,
+            num_elements            = settings.num_elements,
+            atom_element_id         = settings.atom_element_id,
+            atom_species_id         = settings.atom_species_id,
+            atom_element_name       = settings.atom_element_name,
+            direct_xyz              = sc.direct_xyz,
+            num_atoms_ext           = sc.num_atoms_ext,
+            ext_direct_xyz_list     = sc.ext_direct_xyz_list,
+            ext_to_central_item_map = sc.ext_to_central_item_map,
         )
         per_atom = matcher.compute_query(structure_view, sub_spec)
         descriptor_cache[cache_key] = per_atom

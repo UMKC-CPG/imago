@@ -4435,46 +4435,101 @@ class ReduceMatcher extends Matcher:
                                          # path
 
     function compute_query(structure, sub_spec):
-        # Wrap the existing reduce algorithm: for
-        # EVERY atom in the structure (not just one
-        # element), compute a shell-code vector from
-        # sub_spec's (level, thick, cutoff)
-        # parameters.  Returned in site-index order
-        # so 11.3.c can index by full-structure atom
-        # index.  The species-pass filter on
-        # method.element handles per-element
+        # Shells over a PERIODIC NEIGHBOUR LIST
+        # (DESIGN 5.11), for EVERY atom in the
+        # structure (not just one element).  Returned
+        # in site-index order so 11.3.c can index by
+        # full-structure atom index.  The species-pass
+        # filter on method.element handles per-element
         # selection at the call site; computing all
         # atoms keeps the matcher contract uniform
         # across Python-side and loen-side families
         # (loen naturally writes one row per site of
         # the whole structure).
-        #
-        # EXHAUSTION.  The shell walk starts each level
-        # from the closest atom not yet assigned to a
-        # shell, and it enumerates atoms IN THE CELL
-        # under minimum image -- it does not build a
-        # periodic neighbour list.  So a cell holding
-        # fewer atoms than the recipe asks for levels
-        # runs out: a 2-atom cell has one other atom,
-        # which level 1 consumes, leaving level 2 with
-        # nothing to start from.  REFUSE, naming the
-        # level, the cell's atom count, and the two
-        # ways out (a shallower recipe, or a cell with
-        # more atoms).  Refusing is the honest answer
-        # rather than emitting an empty shell: an empty
-        # shell is a value the walk did not find, and
-        # inventing one would put a descriptor in the
-        # database that no structure produced.
-        #
-        # That the answer depends on the cell at all is
-        # a DEFECT in this descriptor -- DESIGN 5.2
-        # calls the shell code transferable across
-        # structures -- tracked as TODO C126.  This
-        # refusal makes the defect loud where it used
-        # to be an unhandled None comparison; it does
-        # not fix it.
-        return run_reduce_in_python(structure,
-            sub_spec)
+        fingerprints = [None] * (structure.num_atoms + 1)
+        for atom in 1 .. structure.num_atoms:
+            fingerprints[atom] = shellCode(
+                structure, atom, sub_spec)
+        return fingerprints
+
+
+function shellCode(structure, atom, sub_spec):
+    # One atom's concentric shells (DESIGN 5.11).
+
+    # THE NEIGHBOUR LIST.  Every periodic IMAGE within
+    # the cutoff is a neighbour, counted once per image
+    # -- including images of the central atom itself,
+    # which are ordinary neighbours in space (in an fcc
+    # lattice the whole second shell of a site is images
+    # of that site).  Only the atom at distance zero is
+    # excluded: an atom is not its own neighbour.
+    #
+    # Counting IMAGES rather than cell atoms is what
+    # makes the descriptor transferable, which is the
+    # property 5.2 relies on when it matches a stored
+    # shell code against another structure.  The
+    # extended coordinates and the image -> central-atom
+    # map are already built by createMinDistMatrix, so
+    # no new geometry is computed here.
+    neighbours = []          # (distance, central atom)
+    for image in 1 .. structure.num_atoms_ext:
+        distance = norm(structure.direct_xyz[atom]
+                        - structure.ext_direct_xyz_list[image])
+        if 0 < distance <= sub_spec.cutoff:
+            neighbours.append((distance,
+                structure.ext_to_central_item_map[image]))
+
+    # THE WALK.  Build shells outward, seeding each level
+    # at the closest neighbour not yet assigned and
+    # sweeping the [seed, seed + thick] band into it.
+    assigned       = [0] * len(neighbours)
+    level_distance = [None] * (sub_spec.level + 1)
+    levels         = [None] * (sub_spec.level + 1)
+
+    for level in 1 .. sub_spec.level:
+        seed = index of the unassigned neighbour with the
+               smallest distance, or None if all assigned
+
+        # EXHAUSTION.  A cutoff too small to reach the
+        # requested levels leaves one with nothing to
+        # seed it.  REFUSE, naming the level and the
+        # cutoff: an empty shell is a value the walk did
+        # not find, and inventing one would store a
+        # descriptor no structure produced (5.11).
+        if seed is None:
+            error("reduce level " + level + " has no "
+                  "neighbour to seed it within cutoff "
+                  + sub_spec.cutoff)
+
+        level_distance[level] = neighbours[seed].distance
+        for i in 0 .. len(neighbours) - 1:
+            d = neighbours[i].distance
+            if (d >= level_distance[level] and
+                    d <= level_distance[level]
+                         + sub_spec.thick and
+                    d <= sub_spec.cutoff):
+                assigned[i] = level
+
+    # Each shell records its seed distance and the
+    # neighbours in it.  Within one structure the
+    # multiset carries (element, species) -- species
+    # distinguishes atoms here; the multiset STORED in
+    # the database carries element symbols only, since
+    # species numbering is local to a structure and
+    # would not transfer (5.2).
+    for level in 1 .. sub_spec.level:
+        members = [(structure.atom_element_id[c],
+                    structure.atom_species_id[c])
+                   for (d, c) in neighbours
+                   where assigned[that neighbour] == level]
+        names   = [structure.atom_element_name[c] ...]
+        levels[level] = ReduceShellLevel(
+            level_distance[level], members, names)
+
+    return ReduceShellCode(
+        structure.atom_element_id[atom],
+        structure.atom_element_name[atom],
+        sub_spec.tolerance, levels)
 
     function distance(a, b):
         # Hamming-like comparison of two shell-code

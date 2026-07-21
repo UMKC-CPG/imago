@@ -26,6 +26,14 @@ import math
 from collections import Counter
 from dataclasses import dataclass
 
+# An atom is not its own neighbor, so its own image at the origin is
+#   dropped from the neighbor list (DESIGN 5.11).  The test is against a
+#   small epsilon rather than exact zero because the extended-cell
+#   coordinates are built by arithmetic on the lattice vectors, so the
+#   self image lands near zero rather than at it.  Any real neighbor is
+#   a bond length away, several orders of magnitude above this.
+_SELF_IMAGE_EPSILON = 1.0e-3
+
 
 # ===========================================================================
 # Phase-2 matcher protocol (ARCHITECTURE 8.9, DESIGN 5.6.4)
@@ -241,11 +249,17 @@ class ReduceStructureView:
 
     During the makeinput species pass the authoritative per-atom species
     assignment lives on ``settings`` (it is mutated as earlier grouping flags
-    run), while the minimum-distance geometry lives on the
-    ``StructureControl``.  This view bundles the two so the matcher can read a
-    single object whose attribute names match ``StructureControl`` -- which
-    lets the producer (build_initial_potentials.py) hand a real
-    ``StructureControl`` to the same ``compute_query`` unchanged.
+    run), while the geometry lives on the ``StructureControl``.  This view
+    bundles the two so the matcher can read a single object whose attribute
+    names match ``StructureControl`` -- which lets the producer
+    (build_initial_potentials.py) hand a real ``StructureControl`` to the
+    same ``compute_query`` unchanged.
+
+    The geometry the walk needs is the PERIODIC NEIGHBOUR LIST (DESIGN
+    5.11): the central atom's own position, every extended-cell image, and
+    the map from an image back to the central atom it copies.  All three
+    are populated by ``create_min_dist_matrix``, so a caller that has built
+    the distance matrix already has them.
     """
 
     num_atoms: int
@@ -253,7 +267,10 @@ class ReduceStructureView:
     atom_element_id: list
     atom_species_id: list
     atom_element_name: list
-    min_dist: list
+    direct_xyz: list
+    num_atoms_ext: int
+    ext_direct_xyz_list: list
+    ext_to_central_item_map: list
 
 
 class ReduceMatcher(Matcher):
@@ -278,20 +295,32 @@ class ReduceMatcher(Matcher):
     default_similarity_floor = 0.05
 
     def compute_query(self, structure, sub_spec):
-        """Build the per-atom shell codes for ``structure``.
+        """Build the per-atom shell codes for ``structure`` (DESIGN 5.11).
 
-        Reproduces the historical reduce Phase 1 verbatim.  For each atom we
-        sweep outward building concentric shells: at each level we find the
-        closest still-unassigned atom (its distance defines the shell), then
-        gather every still-unassigned atom whose distance falls in the band
-        ``[shell_distance, shell_distance + thick]`` and within ``cutoff``.
+        For each atom we sweep outward building concentric shells: each
+        level is seeded at the closest neighbor not yet assigned to a
+        shell (its distance defines the shell), then gathers every
+        neighbor whose distance falls in the band ``[shell_distance,
+        shell_distance + thick]`` and within ``cutoff``.
+
+        A *neighbor* is a periodic IMAGE, counted once per image -- not a
+        cell atom.  That is what makes the descriptor transferable: the
+        neighbor counts describe the physical environment rather than the
+        cell a curator happened to choose for it.  Counting cell atoms
+        instead caps every shell at the number of atoms the cell contains,
+        so diamond silicon reports three second neighbors from its
+        eight-atom conventional cell and one from its two-atom primitive
+        cell, where the physical answer is twelve either way.
 
         Parameters
         ----------
         structure : ReduceStructureView or StructureControl
-            Supplies ``num_atoms``, the 1-indexed ``min_dist`` matrix, and the
-            per-atom ``atom_element_id`` / ``atom_species_id`` /
-            ``atom_element_name`` arrays.
+            Supplies ``num_atoms``, the extended-cell geometry
+            (``direct_xyz``, ``num_atoms_ext``, ``ext_direct_xyz_list``,
+            ``ext_to_central_item_map``), and the per-atom
+            ``atom_element_id`` / ``atom_species_id`` /
+            ``atom_element_name`` arrays.  The extended arrays are
+            populated by ``create_min_dist_matrix``.
         sub_spec : dict
             The reduce parameters: ``level`` (number of shells), ``thick``
             (shell acceptance band, Angstrom), ``cutoff`` (maximum neighbor
@@ -310,7 +339,6 @@ class ReduceMatcher(Matcher):
         tolerance  = sub_spec["tolerance"]
 
         num_atoms    = structure.num_atoms
-        min_dist     = structure.min_dist
         element_id   = structure.atom_element_id
         species_id   = structure.atom_species_id
         element_name = structure.atom_element_name
@@ -318,80 +346,65 @@ class ReduceMatcher(Matcher):
         fingerprints = [None] * (num_atoms + 1)
 
         for atom in range(1, num_atoms + 1):
+            neighbors = self._neighbor_list(structure, atom, cutoff)
 
-            # atom_level[other] records which shell each other atom is
-            # assigned to for the current atom: 0 = unassigned, -1 = the
-            # atom itself (excluded from its own shells), >=1 = shell index.
-            atom_level = [0] * (num_atoms + 1)
-            atom_level[atom] = -1
-
+            # assigned[i] records which shell neighbor i is in:
+            # 0 = unassigned, >=1 = shell index.
+            assigned = [0] * len(neighbors)
             level_distance = [None] * (num_levels + 1)
 
             # Build each shell outward from the current atom.
             for level in range(1, num_levels + 1):
 
-                # The closest still-unassigned atom starts this shell.  Ties
-                # keep the earlier atom index (strict ``<``), matching the
+                # The closest still-unassigned neighbor seeds this shell.
+                # Ties keep the earlier entry (strict ``<``), matching the
                 # historical scan order.
-                closest_atom = 0
-                for other in range(1, num_atoms + 1):
-                    if atom_level[other] == 0:
-                        if closest_atom == 0:
-                            closest_atom = other
-                        elif (min_dist[atom][other] <
-                              min_dist[atom][closest_atom]):
-                            closest_atom = other
+                seed = None
+                for index, (distance, _) in enumerate(neighbors):
+                    if assigned[index] == 0:
+                        if seed is None or distance < neighbors[seed][0]:
+                            seed = index
 
-                # Exhaustion: every atom is already assigned, so this
-                # level has nothing to start from.  The walk
-                # enumerates atoms IN THE CELL under minimum image
-                # rather than building a periodic neighbour list, so
-                # a cell with fewer atoms than the recipe has levels
-                # simply runs out -- a 2-atom cell has one other
-                # atom, which level 1 consumes.  Refuse, naming both
-                # ways out.  Emitting an empty shell instead would
-                # put a descriptor in the database that no structure
-                # produced.  (Without this guard `closest_atom`
-                # stays 0 and `min_dist[atom][0]` -- the 1-indexed
-                # padding slot -- is None, which surfaces as an
-                # unhelpful "'>=' not supported ... NoneType".)
-                if closest_atom == 0:
+                # Exhaustion: no neighbor is left to seed this level,
+                # because the cutoff does not reach far enough to supply
+                # as many shells as the recipe asks for.  Refuse rather
+                # than emit an empty shell -- an empty shell is a value
+                # the walk did not find, and inventing one would store a
+                # descriptor no structure produced (DESIGN 5.11).
+                if seed is None:
                     raise ValueError(
-                        f"reduce level {level} of {num_levels} has "
-                        f"no atom left to start it: the cell holds "
-                        f"{num_atoms} atoms and atom {atom} "
-                        f"exhausted them after level {level - 1}.  "
-                        f"The shell walk enumerates atoms in the "
-                        f"cell, so a cell cannot supply more levels "
-                        f"than it has atoms -- lower the recipe's "
-                        f"'level', or use a cell with more atoms "
-                        f"(a primitive reduction is the usual way "
-                        f"to arrive here).")
+                        f"reduce level {level} of {num_levels} has no "
+                        f"neighbor left to seed it: atom {atom} has "
+                        f"{len(neighbors)} neighbors within the "
+                        f"{cutoff} Angstrom cutoff, and they were "
+                        f"exhausted after level {level - 1}.  Raise the "
+                        f"recipe's 'cutoff' so it reaches the next "
+                        f"shell, or lower its 'level'.")
 
-                closest_dist = min_dist[atom][closest_atom]
+                closest_dist = neighbors[seed][0]
                 level_distance[level] = closest_dist
 
-                # Sweep every atom whose distance falls in the shell band and
-                # within the overall cutoff into this level.
-                for other in range(1, num_atoms + 1):
-                    d = min_dist[atom][other]
-                    if (d >= closest_dist and
-                            d <= closest_dist + thick and
-                            d <= cutoff):
-                        atom_level[other] = level
+                # Sweep every neighbor whose distance falls in the shell
+                # band and within the overall cutoff into this level.
+                for index, (distance, _) in enumerate(neighbors):
+                    if (distance >= closest_dist and
+                            distance <= closest_dist + thick and
+                            distance <= cutoff):
+                        assigned[index] = level
 
-            # Collect each shell's members in ascending atom-index order,
-            # recording their (element, species) pair for the comparison and
-            # their element name for the diagnostic.
+            # Collect each shell's members in ascending neighbor order,
+            # recording the (element, species) pair of the central atom
+            # each image copies -- for the comparison -- and its element
+            # name for the diagnostic.
             levels = [None] * (num_levels + 1)
             for level in range(1, num_levels + 1):
                 members = []
                 member_names = []
-                for other in range(1, num_atoms + 1):
-                    if atom_level[other] == level:
+                for index, (_, central) in enumerate(neighbors):
+                    if assigned[index] == level:
                         members.append(
-                            (element_id[other], species_id[other]))
-                        member_names.append(element_name[other])
+                            (element_id[central], species_id[central]))
+                        member_names.append(element_name[central])
                 levels[level] = ReduceShellLevel(
                     level_distance[level], members, member_names)
 
@@ -400,6 +413,40 @@ class ReduceMatcher(Matcher):
                 tolerance, levels)
 
         return fingerprints
+
+    @staticmethod
+    def _neighbor_list(structure, atom, cutoff):
+        """Every periodic image within ``cutoff`` of ``atom``, as
+        ``(distance, central_atom)`` pairs (DESIGN 5.11).
+
+        An image of the central atom itself counts: in an face-centred
+        cubic lattice the whole second shell of a site consists of images
+        of that site, so excluding them would lose a real shell.  Only the
+        atom at distance zero is dropped, since an atom is not its own
+        neighbor.  The comparison is against a small epsilon rather than
+        exact zero because the extended coordinates are built by
+        arithmetic on the lattice vectors.
+
+        No geometry is computed here beyond the distances: the extended
+        coordinates and the image-to-central map are already built by
+        ``create_min_dist_matrix``.
+        """
+
+        origin = structure.direct_xyz[atom][1:4]
+        extended = structure.ext_direct_xyz_list
+        to_central = structure.ext_to_central_item_map
+
+        neighbors = []
+        for image in range(1, structure.num_atoms_ext + 1):
+            position = extended[image]
+            # The extended list is padded to a fixed length, so a slot
+            #   that was never filled reads as None and is skipped.
+            if position is None or position[1] is None:
+                continue
+            distance = math.dist(origin, position[1:4])
+            if _SELF_IMAGE_EPSILON < distance <= cutoff:
+                neighbors.append((distance, to_central[image]))
+        return neighbors
 
     def distance(self, vec_a, vec_b):
         """Reduce distance: 0.0 when ``vec_b`` is equivalent to the reference

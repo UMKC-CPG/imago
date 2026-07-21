@@ -1477,21 +1477,28 @@ def test_harvest_fingerprints_no_declarations_is_empty():
 
 
 def _fake_two_atom_structure():
-    """A duck-typed structure (Si at row 1, O at row 2) exposing just
-    what ReduceMatcher.compute_query reads: the 1-indexed identity
-    arrays and the minimum-image distance matrix.  Stands in for the
+    """A duck-typed structure (Si at row 1, O at row 2, bonded at 2.0
+    Angstrom) exposing just what ReduceMatcher.compute_query reads: the
+    1-indexed identity arrays and the extended-cell geometry its shell
+    walk builds neighbours from (DESIGN 5.11).  Stands in for the
     StructureControl the harvest would read from the run's expanded
     imago.fract-mi, so the matcher path is tested without a real
-    structure read (which needs the space-group database)."""
+    structure read (which needs the space-group database).
+
+    The pair is isolated rather than periodic, so the extended list is
+    the two atoms themselves and each image maps to itself."""
 
     return types.SimpleNamespace(
         num_atoms=2, num_elements=2,
         atom_element_id=[None, 1, 2],
         atom_species_id=[None, 1, 1],
         atom_element_name=[None, "Si", "O"],
-        min_dist=[[None, None, None],
-                  [None, 0.0, 2.0],
-                  [None, 2.0, 0.0]])
+        direct_xyz=[None, [None, 0.0, 0.0, 0.0],
+                    [None, 2.0, 0.0, 0.0]],
+        num_atoms_ext=2,
+        ext_direct_xyz_list=[None, [None, 0.0, 0.0, 0.0],
+                             [None, 2.0, 0.0, 0.0]],
+        ext_to_central_item_map=[None, 1, 2])
 
 
 _REDUCE_DECL = ManifestFingerprint(

@@ -3200,10 +3200,11 @@ imports its neighbours from `$IMAGO_BIN`).
   PSEUDOCODE 4e.3, then code.  Evidence preserved under
   `share/curation/workspace/wingbeats/si_cmce_64_1999/`.
 
-- [ ] C126. The reduce shell code counts atoms IN THE CELL, so it is
+- [x] C126. The reduce shell code counts atoms IN THE CELL, so it is
   not the transferable descriptor DESIGN says it is.  Found
   2026-07-21 by the C109 full-vs-prim comparison, which the defect
-  crashed outright.  DESIGN + CODE; DESIGN 5.2 (the `shell_code`
+  crashed outright.  RESOLVED 2026-07-21 by option A (make it
+  transferable).  DESIGN + CODE; DESIGN 5.2 (the `shell_code`
   record) / 5.6.5 (the consumer's match) / 5.10 (the family split).
 
   **What was measured.**  The same material, the same reduce recipe,
@@ -3276,13 +3277,66 @@ imports its neighbours from `$IMAGO_BIN`).
   it across structures.  Those are different descriptors and the
   chain currently claims both.
 
-  **Chain note.**  The shell walk is specified at NO level -- neither
-  DESIGN nor PSEUDOCODE describes the closest-atom / thick-band
+  **Chain note.**  The shell walk was specified at NO level -- neither
+  DESIGN nor PSEUDOCODE described the closest-atom / thick-band
   algorithm; it was ported from the historical `group_reduce` and
-  PSEUDOCODE 11.3 only delegates to `run_reduce_in_python`.  That
+  PSEUDOCODE 11.3 only delegated to `run_reduce_in_python`.  That
   absence is why a cell-dependence this basic went unreviewed.
-  Whichever way the decision above goes, the walk itself needs
-  writing down.
+
+  **RESOLUTION -- option A, make it transferable.**  Chosen after
+  measuring that the change does NOT disturb grouping, which was the
+  only reason to hesitate.  The `compare_walks.py` study ran both the
+  old cell-atom walk and a periodic neighbour-list walk over a
+  1296-atom amorphous silica model and four small crystals: on the
+  glass the two agree atom-for-atom on the shells themselves, and on
+  every structure -- including an 8-atom diamond cell where the shells
+  differ completely (second-level counts of 3 against 12) -- the
+  species PARTITION is identical.  Grouping compares atoms WITHIN one
+  structure, and the old cap truncated every symmetry-equivalent atom
+  the same way, so the relative comparison survives even where the
+  absolute counts were wrong.  So option A corrects the descriptor
+  without changing what grouping does with it, and A's walk is
+  strictly more correct for grouping too -- no reason left to keep two
+  descriptors (option C) or merely re-document the defect (option B).
+
+  Written down the chain: new DESIGN 5.11 (what the descriptor IS --
+  a periodic neighbour list, why that makes it transferable, the
+  walk, exhaustion) with 5.11.1 recording why it replaced the
+  cell-atom walk and that grouping was measured unchanged; DESIGN 5.2
+  updated where it introduces `shell_code`; PSEUDOCODE 11.3's
+  `compute_query` now spells out the `shellCode` walk instead of
+  delegating to a named-but-unwritten helper -- closing the chain gap
+  above.  Code: `ReduceMatcher.compute_query` walks the extended-cell
+  images via a new `_neighbor_list` helper (a neighbour is a periodic
+  IMAGE, counted once per image, the central atom's own images
+  included; only distance zero is excluded); `ReduceStructureView`
+  swaps `min_dist` for the `direct_xyz` / `num_atoms_ext` /
+  `ext_direct_xyz_list` / `ext_to_central_item_map` the walk reads,
+  all already populated by `create_min_dist_matrix`; both hand-built
+  views in makeinput (`group_reduce`, `_file_reduce_query`) updated.
+  No new geometry is computed -- the extended arrays already existed,
+  which is what made A a day's work rather than a rewrite.
+
+  The exhaustion guard from the earlier crash-only commit survives in
+  new form: a cutoff too short to seed every level is refused (a
+  cutoff problem now, not a cell-size one, since a neighbour list is
+  not bounded by the atom count).  Verified on the real full-vs-prim
+  diamond cells: both now report identical shells (4 nearest + 12
+  second), where before they gave 4+3 and 1.  A real-structure
+  regression test reads the shipped diamond fixture through the
+  production matcher and asserts the physical 4-and-12 multiplicities
+  -- the test that would have caught this originally.  1021
+  non-integration tests pass.
+
+  **Consequence for C109.**  The blocker is gone: adopting `cell =
+  "prim"` no longer ships reduce records that disagree with the
+  conventional ones, because they no longer disagree.  C109's default
+  decision can now be made on cost alone.
+
+  **Left for later (small):** the ~1.3x slower per-atom walk (it scans
+  the extended list rather than a row of a matrix) is invisible at
+  seed scale but could be cached per structure if a large campaign
+  ever makes it matter.
 
 #### Phase 2 follow-up -- element-aware bispectrum (parked)
 

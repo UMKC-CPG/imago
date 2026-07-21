@@ -3322,7 +3322,12 @@ matchers Phase 2 ships with:
   array, one entry per reduction level holding that
   shell's `distance` and a `neighbors` list of neighbor
   element symbols (the neighbor count is implicit in the
-  list length).  The neighbor multiset is element-only --
+  list length).  The shells are built over a periodic
+  neighbour list, so a neighbour is counted once per
+  periodic image and the counts are those of the physical
+  environment rather than of the chosen cell -- which is
+  what lets one structure's record be matched against
+  another's (5.11).  The neighbor multiset is element-only --
   *not* element/species.  Species numbering is local to a
   single structure (one structure's "species 2" has no
   relation to another's), so it would not transfer to the
@@ -6304,6 +6309,98 @@ units for reasons of its own.  A cheap invariant that can
 only fire when something else is already broken is exactly
 the invariant worth asserting -- it costs nothing when the
 code is right and saves a whole run when it is not.
+
+### 5.11 The reduce descriptor
+
+Where 5.10 defines the path a Fortran-side descriptor
+takes, this section defines what the Python-side one *is*.
+The reduce descriptor answers "what does this atom see
+around it?" with concentric spherical shells: for each
+level, the distance out to that shell and the multiset of
+elements sitting in it.
+
+**The geometry it reads is a periodic neighbour list.**
+For an atom, every periodic *image* of every atom that
+falls within the `cutoff` is a neighbour, counted once per
+image.  This includes images of the central atom itself,
+which are ordinary neighbours in space -- in an
+face-centred cubic lattice the entire second shell of a
+site consists of images of that site.  Only the atom at
+distance zero is excluded, since an atom is not its own
+neighbour.
+
+That definition is what makes the descriptor
+**transferable**, which is the property 5.2 relies on when
+it stores a shell code in one structure and matches it
+against another (5.6.5).  A count of neighbours is a
+property of the environment; it must not change because a
+curator chose a different but equivalent cell for the same
+material.
+
+**The walk.**  Shells are built outward, one level at a
+time:
+
+1. Seed the level at the closest neighbour not yet
+   assigned to a shell.
+2. Sweep every neighbour whose distance falls in
+   `[seed, seed + thick]` and within `cutoff` into this
+   level.
+3. Repeat for `level` levels.
+
+Each shell records the seed distance and its neighbours.
+Within one structure the neighbour multiset carries
+`(element, species)`, because species distinguishes atoms
+there; the multiset *stored* in the database carries
+element symbols only, since species numbering is local to
+a structure and would not transfer (5.2).
+
+**Exhaustion is refused, not padded.**  A cutoff too small
+to reach the requested number of levels leaves a level with
+no neighbour to seed it.  That is refused, naming the level
+and the cutoff, because an empty shell is a value the walk
+did not find and inventing one would store a descriptor no
+structure produced.
+
+#### 5.11.1 Why this replaced a cell-atom walk
+
+The descriptor was originally computed over the *atoms of
+the cell*, using a minimum-image distance matrix: one
+entry per central-cell atom, holding the shortest distance
+to any of its images.  Distances were therefore
+periodic-correct, but *multiplicity* was capped at the
+number of atoms the cell happened to contain.  Diamond
+silicon has four nearest and twelve second neighbours; its
+eight-atom conventional cell reported four and three,
+because the twelve second neighbours are images of only
+three distinct cell atoms.  Its two-atom primitive cell
+reported one neighbour and could not form a second shell
+at all.
+
+Two atoms of the same material in different cells thus
+received different descriptors, which is precisely the
+property a transferable fingerprint must not have.  The
+defect was invisible for years because of where the
+descriptor came from: it began as a *grouping* tool for
+large disordered models, and in a cell big enough that
+every neighbour is a distinct atom, the two definitions
+agree exactly.  It was only when the same code was asked
+to fingerprint small crystalline reference cells that the
+cap began to bite.
+
+**Grouping is unaffected by the change**, which was
+measured rather than assumed before making it.  Grouping
+compares atoms *within* one structure, and the old cap
+truncated every symmetry-equivalent atom identically, so
+the relative comparison survived even where the absolute
+counts were wrong.  Across a 1296-atom amorphous silica
+model and four small crystals, both walks produce
+identical species partitions -- on the glass they agree
+atom-for-atom on the shells themselves, while on an
+eight-atom diamond cell the shells differ completely
+(second-level counts of three against twelve) and the
+partition is *still* identical.  So the correction changes
+what the descriptor says without changing what grouping
+does with it.
 
 ---
 
