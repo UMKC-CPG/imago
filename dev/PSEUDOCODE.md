@@ -5543,6 +5543,16 @@ function buildInitialPotentials(manifest_path,
         loen_units.extend(build_loen_units(
             ref, struct, options, manifest.characterization))
 
+    # Fail fast, before anything is dispatched (DESIGN 5.10.6).
+    # Every Fortran-side declaration the Phase 3 harvest could
+    # read must already have a unit above.  This can only fire
+    # when something upstream is already broken -- which is
+    # precisely why it is worth asserting here, where it costs a
+    # set comparison, rather than discovering it in Phase 3 after
+    # the whole convergence sweep has been paid for.
+    assertLoenCoverage(loen_units, manifest.reference_solids,
+                       manifest.characterization)
+
     # ===== Phase 1b: loen pre-flight (DESIGN 5.7 / Q3) ==
     # The fingerprint units are geometry-only and mesh-independent,
     # so they belong to no climb round: dispatch them ONCE as a
@@ -6332,17 +6342,59 @@ function main_submit_mode(argv, args, data_root):
 #   versus stop after the fetch), so the CLI rejects both at once.
 
 
+function fingerprintDeclarations(characterization,
+                                 overrides):
+    # THE declaration-set rule (DESIGN 5.10.6).  Defined once
+    # and used by BOTH ends of the producer: the harvest, to
+    # know which fingerprints to store, and the build, to know
+    # which `-loen -scf no` units to dispatch.  Writing it once
+    # is what keeps the set that is harvested identical to the
+    # set that was run; the drift this prevents cost a whole
+    # flight before the rule existed.
+    #
+    # An environment harvests the database-wide
+    # [characterization] preferred recipe (one sub_spec per
+    # method, marked preferred = true), plus any rare per-entry
+    # override the customization added (extra NON-preferred
+    # sub_specs).  DESIGN 5.7.  Each record already carries its
+    # own `preferred` flag, so composing is plain concatenation,
+    # recipe first.
+    return characterization + overrides
+
+
+function producerFingerprintDeclarations(ref,
+                                         characterization):
+    # Every declaration ANY environment of this solid could
+    # present at harvest (DESIGN 5.10.6).  The build side needs
+    # this superset because the environments themselves are not
+    # known yet -- they are discovered from the converged run --
+    # so it applies the one rule above to each case that could
+    # arise and unions the results:
+    #   * an environment with no customization  -> no overrides;
+    #   * an environment a customization annotates -> that
+    #     entry's overrides.
+    # A declaration for an entry no environment turns out to
+    # claim (a site-less customization, which environment
+    # discovery cannot yet match) merely builds one extra
+    # geometry-only run.  That is the right direction to err:
+    # a spare descriptor costs one short run, a missing one
+    # costs the flight.  Callers dedup by calc tag, so the
+    # repeated recipe collapses to one unit per (method,
+    # sub_spec).
+    decls = fingerprintDeclarations(characterization, [])
+    for entry in ref.entries:
+        decls = decls + fingerprintDeclarations(
+            characterization, entry.fingerprints)
+    return decls
+
+
 function harvestFingerprints(flight, ref, env,
         result_toml, characterization):
-    # Every environment harvests the database-wide
-    # [characterization] preferred recipe (one sub_spec per
-    # method, marked preferred=true), plus any rare per-
-    # entry override the customization added (extra NON-preferred
-    # sub_specs).  DESIGN 5.7.  Each record already carries its
-    # own `preferred` flag -- true on a characterization record,
-    # false on an override -- so composing the set is plain
-    # concatenation, recipe first.
-    decls = characterization + env.overrides
+    # This environment's declarations, by the one rule above --
+    # the same rule the build side used to decide what to
+    # dispatch, so what is read here was certainly run.
+    decls = fingerprintDeclarations(
+        characterization, env.overrides)
     if decls is empty:
         return []
 
@@ -6440,6 +6492,89 @@ function harvestFingerprints(flight, ref, env,
             preferred = d["preferred"],
             payload   = payload))
     return fingerprints
+
+
+function buildLoenUnits(ref, struct_path, options,
+                        characterization):
+    # One structure-only `imago -loen -scf no` unit per distinct
+    # Fortran-side declaration (DESIGN 5.10).  A bispectrum
+    # descriptor is computed by the engine, so each declaration
+    # needs its own dispatched run -- but the bispectrum is
+    # geometry-only, so these runs need no converged SCF and
+    # belong to no climb round.
+    #
+    # The declaration set comes from the SAME rule the harvest
+    # applies, widened to every environment this solid could
+    # present (DESIGN 5.10.6).  That is the whole point: the
+    # build set is a superset of the harvest set by
+    # construction, not by inspection.
+    declarations = producerFingerprintDeclarations(
+        ref, characterization)
+
+    units     = []
+    seen_tags = {}
+    for d in declarations:
+        matcher = MATCHERS[d["method"]]()
+        if not matcher.needs_loen_run:
+            continue      # Python-side: harvested in process.
+        # One run serves every site sharing a (method,
+        # sub_spec), because the descriptor table holds one row
+        # per atom.  The calc tag is the dedup key, and it is
+        # the same tag harvestLoenFingerprint rebuilds to find
+        # the run directory.
+        calc_tag = "loen-" + matcher.name + "-" + \
+                   sub_spec_slug(d["sub_spec"])
+        if calc_tag in seen_tags:
+            continue
+        seen_tags.add(calc_tag)
+
+        # Layer the loen overrides on a COPY of the solid's
+        # options, so the convergence units are untouched.
+        loen_options = copy(options)
+        loen_options["job"]       = "loen"
+        loen_options["scf_basis"] = "no"
+        loen_options["loeninput"] = loen_input_values(
+            matcher, d["sub_spec"])
+        units.append(CalcUnit(
+            id        = ref.reference_id,
+            structure = struct_path,
+            calc      = [calc_tag],
+            options   = loen_options,
+            kind      = "fingerprint"))
+    return units
+
+
+function assertLoenCoverage(units, refs, characterization):
+    # The pre-dispatch invariant (DESIGN 5.10.6).  Structural
+    # agreement is an argument, and an argument can be wrong, so
+    # assert it directly: every Fortran-side declaration the
+    # harvest could read must already have a unit in the flight.
+    #
+    # Called once the units are assembled and BEFORE any is
+    # sent.  It is a set comparison over calc tags, so it costs
+    # nothing -- and it converts build/harvest drift from a
+    # failure found after minutes of cluster SCF time into one
+    # raised before a single job is submitted.
+    dispatched = {(u.id, u.calc[0]) for u in units
+                  if u.kind == "fingerprint"}
+    for ref in refs:
+        for d in producerFingerprintDeclarations(
+                ref, characterization):
+            matcher = MATCHERS[d["method"]]()
+            if not matcher.needs_loen_run:
+                continue
+            calc_tag = "loen-" + matcher.name + "-" + \
+                       sub_spec_slug(d["sub_spec"])
+            if (ref.reference_id, calc_tag) not in dispatched:
+                # Name the solid AND the sub_spec: the curator
+                # needs to know which declaration went unrun,
+                # not merely that one did.
+                raise ValueError(
+                    f"{ref.reference_id}: fingerprint "
+                    f"{d['method']} {d['sub_spec']} has no "
+                    f"dispatched loen unit; the harvest would "
+                    f"read a descriptor that was never "
+                    f"computed")
 
 
 function harvestLoenFingerprint(flight, ref,

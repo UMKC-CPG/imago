@@ -2162,7 +2162,7 @@ shipped.
   requirement -- in-memory migration plus the producer's next save
   already carries forward every file a run touches -- so it earns
   its keep only for files no producer run will revisit.
-- [ ] C106. Single-source the producer's fingerprint-declaration
+- [x] C106. Single-source the producer's fingerprint-declaration
   set so the build and harvest sides cannot drift (DESIGN
   5.7/5.10).  Back-burner.  Scenario that surfaced it (2026-07-02,
   C91 Si seed live run): the producer dispatched every SCF
@@ -2187,7 +2187,37 @@ shipped.
   helper) and have BOTH the loen-unit build and the harvest
   consume that single list, so the build set is the harvest set by
   construction.  CODE; DESIGN 5.7/5.10.
-- [ ] C107. Fail fast before dispatch when a fingerprint the
+
+  **DONE 2026-07-21**, with C107 (they share a design rung and a
+  commit).  New DESIGN 5.10.6 states the rule and why the drift is
+  structural rather than incidental; PSEUDOCODE 11.4 gains
+  `fingerprintDeclarations` and `producerFingerprintDeclarations`;
+  the code follows.  The shapes differ between the two sides, which
+  is what made the single source non-obvious: the harvest composes
+  the set for ONE environment, while the build cannot know the
+  environments yet (they are discovered from the converged run).
+  So the rule is defined per-environment and the build applies it
+  to every case that could arise -- the override-less environment,
+  plus each manifest entry -- and unions.  The build set is then a
+  superset of any harvest set by construction.  Two consequences
+  documented: a site-less customization may build one spare
+  geometry-only run (the right direction to err), and the calc-tag
+  dedup still collapses the repeated recipe to one unit per
+  `(method, sub_spec)`.
+
+  A prerequisite surfaced on the way in and was done first, as its
+  own commit (aa6f341): PSEUDOCODE 11.4's `harvestFingerprints`
+  still carried the interim C55/C58 guard refusing every loen-side
+  declaration, and `harvestLoenFingerprint` was spec'd as an unbuilt
+  path with naive positional indexing, though the code had
+  implemented the finished state since C60 and DESIGN 5.10 described
+  it correctly.  Writing the single-source rule into a spec that
+  still refused loen declarations would have been incoherent.  That
+  repair was a legitimate upward edit (code verified faithful to
+  DESIGN first, per the chain rules), kept separate so a later
+  reader can tell catching-up from new specification.
+
+- [x] C107. Fail fast before dispatch when a fingerprint the
   harvest will read has no dispatched unit (DESIGN 5.10/6.2).
   Back-burner.  Same scenario as C106: the missing loen unit was
   not detected until the HARVEST phase, after the producer had
@@ -2203,6 +2233,18 @@ shipped.
   keeping even after C106 single-sources the declaration set,
   since it also guards against a unit that was built but dropped
   during dispatch assembly.  CODE; DESIGN 5.10/6.2.
+
+  **DONE 2026-07-21**, with C106.  `assert_loen_coverage` runs in
+  the producer main once the units are assembled and before any is
+  sent; it is a set comparison over calc tags, so it costs nothing
+  next to the minutes of cluster SCF time it protects.  The error
+  names the solid AND the sub_spec, since the curator needs to know
+  which declaration went unrun.  Kept even though C106 should make
+  it unreachable, exactly as this entry argued -- it guards what
+  the rule does not, and a cheap invariant that can only fire when
+  something else is already broken is the kind worth asserting.
+  Four tests, including one that a convergence-tagged unit sharing
+  the calc tag does NOT satisfy the check.
 
 - [ ] C108. Intermediate-scratch cleanup for the producer (and a
   reusable cleanup subsystem).  Motivation: the Si seed run

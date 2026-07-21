@@ -6153,6 +6153,77 @@ flag from `sub_spec.get("by_element", False)`.
 Centralizing the mapping in the matcher keeps producer
 and consumer aligned by construction.
 
+#### 5.10.6 One declaration set, checked before dispatch
+
+The producer touches the fingerprint declarations twice,
+at opposite ends of a run.  Early, the **build** side asks
+which Fortran-side declarations exist, because each one
+needs its own dispatched `-loen -scf no` unit (5.10).
+Late, the **harvest** side asks the same question again,
+because each declaration becomes a stored fingerprint
+record and a Fortran-side one is read from that unit's
+descriptor.  The two answers must be the same answer.  If
+the build's set is ever smaller than the harvest's, the
+harvest reads a descriptor no run produced.
+
+That failure has happened, and its shape is worth keeping
+on record because it is the shape any future divergence
+will take.  The harvest read its set as the database-wide
+`[characterization]` recipe plus the environment's own
+overrides; the build read only the entries' overrides.
+While every manifest carried its bispectrum as a per-entry
+declaration the two agreed by accident.  When the
+characterization block became the normal home for the
+recipe (5.7), a manifest with a recipe and no overrides
+left the build with nothing to dispatch, and the producer
+ran every solid's full convergence sweep before dying at
+harvest on a descriptor that was never computed.
+
+**One rule, two consumers.**  The composition of a
+declaration set -- the recipe, then that environment's
+overrides -- is defined once and used by both sides.  The
+harvest applies it to one environment.  The build cannot
+know the environments yet, since they are discovered from
+the converged run (5.7), so it applies the same rule to
+every entry the manifest declares *and* to the
+override-less case, and takes the union.  The build's set
+is therefore a superset of any set the harvest can later
+present, by construction rather than by inspection.  This
+is what makes the agreement structural: a future third
+source, or a change in precedence, is written in one place
+and both sides move together.
+
+Two consequences are worth naming.  The union may build a
+unit for a declaration no environment turns out to claim
+-- a site-less customization, for instance, which the
+harvest's environment discovery cannot yet match (5.7).
+That is a wasted geometry-only run, which is cheap, and it
+is the right direction to err: an extra descriptor costs
+one short run, a missing one costs the whole flight.  And
+the union deduplicates by calc tag, so one run still
+serves every environment sharing a `(method, sub_spec)`.
+
+**Checked before anything is dispatched.**  Structural
+agreement is an argument, and an argument can be wrong.
+The producer therefore also asserts the invariant directly:
+once the units are assembled and before any is sent, every
+Fortran-side declaration the harvest could read must have a
+matching loen unit in the flight.  The check is a
+set comparison over calc tags, costing nothing, and it
+converts the entire class of build/harvest drift from a
+failure discovered after minutes of cluster SCF time into
+one raised before a single job is submitted, naming the
+solid and the `sub_spec` that has no run.
+
+This backstop keeps its value even though the single rule
+above should make it unreachable.  It guards what the rule
+does not: a unit that was composed correctly and then
+dropped during flight assembly, or a filter that removes
+units for reasons of its own.  A cheap invariant that can
+only fire when something else is already broken is exactly
+the invariant worth asserting -- it costs nothing when the
+code is right and saves a whole run when it is not.
+
 ---
 
 ## 6. High-Throughput Calculation Flights

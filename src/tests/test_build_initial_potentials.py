@@ -15,6 +15,7 @@ no Imago runs.  conftest.py's ``SCRIPTS_DIR`` insertion lets us
 import ``build_initial_potentials`` directly.
 """
 
+import dataclasses
 import os
 import tomllib
 import types
@@ -42,6 +43,9 @@ from build_initial_potentials import (
     _thermsmear_for,
     make_imago_provenance,
     build_loen_units,
+    fingerprint_declarations,
+    producer_fingerprint_declarations,
+    assert_loen_coverage,
     harvest_fingerprints,
     curation_workspace_root,
     structure_cache_dir,
@@ -1264,6 +1268,119 @@ def test_build_loen_units_dedups_recipe_and_override():
     units = build_loen_units(ref, "si.skel", options, [_BISPEC_DECL])
 
     assert len(units) == 1
+
+
+_REDUCE_DECL = ManifestFingerprint(
+    method="reduce",
+    sub_spec={"level": 2, "thick": 0.5, "cutoff": 5.0,
+              "tolerance": 0.05})
+
+
+class TestOneDeclarationSet:
+    """DESIGN 5.10.6: the build and harvest sides compose their
+    declaration sets through one rule, so they cannot drift."""
+
+    def test_the_rule_is_recipe_then_overrides(self):
+        # Order matters to the reader of the resulting record list
+        #   (the recipe's preferred records come first), and each
+        #   record already carries its own preferred flag, so the
+        #   rule neither reorders nor re-stamps anything.
+        recipe = [_BISPEC_DECL]
+        overrides = [_REDUCE_DECL]
+        assert fingerprint_declarations(recipe, overrides) == [
+            _BISPEC_DECL, _REDUCE_DECL]
+
+    def test_the_rule_does_not_alias_its_inputs(self):
+        # The harvest calls this per environment; a returned list
+        #   that aliased the recipe would let one environment's
+        #   mutation leak into the next.
+        recipe = [_BISPEC_DECL]
+        result = fingerprint_declarations(recipe, [])
+        result.append(_REDUCE_DECL)
+        assert recipe == [_BISPEC_DECL]
+
+    def test_the_build_set_covers_the_override_less_case(self):
+        # An environment that no customization annotates harvests
+        #   the recipe alone.  The build cannot know whether such an
+        #   environment exists -- environments are discovered from
+        #   the converged run -- so its set must include that case.
+        ref = _ref(entries=[
+            ReferenceEntry(element="Si", atom_site=1, label="a",
+                           default=True, description="d",
+                           fingerprints=[_REDUCE_DECL])])
+        declarations = producer_fingerprint_declarations(
+            ref, [_BISPEC_DECL])
+        assert _BISPEC_DECL in declarations
+        assert _REDUCE_DECL in declarations
+
+    def test_the_build_set_is_a_superset_of_every_harvest_set(self):
+        # The invariant the whole design rests on, stated directly:
+        #   whatever any environment presents at harvest, the build
+        #   already accounted for.
+        entries = [
+            ReferenceEntry(element="Si", atom_site=1, label="a",
+                           default=True, description="d",
+                           fingerprints=[_REDUCE_DECL]),
+            ReferenceEntry(element="O", atom_site=2, label="b",
+                           default=False, description="d",
+                           fingerprints=[])]
+        ref = _ref(entries=entries)
+        build_set = producer_fingerprint_declarations(
+            ref, [_BISPEC_DECL])
+        # Every environment the harvest could discover: one per
+        #   entry, plus one that no customization annotates.
+        for overrides in ([], [_REDUCE_DECL], []):
+            harvest_set = fingerprint_declarations(
+                [_BISPEC_DECL], overrides)
+            for declaration in harvest_set:
+                assert declaration in build_set
+
+
+class TestLoenCoverageIsCheckedBeforeDispatch:
+    """DESIGN 5.10.6: the pre-dispatch invariant.  Cheap, and it
+    can only fire when something upstream is already broken."""
+
+    def _ref_with_recipe(self):
+        return _ref(entries=[
+            ReferenceEntry(element="Si", atom_site=1, label="a",
+                           default=True, description="d",
+                           fingerprints=[])])
+
+    def test_a_well_formed_flight_passes(self):
+        ref = self._ref_with_recipe()
+        units = build_loen_units(ref, "si.skel", {}, [_BISPEC_DECL])
+        # Does not raise.
+        assert_loen_coverage(units, [ref], [_BISPEC_DECL])
+
+    def test_a_dropped_unit_raises_naming_solid_and_subspec(self):
+        # The failure this guards: a unit composed correctly and
+        #   then lost during flight assembly.  Without the check it
+        #   surfaces only at harvest, after every solid's
+        #   convergence sweep has been paid for.
+        ref = self._ref_with_recipe()
+        with pytest.raises(ValueError) as excinfo:
+            assert_loen_coverage([], [ref], [_BISPEC_DECL])
+        message = str(excinfo.value)
+        assert "au_fcc" in message
+        assert "bispectrum" in message
+        assert "twoj1" in message
+
+    def test_python_side_declarations_need_no_unit(self):
+        # A reduce-only recipe dispatches nothing and must still
+        #   pass: those descriptors are computed in process.
+        ref = self._ref_with_recipe()
+        assert_loen_coverage([], [ref], [_REDUCE_DECL])
+
+    def test_a_non_fingerprint_unit_does_not_satisfy_the_check(self):
+        # Only units tagged kind="fingerprint" carry a descriptor.
+        #   A convergence unit that happened to share the calc tag
+        #   must not be mistaken for one.
+        ref = self._ref_with_recipe()
+        units = build_loen_units(ref, "si.skel", {}, [_BISPEC_DECL])
+        mistagged = [
+            dataclasses.replace(units[0], kind="convergence")]
+        with pytest.raises(ValueError, match="au_fcc"):
+            assert_loen_coverage(mistagged, [ref], [_BISPEC_DECL])
 
 
 def test_sub_spec_slug_is_slug_safe_and_ordered():
