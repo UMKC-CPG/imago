@@ -5275,18 +5275,33 @@ resolvable from the manifest at all.  The rest are per solid.
   default moved to `"prim"` was produced from a conventional
   cell, so the missing field fills with `"full"`.
 
-  Moving the default *raises* the value of recording it.  While
-  every database was built one way, an unrecorded cell was a gap
-  that cost nothing; now a database can hold entries harvested
-  under either cell with nothing on the entry to say which.  The
-  entries remain individually correct -- that is what
-  cell-invariance means -- but two harvests of one environment in
-  different cells differ in the last few digits of their stored
-  distances, so the dedup keeps both rather than collapsing them,
-  and a curator reading the file cannot tell why.  The migration
-  above is exactly what closes this, and its derivation stays
-  honest only while the pre-`prim` history is unambiguous, which
-  argues for doing it sooner rather than later.
+  Moving the default gives recording it a concrete purpose, though
+  a narrower one than it might first appear.  **It does not affect
+  dedup, and must never be allowed to.**  The dedup keys on the
+  preferred bispectrum descriptor (5.2.3), which the engine
+  computes from a periodic neighbour list at seven significant
+  figures and which is identical in both cells -- measured, not
+  assumed -- so two harvests of one environment in different cells
+  collapse to one entry exactly as they should.  Were `cell` ever
+  folded into the dedup or the match, it would manufacture
+  distinctions the physics does not have: the same environment
+  stored twice because a curator drew a different cell, inflating
+  the database with redundancy and teaching a learned predictor
+  (5.2.4) that cell choice is a feature of an environment.  It is
+  not.  `cell` belongs beside `commit` and `generated_at` -- it
+  says where a number came from, never what the number means.
+
+  What it does buy is **reconstruction**.  The Imago provenance
+  fields exist so the originating SCF can be identified and re-run
+  on demand, and the cell is now part of what defines that run: it
+  fixes the atom count, and through the reciprocal cell the mesh
+  the climb converges on.  Given a database entry and no recorded
+  cell, that run cannot be reproduced.  The same fact serves the
+  resource-and-cost dataspace (section 8), whose size signature is
+  built on `atom_count` and `secular_dimension` -- both halved or
+  doubled by this one setting, so a cost model fitted across mixed
+  cells without knowing which would be fitting the cell choice as
+  noise.
 
 The one *harvest* setting a solid may carry is not a run setting
 and resolves against the `[harvest]` block, not `[defaults]`:

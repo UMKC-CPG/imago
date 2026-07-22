@@ -2423,57 +2423,88 @@ shipped.
   `[defaults]` restores the old behaviour for any structure that
   needs it.
 
-  **Now due, and more urgent than before:** recording `cell` in each
-  entry's provenance.  While every database was built one way an
-  unrecorded cell cost nothing; now a database can hold entries from
-  either cell with nothing to say which.  They stay individually
-  correct -- that is what cell-invariance means -- but two harvests
-  of one environment in different cells differ in the last digits of
-  their stored distances, so the dedup keeps both instead of
-  collapsing them, and a curator cannot tell why.  It is a
-  required-field change, hence a schema bump (5.2.5) with an
-  honestly derivable migration (everything written before this
-  decision is `full`) -- and that derivation stays honest only while
-  the pre-`prim` history is unambiguous, so it wants doing soon.
-  Tracked as C127.
+  **Follow-up:** recording `cell` in each entry's provenance, so a
+  run can be reconstructed from its entry and the cost dataspace
+  can tell an 8-atom run from a 2-atom one.  Tracked as C127.  Note
+  it does NOT affect dedup -- an earlier draft of this entry claimed
+  it did, and that was wrong; see C127 for the measurement that
+  corrected it.
 
 - [ ] C127. Record `cell` in each entry's provenance, and make it a
-  required, resolvable run setting.  Due now that C109 moved the
-  default to `prim` (2026-07-21): a database can hold entries
-  harvested under either cell with nothing on the entry to say
-  which.  DESIGN 5.7 already states the trigger -- the exemption
-  from manifest rule 2 lasts exactly as long as `cell` is recorded
-  nowhere, because the rule exists so that nothing EMITTED rides on
-  an implicit default (VISION Principle 11).  Recording it ends the
-  exemption by definition.  DESIGN + CODE; DESIGN 5.2 (provenance
-  block) / 5.2.5 (the version gate) / 5.7 (the run setting).
+  required, resolvable run setting.  Raised when C109 moved the
+  default to `prim` (2026-07-21), so a database can now hold entries
+  harvested under either cell.  LOW priority -- see the correction
+  below, which removed the urgency the first draft claimed.  DESIGN
+  + CODE; DESIGN 5.2 (provenance block) / 5.2.5 (the version gate) /
+  5.7 (the run setting) / 8.2 (the cost size signature).
 
-  **Why it matters in practice, not just in principle.**  Entries
-  from the two cells stay individually correct -- that is what
-  cell-invariance means, and C126 plus the C109 runs measured it.
-  But two harvests of ONE environment in different cells differ in
-  the last few digits of their stored shell distances (the two
-  cells' coordinates are arithmetically different), so the
-  bispectrum dedup treats them as distinct and keeps both.  The
-  file then carries a duplicate environment with no field
-  explaining it, and a curator reading it cannot tell whether that
-  is two genuine environments or one environment harvested twice.
+  **A correction, recorded because the reasoning is the useful
+  part.**  This entry was first written claiming that mixing cells
+  would leave DUPLICATE environments the dedup could not collapse,
+  because two harvests of one environment in different cells differ
+  in the last digits of their stored distances.  That was wrong, and
+  measuring it took one script.  The dedup keys on the preferred
+  BISPECTRUM descriptor (5.2.3), not on the reduce shell code: the
+  engine computes it from a periodic neighbour list, emits seven
+  significant figures, and both cells produce the SAME seven --
+  bitwise identical across all nine channels, L2 distance 0.0
+  against a similarity floor of 0.10.  Inserting every prim entry
+  into a full-harvested database under deliberately different labels
+  (so the label-replace path could not mask the question) skipped
+  all seven as duplicates: 8 entries before, 8 after.  The last-digit
+  differences that prompted the worry are in the REDUCE distances,
+  computed in Python from coordinates at double precision -- a
+  different fingerprint family, and one the dedup never consults.
+
+  **`cell` must never enter the dedup or the match.**  This is the
+  trap the correction exposes, and it is worth stating as a rule
+  rather than leaving implicit.  Folding `cell` into either key
+  would manufacture distinctions the physics does not have: one
+  environment stored twice because a curator drew a different cell,
+  inflating the database with redundancy and teaching the learned
+  predictor (5.2.4) that cell choice is a property of an atom's
+  surroundings.  C126 and the C109 validation exist precisely to
+  establish that it is not.  `cell` belongs beside `commit` and
+  `generated_at` -- provenance describing where a number came from,
+  never a key describing what it means.
+
+  **What recording it actually buys.**  Two things, both real but
+  neither urgent:
+    (a) RECONSTRUCTION.  The Imago provenance fields exist so an
+        entry's originating SCF can be identified and re-run.  The
+        cell is now part of what defines that run -- it fixes the
+        atom count and, through the reciprocal cell, the mesh the
+        climb converges on -- so an entry without it cannot be
+        reproduced from what it records.
+    (b) THE COST DATASPACE (section 8), whose size signature is
+        built on `atom_count` and `secular_dimension`.  A primitive
+        cell halves both.  A resource model fitted across mixed
+        cells with no field distinguishing them would be fitting
+        the cell choice as unexplained scatter.  This is the
+        stronger of the two, and it only bites once the cost
+        dataspace is actually being trained (C77-C82).
 
   **The work.**  Add `cell` to the required Imago provenance set
   beside `type_assignment`, which by the C105 rule (the
-  required-field set IS the version) makes this a v2 -> v3 schema
+  required-field set IS the version) makes it a v2 -> v3 schema
   bump.  Register the migration: `cell` IS derivable for every file
-  written before this change, because the default was `full`
-  throughout, so the derivation fills `"full"` and is honest.  Then
-  drop `cell` from `EXEMPT_RUN_SETTING_KEYS` so a manifest must
-  resolve it, and update the authoring tools (they already emit it).
+  written before C109, because the default was `full` throughout, so
+  the derivation fills `"full"` honestly.  Then drop `cell` from
+  `EXEMPT_RUN_SETTING_KEYS` so a manifest must resolve it -- the
+  exemption in DESIGN 5.7 lasts exactly as long as `cell` is
+  recorded nowhere, since the rule it is exempt from exists so that
+  nothing EMITTED rides on an implicit default (VISION Principle
+  11).  Recording it ends the exemption by definition.
 
-  **This is the first real exercise of the C105 machinery**, which
-  until now has an empty `SCHEMA_MIGRATIONS` table and a version
-  gate that only ever refuses.  Worth doing while the derivation is
-  unambiguous: it stays honest only while the pre-`prim` history is
-  entirely `full`, so every day of mixed-cell harvesting makes it
-  less so.
+  **Also the first real exercise of the C105 machinery**, which so
+  far has an empty `SCHEMA_MIGRATIONS` table and a version gate that
+  only ever refuses.  Doing it here would prove the migrate-when-
+  honest path with a derivation that is genuinely derivable.  The
+  one time-sensitive aspect: that derivation is honest only while
+  the pre-C109 history is entirely `full`, so it gets murkier the
+  longer mixed-cell harvesting runs -- though since every database
+  can simply be regenerated at this stage, that is a mild argument
+  rather than a deadline.
 
 #### Seed-run refinement -- producer code tasks (design settled)
 
