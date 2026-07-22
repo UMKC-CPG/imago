@@ -5181,8 +5181,9 @@ resolvable from the manifest at all.  The rest are per solid.
   eV).  A bare `"gaussian"` names no width, so makeinput keeps its
   rc-sourced default (no smearing).
 - `cell` (string): which cell the reference run computes in --
-  `"full"` (the conventional cell of the structure's space
-  group) or `"prim"` (its primitive reduction).  It becomes the
+  `"prim"` (the primitive reduction of the structure's space
+  group, the default) or `"full"` (its conventional cell).  It
+  becomes the
   `full` / `prim` token in the materialized `imago.skl`, which
   `structure_control` reads to decide whether to reduce; the
   reduction is performed by the space-group operations already
@@ -5197,12 +5198,43 @@ resolvable from the manifest at all.  The rest are per solid.
   structure yields the same entries either way.  What changes is
   the size of the problem.  A primitive cell of an n-fold centred
   lattice holds n times fewer atoms and, at a fixed k-point
-  density, takes n times more k-points -- and because both
-  dominant cost terms (the real-space pair integrals, and the
-  Bloch sum with its diagonalization) carry a factor of atom
-  count cubed against one factor of k-point count, the net work
-  scales as `1/n^2`.  For an F-centred cubic cell (n = 4) that is
-  a sixteen-fold reduction.
+  density, takes n times more k-points.
+
+  **The primitive cell is the default, on measured evidence.**  A
+  scaling argument suggests the saving should be large -- both
+  dominant cost terms carry atom count cubed against one factor
+  of k-point count, so `1/n^2`, or sixteen-fold for an F-centred
+  cubic cell.  The measurement does not bear that out: at these
+  system sizes the cubic term does not dominate, and the same
+  structure converged in both cells costs
+
+      diamond Si (8 atoms -> 2)   5.1 s -> 2.7 s   1.9x
+      Si III BC8 (16 atoms -> 8)  43.6 s -> 22.8 s  1.9x
+
+  at its converged mesh.  So the honest figure is about **twice**,
+  not sixteen times, and it should improve for larger cells where
+  the cubic term does begin to tell.  Across a whole seeding
+  campaign the advantage is smaller again -- about 1.33x -- because
+  the primitive cell's larger reciprocal cell makes the mesh climb
+  walk further before the energy flattens (eleven rungs against
+  seven for diamond).  The campaign figure is the pessimistic one:
+  a climb is a one-time cost per material, while a production run
+  reads its k-point density from the guidance dataspace and pays
+  only the single converged calculation.
+
+  Two independent checks say the choice costs nothing in
+  correctness.  Converged energies agree to **0.002 meV/atom** on
+  every insulator tested (0.8 meV/atom on the one metal, which
+  settles at a deliberately rough mesh anyway).  And the axis
+  classes the climb depends on -- which reciprocal axes must share
+  a k-point count -- agree between this design's Python port and
+  imago's own runtime computation for every cell and centring
+  tested, including the case where the reduction genuinely changes
+  them: a C-centred orthorhombic cell has three independent axes
+  conventionally and only two primitively, because its primitive
+  vectors `(a +/- b)/2` have equal length.  That is the conjugation
+  of 2.7 being exercised and confirmed, not merely unexercised and
+  assumed.
 
   Two consequences follow from *cost, not physics*.  First,
   `cell` is **not** a predictor sub-model selector, unlike
@@ -5240,8 +5272,21 @@ resolvable from the manifest at all.  The rest are per solid.
   Because recording it also adds a required provenance field,
   that change is a schema version bump (5.2.5) carrying an
   honestly derivable migration: every file written before the
-  bump was produced from a conventional cell, so the missing
-  field fills with `"full"`.
+  default moved to `"prim"` was produced from a conventional
+  cell, so the missing field fills with `"full"`.
+
+  Moving the default *raises* the value of recording it.  While
+  every database was built one way, an unrecorded cell was a gap
+  that cost nothing; now a database can hold entries harvested
+  under either cell with nothing on the entry to say which.  The
+  entries remain individually correct -- that is what
+  cell-invariance means -- but two harvests of one environment in
+  different cells differ in the last few digits of their stored
+  distances, so the dedup keeps both rather than collapsing them,
+  and a curator reading the file cannot tell why.  The migration
+  above is exactly what closes this, and its derivation stays
+  honest only while the pre-`prim` history is unambiguous, which
+  argues for doing it sooner rather than later.
 
 The one *harvest* setting a solid may carry is not a run setting
 and resolves against the `[harvest]` block, not `[defaults]`:

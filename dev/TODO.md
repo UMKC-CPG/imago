@@ -2281,7 +2281,7 @@ shipped.
   standalone-script boundary and the generic-pruning-hook belong in
   ARCHITECTURE/DESIGN before (c) is coded.  CODE + DESIGN.
 
-- [ ] C109. Decide the default cell -- full (conventional) vs
+- [x] C109. Decide the default cell -- full (conventional) vs
   primitive -- for the materialized `imago.skl`.  Surfaced by the
   Si seed run (2026-07-02): a primitive cell has fewer atoms, so a
   smaller secular equation and a faster SCF, and the harvested
@@ -2370,14 +2370,110 @@ shipped.
   one factor of k-point count): about 16x for the diamond cells and
   4x for the other two.  THEN decide the default.
 
-  **Deferred until that decision:** recording `cell` in each entry's
-  provenance.  A database otherwise cannot say which cell produced
-  a potential, which is what makes mixing unanswerable -- but it is
-  a required-field change, hence a schema bump (5.2.5) with an
-  honestly derivable migration (everything written so far is
-  `full`).  No point bumping the schema for a knob we might not
-  keep; if we do keep it, that migration is the first real exercise
-  of the C105 machinery.
+  **DECIDED 2026-07-21: the default is `prim`.**  Both live runs
+  completed 8/8 (jobs 15165434 full, 15167972 prim) from a wiped
+  workspace, so nothing was served from the run-reuse cache, and
+  they were run SEQUENTIALLY rather than side by side -- the
+  earlier attempt had both on one node, which made its timings
+  worthless.
+
+  Cost, per converged calculation:
+
+      diamond Si   (8 -> 2 atoms)   5.1 s -> 2.7 s    1.9x
+      Si III BC8   (16 -> 8 atoms)  43.6 s -> 22.8 s  1.9x
+      si_cmce      (metal)          13.8 s -> 12.1 s  1.1x
+
+  So about **twice**, not the 16x the `1/n^2` scaling argument
+  predicted -- at these sizes the cubic term simply does not
+  dominate, and the 8x more k-points a primitive F-centred cell
+  needs ([6,6,6] -> [12,12,12]) nearly cancels the cheaper
+  diagonalization.  The whole-campaign figure is smaller again,
+  1.33x (492 s -> 369 s), because the primitive climb walks
+  eleven rungs to the conventional seven.  The campaign number is
+  the pessimistic one and NOT the one that governs: a climb is a
+  one-time seeding cost per material, while a production run reads
+  its density from the guidance dataspace and pays only the single
+  converged calculation.  At thousands of simulations, 1.9x is the
+  figure that compounds.
+
+  Correctness cost: none measurable.  Converged energies agree to
+  **0.002 meV/atom** on every insulator (0.8 meV/atom on si_cmce,
+  the metal, which settles at a deliberately rough mesh anyway).
+  Reduce and bispectrum fingerprints match across cells in both
+  directions for all three centrings, once C126 made the reduce
+  descriptor transferable.
+
+  The one genuine risk -- the prim-only conjugation in
+  `axis_classes_for_cell` (DESIGN 2.7), the same class of math as
+  the `buildAtomPerm` hex/trig bug -- is now directly validated
+  rather than merely unexercised.  si_cmce's reduction GENUINELY
+  changes its axis classes (`1 2 3` conventional -> `1 1 3`
+  primitive, because a C-centred lattice's primitive vectors
+  `(a +/- b)/2` have equal length), and the Python port and imago's
+  own runtime `computeAxisClasses` agree on the partition for every
+  cell and centring tested.  Two independent implementations
+  agreeing on a non-trivial answer is much stronger evidence than
+  an absence of errors.
+
+  Changed: `DEFAULT_CELL` -> `"prim"` with the measurement recorded
+  beside it, `default_run_settings()` emits it, DESIGN 5.7 rewritten
+  around the measured figures (replacing the `1/n^2` estimate),
+  PSEUDOCODE constant updated.  A manifest naming no cell now gets
+  the primitive reduction; `cell = "full"` per solid or in
+  `[defaults]` restores the old behaviour for any structure that
+  needs it.
+
+  **Now due, and more urgent than before:** recording `cell` in each
+  entry's provenance.  While every database was built one way an
+  unrecorded cell cost nothing; now a database can hold entries from
+  either cell with nothing to say which.  They stay individually
+  correct -- that is what cell-invariance means -- but two harvests
+  of one environment in different cells differ in the last digits of
+  their stored distances, so the dedup keeps both instead of
+  collapsing them, and a curator cannot tell why.  It is a
+  required-field change, hence a schema bump (5.2.5) with an
+  honestly derivable migration (everything written before this
+  decision is `full`) -- and that derivation stays honest only while
+  the pre-`prim` history is unambiguous, so it wants doing soon.
+  Tracked as C127.
+
+- [ ] C127. Record `cell` in each entry's provenance, and make it a
+  required, resolvable run setting.  Due now that C109 moved the
+  default to `prim` (2026-07-21): a database can hold entries
+  harvested under either cell with nothing on the entry to say
+  which.  DESIGN 5.7 already states the trigger -- the exemption
+  from manifest rule 2 lasts exactly as long as `cell` is recorded
+  nowhere, because the rule exists so that nothing EMITTED rides on
+  an implicit default (VISION Principle 11).  Recording it ends the
+  exemption by definition.  DESIGN + CODE; DESIGN 5.2 (provenance
+  block) / 5.2.5 (the version gate) / 5.7 (the run setting).
+
+  **Why it matters in practice, not just in principle.**  Entries
+  from the two cells stay individually correct -- that is what
+  cell-invariance means, and C126 plus the C109 runs measured it.
+  But two harvests of ONE environment in different cells differ in
+  the last few digits of their stored shell distances (the two
+  cells' coordinates are arithmetically different), so the
+  bispectrum dedup treats them as distinct and keeps both.  The
+  file then carries a duplicate environment with no field
+  explaining it, and a curator reading it cannot tell whether that
+  is two genuine environments or one environment harvested twice.
+
+  **The work.**  Add `cell` to the required Imago provenance set
+  beside `type_assignment`, which by the C105 rule (the
+  required-field set IS the version) makes this a v2 -> v3 schema
+  bump.  Register the migration: `cell` IS derivable for every file
+  written before this change, because the default was `full`
+  throughout, so the derivation fills `"full"` and is honest.  Then
+  drop `cell` from `EXEMPT_RUN_SETTING_KEYS` so a manifest must
+  resolve it, and update the authoring tools (they already emit it).
+
+  **This is the first real exercise of the C105 machinery**, which
+  until now has an empty `SCHEMA_MIGRATIONS` table and a version
+  gate that only ever refuses.  Worth doing while the derivation is
+  unambiguous: it stays honest only while the pre-`prim` history is
+  entirely `full`, so every day of mixed-cell harvesting makes it
+  less so.
 
 #### Seed-run refinement -- producer code tasks (design settled)
 

@@ -23,6 +23,7 @@ import types
 import pytest
 
 from curation_manifest import (
+    DEFAULT_CELL,
     load_manifest_v2,
     CurationManifest,
     ReferenceSolid,
@@ -285,25 +286,29 @@ class TestCellRunSetting:
     is exempt from rule 2's resolvability requirement and carries a
     built-in default."""
 
-    def test_a_manifest_naming_no_cell_resolves_to_full(
+    def test_a_manifest_naming_no_cell_resolves_to_the_default(
             self, tmp_path):
         # The exemption in practice: _VALID_COD_MANIFEST names no
         #   cell anywhere, and must still load -- every manifest
-        #   written before this setting existed does the same.
+        #   written before this setting existed does the same.  It
+        #   then takes the built-in default, the primitive cell.
         path = _write(tmp_path, _VALID_COD_MANIFEST)
         manifest = load_manifest_v2(path)
         apply_manifest_defaults(manifest)
         solid = manifest.reference_solids[0]
-        assert solid.cell == "full"
+        assert solid.cell == DEFAULT_CELL == "prim"
 
     def test_a_defaults_cell_is_inherited(self, tmp_path):
+        # Named in [defaults] and inherited -- shown with "full", the
+        #   non-default value, so inheritance is what is being tested
+        #   rather than the built-in default coincidentally matching.
         path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
             "schema_version = 2\n\n",
-            "schema_version = 2\n\n[defaults]\ncell = \"prim\"\n\n"))
+            "schema_version = 2\n\n[defaults]\ncell = \"full\"\n\n"))
         manifest = load_manifest_v2(path)
         apply_manifest_defaults(manifest)
         solid = manifest.reference_solids[0]
-        assert solid.cell == "prim"
+        assert solid.cell == "full"
 
     def test_a_per_solid_cell_overrides_defaults(self, tmp_path):
         path = _write(tmp_path, _VALID_COD_MANIFEST.replace(
@@ -345,10 +350,13 @@ class TestCellRunSetting:
         sources = load_structure_sources(path)
         assert [s.cell for s in sources] == ["prim", "prim"]
 
-    def test_the_relaxed_reader_defaults_cell_to_full(self, tmp_path):
+    def test_the_relaxed_reader_defaults_cell_too(self, tmp_path):
+        # A sketch naming no cell takes the same built-in default the
+        #   full loader takes, so the pre-flight and the run that
+        #   follows it name the cached skeleton identically.
         path = _write(tmp_path, _SOURCES_ONLY_MANIFEST)
         sources = load_structure_sources(path)
-        assert [s.cell for s in sources] == ["full", "full"]
+        assert [s.cell for s in sources] == [DEFAULT_CELL] * 2
 
 
 class TestRule2RequiredSolidFields:
@@ -2047,7 +2055,7 @@ class TestMaterializeOnly:
             "si_diamond", "a_si"}
         # The cod_id solid's CIF + skl land in the redirect mirror.
         assert (mirror / "si_diamond.cif").exists()
-        assert (mirror / "si_diamond-full.skl").exists()
+        assert (mirror / f"si_diamond-{DEFAULT_CELL}.skl").exists()
         # The structure_path solid resolves against the manifest dir.
         diamond = next(r for r in report
                        if r["reference_id"] == "si_diamond")

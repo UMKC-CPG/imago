@@ -6274,9 +6274,11 @@ RUN_SETTING_KEYS = ("basis", "functional",
 #   primitive reduction.  A cost setting, not a physics one --
 #   the harvested potential and every fingerprint are
 #   cell-invariant -- so it is NOT a predictor sub-model
-#   selector.  The default is the conventional cell.
+#   selector.  The default is the PRIMITIVE reduction, which
+#   costs about half as much per converged calculation and
+#   agrees with the conventional cell to 0.002 meV/atom.
 VALID_CELLS  = ("full", "prim")
-DEFAULT_CELL = "full"
+DEFAULT_CELL = "prim"
 
 # The run settings exempt from rule 2's resolvability requirement,
 #   because they are recorded nowhere and so leave no provenance
