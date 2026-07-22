@@ -8901,10 +8901,10 @@ mechanism and a client-supplied key, because only the
 client knows what defines identity for its calculations.
 Reclamation divides the same way, and for the same reason:
 
-- *Mechanism (kaleidoscope).*  Walk a workspace, resolve
-  each run directory's `intermediate` target, and remove
-  what a policy marks reclaimable -- with the dry-run
-  preview, the reporting, and the refusal rules below.
+- *Mechanism (kaleidoscope).*  Walk a root, resolve each
+  run directory's `intermediate` target, and remove what a
+  policy marks reclaimable -- with the dry-run preview,
+  the reporting, and the refusal rules below.
 - *Policy (client).*  Decide **when** a unit's scratch is
   reclaimable.  Only the client knows whether a finished
   run is finished *with*: the k-point producer is done
@@ -8912,13 +8912,106 @@ Reclamation divides the same way, and for the same reason:
   client that post-processes wavefunctions into a density
   of states needs the HDF5 until that step has run.
 
-The default policy is the conservative one -- a unit is
-reclaimable when its status is `done` and its `result.toml`
-exists -- and a client overrides it by supplying its own.
+A policy is handed `(run_dir, target)`: the run directory
+and its already-resolved scratch.  The second argument is
+part of the contract because one of the built-in policies
+must look *inside* the scratch to decide (the job tree's,
+below), and a client is no worse off for being given the
+path it is judging.
 
-**Four refusals, which are the whole safety model.**
-Reclamation deletes, so it is defined by what it will not
-do:
+Each kind of root supplies the default that fits it, and a
+client overrides by passing its own.  For a workspace the
+default is the conservative one -- reclaimable when the
+status is `done` and `result.toml` exists.
+
+**Two kinds of root, one contract per call.**  A
+kaleidoscope workspace is not the only place imago scratch
+accumulates, and it is not even the common one.  Every
+ordinary `imago.py` run -- a student's job directory, a
+hand-driven convergence test -- plants the same
+`intermediate` link and leaves the same tens of megabytes
+behind it.  Those runs sit in a **job tree**: run
+directories with no `wingbeats/` and no flight above them.
+Reclamation recognizes both roots and decides which it has
+by looking rather than by being told:
+
+- a root holding `wingbeats/` is a **workspace**;
+- a root with no `wingbeats/` but `intermediate` links
+  somewhere below it is a **job tree**;
+- a root with neither is not a reclamation target, and is
+  refused.
+
+One call handles exactly one kind.  Mixing them in a single
+report would gather two different safety contracts under
+one set of totals, and the contracts really do differ --
+which is the next point.
+
+**The job tree has no `status.toml`, but it is not without
+evidence.**  Workspace reclamation rests on a unit
+declaring itself `done`.  A hand run writes no
+`status.toml` and no `result.toml`, so that authority is
+absent -- but the run is not silent, because a hand run is
+not a separate code path.  The CLI is a thin wrapper over
+the same callable core (6.1.3), so an `imago.py` run in a
+job directory leaves the same two traces every kaleidoscope
+unit does:
+
+- **`imagoLock`, inside the scratch itself.**  It is
+  created before any work begins and removed in the
+  cleanup that always runs, so its presence means the run
+  either owns the directory now or died without releasing
+  it.  Either way the scratch is not ours to take.
+- **`Program Sequence Complete.` in `runtime`.**  The
+  driver appends it as it closes the log.
+
+Both traces are `imago.py`'s to define, not the cleanup
+tool's to guess.  The lock name, the log name, and the
+completion marker are read from `imago.py` directly rather
+than re-spelled as literals here, so that a change to how
+the engine names or marks a run cannot silently desync the
+recognizer.  The failure would be in the safe direction --
+"absence of evidence is refusal" means an unrecognized
+marker refuses rather than deletes -- but it would be
+silent, and a silent refusal of everything is harder to
+diagnose than a mismatch that fails loudly.
+
+Requiring *both* is what makes the test sound.  The lock is
+released a moment before the marker is written, so each
+covers the other's blind spot, and together they close the
+window a bare staleness test would leave open: a run
+starting *now* takes the lock before it writes anything, so
+a reclamation racing it is refused rather than mis-timed.
+No arbitrary "old enough" threshold is needed anywhere.
+
+Two details decide whether this works in practice.  The
+`runtime` log is opened in **append** mode, so a directory
+run four times holds four markers, and only the *last*
+non-blank line describes the *current* state -- a run
+interrupted after three good ones ends in something else
+entirely.  The test therefore reads the tail, never
+`grep`.  And the marker is written from a `finally`, so it
+records that the driver reached cleanup, not that the
+calculation succeeded: a run that failed but exited tidily
+is reclaimable here, where the workspace contract would
+have preserved it for the curator by finding no
+`result.toml`.  That is the one place the two contracts
+genuinely disagree, and a job tree has no success signal
+with which to close the gap.  `--older-than` is the lever
+for anyone who wants recent failures kept.
+
+That age filter must be measured correctly, which is
+subtler than it looks: the mtime of the scratch *directory*
+moves only when entries are added to or removed from it, so
+a job that has spent a week writing into an
+already-created HDF5 still presents a week-old directory.
+Age is therefore the newest mtime anywhere in the tree,
+never the top directory's.  The size walk already visits
+every file, so one pass yields both.
+
+**Five refusals that hold for every root.**  Reclamation
+deletes, so it is defined by what it will not do.  These
+five apply to a workspace and a job tree alike; the job
+tree then adds two more of its own:
 
 1. **Never delete the run directory, only scratch.**  The
    kept tier is the record of the calculation and is two
@@ -8941,15 +9034,51 @@ do:
    that can be redirected by a symlink is a hazard, not a
    convenience.
 4. **Never descend through a symlink while walking.**  The
-   third refusal guards what is *removed*; this one guards
-   what is even *considered*.  `intermediate` is itself a
-   symlink into the scratch area, so a walk that followed
-   links would leave the workspace, find whatever lives
+   third refusal guards where scratch may *be*; this one
+   guards what is even *considered*.  `intermediate` is
+   itself a symlink into the scratch area, so a walk that
+   followed links would leave the root, find whatever lives
    over there, and could plan a removal outside the tree
    it was pointed at.  The walk therefore skips every
    symlinked subdirectory, which keeps the set of
-   candidate run directories inside the workspace by
-   construction rather than by later checking.
+   candidate run directories inside the root it was given
+   by construction rather than by later checking.
+5. **Never remove a scratch tree holding another run's
+   scratch.**  Scratch mirrors the run directory's path,
+   so a run nested inside another -- a `debug/`
+   subdirectory of a job that was itself run in place --
+   has its scratch nested inside the outer run's scratch
+   too.  Removing the outer tree would take the inner one
+   with it: at best double-counting the saving, at worst
+   deleting the working files of a run the refusals above
+   had just declined to touch, which turns refusal 2 into
+   a formality.  The outer tree is skipped while any other
+   run's scratch lies within it, and named as such.  Once
+   the inner ones are reclaimed a second pass takes the
+   outer, so nothing is lost -- only deferred.
+
+   The containment test looks at *every* run directory the
+   walk found, not merely the ones this call selected: a
+   filter that excluded the inner run would otherwise let
+   the outer removal delete it as collateral, which is
+   precisely the case the refusal exists to stop.
+
+**Two further refusals, for the job-tree contract.**
+
+6. **Never reclaim a run that has not declared it
+   finished.**  A hand run is reclaimable only when its
+   scratch holds no `imagoLock` *and* the last non-blank
+   line of its `runtime` log is the completion marker.
+   Absence of evidence is refusal, not permission: a run
+   directory with no `runtime` at all, or one whose log
+   ends mid-stream, is reported and left alone.
+7. **Never descend into a workspace from a job tree.**  A
+   job tree may hold a workspace far below it, and walking
+   in would apply the presumption-based contract to units
+   that have a provable one.  Such directories are not
+   descended, and every one is named in the report, so the
+   bytes deliberately left behind stay visible instead of
+   vanishing from the accounting.
 
 **Dry run is the default.**  The tool previews what it
 would remove, with sizes, and removes nothing until asked.
@@ -8960,25 +9089,38 @@ the destructive path the one the user typed deliberately.
 place and is reached three ways:
 
 - (c) A **standalone tool**, the home of the logic:
-  selective over a workspace, by unit, by calc kind, and
-  by age, with the preview and the refusals above.  This
-  is what a user runs to reclaim a finished campaign.
+  selective over a workspace by unit and by calc kind,
+  over a job tree by path, and over either by age, with
+  the preview and the refusals above.  This is what a user
+  runs to reclaim a finished campaign, or to sweep up
+  after a season of hand runs.
 - (a) The producer's **`--clean-after`**, which calls that
-  same logic once its harvest completes, with the options
-  a just-finished harvest can supply: exactly the units it
-  harvested, which are by construction done with their
-  scratch.
+  same logic once its harvest completes.  It supplies only
+  the workspace and leans on the default policy to gate
+  each unit, rather than naming the harvested units: the
+  policy is the same "spent once `done` with a
+  `result.toml`" rule the producer would apply anyway, so
+  the two cannot diverge, and a unit the flight left
+  unfinished is preserved rather than swept up as a side
+  effect of the harvest.
 - (b) **Prune-as-you-go**, which applies the client policy
   as the flight advances rather than after it ends,
   discarding a unit's superseded scratch while later units
   are still running.  It matters only for a campaign large
-  enough to exhaust scratch mid-flight -- a real prospect
-  at thousands of calculations, and no risk at all at
-  seed scale -- so it is specified here and built when
-  that pressure arrives.  It is the layer that deletes
-  while runs are in progress, so it is also the one whose
-  policy must be right, which is the argument for settling
-  the mechanism/policy boundary before it is wired.
+  enough to exhaust scratch mid-flight.  There is no fixed
+  headroom to name here: `$IMAGO_TEMP` has no per-user
+  quota, so the ceiling is whatever a *shared* filesystem
+  happens to have free -- unguaranteed, not the user's to
+  count on, and reduced by everyone else's jobs at the
+  same time.  That is a stronger reason to prune in flight
+  than a generous private allowance would be, not a weaker
+  one: a campaign cannot know in advance how much room it
+  will actually get.  So (b) is specified here and built
+  when that pressure first bites.  It is the layer that
+  deletes while runs are in progress, so it is also the
+  one whose policy must be right, which is the argument for
+  settling the mechanism/policy boundary before it is
+  wired.
 
 ### 6.3 makeinput callable build API
 

@@ -2308,13 +2308,15 @@ shipped.
   cache key and status intact.
 
   Chain: ARCHITECTURE 9.6 gains the two-tier kept/scratch model and
-  names `tidy_workspace.py`; DESIGN 6.2.12 defines the subsystem --
+  names `tidy_scratch.py`; DESIGN 6.2.12 defines the subsystem --
   the mechanism/policy split (mirroring the cache's split in 6.2.5,
   and for the same reason: only the client knows when a finished run
-  is finished WITH), the four refusals, dry-run-by-default, and all
-  three layers; PSEUDOCODE 13.8 gives the walk.
+  is finished WITH), the refusals, dry-run-by-default, and all
+  three layers; PSEUDOCODE 13.8 gives the walk.  (The tool began as
+  `tidy_workspace.py` with four refusals; the hand-run block below
+  records its growth to two roots and seven refusals.)
 
-  Code: `src/scripts/tidy_workspace.py` (layer (c)) -- selective by
+  Code: `src/scripts/tidy_scratch.py` (layer (c)) -- selective by
   id, calc glob, and age, previewing by default and removing nothing
   without `--apply`.  Producer `--clean-after` (layer (a)) calls
   that same planner rather than reimplementing the walk, so the two
@@ -2330,6 +2332,60 @@ shipped.
   scratch MID-flight; at seed scale `--clean-after` covers it.  It
   is also the layer that deletes while runs are in progress, which
   is why the mechanism/policy boundary was settled first.
+
+  **The threshold (b) waits for, measured 2026-07-22.**
+  `$IMAGO_TEMP` sits on pixstor with 37 TB free and no user quota.
+  At the measured 25 MB per calculation, unpruned scratch reaches
+  1 TB at roughly 40,000 calculations in a SINGLE flight and fills
+  the filesystem at about 1.5 million.  Below that, reclaiming at
+  the end covers it.  That is the number to re-check before
+  building (b), rather than treating "thousands of calculations"
+  as the trigger.
+
+  **HAND-RUN GAP CLOSED 2026-07-22 (the actual daily cost).**  The
+  tool only ever saw kaleidoscope workspaces, but an ordinary
+  `imago.py` run plants the same `intermediate` link -- and those
+  are the common case, not the exception.  On this machine they
+  held ~1.0 GB the tool could not reach: no `wingbeats/` (so the
+  CLI refused the root) and no `status.toml` (so the default
+  policy would have refused each run anyway).
+
+  Renamed `tidy_workspace.py` -> **`tidy_scratch.py`**, since a
+  workspace is now one of two roots it recognizes.  The root's
+  kind is DETECTED, and one call handles exactly one kind, so a
+  single report never gathers two safety contracts under one set
+  of totals.  Two refusals were added for the job tree (a run must
+  hold no `imagoLock` AND end its `runtime` log with the
+  completion marker; a workspace nested in a job tree is named but
+  never descended into).
+
+  Two findings worth keeping.  First, `runtime` is opened in
+  APPEND mode, so a directory run four times holds four completion
+  markers -- only the TAIL is truthful, and `c/diamond/full2` is
+  the live proof: four markers, a log ending mid-run, and a stale
+  lock.  Searching the file would have deleted a killed run's
+  scratch.  Second, the marker is written from a `finally`, so it
+  means the driver reached cleanup, NOT that the run succeeded; a
+  job tree has no `result.toml` with which to preserve failures
+  the way the workspace contract does.
+
+  **A safety hole the live run exposed, now refusal 5.**  Scratch
+  mirrors the run directory's path, so a run nested inside another
+  (`knbo3/cubic/debug` inside `knbo3/cubic`) has its scratch
+  nested too.  Removing the outer tree would have taken the inner
+  one with it -- double-counting the saving, and deleting the
+  working files of a run the other refusals had just declined to
+  touch, which would make "never touch an unfinished run" a
+  formality.  An outer tree holding another run's scratch is now
+  deferred and named; a second pass takes it once the inner ones
+  are gone.  Containment is tested against every run the walk
+  found, not only the selected ones, since a filtered-out inner
+  run is exactly the collateral case.  On the live tree this
+  corrected the reported saving from 895.9 MB to 787.3 MB.
+
+  Chain: DESIGN 6.2.12 (two roots, refusals 5-7), PSEUDOCODE 13.8
+  (`detect_root_kind`, `find_job_run_dirs`, `hand_run_policy`,
+  resolve-then-judge planner), ARCHITECTURE 9.6.  1075 tests pass.
 
 - [x] C109. Decide the default cell -- full (conventional) vs
   primitive -- for the materialized `imago.skl`.  Surfaced by the

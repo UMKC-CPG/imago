@@ -52,6 +52,26 @@ from enum import Enum
 #                     File Name Components                           #
 # ------------------------------------------------------------------ #
 
+# A handful of these names are also read by tools that inspect a
+#   finished run from the outside -- above all tidy_scratch.py,
+#   which recognizes a completed hand run by the ABSENCE of the
+#   lock file and the PRESENCE of the completion marker at the end
+#   of the runtime log (DESIGN 6.2.12).  Naming them once here, at
+#   module level, keeps that external recognizer and this engine
+#   reading from a single definition: a rename cannot silently
+#   desync the two, because there is only one string to change.
+LOCK_FILE = "imagoLock"
+RUNTIME_FILE = "runtime"
+INTERMEDIATE_LINK = "intermediate"
+
+# The exact line the driver appends to the runtime log as it
+#   closes it, marking that the run reached cleanup.  Written from
+#   a `finally`, so it records that the driver finished, not that
+#   the calculation succeeded (a distinction tidy_scratch.py's
+#   job-tree contract depends on; DESIGN 6.2.12).
+COMPLETION_MARKER = "Program Sequence Complete."
+
+
 class FileNames:
     """Container for all file name components used throughout the
     program. Centralizing them here provides a quick overview of
@@ -67,11 +87,13 @@ class FileNames:
 
     def __init__(self):
 
-        # Miscellaneous control and tracking files.
+        # Miscellaneous control and tracking files.  The three
+        #   shared with external inspectors are sourced from the
+        #   module constants above, so there is one definition.
         self.imago_kill = "imagoKill"
-        self.imago_lock = "imagoLock"
-        self.runtime = "runtime"
-        self.intermediate = "intermediate"
+        self.imago_lock = LOCK_FILE
+        self.runtime = RUNTIME_FILE
+        self.intermediate = INTERMEDIATE_LINK
         self.energy = "enrg"
         self.iteration = "iter"
         self.kp_scf = "kp-scf"
@@ -2477,7 +2499,7 @@ def clean_up(temp, fn, runtime_fh):
     lock_path = os.path.join(temp, fn.imago_lock)
     if os.path.exists(lock_path):
         os.remove(lock_path)
-    runtime_fh.write("Program Sequence Complete.\n")
+    runtime_fh.write(COMPLETION_MARKER + "\n")
     runtime_fh.close()
 
 
@@ -2913,7 +2935,7 @@ def _run_core(run_dir, settings):
             except OSError:
                 pass
         if runtime_fh is not None and not runtime_fh.closed:
-            runtime_fh.write("Program Sequence Complete.\n")
+            runtime_fh.write(COMPLETION_MARKER + "\n")
             runtime_fh.close()
         os.chdir(original_cwd)
 

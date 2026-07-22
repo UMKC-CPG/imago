@@ -3044,7 +3044,7 @@ def reclaim_run_scratch(pdb_root: str) -> None:
 
     The producer supplies only the workspace; the decision about
     which units are safe to reclaim is left to
-    ``tidy_workspace``'s default policy, which is the same rule
+    ``tidy_scratch``'s default policy, which is the same rule
     this producer would apply anyway -- a unit is spent once it is
     ``done`` and has written its ``result.toml``.  Sharing that
     one policy is the point: a post-harvest cleanup that drifted
@@ -3058,7 +3058,7 @@ def reclaim_run_scratch(pdb_root: str) -> None:
     build into a failed one.
     """
 
-    import tidy_workspace
+    import tidy_scratch
 
     scratch_root = os.environ.get("IMAGO_TEMP", "")
     if not scratch_root:
@@ -3068,10 +3068,10 @@ def reclaim_run_scratch(pdb_root: str) -> None:
         return
 
     workspace = curation_workspace_root(pdb_root)
-    plan = tidy_workspace.plan_reclamation(workspace, scratch_root)
-    removed, freed, failures = tidy_workspace.apply_reclamation(plan)
+    plan = tidy_scratch.plan_reclamation(workspace, scratch_root)
+    removed, freed, failures = tidy_scratch.apply_reclamation(plan)
     print(f"producer: reclaimed {removed} run directories, "
-          f"freeing {tidy_workspace.human_bytes(freed)}")
+          f"freeing {tidy_scratch.human_bytes(freed)}")
     for unit, message in failures:
         print(f"producer:   could not reclaim {unit}: {message}")
 

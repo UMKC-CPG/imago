@@ -8833,30 +8833,80 @@ function render_starter_clusterrc(facts):
 
 ### 13.8 Scratch reclamation (DESIGN 6.2.12)
 
-The mechanism half of reclamation: walk a workspace,
-decide what is reclaimable by the CLIENT's policy, and
-remove only scratch.  The default policy is the
-conservative one -- a unit is spent once it is `done` and
-has a `result.toml` -- and a client passes its own when it
-needs the working files for longer.
+The mechanism half of reclamation: walk a root, decide
+what is reclaimable by the CLIENT's policy, and remove
+only scratch.
 
-Everything here is defined by what it refuses.  Three of
-the four refusals are checked per unit, in this order, and
-each records a reason so the report can explain a skip
-rather than silently passing over it; the fourth is a
-property of the walk itself (`find_run_dirs`).
+Two kinds of root are recognized, and one call handles
+exactly one of them (DESIGN 6.2.12).  A **workspace**
+holds `wingbeats/`, and its units prove they are finished
+in `status.toml`; the default policy is the conservative
+one -- spent once `done` with a `result.toml` -- and a
+client passes its own when it needs the working files for
+longer.  A **job tree** holds ordinary `imago.py` run
+directories with no flight above them; they prove they
+are finished by holding no `imagoLock` and ending their
+`runtime` log with the completion marker.
+
+A policy therefore receives `(run_dir, target)` -- the run
+directory and its already-resolved scratch -- because the
+job-tree test needs to look inside the scratch for the
+lock, and a client policy is no worse off for being handed
+the path it is deciding about.
+
+Everything here is defined by what it refuses.  Refusals
+1-3, 5 and 6 are checked per unit, each recording a reason
+so the report can explain a skip rather than silently
+passing over it; refusals 4 and 7 are properties of the
+walks themselves.
 
 ```
-function default_reclaim_policy(run_dir):
-    # A unit is spent when it finished AND left a result.
-    # `done` alone is not enough: a run that completed but
-    # wrote no result is the state a curator most wants to
-    # look at, so it is preserved (DESIGN 6.2.12).
+function default_reclaim_policy(run_dir, target):
+    # WORKSPACE contract.  A unit is spent when it finished
+    # AND left a result.  `done` alone is not enough: a run
+    # that completed but wrote no result is the state a
+    # curator most wants to look at, so it is preserved
+    # (DESIGN 6.2.12).  `target` is unused here; the status
+    # file is authority enough.
     status = read_status(run_dir)
     if status is None or status["status"] != "done":
         return (False, "not done")
     if not file_exists(join(run_dir, "result.toml")):
         return (False, "no result.toml")
+    return (True, "")
+
+
+function hand_run_policy(run_dir, target):
+    # JOB-TREE contract (REFUSAL 6).  A hand run writes no
+    # status.toml, but it is not silent: the CLI is a thin
+    # wrapper over the same callable core, so it leaves the
+    # same two traces every unit does.  BOTH are required.
+    #
+    # The three names below -- the lock file, the log file,
+    # and the completion marker -- are imago.py's to define
+    # (imago.LOCK_FILE, imago.RUNTIME_FILE,
+    # imago.COMPLETION_MARKER), imported rather than
+    # re-spelled here so a change to how the engine names or
+    # marks a run cannot silently desync this recognizer
+    # (DESIGN 6.2.12).
+    #
+    # The lock lives in the SCRATCH and is taken before any
+    # work begins, so its presence means the run owns the
+    # directory now or died without releasing it -- and it
+    # is what makes a reclamation racing a just-started run
+    # refuse rather than mis-time.
+    if file_exists(join(target, LOCK_FILE)):
+        return (False, "imagoLock present: running or died")
+
+    # The runtime log is opened in APPEND mode, so a
+    # directory run four times holds four markers and only
+    # the LAST non-blank line describes the current state.
+    # Read the tail; never grep for the marker anywhere.
+    lines = read_nonblank_lines(join(run_dir, RUNTIME_FILE))
+    if lines is empty:
+        return (False, "no runtime log")
+    if lines[-1] != COMPLETION_MARKER:
+        return (False, "runtime log ends mid-run")
     return (True, "")
 
 
@@ -8897,44 +8947,156 @@ function find_run_dirs(root):
             yield directory
 
 
-function plan_reclamation(root, scratch_root,
-        policy = default_reclaim_policy, ids = None,
-        calc_pattern = None, older_than = None):
+function detect_root_kind(root):
+    # Decide what KIND of thing the user pointed at, by
+    # looking rather than by being told (DESIGN 6.2.12).
+    # One call handles one kind, so this decision is made
+    # once, up front, and fixes the contract for the run.
+    if is_dir(join(root, "wingbeats")):
+        return "workspace"
+    if any run directory is found by find_job_run_dirs(root):
+        return "job-tree"
+    return None            # neither; the caller refuses
+
+
+function find_job_run_dirs(root):
+    # A hand-run directory is one carrying an `intermediate`
+    # symlink -- there is no status.toml to key on, and no
+    # fixed depth, since job trees are organized however
+    # their author liked.
+    #
+    # REFUSAL 4: never descend through a symlink (as in
+    # find_run_dirs; `intermediate` IS one).
+    #
+    # REFUSAL 7: never descend into a workspace.  A job tree
+    # may hold one far below it, and walking in would judge
+    # provable units by the presumption-based contract.  The
+    # directory is yielded as a SkippedWorkspace so the
+    # bytes left behind stay visible in the report, and is
+    # then pruned from the walk.
+    for (directory, subdirs, files) in walk(root):
+        if is_dir(join(directory, "wingbeats")):
+            yield SkippedWorkspace(directory)
+            subdirs = []                  # refusal 7
+            continue
+        subdirs = [d for d in subdirs
+                   if not is_symlink(join(directory, d))]
+        if is_symlink(join(directory, "intermediate")):
+            yield RunDir(directory)
+
+
+function plan_reclamation(root, scratch_root, policy = None,
+        ids = None, calc_pattern = None, older_than = None,
+        kind = None, match = None):
     # Build the plan; remove NOTHING.  Planning and applying are
     # separate calls rather than one function with an `apply`
     # flag, because that split is what lets the preview, the
     # standalone run, and the producer's --clean-after all share
     # one plan and one code path (DESIGN 6.2.12).
     #
-    # `ids` and `calc_pattern` are concrete filters rather than a
-    # general predicate: they are what a user selects on at the
-    # command line, and what a just-finished harvest can supply.
+    # The filters are concrete, not a general predicate: they are
+    # what a user selects on at the command line.  A workspace
+    # selects on `ids` and `calc_pattern`; a job tree, which has
+    # neither concept, selects on `match` -- a glob over the run
+    # directory's path relative to the root.
+    #
+    # The root's kind fixes the contract for the whole call, and
+    # with it the policy that fits when none is given.
+    if kind is None:
+        kind = detect_root_kind(root)
+    if kind is None:
+        return []            # neither root: nothing to reclaim,
+                             # and no contract under which to try
+    if policy is None:
+        policy = (default_reclaim_policy if kind == "workspace"
+                  else hand_run_policy)
+
+    if kind == "workspace":
+        base = join(root, "wingbeats")
+        found = [("run", d) for d in find_run_dirs(root)]
+    else:
+        base = root
+        found = find_job_run_dirs(root)   # ("run"|"workspace", d)
+
+    # Resolve EVERY run directory's scratch before judging any of
+    # it.  Scratch mirrors the run path, so a run nested in
+    # another has its scratch nested too, and refusal 5 needs the
+    # whole set -- including runs this call filtered out, since an
+    # excluded inner run is exactly the one an outer removal would
+    # take as collateral.
     plan = []
-    for run_dir in sorted(find_run_dirs(root)):
-        unit_id  = first path component under wingbeats/
-        calc_tag = basename(run_dir)
-
-        if ids is not None and unit_id not in ids:
+    resolved = []           # (directory, relative, target, why)
+    for (item_kind, directory) in sorted(found by directory):
+        relative = relpath(directory, base)
+        # A workspace a job-tree walk declined to enter is not a
+        # candidate; it is recorded so the report shows where the
+        # untouched bytes went (REFUSAL 7).
+        if item_kind == "workspace":
+            plan.append(SkippedWorkspace(directory, relative))
             continue
-        if calc_pattern is not None and
-                not glob_match(calc_tag, calc_pattern):
+        (target, why) = scratch_target(directory, scratch_root)
+        resolved.append((directory, relative, target, why))
+
+    every_target = [t for (_, _, t, _) in resolved if t != None]
+
+    for (directory, relative, target, why) in resolved:
+        # A workspace selects on unit id and calc tag; a job tree
+        # on the path relative to the root.
+        if not selected(relative, kind, ids, calc_pattern, match):
             continue
 
-        (spent, why) = policy(run_dir)
-        if not spent:
-            plan.append(Skipped(run_dir, why));  continue
-
-        (target, why) = scratch_target(run_dir, scratch_root)
         if target is None:
-            plan.append(Skipped(run_dir, why));  continue
+            plan.append(Skipped(directory, relative, why))
+            continue
 
+        # REFUSAL 5: an outer tree that holds another run's
+        # scratch is deferred, not removed.  Checked against
+        # every_target, NOT the selected subset, so a filtered-out
+        # inner run still stops the outer removal.  Once the inner
+        # ones are gone a second pass reclaims the outer.
+        nested = [t for t in every_target
+                  if t != target and is_under(t, target)]
+        if nested is not empty:
+            plan.append(Skipped(directory, relative,
+                "holds " + count(nested) + " nested run's "
+                "scratch; reclaim those first"))
+            continue
+
+        (spent, why) = policy(directory, target)
+        if not spent:
+            plan.append(Skipped(directory, relative, why))
+            continue
+
+        # Age is the NEWEST mtime anywhere in the tree, never the
+        # top directory's: that moves only when entries are added
+        # or removed, so a job that has spent a week writing into
+        # an already-created HDF5 still presents a week-old
+        # directory.  One walk yields both facts.
+        (bytes, newest) = tree_stats(target)
         if older_than is not None and
-                age_days(target) < older_than:
-            plan.append(Skipped(run_dir, "too recent"));  continue
+                days_since(newest) < older_than:
+            plan.append(Skipped(directory, relative, "too recent"))
+            continue
 
-        plan.append(Reclaimable(run_dir, target,
-                                size_of_tree(target)))
+        plan.append(Reclaimable(directory, relative, target, bytes))
     return plan
+
+
+function selected(relative, kind, ids, calc_pattern, match):
+    # The CLI filters, applied to one run directory.  A workspace
+    # selects on the concepts its layout supplies -- the stable id
+    # (first path component under wingbeats/) and the calc tag
+    # (the directory's own name).  A job tree has neither, so it
+    # selects on the whole relative path, the only handle its
+    # free-form layout offers.
+    if kind == "workspace":
+        if ids != None and first_component(relative) not in ids:
+            return False
+        if calc_pattern != None and
+                not glob_match(basename(relative), calc_pattern):
+            return False
+        return True
+    return match is None or glob_match(relative, match)
 
 
 function apply_reclamation(plan):

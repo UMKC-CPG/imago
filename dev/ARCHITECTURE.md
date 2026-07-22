@@ -1901,21 +1901,38 @@ Reclaiming it is a **general kaleidoscope feature**, split
 exactly as the cache is, and for the same reason -- only
 the client knows when a finished run is finished *with*:
 
-- *Mechanism (kaleidoscope).*  Walk a workspace, resolve
-  each run's scratch, preview it, and remove what a policy
+- *Mechanism (kaleidoscope).*  Walk a root, resolve each
+  run's scratch, preview it, and remove what a policy
   marks reclaimable.
 - *Policy (client).*  Decide when a unit's scratch is
   spent.  The k-point producer is done with a rung once
   its `result.toml` lands; a client that post-processes
   wavefunctions is not done until that step has run.
 
-- `src/scripts/tidy_workspace.py`: the standalone
+Scratch is not only a flight's problem, though.  An
+ordinary `imago.py` run plants the same `intermediate`
+link and leaves the same tens of megabytes behind, and
+those runs -- a student's job directory, a hand-driven
+convergence test -- are the common case rather than the
+exception.  Reclamation therefore recognizes two kinds of
+root and handles exactly one per call: a *workspace*,
+whose units prove completion in `status.toml`, and a *job
+tree*, whose runs prove it by holding no `imagoLock` and
+ending their `runtime` log with the completion marker.
+
+- `src/scripts/tidy_scratch.py`: the standalone
   reclamation tool -- the home of the logic, which the
   producer's `--clean-after` then calls rather than
   reimplementing.  Design in DESIGN 6.2.12, including the
-  refusals that define it (never the run directory, never
-  an unfinished unit, never a link out of the scratch
-  area) and the dry-run-by-default rule.
+  five refusals that hold for every root (never the run
+  directory, never an unfinished unit, never a link out of
+  the scratch area, never a symlink descended while
+  walking, and never a tree that holds another run's
+  scratch -- scratch mirrors the run path, so a nested run
+  directory nests its scratch too), the two the job tree
+  adds (never a run that has not declared completion, never
+  descending into a workspace from a job tree), and the
+  dry-run-by-default rule.
 
 ### 9.7 Clients, and the producer relationship
 

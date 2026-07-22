@@ -3802,7 +3802,7 @@ def test_build_climb_config_under_trained_climbs_serially():
 
 class TestCleanAfter:
     """The producer must not carry its own idea of what is safe to
-    delete: it calls ``tidy_workspace``'s planner, so the two can
+    delete: it calls ``tidy_scratch``'s planner, so the two can
     never disagree."""
 
     def _workspace(self, tmp_path, monkeypatch):
@@ -3839,7 +3839,7 @@ class TestCleanAfter:
             self, tmp_path, monkeypatch):
         # The contract that matters: the producer delegates, so a
         #   future change to what is reclaimable lands in one place.
-        import tidy_workspace
+        import tidy_scratch
         data_root, _ = self._workspace(tmp_path, monkeypatch)
         seen = {}
 
@@ -3847,7 +3847,7 @@ class TestCleanAfter:
             seen["root"] = root
             return []
 
-        monkeypatch.setattr(tidy_workspace, "plan_reclamation", spy)
+        monkeypatch.setattr(tidy_scratch, "plan_reclamation", spy)
         bip.reclaim_run_scratch(data_root)
         assert seen["root"].endswith(
             os.path.join("curation", "workspace"))
@@ -3868,10 +3868,10 @@ class TestCleanAfter:
         # Reclamation runs after every result is on disk, so a
         #   stuck directory must not turn a successful build into a
         #   failed one.
-        import tidy_workspace
+        import tidy_scratch
         data_root, _ = self._workspace(tmp_path, monkeypatch)
         monkeypatch.setattr(
-            tidy_workspace, "apply_reclamation",
+            tidy_scratch, "apply_reclamation",
             lambda plan: (0, 0, [("si/kpt-mesh-2-2-2", "busy")]))
         bip.reclaim_run_scratch(data_root)       # must not raise
         assert "could not reclaim" in capsys.readouterr().out
