@@ -2732,6 +2732,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                              walltime: str | None = None,
                              profile: str | None = None,
                              save_config: bool = False,
+                             clean_after: bool = False,
                              dispatch_fn=dispatch,
                              prepare_fn=prepare_units,
                              extract_fn=extract_potential,
@@ -3023,7 +3024,57 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     write_run_log(
         os.path.join(data_root, "curation", "run_log.toml"),
         imago_commit, timestamp, per_run_log)
+
+    # ----- Reclaim the run scratch, if asked (DESIGN 6.2.12
+    #   layer (a)).  Deliberately AFTER the databases and the run
+    #   log are written: everything harvested is then on disk, so
+    #   a reclamation that went wrong could not cost us the
+    #   results.  It calls the standalone tool's own planner
+    #   rather than reimplementing the walk, so the two can never
+    #   disagree about what is safe to remove.
+    if clean_after:
+        reclaim_run_scratch(pdb_root)
+
     return per_run_log
+
+
+def reclaim_run_scratch(pdb_root: str) -> None:
+    """Remove the intermediate scratch of every finished unit in
+    this run's workspace (DESIGN 6.2.12 layer (a)).
+
+    The producer supplies only the workspace; the decision about
+    which units are safe to reclaim is left to
+    ``tidy_workspace``'s default policy, which is the same rule
+    this producer would apply anyway -- a unit is spent once it is
+    ``done`` and has written its ``result.toml``.  Sharing that
+    one policy is the point: a post-harvest cleanup that drifted
+    from the standalone tool would be a second, unreviewed
+    definition of "safe to delete".
+
+    Failures are reported and swallowed.  Reclamation is
+    housekeeping that runs after every result is already on disk,
+    so a scratch directory that will not remove -- a busy
+    filesystem, a permission problem -- must not turn a successful
+    build into a failed one.
+    """
+
+    import tidy_workspace
+
+    scratch_root = os.environ.get("IMAGO_TEMP", "")
+    if not scratch_root:
+        print("producer: --clean-after skipped: $IMAGO_TEMP is "
+              "unset, so the check that scratch lies where it "
+              "should cannot run")
+        return
+
+    workspace = curation_workspace_root(pdb_root)
+    plan = tidy_workspace.plan_reclamation(workspace, scratch_root)
+    removed, freed, failures = tidy_workspace.apply_reclamation(plan)
+    print(f"producer: reclaimed {removed} run directories, "
+          f"freeing {tidy_workspace.human_bytes(freed)}")
+    for unit, message in failures:
+        print(f"producer:   could not reclaim {unit}: {message}")
+
 
 
 # ============================================================
@@ -3168,6 +3219,12 @@ def main(argv=None) -> int:
              "run for a reproducible record (default: do not write "
              "the record)")
     parser.add_argument(
+        "--clean-after", action="store_true",
+        help="once the harvest is written, reclaim the intermediate "
+             "scratch of every finished unit in this run's workspace "
+             "-- typically most of the bytes a run leaves behind "
+             "(default: leave the scratch in place)")
+    parser.add_argument(
         "--materialize-only", action="store_true",
         help="fetch and convert every reference structure named in "
              "the manifest, then stop without running any SCF -- a "
@@ -3253,7 +3310,8 @@ def main(argv=None) -> int:
         force=args.force, single_element=args.element,
         dispatch_shape=args.dispatch, partition=args.partition,
         nodes=args.nodes, walltime=args.walltime,
-        profile=args.profile, save_config=args.save_config)
+        profile=args.profile, save_config=args.save_config,
+        clean_after=args.clean_after)
     converged = sum(1 for row in per_run_log if row["converged"])
     print(f"producer: {converged}/{len(per_run_log)} reference "
           f"solids converged and harvested")

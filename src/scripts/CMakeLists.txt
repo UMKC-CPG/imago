@@ -27,6 +27,7 @@ set (SCRIPTS
    runIsoAtoms.py
    skl2isaacs.py skl2pdb.py skl2vasp.py struct2skl.py structure_control.py
    symmetry.py
+   tidy_workspace.py
    unpackImagoDB.py
    vasp2skl.py viewCell.py
    xyz2skl.py)

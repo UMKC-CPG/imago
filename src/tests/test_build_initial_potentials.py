@@ -3793,3 +3793,85 @@ def test_build_climb_config_under_trained_climbs_serially():
     assert config.stride_threshold == pytest.approx(
         1.0e-4 * mesh_climb.DEFAULT_POLICY_THRESHOLDS
         .stride_flatness_multiple)
+
+
+# ============================================================
+#  --clean-after: the producer reaches the standalone tool
+#  (DESIGN 6.2.12 layer (a))
+# ============================================================
+
+class TestCleanAfter:
+    """The producer must not carry its own idea of what is safe to
+    delete: it calls ``tidy_workspace``'s planner, so the two can
+    never disagree."""
+
+    def _workspace(self, tmp_path, monkeypatch):
+        """A data root whose workspace holds one finished unit with
+        scratch, plus the matching scratch root."""
+
+        data_root = tmp_path / "data"
+        scratch = tmp_path / "scratch"
+        run = (data_root / "curation" / "workspace" / "wingbeats"
+               / "si" / "kpt-mesh-2-2-2")
+        run.mkdir(parents=True)
+        (run / "status.toml").write_text('status = "done"\n')
+        (run / "result.toml").write_text("total_energy = -1.0\n")
+        target = scratch / "si"
+        target.mkdir(parents=True)
+        (target / "gs_scf-fb.hdf5").write_bytes(b"\0" * 2048)
+        os.symlink(str(target), str(run / "intermediate"))
+        monkeypatch.setenv("IMAGO_TEMP", str(scratch))
+        return str(data_root / "atomicPDB"), target
+
+    def test_it_reclaims_scratch_and_keeps_the_run(
+            self, tmp_path, monkeypatch, capsys):
+        data_root, target = self._workspace(tmp_path, monkeypatch)
+        bip.reclaim_run_scratch(data_root)
+        assert not target.exists()
+        # The kept tier survives: the harvest already read it, but
+        #   it is also the record of the calculation.
+        run = (tmp_path / "data" / "curation" / "workspace"
+               / "wingbeats" / "si" / "kpt-mesh-2-2-2")
+        assert (run / "result.toml").is_file()
+        assert "reclaimed 1 run directories" in capsys.readouterr().out
+
+    def test_it_uses_the_shared_planner(
+            self, tmp_path, monkeypatch):
+        # The contract that matters: the producer delegates, so a
+        #   future change to what is reclaimable lands in one place.
+        import tidy_workspace
+        data_root, _ = self._workspace(tmp_path, monkeypatch)
+        seen = {}
+
+        def spy(root, scratch_root, **kwargs):
+            seen["root"] = root
+            return []
+
+        monkeypatch.setattr(tidy_workspace, "plan_reclamation", spy)
+        bip.reclaim_run_scratch(data_root)
+        assert seen["root"].endswith(
+            os.path.join("curation", "workspace"))
+
+    def test_without_a_scratch_root_it_declines(
+            self, tmp_path, monkeypatch, capsys):
+        # No $IMAGO_TEMP means the containment check cannot run, and
+        #   that check is the whole safety property -- so decline
+        #   rather than delete without it.
+        data_root, target = self._workspace(tmp_path, monkeypatch)
+        monkeypatch.delenv("IMAGO_TEMP")
+        bip.reclaim_run_scratch(data_root)
+        assert target.exists()
+        assert "IMAGO_TEMP is unset" in capsys.readouterr().out
+
+    def test_a_failure_does_not_fail_the_build(
+            self, tmp_path, monkeypatch, capsys):
+        # Reclamation runs after every result is on disk, so a
+        #   stuck directory must not turn a successful build into a
+        #   failed one.
+        import tidy_workspace
+        data_root, _ = self._workspace(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            tidy_workspace, "apply_reclamation",
+            lambda plan: (0, 0, [("si/kpt-mesh-2-2-2", "busy")]))
+        bip.reclaim_run_scratch(data_root)       # must not raise
+        assert "could not reclaim" in capsys.readouterr().out

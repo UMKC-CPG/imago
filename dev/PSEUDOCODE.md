@@ -8831,7 +8831,131 @@ function render_starter_clusterrc(facts):
                             blanks = ["partitions", "worker_init"])
 ```
 
-## 14. makeinput Callable Build API (DESIGN 6.3)
+### 13.8 Scratch reclamation (DESIGN 6.2.12)
+
+The mechanism half of reclamation: walk a workspace,
+decide what is reclaimable by the CLIENT's policy, and
+remove only scratch.  The default policy is the
+conservative one -- a unit is spent once it is `done` and
+has a `result.toml` -- and a client passes its own when it
+needs the working files for longer.
+
+Everything here is defined by what it refuses.  Three of
+the four refusals are checked per unit, in this order, and
+each records a reason so the report can explain a skip
+rather than silently passing over it; the fourth is a
+property of the walk itself (`find_run_dirs`).
+
+```
+function default_reclaim_policy(run_dir):
+    # A unit is spent when it finished AND left a result.
+    # `done` alone is not enough: a run that completed but
+    # wrote no result is the state a curator most wants to
+    # look at, so it is preserved (DESIGN 6.2.12).
+    status = read_status(run_dir)
+    if status is None or status["status"] != "done":
+        return (False, "not done")
+    if not file_exists(join(run_dir, "result.toml")):
+        return (False, "no result.toml")
+    return (True, "")
+
+
+function scratch_target(run_dir, scratch_root):
+    # Resolve the `intermediate` symlink imago.py created,
+    # and REFUSE anything that does not land under the
+    # scratch root.  A cleanup tool that a symlink can
+    # redirect is a hazard: imago.py renames a stale link to
+    # `intermediateFIXME`, and a hand-edited workspace can
+    # point anywhere at all.
+    link = join(run_dir, "intermediate")
+    if not is_symlink(link):
+        return (None, "no intermediate link")
+    target = resolve_real_path(link)
+    if not exists(target):
+        return (None, "already reclaimed")
+    if not is_under(target, scratch_root):
+        return (None, "target outside scratch root: " + target)
+    return (target, "")
+
+
+function find_run_dirs(root):
+    # A run directory is one carrying a status.toml: the <calc>
+    # level is optional (DESIGN 6.2.4), so a unit may sit
+    # directly under its id or one or more levels below, and
+    # keying on the status file finds either without assuming
+    # a depth.
+    #
+    # REFUSAL 4: never descend through a symlink.  `intermediate`
+    # IS a symlink into the scratch area, so a walk that followed
+    # links would wander out of the workspace and could plan a
+    # removal outside it entirely.
+    for (directory, subdirs, files) in walk(join(root,
+            "wingbeats")):
+        subdirs = [d for d in subdirs
+                   if not is_symlink(join(directory, d))]
+        if "status.toml" in files:
+            yield directory
+
+
+function plan_reclamation(root, scratch_root,
+        policy = default_reclaim_policy, ids = None,
+        calc_pattern = None, older_than = None):
+    # Build the plan; remove NOTHING.  Planning and applying are
+    # separate calls rather than one function with an `apply`
+    # flag, because that split is what lets the preview, the
+    # standalone run, and the producer's --clean-after all share
+    # one plan and one code path (DESIGN 6.2.12).
+    #
+    # `ids` and `calc_pattern` are concrete filters rather than a
+    # general predicate: they are what a user selects on at the
+    # command line, and what a just-finished harvest can supply.
+    plan = []
+    for run_dir in sorted(find_run_dirs(root)):
+        unit_id  = first path component under wingbeats/
+        calc_tag = basename(run_dir)
+
+        if ids is not None and unit_id not in ids:
+            continue
+        if calc_pattern is not None and
+                not glob_match(calc_tag, calc_pattern):
+            continue
+
+        (spent, why) = policy(run_dir)
+        if not spent:
+            plan.append(Skipped(run_dir, why));  continue
+
+        (target, why) = scratch_target(run_dir, scratch_root)
+        if target is None:
+            plan.append(Skipped(run_dir, why));  continue
+
+        if older_than is not None and
+                age_days(target) < older_than:
+            plan.append(Skipped(run_dir, "too recent"));  continue
+
+        plan.append(Reclaimable(run_dir, target,
+                                size_of_tree(target)))
+    return plan
+
+
+function apply_reclamation(plan):
+    # Remove the scratch TREE only.  The run directory is the
+    # record of the calculation and is never touched, and the
+    # `intermediate` link is left dangling on purpose so the run
+    # still shows where its scratch was (DESIGN 6.2.12).
+    #
+    # A tree that will not remove -- a permission problem, a busy
+    # filesystem -- is COLLECTED and reported, not raised: one
+    # stuck directory must not abandon the rest of a campaign's
+    # reclamation.
+    removed = 0;  freed = 0;  failures = []
+    for item in plan where item is Reclaimable:
+        try:
+            remove_tree(item.target)
+        except OSError as exc:
+            failures.append((item.unit, str(exc)));  continue
+        removed += 1;  freed += item.bytes
+    return (removed, freed, failures)
+```
 
 The makeinput-side twin of §12.  It turns `makeinput.py`
 from an argv-and-cwd-bound script into one that also

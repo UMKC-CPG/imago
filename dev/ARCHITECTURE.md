@@ -1885,6 +1885,38 @@ clean: `imago.py` resumes *within* a run directory;
 kaleidoscope decides whether to *launch* the run
 directory at all.
 
+**Two tiers, and reclaiming the larger one.**  A run
+directory spans two filesystems.  The *kept* tier is the
+directory itself -- staged inputs, `result.toml`,
+`status.toml`, `cache_key.toml`, the SCF potential, the
+log.  The *scratch* tier sits behind the `intermediate`
+symlink that `imago.py` creates, pointing at a temporary
+area, and holds the engine's working files.  Scratch
+dominates: measured at seed scale it was 99.7% of the
+bytes, almost entirely the HDF5 that carries the
+wavefunctions, against a couple of hundred kilobytes of
+kept files per calculation.
+
+Reclaiming it is a **general kaleidoscope feature**, split
+exactly as the cache is, and for the same reason -- only
+the client knows when a finished run is finished *with*:
+
+- *Mechanism (kaleidoscope).*  Walk a workspace, resolve
+  each run's scratch, preview it, and remove what a policy
+  marks reclaimable.
+- *Policy (client).*  Decide when a unit's scratch is
+  spent.  The k-point producer is done with a rung once
+  its `result.toml` lands; a client that post-processes
+  wavefunctions is not done until that step has run.
+
+- `src/scripts/tidy_workspace.py`: the standalone
+  reclamation tool -- the home of the logic, which the
+  producer's `--clean-after` then calls rather than
+  reimplementing.  Design in DESIGN 6.2.12, including the
+  refusals that define it (never the run directory, never
+  an unfinished unit, never a link out of the scratch
+  area) and the dry-run-by-default rule.
+
 ### 9.7 Clients, and the producer relationship
 
 Kaleidoscope's clients are the *what-to-compute*

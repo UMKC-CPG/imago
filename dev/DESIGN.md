@@ -8853,6 +8853,133 @@ that a hit then occupies a cheap worker slot rather than being
 decided driver-local.  That transition is a later refinement,
 turned on when the serial cost bites.
 
+#### 6.2.12 Scratch reclamation
+
+A finished run directory holds two very different kinds of
+file, and the difference is almost entirely one of size.
+The **kept** tier lives in the run directory itself: the
+staged inputs, `result.toml`, `status.toml`,
+`cache_key.toml`, the SCF potential, the descriptor, the
+log.  The **scratch** tier lives behind the `intermediate`
+symlink, which `imago.py` creates pointing at a temporary
+area (typically a fast local or scratch filesystem), and
+holds the engine's working files -- above all the HDF5 that
+carries the wavefunctions.
+
+Measured on a seed-scale producer run, the split is stark:
+scratch was **99.7%** of the bytes (3.17 GB of 3.2 GB, about
+25 MB per calculation, essentially all HDF5), against 222 KB
+of kept files per calculation.  Everything else in scratch
+was numbered copies of files the run had already written
+home.  So reclaiming scratch is nearly all of the available
+saving, and reclaiming anything else is nearly none of it.
+
+**Why this is safe, and how we know.**  Two consumers could
+in principle be broken by removing scratch, and neither is:
+
+- The **harvest** reads only paths recorded in
+  `result.toml`'s `outputs` table, and every one of them
+  -- the energy, the iteration count, the SCF potential,
+  the expanded structure, the `datSkl.map`, the log --
+  resolves inside the run directory.  None points through
+  `intermediate`.
+- The **run-reuse cache** (6.2.5) decides a hit from
+  `status.toml` and `cache_key.toml` alone.  Scratch is
+  never consulted, so a pruned run still hits.
+
+Those two facts are what make reclamation a tidying
+operation rather than a destructive one: a pruned run
+directory answers every question the producer ever asks of
+it.  They are properties of the current design, though, not
+laws, so a client that starts reading through
+`intermediate` must say so (below) rather than discover the
+loss later.
+
+**Mechanism and policy, split as the cache is.**  Section
+6.2.5 already divides the cache into a kaleidoscope
+mechanism and a client-supplied key, because only the
+client knows what defines identity for its calculations.
+Reclamation divides the same way, and for the same reason:
+
+- *Mechanism (kaleidoscope).*  Walk a workspace, resolve
+  each run directory's `intermediate` target, and remove
+  what a policy marks reclaimable -- with the dry-run
+  preview, the reporting, and the refusal rules below.
+- *Policy (client).*  Decide **when** a unit's scratch is
+  reclaimable.  Only the client knows whether a finished
+  run is finished *with*: the k-point producer is done
+  with a rung the moment its `result.toml` lands, while a
+  client that post-processes wavefunctions into a density
+  of states needs the HDF5 until that step has run.
+
+The default policy is the conservative one -- a unit is
+reclaimable when its status is `done` and its `result.toml`
+exists -- and a client overrides it by supplying its own.
+
+**Four refusals, which are the whole safety model.**
+Reclamation deletes, so it is defined by what it will not
+do:
+
+1. **Never delete the run directory, only scratch.**  The
+   kept tier is the record of the calculation and is two
+   orders of magnitude smaller than the saving; there is
+   no case for touching it.  The `intermediate` symlink
+   itself is left in place, dangling, so the run directory
+   still shows where its scratch was.
+2. **Never delete a unit that is not finished.**  A
+   `running` or `queued` status means the engine may still
+   be writing, and a missing `result.toml` means the run
+   produced nothing to keep.  Both are skipped and
+   reported rather than pruned, since the second is
+   usually the state a curator most wants to investigate.
+3. **Never follow a link out of the scratch area.**  The
+   target is resolved and checked to be under the scratch
+   root before anything is removed.  An `intermediate`
+   pointing somewhere unexpected -- the `FIXME` rename
+   `imago.py` performs when a link is stale is one way it
+   happens -- is reported and skipped.  A cleanup tool
+   that can be redirected by a symlink is a hazard, not a
+   convenience.
+4. **Never descend through a symlink while walking.**  The
+   third refusal guards what is *removed*; this one guards
+   what is even *considered*.  `intermediate` is itself a
+   symlink into the scratch area, so a walk that followed
+   links would leave the workspace, find whatever lives
+   over there, and could plan a removal outside the tree
+   it was pointed at.  The walk therefore skips every
+   symlinked subdirectory, which keeps the set of
+   candidate run directories inside the workspace by
+   construction rather than by later checking.
+
+**Dry run is the default.**  The tool previews what it
+would remove, with sizes, and removes nothing until asked.
+An operation whose entire purpose is deletion should make
+the destructive path the one the user typed deliberately.
+
+**Three layers, one code path.**  The logic lives in one
+place and is reached three ways:
+
+- (c) A **standalone tool**, the home of the logic:
+  selective over a workspace, by unit, by calc kind, and
+  by age, with the preview and the refusals above.  This
+  is what a user runs to reclaim a finished campaign.
+- (a) The producer's **`--clean-after`**, which calls that
+  same logic once its harvest completes, with the options
+  a just-finished harvest can supply: exactly the units it
+  harvested, which are by construction done with their
+  scratch.
+- (b) **Prune-as-you-go**, which applies the client policy
+  as the flight advances rather than after it ends,
+  discarding a unit's superseded scratch while later units
+  are still running.  It matters only for a campaign large
+  enough to exhaust scratch mid-flight -- a real prospect
+  at thousands of calculations, and no risk at all at
+  seed scale -- so it is specified here and built when
+  that pressure arrives.  It is the layer that deletes
+  while runs are in progress, so it is also the one whose
+  policy must be right, which is the argument for settling
+  the mechanism/policy boundary before it is wired.
+
 ### 6.3 makeinput callable build API
 
 This subsection designs the makeinput counterpart of the

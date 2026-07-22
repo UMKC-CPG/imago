@@ -2256,7 +2256,15 @@ shipped.
   units from earlier manifests linger in the shared workspace (the
   seed run's workspace still held `si_diamond`, `si_fd-3m_227_2010`,
   and a half-finished `si_p63mmc_194_2018` from prior experiments).
-  Three layers, built in this order:
+  Three layers.  The build order below was originally written two
+  ways -- (b) is labelled NEAR-TERM "before (c) lands" yet listed
+  after it -- and was settled 2026-07-21 in favour of (c) first:
+  measurement showed scratch is 99.7% of the bytes and that
+  pruning it is provably safe (DESIGN 6.2.12), so the standalone
+  tool recovers essentially the whole saving at once, while (b)
+  only matters for a campaign large enough to exhaust scratch
+  MID-flight, which nothing has yet reached.  Order: (c), (a),
+  then (b) when that pressure arrives.
     (c) A STANDALONE cleanup script -- the eventual home of the
         logic: a generic, selective find/remove over intermediate
         scratch, with options that let the user target what to
@@ -2280,6 +2288,48 @@ shipped.
   Level note: this introduces a small cleanup subsystem, so the
   standalone-script boundary and the generic-pruning-hook belong in
   ARCHITECTURE/DESIGN before (c) is coded.  CODE + DESIGN.
+
+  **DESIGN COMPLETE; (c) and (a) BUILT 2026-07-21.  (b) deferred.**
+
+  Measured first, which reshaped the task.  Scratch is **99.7%** of
+  the bytes a run leaves behind -- 3.17 GB of 3.2 GB on a seed-scale
+  run, essentially all the HDF5 carrying the wavefunctions, about 25
+  MB per calculation -- against 222 KB of kept files per calc.  So
+  reclaiming scratch is nearly all of the available saving, and the
+  motivation's "roughly 20 MB per calc dir" was about right.
+
+  **Why it is safe, established rather than assumed.**  Every path
+  in a `result.toml` `outputs` table resolves INSIDE the run
+  directory; none points through `intermediate`.  And `is_cache_hit`
+  decides from `status.toml` plus `cache_key.toml` alone.  So a
+  reclaimed run still harvests and still counts as a cache hit --
+  verified on the live workspace after reclaiming it: the potential
+  still extracted (16 coefficients), every output still present, the
+  cache key and status intact.
+
+  Chain: ARCHITECTURE 9.6 gains the two-tier kept/scratch model and
+  names `tidy_workspace.py`; DESIGN 6.2.12 defines the subsystem --
+  the mechanism/policy split (mirroring the cache's split in 6.2.5,
+  and for the same reason: only the client knows when a finished run
+  is finished WITH), the four refusals, dry-run-by-default, and all
+  three layers; PSEUDOCODE 13.8 gives the walk.
+
+  Code: `src/scripts/tidy_workspace.py` (layer (c)) -- selective by
+  id, calc glob, and age, previewing by default and removing nothing
+  without `--apply`.  Producer `--clean-after` (layer (a)) calls
+  that same planner rather than reimplementing the walk, so the two
+  cannot drift about what is safe to delete.  Reclamation runs after
+  the databases and run log are written, and swallows failures: a
+  stuck directory must not turn a successful build into a failed
+  one.  28 tests; 1049 non-integration tests pass.  Proven live:
+  1.6 GB reclaimed from the C109 full workspace, 6 KB left, every
+  kept file intact.
+
+  **(b) prune-as-you-go remains**, specified in DESIGN 6.2.12 but
+  unwired.  It matters only for a campaign large enough to exhaust
+  scratch MID-flight; at seed scale `--clean-after` covers it.  It
+  is also the layer that deletes while runs are in progress, which
+  is why the mechanism/policy boundary was settled first.
 
 - [x] C109. Decide the default cell -- full (conventional) vs
   primitive -- for the materialized `imago.skl`.  Surfaced by the
