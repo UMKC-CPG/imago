@@ -1897,17 +1897,29 @@ bytes, almost entirely the HDF5 that carries the
 wavefunctions, against a couple of hundred kilobytes of
 kept files per calculation.
 
-Reclaiming it is a **general kaleidoscope feature**, split
-exactly as the cache is, and for the same reason -- only
-the client knows when a finished run is finished *with*:
+Reclaiming it is split exactly as the cache is, and for
+the same reason -- only the client knows when a finished
+run is finished *with*:
 
-- *Mechanism (kaleidoscope).*  Walk a root, resolve each
-  run's scratch, preview it, and remove what a policy
-  marks reclaimable.
+- *Mechanism (the reclamation tool).*  Walk a root,
+  resolve each run's scratch, preview it, and remove what
+  a policy marks reclaimable.
 - *Policy (client).*  Decide when a unit's scratch is
   spent.  The k-point producer is done with a rung once
   its `result.toml` lands; a client that post-processes
   wavefunctions is not done until that step has run.
+
+Unlike the cache, the mechanism sits *beside* kaleidoscope
+rather than inside it.  Reclamation reads imago's own names
+-- the `intermediate` link, the lock file, the completion
+marker -- out of `imago.py`, and within kaleidoscope the
+one place engine knowledge belongs is the wingbeat (9.4),
+the pluggable piece that knows how to run a unit
+(Principle 9: domain-specific machinery lives at the
+adapter layer).  Reclamation is not a way of running a
+unit, and the dispatch core beneath the wingbeat names no
+imago file at all.  So the tool stands on its own, and all
+three layers reach it from the client side.
 
 Scratch is not only a flight's problem, though.  An
 ordinary `imago.py` run plants the same `intermediate`
@@ -1922,8 +1934,13 @@ ending their `runtime` log with the completion marker.
 
 - `src/scripts/tidy_scratch.py`: the standalone
   reclamation tool -- the home of the logic, which the
-  producer's `--clean-after` then calls rather than
-  reimplementing.  Design in DESIGN 6.2.12, including the
+  producer's `--clean-after` (sweep once the harvest is
+  written) and `--tidy-run` (prune each unit as it lands)
+  both call rather than reimplementing.  The in-flight
+  prune reaches it through the `on_outcome` hook a flight
+  already fires, so it is a producer wiring and adds
+  nothing to kaleidoscope.  Design in DESIGN 6.2.12,
+  including the
   five refusals that hold for every root (never the run
   directory, never an unfinished unit, never a link out of
   the scratch area, never a symlink descended while

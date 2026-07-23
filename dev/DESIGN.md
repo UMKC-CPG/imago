@@ -8901,16 +8901,45 @@ mechanism and a client-supplied key, because only the
 client knows what defines identity for its calculations.
 Reclamation divides the same way, and for the same reason:
 
-- *Mechanism (kaleidoscope).*  Walk a root, resolve each
-  run directory's `intermediate` target, and remove what a
-  policy marks reclaimable -- with the dry-run preview,
-  the reporting, and the refusal rules below.
+- *Mechanism (the reclamation tool).*  Walk a root,
+  resolve each run directory's `intermediate` target, and
+  remove what a policy marks reclaimable -- with the
+  dry-run preview, the reporting, and the refusal rules
+  below.
 - *Policy (client).*  Decide **when** a unit's scratch is
   reclaimable.  Only the client knows whether a finished
   run is finished *with*: the k-point producer is done
   with a rung the moment its `result.toml` lands, while a
   client that post-processes wavefunctions into a density
   of states needs the HDF5 until that step has run.
+
+**Where the mechanism lives, and why not in the
+dispatcher.**  The *split* above is the cache's, but the
+*placement* is not: the cache mechanism sits inside
+kaleidoscope, while this one sits beside it, in a tool of
+its own (layer (c) below).  The reason is what reclamation
+has to know.  It reads imago's own names -- the
+`intermediate` link, the lock file, the wording of the
+completion line -- out of `imago.py` rather than
+re-spelling them, so that a rename in the engine cannot
+silently desync the recognizer.  That is engine knowledge,
+and within kaleidoscope there is exactly one place engine
+knowledge is allowed: the **wingbeat**, the pluggable piece
+that knows how to run one unit.  The dispatch core beneath
+it -- the driver and the data model -- names no imago file
+at all, which is what would let a different engine be flown
+by the same dispatcher.  This is Principle 9 exactly:
+domain-specific machinery lives at the adapter layer, and
+the flight layer is ordinary scientific Python.  Principle
+12 says the matching thing from the other side, naming the
+wingbeat as where per-unit domain iteration belongs.
+Reclamation is not
+a way of running a unit, so it is not a wingbeat; and
+putting it in the core would place engine knowledge in the
+one layer that must not carry any.  It therefore lives
+outside kaleidoscope altogether, and each of the three
+layers below reaches it from the *client* side rather than
+from within a flight.
 
 A policy is handed `(run_dir, target)`: the run directory
 and its already-resolved scratch.  The second argument is
@@ -9106,7 +9135,7 @@ place and is reached three ways:
 - (b) **Prune-as-you-go**, which applies the client policy
   as the flight advances rather than after it ends,
   discarding a unit's superseded scratch while later units
-  are still running.  It matters only for a campaign large
+  are still running.  It matters for a campaign large
   enough to exhaust scratch mid-flight.  There is no fixed
   headroom to name here: `$IMAGO_TEMP` has no per-user
   quota, so the ceiling is whatever a *shared* filesystem
@@ -9115,12 +9144,85 @@ place and is reached three ways:
   same time.  That is a stronger reason to prune in flight
   than a generous private allowance would be, not a weaker
   one: a campaign cannot know in advance how much room it
-  will actually get.  So (b) is specified here and built
-  when that pressure first bites.  It is the layer that
-  deletes while runs are in progress, so it is also the
-  one whose policy must be right, which is the argument for
-  settling the mechanism/policy boundary before it is
-  wired.
+  will actually get.  As in (a), the producer names no
+  policy of its own and leans on the default -- a unit is
+  spent once it is `done` with a `result.toml` -- so the
+  in-flight prune, the post-harvest sweep, and the
+  standalone tool all judge a workspace by one rule.  A
+  client whose units are not spent that early passes its
+  own, which is the whole reason the policy is an argument.
+  (b) is also the layer that deletes while runs are still
+  in progress, so it is the one whose policy and refusals
+  have to be right; the two paragraphs after this list say
+  where it hooks and what the mechanism had to grow to
+  support it.
+
+**How prune-as-you-go hooks.**  It adds nothing to
+kaleidoscope, for the reason given above, and it does not
+need to: a flight already tells its client when a unit
+reaches a terminal state.  The `on_outcome` callback fires
+once per unit, in landing order, carrying that unit's run
+directory -- exactly the moment, and exactly the fact, a
+prune needs.  So (b) is a *client* wiring: the client hands
+the flight one callback that reports the landing and prunes
+it.  The alternative considered was a reclamation policy
+recorded on the flight itself, which the dispatcher would
+act on; it was rejected because it buys uniformity across
+clients at the price of teaching the dispatch core an
+engine's file names.  A client wanting both progress
+reporting and pruning composes them in its own callback,
+which is a few lines it can read, rather than inheriting a
+deletion it never asked for.
+
+**A prune that fails is contained, but never hidden.**  This
+is Principle 10 applied to housekeeping -- one failure never
+fails the flight, and failures are recorded and surfaced --
+so what follows is that principle worked out, not a new
+rule invented here.  The
+callback runs inside the dispatcher's collect step, which
+does not guard it, so an exception escaping it would
+propagate out through the climb and abandon the campaign --
+trading hours of cluster time for a piece of housekeeping.
+Nothing may escape, therefore.  But *contained* must not
+become *ignored*, and the distinction that makes both
+possible is between a refusal and a failure.  A refusal --
+unfinished, nested, too recent -- is the mechanism working
+exactly as the rules above say it should, and is reported
+at the same quiet level the standalone tool uses.  A
+failure -- a removal attempted and declined by the
+filesystem, or the mechanism itself raising -- means an
+assumption behind this whole section has stopped holding:
+a permission changed, a mount went read-only, something is
+holding files open.  The next campaign will meet it too.
+So a failure is printed when it happens *and* carried to
+the end of the run and printed again, because a single line
+an hour deep in a log is lost, and this is the class of
+thing that must not be.  It is deliberately not made fatal:
+the databases and the run log are complete and correct, and
+a housekeeping fault is a thing to go and look at, not a
+reason to call a good campaign failed.
+
+**What the mechanism had to grow.**  The standalone tool
+judges a whole tree at once; (b) judges one directory at a
+time.  That is a separation, not a second rule: the
+per-directory decision -- resolve the link, refuse what
+must be refused, apply the policy, measure -- becomes a
+function that the whole-tree planner calls in a loop and
+the in-flight prune calls once.  A campaign pruned in
+flight and one swept afterwards are then governed by the
+same code, which is the same argument that made layer (a)
+call the tool's planner instead of reimplementing it.
+
+The one refusal that does not survive being narrowed to a
+single directory is the nested-scratch rule, which by its
+nature compares one tree against others.  The
+per-directory function therefore receives the set to
+compare against as an argument: the whole-tree planner
+passes every run its walk found, and the in-flight caller
+passes the flight's other units.  A unit that has not
+started yet contributes nothing to that set, which is
+right -- it has no scratch to lose, and it will create its
+own when it runs, inside a parent that by then is gone.
 
 ### 6.3 makeinput callable build API
 

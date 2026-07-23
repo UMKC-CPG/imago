@@ -497,7 +497,13 @@ def plan_reclamation(root, scratch_root, policy=None,
     #   against -- including runs this call filtered out, since an
     #   excluded inner run is exactly the one an outer removal
     #   would take as collateral.
-    resolved = []                       # (directory, target, why)
+    #
+    # The link is resolved twice: once here, to build that
+    #   comparison set, and once inside plan_one_dir when it judges
+    #   the directory.  Those are two cheap stats, and paying them
+    #   keeps plan_one_dir usable on its own, with no caller
+    #   obliged to hand it a pre-resolved target.
+    resolved = []                    # (directory, relative, target)
     for item_kind, directory in sorted(found, key=lambda p: p[1]):
         relative = os.path.relpath(os.path.abspath(directory), base)
 
@@ -509,52 +515,138 @@ def plan_reclamation(root, scratch_root, policy=None,
                              ok=False, workspace=True, bytes=0,
                              reason="workspace: tidy it directly"))
             continue
-        resolved.append((directory, relative) +
-                        scratch_target(directory, scratch_root))
+        target, _ = scratch_target(directory, scratch_root)
+        resolved.append((directory, relative, target))
 
-    every_target = [target for _, _, target, _ in resolved
+    every_target = [target for _, _, target in resolved
                     if target is not None]
 
-    for directory, relative, target, reason in resolved:
+    for directory, relative, _ in resolved:
         if not _selected(relative, kind, ids, calc_pattern, match):
             continue
 
-        if target is None:
-            plan.append(_skipped(directory, relative, reason))
-            continue
-
-        # REFUSAL 5: an outer tree holding another run's scratch
-        #   is deferred, never removed.  Taking it would delete
-        #   the inner run's working files as collateral, which
-        #   would make the "never touch an unfinished run" refusal
-        #   a formality.  A second pass reclaims it once the inner
-        #   ones are gone, so nothing is lost -- only deferred.
-        nested = [other for other in every_target
-                  if other != target and _is_under(other, target)]
-        if nested:
-            plan.append(_skipped(
-                directory, relative,
-                f"holds {len(nested)} nested run's scratch; "
-                f"reclaim those first"))
-            continue
-
-        spent, reason = policy(directory, target)
-        if not spent:
-            plan.append(_skipped(directory, relative, reason))
-            continue
-
-        size, newest = tree_stats(target)
-        if older_than is not None:
-            age_days = (now - newest) / SECONDS_PER_DAY
-            if age_days < older_than:
-                plan.append(_skipped(
-                    directory, relative,
-                    f"only {age_days:.1f} days old"))
-                continue
-
-        plan.append(dict(run_dir=directory, unit=relative, ok=True,
-                         reason="", target=target, bytes=size))
+        # Every refusal from here down belongs to plan_one_dir, so
+        #   this whole-tree sweep and the in-flight prune of layer
+        #   (b) apply one set of rules rather than two.
+        #
+        # ``every_target`` is the comparison set for the nesting
+        #   refusal: every run the WALK found, not the selected
+        #   subset, so a filtered-out inner run still stops the
+        #   outer removal -- precisely the case that refusal
+        #   exists to stop.
+        plan.append(plan_one_dir(directory, relative, scratch_root,
+                                 policy, every_target, older_than,
+                                 now=now))
     return plan
+
+
+def plan_one_dir(run_dir, label, scratch_root, policy,
+                 other_targets=(), older_than=None, now=None):
+    """Judge ONE run directory and return its plan record
+    (PSEUDOCODE 13.8).
+
+    The whole per-directory decision -- resolve the link, refuse
+    what must be refused, apply the policy, measure the tree --
+    lives here so that :func:`plan_reclamation`, which sweeps a
+    whole root, and :func:`reclaim_one_dir`, which prunes a single
+    unit mid-flight, reach it by the same path and cannot drift
+    apart.
+
+    :param run_dir: the run directory to judge.
+    :param label: how the report should name this run -- the path
+        relative to the walk's base for a whole-tree plan, the
+        unit's own directory name for a single prune.  Nothing is
+        decided from it.
+    :param scratch_root: the area scratch must lie under.
+    :param policy: ``(run_dir, target) -> (spent, reason)``.
+    :param other_targets: the comparison set for the nesting
+        refusal, supplied by the CALLER because containment is the
+        one refusal a single directory cannot judge on its own: a
+        whole-tree sweep passes every run its walk found, and an
+        in-flight prune passes the flight's other units.
+    :param older_than: only scratch whose newest file is at least
+        this many days old, or None for any age.
+    :param now: the timestamp the age is measured against, so a
+        sweep dates every entry from one instant; None to read the
+        clock here.
+    """
+
+    if now is None:
+        now = datetime.now().timestamp()
+
+    target, reason = scratch_target(run_dir, scratch_root)
+    if target is None:
+        return _skipped(run_dir, label, reason)
+
+    # REFUSAL 5: an outer tree holding another run's scratch is
+    #   deferred, never removed.  Taking it would delete the inner
+    #   run's working files as collateral, which would make the
+    #   "never touch an unfinished run" refusal a formality.  A
+    #   second pass reclaims it once the inner ones are gone, so
+    #   nothing is lost -- only deferred.
+    nested = [other for other in other_targets
+              if other != target and _is_under(other, target)]
+    if nested:
+        return _skipped(
+            run_dir, label,
+            f"holds {len(nested)} nested run's scratch; "
+            f"reclaim those first")
+
+    spent, reason = policy(run_dir, target)
+    if not spent:
+        return _skipped(run_dir, label, reason)
+
+    size, newest = tree_stats(target)
+    if older_than is not None:
+        age_days = (now - newest) / SECONDS_PER_DAY
+        if age_days < older_than:
+            return _skipped(run_dir, label,
+                            f"only {age_days:.1f} days old")
+
+    return dict(run_dir=run_dir, unit=label, ok=True, reason="",
+                target=target, bytes=size)
+
+
+def reclaim_one_dir(run_dir, scratch_root, policy=None,
+                    other_targets=(), older_than=None, label=None):
+    """Judge ONE finished run and remove its scratch when the
+    policy calls it spent (PSEUDOCODE 13.8; DESIGN 6.2.12 layer
+    (b)).
+
+    This is the entry point a client uses to prune as a campaign
+    advances, rather than sweeping the workspace after it ends.
+    Nothing about flights appears here: the caller decides *when*
+    to call it -- as a unit lands -- and *which* policy applies.
+    This is only the mechanism.
+
+    Returns the plan record :func:`plan_one_dir` built, with two
+    fields added when a removal was attempted: ``removed`` says
+    whether the tree actually went, and ``failure`` carries the
+    message when it did not.  A caller can then report a single
+    prune the way the standalone tool reports a whole sweep, and
+    can tell a refusal (``ok`` false) from a failure (``ok`` true,
+    ``removed`` false) -- a distinction that matters, because the
+    first is the mechanism working and the second means a
+    filesystem assumption has broken.
+
+    The default policy is the workspace one, since a unit landing
+    in a flight is what this layer exists for.
+    """
+
+    if policy is None:
+        policy = default_reclaim_policy
+    if label is None:
+        label = os.path.basename(os.path.normpath(run_dir))
+
+    record = plan_one_dir(run_dir, label, scratch_root, policy,
+                          other_targets, older_than)
+    if not record["ok"]:
+        return record
+
+    removed, _, failures = apply_reclamation([record])
+    record["removed"] = removed == 1
+    record["failure"] = failures[0][1] if failures else None
+    return record
 
 
 def _skipped(directory, relative, reason):

@@ -23,6 +23,13 @@ Two fixtures build miniature roots on tmp_path, one per kind:
 Both plant an ``intermediate`` symlink into a separate "scratch"
 tree, mirroring the real two-filesystem layout closely enough to
 exercise every path without needing a flight.
+
+There are two ways into the tool, and the last class here holds
+them to the same standard: ``plan_reclamation`` sweeps a whole
+root, while ``plan_one_dir`` / ``reclaim_one_dir`` judge a single
+run directory as it lands mid-campaign.  Both reach their verdict
+through one function, so those tests check that the single-unit
+path agrees with the sweep rather than merely that it works.
 """
 
 import os
@@ -808,3 +815,126 @@ class TestNestedScratch:
         assert by_unit["si"]["ok"] is False
         assert "nested" in by_unit["si"]["reason"]
         assert by_unit["si/kpt-mesh-2-2-2"]["ok"] is True
+
+
+class TestSingleDirectoryEntryPoint:
+    """DESIGN 6.2.12 layer (b).  The in-flight prune judges ONE
+    run directory rather than sweeping a whole root, and it must
+    reach exactly the same decision the sweep would -- the two
+    share ``plan_one_dir`` precisely so they cannot diverge."""
+
+    def test_it_agrees_with_the_sweep_on_a_spent_unit(self,
+                                                      workspace):
+        root, scratch = workspace
+        run_dir = _make_run(root, scratch, "si", "gs_scf-fb")
+
+        swept = tidy_scratch.plan_reclamation(root, scratch)[0]
+        single = tidy_scratch.plan_one_dir(
+            run_dir, "si/gs_scf-fb", scratch,
+            tidy_scratch.default_reclaim_policy)
+        assert single["ok"] is True
+        assert single["ok"] == swept["ok"]
+        assert single["target"] == swept["target"]
+        assert single["bytes"] == swept["bytes"]
+
+    def test_it_agrees_with_the_sweep_on_an_unfinished_unit(
+            self, workspace):
+        # The refusal that matters most in flight: a unit still
+        #   running has not written a terminal status, and its
+        #   working files are emphatically not ours to take.
+        root, scratch = workspace
+        run_dir = _make_run(root, scratch, "si", "gs_scf-fb",
+                            status="running")
+
+        swept = tidy_scratch.plan_reclamation(root, scratch)[0]
+        single = tidy_scratch.plan_one_dir(
+            run_dir, "si/gs_scf-fb", scratch,
+            tidy_scratch.default_reclaim_policy)
+        assert single["ok"] is False
+        assert single["reason"] == swept["reason"]
+
+    def test_a_prune_removes_only_the_scratch(self, workspace):
+        root, scratch = workspace
+        run_dir = _make_run(root, scratch, "si", "gs_scf-fb")
+        target = os.path.join(scratch, "si", "gs_scf-fb")
+
+        record = tidy_scratch.reclaim_one_dir(run_dir, scratch)
+        assert record["ok"] is True
+        assert record["removed"] is True
+        assert record["failure"] is None
+        assert not os.path.isdir(target)
+        # Refusal 1: the kept tier survives, and the dangling link
+        #   is left in place so the run still shows where its
+        #   scratch was.
+        assert os.path.isfile(os.path.join(run_dir, "result.toml"))
+        assert os.path.islink(os.path.join(run_dir, "intermediate"))
+
+    def test_a_prune_refuses_an_unfinished_unit(self, workspace):
+        root, scratch = workspace
+        run_dir = _make_run(root, scratch, "si", "gs_scf-fb",
+                            status="running")
+
+        record = tidy_scratch.reclaim_one_dir(run_dir, scratch)
+        assert record["ok"] is False
+        assert "removed" not in record
+        assert os.path.isdir(os.path.join(scratch, "si",
+                                          "gs_scf-fb"))
+
+    def test_a_prune_defers_to_the_nesting_refusal(self,
+                                                   workspace):
+        # Refusal 5 is the one a single directory cannot judge
+        #   alone, so the caller supplies the comparison set.  In
+        #   flight that is the flight's other units.
+        root, scratch = workspace
+        outer = _make_run(root, scratch, "si", "gs_scf-fb")
+        inner_target = os.path.join(scratch, "si", "gs_scf-fb",
+                                    "nested")
+        os.makedirs(inner_target)
+
+        record = tidy_scratch.reclaim_one_dir(
+            outer, scratch, other_targets=[inner_target])
+        assert record["ok"] is False
+        assert "nested" in record["reason"]
+        assert os.path.isdir(inner_target)
+
+    def test_an_empty_comparison_set_is_not_a_refusal(self,
+                                                      workspace):
+        # A unit that has not started yet owns no scratch and so
+        #   contributes nothing to the set -- which must read as
+        #   "nothing in the way", not as an unknown.
+        root, scratch = workspace
+        run_dir = _make_run(root, scratch, "si", "gs_scf-fb")
+
+        record = tidy_scratch.reclaim_one_dir(run_dir, scratch,
+                                              other_targets=[])
+        assert record["removed"] is True
+
+    def test_a_failed_removal_is_reported_not_raised(
+            self, workspace, monkeypatch):
+        # The distinction layer (b) rests on: a REFUSAL is the
+        #   mechanism working (ok False), while a FAILURE is a
+        #   removal that was attempted and did not happen (ok
+        #   True, removed False).  The caller alarms only on the
+        #   second, and neither may raise into the campaign.
+        root, scratch = workspace
+        run_dir = _make_run(root, scratch, "si", "gs_scf-fb")
+
+        def refuse(path):
+            raise OSError("device or resource busy")
+
+        monkeypatch.setattr(tidy_scratch.shutil, "rmtree", refuse)
+        record = tidy_scratch.reclaim_one_dir(run_dir, scratch)
+        assert record["ok"] is True
+        assert record["removed"] is False
+        assert "busy" in record["failure"]
+
+    def test_the_label_defaults_to_the_directory_name(self,
+                                                      workspace):
+        # The label only names the run in a report; nothing is
+        #   decided from it, and a caller that gives none still
+        #   gets something readable.
+        root, scratch = workspace
+        run_dir = _make_run(root, scratch, "si", "gs_scf-fb")
+
+        record = tidy_scratch.reclaim_one_dir(run_dir, scratch)
+        assert record["unit"] == "gs_scf-fb"

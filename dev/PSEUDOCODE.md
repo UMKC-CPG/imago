@@ -2313,7 +2313,9 @@ function predict_kpoint_density(structure, dataspace, system_type,
 
 function make_climb_dispatcher(structures, options_by_material,
                                workspace, parsl_config, executor,
-                               force):
+                               force, tidy_run = False,
+                               scratch_root = "",
+                               prune_problems = None):
     # Build the dispatcher converge_by_climb (4e.5) drives, closing
     # over each material's structure and options, the workspace root,
     # the resolved Config (13.7), and the ONE shared executor every
@@ -2336,6 +2338,18 @@ function make_climb_dispatcher(structures, options_by_material,
                     sweep = Sweep(varied = ("kpt-mesh",), fixed = {}))
     outstanding = []          # (unit, future) -- the in-flight rungs
     origin = {}               # unit identity -> (material, mesh)
+
+    # Layer (b) (DESIGN 6.2.12).  With --tidy-run the flight carries
+    #   the producer's prune callback (11.4), so each rung's scratch
+    #   goes as that rung lands rather than after the climb ends.
+    #   This is the flight that matters for it: the climb dispatches
+    #   many rungs per solid, and is the phase long enough to fill
+    #   scratch before it finishes.  The callback reads flight.units
+    #   at call time, which is why the accreting list above is safe
+    #   to hand it now.
+    if tidy_run:
+        flight.on_outcome = make_prune_callback(
+            flight, workspace, scratch_root, prune_problems)
 
     # send: build one unit per requested mesh, remember its origin,
     #   append it to the flight's growing list, prepare ONLY the new
@@ -5477,7 +5491,7 @@ it).
 function buildInitialPotentials(manifest_path,
         force, single_element, dispatch_shape,
         partition, nodes, walltime, profile,
-        save_config):
+        save_config, clean_after, tidy_run):
     manifest     = load_manifest_v2(manifest_path)
     # Fill each sparse solid from the shared blocks before the
     #   pipeline reads it (11.4): run settings from [defaults],
@@ -5662,14 +5676,46 @@ function buildInitialPotentials(manifest_path,
     # allocation.  Phase 3 harvest reads run dirs only and needs no
     # dispatch, so the pool is freed the moment convergence ends.
     executor = make_executor(parsl_config)            # 13.5
+
+    # Layer (b), prune-as-you-go (DESIGN 6.2.12).  When --tidy-run
+    # is asked for, each flight is handed a callback that kaleido-
+    # scope fires as each unit reaches a terminal state, and that
+    # callback prunes that unit's scratch there and then, while the
+    # rest of the campaign is still running.  Nothing is added to
+    # kaleidoscope for this: on_outcome already reports a landing
+    # and already carries the run directory.
+    #
+    # A campaign that is not asked to tidy passes None and behaves
+    # exactly as before.  $IMAGO_TEMP unset means the check that
+    # scratch lies where it should cannot run, so the prune is
+    # declined out loud rather than performed unchecked -- the same
+    # rule layer (a) applies after the harvest.
+    #
+    # Prune failures are collected across BOTH flights into one
+    # list and reported again at the very end (below).  A failure
+    # cannot be allowed to stop the campaign, but it must not be
+    # able to scroll away either: it says a filesystem assumption
+    # of 6.2.12 has broken, and that is the user's to act on.
+    scratch_root = env("IMAGO_TEMP")
+    prune_enabled = tidy_run and scratch_root != ""
+    prune_problems = []
+    if tidy_run and not prune_enabled:
+        report("--tidy-run skipped: $IMAGO_TEMP is unset")
+
     try:
+        # The flight is built whether or not there is anything to
+        # dispatch: Phase 3's fingerprint harvest reads it below.
+        loen_flight = Flight(
+            units        = loen_units,
+            root         = workspace,
+            parsl_config = parsl_config,
+            sweep        = SweepRecord(
+                varied_axes = (), fixed_axes = {}))
+        if prune_enabled:
+            loen_flight.on_outcome = make_prune_callback(
+                loen_flight, workspace, scratch_root,
+                prune_problems)
         if loen_units is not empty:
-            loen_flight = Flight(
-                units        = loen_units,
-                root         = workspace,
-                parsl_config = parsl_config,
-                sweep        = SweepRecord(
-                    varied_axes = (), fixed_axes = {}))
             prepare_units(loen_flight)    # driver-side makeinput
             dispatch(loen_flight, executor = executor,
                      force = force)
@@ -5691,10 +5737,18 @@ function buildInitialPotentials(manifest_path,
         # is a cache hit (6.2.5).  on_non_converged tags the solid's
         # workspace with a prediction mismatch (7.8 3d); it is
         # injected so the climb loop stays free of the workspace.
+        #
+        # The climb's flight gets the same prune callback.  This is
+        # where prune-as-you-go earns its keep: the pre-flight is a
+        # handful of geometry-only runs, while the climb dispatches
+        # many rungs per solid and is the phase long enough to
+        # exhaust scratch before it ends.
         dispatcher = make_climb_dispatcher(
             struct_of, options_of, workspace,
             parsl_config = parsl_config, executor = executor,
-            force = force)
+            force = force, tidy_run = prune_enabled,
+            scratch_root = scratch_root,
+            prune_problems = prune_problems)
         materials = [ref.reference_id
                      for ref in manifest.reference_solids]
         outcomes, rungs = converge_by_climb(
@@ -5834,6 +5888,116 @@ function buildInitialPotentials(manifest_path,
         manifest_snapshot = manifest,
         imago_commit      = imago_commit,
         per_run_log       = log)
+
+    # Layer (a), the post-harvest sweep (DESIGN 6.2.12).  Placed
+    # deliberately AFTER the databases and the run log are on disk:
+    # everything harvested is then safe, so a reclamation that went
+    # wrong could not cost us the results.  It calls the standalone
+    # tool's own planner rather than reimplementing the walk, and
+    # supplies only the workspace -- the default policy is the same
+    # "spent once `done` with a result.toml" rule this producer
+    # would apply anyway, so the two cannot diverge.
+    #
+    # It remains useful alongside --tidy-run, because the in-flight
+    # prune deliberately leaves some units behind: one still nested
+    # inside another (REFUSAL 5), and one whose scratch appeared
+    # after it landed.  This is the second pass that takes them.
+    if clean_after:
+        reclaim_run_scratch(workspace)
+
+    # Say again, at the end and all together, anything that went
+    # wrong while tidying in flight.  Each was already printed when
+    # it happened, but a campaign is hours long and that line is
+    # far up the log by now.  This is the summary the user is
+    # actually looking at when the run finishes, so a broken
+    # filesystem assumption gets named where it will be seen -- and
+    # named as something to look into, not as a run that failed,
+    # because every database and every log above is intact.
+    if prune_problems is not empty:
+        report("")
+        report("tidy-run: " + count(prune_problems) + " scratch "
+               "tree(s) could NOT be removed.  The results above "
+               "are complete and unaffected, but reclamation is "
+               "not working -- check permissions and the mount, "
+               "and sweep with tidy_scratch.py when fixed:")
+        for (label, message) in prune_problems:
+            report("    " + label + ": " + message)
+
+
+function make_prune_callback(flight, workspace, scratch_root,
+                             problems):
+    # Layer (b) (DESIGN 6.2.12): build the on_outcome callback a
+    # flight is handed when --tidy-run is asked for.  Kaleidoscope
+    # fires it once per unit, in LANDING order, as that unit
+    # reaches a terminal state.
+    #
+    # It closes over the FLIGHT, not over a fixed unit list,
+    # because the climb's list ACCRETES as rungs are decided
+    # (4e.7): reading flight.units at call time therefore sees
+    # every rung decided so far, which is exactly the set that
+    # could own scratch right now.
+    #
+    # `problems` is the shared list every prune failure is appended
+    # to, so the end of the run can say plainly that tidying went
+    # wrong.  A REFUSAL is not a problem and never lands there: a
+    # unit skipped because it is unfinished, nested, or too recent
+    # is the mechanism working.  A FAILURE is a removal that was
+    # attempted and did not happen, or the mechanism itself
+    # throwing -- and that means an assumption of 6.2.12 no longer
+    # holds, which the user needs to know about.
+    function on_landed(entry):
+        # The comparison set for REFUSAL 5 is this flight's OTHER
+        # units.  A unit not yet run owns no scratch and so
+        # contributes nothing, which is right: it has nothing to
+        # lose, and it will create its own tree when it runs.
+        others = []
+        for unit in flight.units:
+            run_dir = unit_run_dir(flight, unit)
+            if run_dir == entry.wingbeat_dir:
+                continue
+            (target, _) = scratch_target(run_dir, scratch_root)
+            if target != None:
+                others.append(target)
+
+        # Nothing raised here may escape.  This runs inside
+        # kaleidoscope's collect (13.5), which does NOT guard the
+        # hook, so an exception would propagate out through the
+        # climb and abandon the whole campaign -- losing a run of
+        # cluster time to a piece of housekeeping.  Tidying may
+        # fail; a campaign may not fail because tidying did.
+        #
+        # Contained is not the same as ignored.  A failure is
+        # printed the moment it happens AND recorded in `problems`,
+        # because a mid-campaign line is easily lost in hours of
+        # scrollback and this is exactly the kind of thing that
+        # must not be lost: a scratch tree that will not remove
+        # means a permission, mount, or lock assumption has broken,
+        # and the next campaign will hit it too.
+        label = relpath(entry.wingbeat_dir,
+                        join(workspace, "wingbeats"))
+        try:
+            record = reclaim_one_dir(
+                entry.wingbeat_dir, scratch_root,
+                other_targets = others, label = label)
+        except Exception as exc:
+            # The mechanism itself threw -- a stronger signal than
+            # a removal that merely failed, since 6.2.12's refusals
+            # are meant to leave no uncaught path.
+            problems.append((label, "prune raised: " + str(exc)))
+            report("tidy-run: FAILED to prune " + label + ": " +
+                   str(exc))
+            return
+
+        if record.ok and not record.removed:
+            problems.append((label, record.failure))
+            report("tidy-run: FAILED to prune " + label + ": " +
+                   record.failure)
+        else:
+            # A removal, or an ordinary refusal.  Both are the
+            # mechanism working, and are reported at the quiet
+            # level the standalone tool uses.
+            report_prune(record)
+    return on_landed
 
 
 function build_climb_config(ref, structure, confidence,
@@ -8860,6 +9024,16 @@ so the report can explain a skip rather than silently
 passing over it; refusals 4 and 7 are properties of the
 walks themselves.
 
+There are two ways in, and they share their judgment.
+`plan_reclamation` walks a whole root and is what the
+standalone tool and the producer's post-harvest sweep call;
+`reclaim_one_dir` judges a SINGLE run directory and removes
+it, and is what the in-flight prune of layer (b) calls as
+each unit lands.  Both reach the per-directory decision
+through one function, `plan_one_dir`, so a campaign pruned
+in flight and one swept afterwards cannot be governed by
+different rules (DESIGN 6.2.12).
+
 ```
 function default_reclaim_policy(run_dir, target):
     # WORKSPACE contract.  A unit is spent when it finished
@@ -8985,6 +9159,86 @@ function find_job_run_dirs(root):
             yield RunDir(directory)
 
 
+function plan_one_dir(run_dir, label, scratch_root, policy,
+        other_targets = [], older_than = None):
+    # Judge ONE run directory and return its plan record.  The
+    # whole per-directory decision -- resolve, refuse, apply the
+    # policy, measure -- lives here so that the whole-tree planner
+    # below and the in-flight prune of layer (b) reach it by the
+    # same path and cannot drift apart (DESIGN 6.2.12).
+    #
+    # `other_targets` is the comparison set for REFUSAL 5, supplied
+    # by the CALLER because containment is the one refusal a single
+    # directory cannot judge on its own: the whole-tree planner
+    # passes every run its walk found, the in-flight caller passes
+    # the flight's other units.
+    #
+    # `label` is only how the report names this run -- the path
+    # relative to the walk's base for a whole-tree plan, the unit's
+    # own directory name for a single prune.  Nothing is decided
+    # from it.
+    (target, why) = scratch_target(run_dir, scratch_root)
+    if target is None:
+        return Skipped(run_dir, label, why)
+
+    # REFUSAL 5: an outer tree holding another run's scratch is
+    # deferred, never removed.  Taking it would delete the inner
+    # run's working files as collateral, which would turn the
+    # "never touch an unfinished run" refusal into a formality.
+    # Once the inner ones are gone a later pass takes the outer, so
+    # nothing is lost -- only deferred.
+    nested = [t for t in other_targets
+              if t != target and is_under(t, target)]
+    if nested is not empty:
+        return Skipped(run_dir, label,
+            "holds " + count(nested) + " nested run's scratch; "
+            "reclaim those first")
+
+    (spent, why) = policy(run_dir, target)
+    if not spent:
+        return Skipped(run_dir, label, why)
+
+    # Age is the NEWEST mtime anywhere in the tree, never the top
+    # directory's: that moves only when entries are added or
+    # removed, so a job that has spent a week writing into an
+    # already-created HDF5 still presents a week-old directory.
+    # The size walk visits every file, so one pass yields both.
+    (bytes, newest) = tree_stats(target)
+    if older_than is not None and days_since(newest) < older_than:
+        return Skipped(run_dir, label, "too recent")
+
+    return Reclaimable(run_dir, label, target, bytes)
+
+
+function reclaim_one_dir(run_dir, scratch_root, policy = None,
+        other_targets = [], older_than = None, label = None):
+    # Layer (b)'s entry point: judge ONE finished run and remove
+    # its scratch when the policy calls it spent.  Returns the plan
+    # record, carrying whether the removal actually happened and
+    # the message when it did not, so a caller can report a prune
+    # the way the standalone tool reports a sweep.
+    #
+    # Nothing about flights appears here.  The caller decides WHEN
+    # to call it -- on a unit landing -- and WHICH policy applies;
+    # this is only the mechanism (DESIGN 6.2.12).  The default is
+    # the workspace policy, since a unit landing in a flight is
+    # what layer (b) exists for.
+    if policy is None:
+        policy = default_reclaim_policy
+    record = plan_one_dir(run_dir, label or basename(run_dir),
+                          scratch_root, policy, other_targets,
+                          older_than)
+    if not record.ok:
+        return record
+    (removed, freed, failures) = apply_reclamation([record])
+    record.removed = (removed == 1)
+    # apply_reclamation returns (unit, message) pairs, so the
+    # message is the second element of the one failure a
+    # single-directory plan can produce.
+    record.failure = (failures[0][1] if failures else None)
+    return record
+
+
 function plan_reclamation(root, scratch_root, policy = None,
         ids = None, calc_pattern = None, older_than = None,
         kind = None, match = None):
@@ -9025,7 +9279,7 @@ function plan_reclamation(root, scratch_root, policy = None,
     # excluded inner run is exactly the one an outer removal would
     # take as collateral.
     plan = []
-    resolved = []           # (directory, relative, target, why)
+    resolved = []                    # (directory, relative, target)
     for (item_kind, directory) in sorted(found by directory):
         relative = relpath(directory, base)
         # A workspace a job-tree walk declined to enter is not a
@@ -9034,51 +9288,32 @@ function plan_reclamation(root, scratch_root, policy = None,
         if item_kind == "workspace":
             plan.append(SkippedWorkspace(directory, relative))
             continue
-        (target, why) = scratch_target(directory, scratch_root)
-        resolved.append((directory, relative, target, why))
+        (target, _) = scratch_target(directory, scratch_root)
+        resolved.append((directory, relative, target))
 
-    every_target = [t for (_, _, t, _) in resolved if t != None]
+    every_target = [t for (_, _, t) in resolved if t != None]
 
-    for (directory, relative, target, why) in resolved:
+    for (directory, relative, _) in resolved:
         # A workspace selects on unit id and calc tag; a job tree
         # on the path relative to the root.
         if not selected(relative, kind, ids, calc_pattern, match):
             continue
 
-        if target is None:
-            plan.append(Skipped(directory, relative, why))
-            continue
-
-        # REFUSAL 5: an outer tree that holds another run's
-        # scratch is deferred, not removed.  Checked against
-        # every_target, NOT the selected subset, so a filtered-out
-        # inner run still stops the outer removal.  Once the inner
-        # ones are gone a second pass reclaims the outer.
-        nested = [t for t in every_target
-                  if t != target and is_under(t, target)]
-        if nested is not empty:
-            plan.append(Skipped(directory, relative,
-                "holds " + count(nested) + " nested run's "
-                "scratch; reclaim those first"))
-            continue
-
-        (spent, why) = policy(directory, target)
-        if not spent:
-            plan.append(Skipped(directory, relative, why))
-            continue
-
-        # Age is the NEWEST mtime anywhere in the tree, never the
-        # top directory's: that moves only when entries are added
-        # or removed, so a job that has spent a week writing into
-        # an already-created HDF5 still presents a week-old
-        # directory.  One walk yields both facts.
-        (bytes, newest) = tree_stats(target)
-        if older_than is not None and
-                days_since(newest) < older_than:
-            plan.append(Skipped(directory, relative, "too recent"))
-            continue
-
-        plan.append(Reclaimable(directory, relative, target, bytes))
+        # Every refusal from here down is plan_one_dir's, so the
+        # sweep and the in-flight prune apply one set of rules.
+        # `every_target` is passed as the comparison set for
+        # REFUSAL 5 -- every run the WALK found, not the selected
+        # subset, so a filtered-out inner run still stops the outer
+        # removal, which is precisely the case the refusal exists
+        # to stop.
+        #
+        # The link is resolved twice: once above, to build that
+        # comparison set, and once inside plan_one_dir.  Those are
+        # two cheap stats, and paying them keeps plan_one_dir
+        # usable on its own, with no caller obliged to hand it a
+        # pre-resolved target.
+        plan.append(plan_one_dir(directory, relative, scratch_root,
+                                 policy, every_target, older_than))
     return plan
 
 

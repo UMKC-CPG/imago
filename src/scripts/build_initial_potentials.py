@@ -2525,7 +2525,9 @@ def make_climb_dispatcher(structures, options_by_material, workspace,
                           prepare_fn=prepare_units,
                           send_off_fn=send_off,
                           collect_next_fn=collect_next,
-                          read_fn=_read_unit_result, force=False):
+                          read_fn=_read_unit_result, force=False,
+                          tidy_run=False, scratch_root="",
+                          prune_problems=None):
     """Build the climb dispatcher ``converge_by_climb`` drives
     (DESIGN 7.7; PSEUDOCODE 4e.7).
 
@@ -2544,6 +2546,18 @@ def make_climb_dispatcher(structures, options_by_material, workspace,
         root=workspace, units=[],
         parsl_config=parsl_config,
         sweep=SweepRecord(varied_axes=("kpt-mesh",), fixed_axes={}))
+
+    # Layer (b) (DESIGN 6.2.12).  With ``tidy_run`` the flight
+    #   carries the producer's prune callback, so each rung's
+    #   scratch goes as that rung lands rather than after the whole
+    #   climb ends.  The callback reads ``flight.units`` at call
+    #   time, which is why the list that accretes below is safe to
+    #   hand it now, while it is still empty.
+    if tidy_run:
+        flight.on_outcome = make_prune_callback(
+            flight, workspace, scratch_root,
+            prune_problems if prune_problems is not None else [])
+
     return _ClimbDispatcher(
         structures, options_by_material, workspace, flight, executor,
         force, prepare_fn, send_off_fn, collect_next_fn, read_fn)
@@ -2733,6 +2747,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
                              profile: str | None = None,
                              save_config: bool = False,
                              clean_after: bool = False,
+                             tidy_run: bool = False,
                              dispatch_fn=dispatch,
                              prepare_fn=prepare_units,
                              extract_fn=extract_potential,
@@ -2755,6 +2770,14 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     ``partition`` / ``nodes`` / ``walltime`` / ``profile`` choices.
     ``save_config`` records the resolved cluster choices beside the
     run.  ``force`` bypasses the run-reuse cache (DESIGN 6.2.5).
+
+    ``clean_after`` sweeps the workspace's scratch once the harvest
+    is written; ``tidy_run`` instead prunes each unit's scratch as
+    that unit lands, while the rest of the campaign is still
+    running (DESIGN 6.2.12 layers (a) and (b)).  They compose: the
+    in-flight prune deliberately leaves behind anything it had to
+    refuse, and the post-harvest sweep is the second pass that
+    takes it.
 
     ``dispatch_fn``, ``prepare_fn``, ``extract_fn``, ``identity_fn``,
     and ``fingerprint_fn`` are injected (defaulting to the real
@@ -2884,11 +2907,35 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     #   SLURM allocation.  Phase 3 harvest reads run dirs only and
     #   needs no dispatch, so the pool is freed as convergence ends.
     executor = make_executor(parsl_config)
+
+    # Layer (b), prune-as-you-go (DESIGN 6.2.12).  With --tidy-run
+    #   each flight carries a callback that kaleidoscope fires as a
+    #   unit reaches a terminal state, and that callback prunes
+    #   that unit's scratch there and then, while the rest of the
+    #   campaign is still running.
+    #
+    # $IMAGO_TEMP unset means the check that scratch lies where it
+    #   should cannot run, so the prune is declined out loud rather
+    #   than performed unchecked -- the same rule layer (a) applies
+    #   after the harvest.  Failures from BOTH flights collect into
+    #   one list, reported again at the very end: a failure cannot
+    #   stop the campaign, but it must not scroll away either.
+    scratch_root = os.environ.get("IMAGO_TEMP", "")
+    prune_enabled = bool(tidy_run and scratch_root)
+    prune_problems: list = []
+    if tidy_run and not prune_enabled:
+        print("producer: --tidy-run skipped: $IMAGO_TEMP is unset, "
+              "so the check that scratch lies where it should "
+              "cannot run")
+
     try:
         loen_flight = Flight(
             root=workspace, units=loen_units,
             parsl_config=parsl_config,
             sweep=SweepRecord(varied_axes=(), fixed_axes={}))
+        if prune_enabled:
+            loen_flight.on_outcome = make_prune_callback(
+                loen_flight, workspace, scratch_root, prune_problems)
         if loen_units:
             prepare_fn(loen_flight, workspace)
             dispatch_fn(loen_flight, executor=executor, force=force)
@@ -2906,10 +2953,17 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         # (DESIGN 6.2.5).  on_non_converged tags the solid's workspace
         # with a prediction mismatch (DESIGN 7.8 step 3d); it is
         # injected so the climb loop stays free of the workspace.
+        # The climb's flight gets the same prune callback.  This is
+        #   where prune-as-you-go earns its keep: the pre-flight is
+        #   a handful of geometry-only runs, while the climb
+        #   dispatches many rungs per solid and is the phase long
+        #   enough to exhaust scratch before it ends.
         dispatcher = make_climb_dispatcher(
             struct_of, options_of, workspace,
             parsl_config=parsl_config, executor=executor,
-            prepare_fn=prepare_fn, force=force)
+            prepare_fn=prepare_fn, force=force,
+            tidy_run=prune_enabled, scratch_root=scratch_root,
+            prune_problems=prune_problems)
         materials = [ref.reference_id
                      for ref in manifest.reference_solids]
         outcomes, rungs = converge_by_climb(
@@ -3035,7 +3089,134 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     if clean_after:
         reclaim_run_scratch(pdb_root)
 
+    # Anything that went wrong while tidying in flight is named
+    #   again here, at the end, where the user is actually looking
+    #   when the run finishes (DESIGN 6.2.12 layer (b)).
+    report_prune_problems(prune_problems)
+
     return per_run_log
+
+
+def make_prune_callback(flight, workspace: str, scratch_root: str,
+                        problems: list):
+    """Build the per-unit callback that prunes scratch as a flight
+    advances (DESIGN 6.2.12 layer (b); PSEUDOCODE 11.4).
+
+    kaleidoscope fires this once per unit, in *landing* order, as
+    that unit reaches a terminal state -- which is exactly the
+    moment, and the ``wingbeat_dir`` is exactly the fact, that a
+    prune needs.  Nothing is added to kaleidoscope for this: the
+    ``on_outcome`` hook already reports a landing, and reclamation
+    stays on the client side where the engine's file names belong.
+
+    The callback closes over the *flight*, not over a fixed unit
+    list, because the climb's list accretes as rungs are decided
+    (PSEUDOCODE 4e.7).  Reading ``flight.units`` at call time
+    therefore sees every rung decided so far, which is exactly the
+    set that could own scratch at that instant.
+
+    ``problems`` is the shared list every prune *failure* is
+    appended to, so the end of the run can say plainly that
+    tidying went wrong.  A *refusal* is not a problem and never
+    lands there: a unit skipped because it is unfinished, nested,
+    or too recent is the mechanism working as designed.  A failure
+    -- a removal attempted and declined, or the mechanism itself
+    raising -- means an assumption behind DESIGN 6.2.12 has
+    stopped holding, and the user needs to know.
+    """
+
+    import tidy_scratch
+    from kaleidoscope.workspace import unit_run_dir
+
+    wingbeats_root = os.path.join(workspace, "wingbeats")
+
+    def on_landed(entry) -> None:
+        # The comparison set for the nesting refusal is this
+        #   flight's OTHER units.  A unit not yet run owns no
+        #   scratch and so contributes nothing, which is right: it
+        #   has nothing to lose, and it will create its own tree
+        #   when it runs, inside a parent that by then is gone.
+        others = []
+        for unit in flight.units:
+            run_dir = unit_run_dir(flight, unit)
+            if os.path.abspath(run_dir) == os.path.abspath(
+                    entry.wingbeat_dir):
+                continue
+            target, _ = tidy_scratch.scratch_target(
+                run_dir, scratch_root)
+            if target is not None:
+                others.append(target)
+
+        # Nothing raised here may escape.  This runs inside
+        #   kaleidoscope's collect, which does NOT guard the hook,
+        #   so an exception would propagate out through the climb
+        #   and abandon the whole campaign -- trading hours of
+        #   cluster time for a piece of housekeeping.  Tidying may
+        #   fail; a campaign may not fail because tidying did.
+        #
+        # Contained is not the same as ignored.  A failure is
+        #   printed the moment it happens AND recorded, because a
+        #   mid-campaign line is easily lost in hours of scrollback
+        #   and this is exactly the kind of thing that must not be:
+        #   a scratch tree that will not remove means a permission,
+        #   mount, or lock assumption has broken, and the next
+        #   campaign will meet it too.
+        label = os.path.relpath(
+            os.path.abspath(entry.wingbeat_dir), wingbeats_root)
+        try:
+            record = tidy_scratch.reclaim_one_dir(
+                entry.wingbeat_dir, scratch_root,
+                other_targets=others, label=label)
+        except Exception as exc:            # noqa: BLE001
+            # The mechanism itself threw -- a stronger signal than
+            #   a removal that merely failed, since the refusals of
+            #   DESIGN 6.2.12 are meant to leave no uncaught path.
+            problems.append((label, f"prune raised: {exc}"))
+            print(f"producer: tidy-run FAILED to prune {label}: "
+                  f"{exc}")
+            return
+
+        if record["ok"] and not record["removed"]:
+            problems.append((label, record["failure"]))
+            print(f"producer: tidy-run FAILED to prune {label}: "
+                  f"{record['failure']}")
+        elif record["ok"]:
+            freed = tidy_scratch.human_bytes(record["bytes"])
+            print(f"producer: tidy-run pruned {label}, "
+                  f"freeing {freed}")
+        else:
+            # An ordinary refusal: the mechanism working.  Reported
+            #   quietly so the reason is on the record without
+            #   reading as an alarm.
+            print(f"producer: tidy-run kept {label}: "
+                  f"{record['reason']}")
+
+    return on_landed
+
+
+def report_prune_problems(problems: list) -> None:
+    """Say again, at the end and all together, anything that went
+    wrong while tidying in flight (DESIGN 6.2.12 layer (b)).
+
+    Each failure was already printed when it happened, but a
+    campaign runs for hours and that line is far up the log by now.
+    This is the summary the user is actually looking at when the
+    run finishes, so a broken filesystem assumption gets named
+    where it will be seen -- and named as something to look into,
+    not as a run that failed, because every database and every log
+    written above is intact.
+    """
+
+    if not problems:
+        return
+    print()
+    print(f"producer: tidy-run: {len(problems)} scratch tree(s) "
+          f"could NOT be removed.  The results above are complete "
+          f"and unaffected, but reclamation is not working -- "
+          f"check permissions and the mount, then sweep with "
+          f"tidy_scratch.py once fixed:")
+    for label, message in problems:
+        print(f"    {label}: {message}")
 
 
 def reclaim_run_scratch(pdb_root: str) -> None:
@@ -3225,6 +3406,15 @@ def main(argv=None) -> int:
              "-- typically most of the bytes a run leaves behind "
              "(default: leave the scratch in place)")
     parser.add_argument(
+        "--tidy-run", action="store_true",
+        help="reclaim each unit's intermediate scratch as that unit "
+             "finishes, instead of waiting for the end of the run -- "
+             "for a campaign large enough to fill the scratch "
+             "filesystem before it completes.  Combines with "
+             "--clean-after, which then sweeps up whatever the "
+             "in-flight pass had to leave behind (default: do not "
+             "reclaim anything during the run)")
+    parser.add_argument(
         "--materialize-only", action="store_true",
         help="fetch and convert every reference structure named in "
              "the manifest, then stop without running any SCF -- a "
@@ -3311,7 +3501,8 @@ def main(argv=None) -> int:
         dispatch_shape=args.dispatch, partition=args.partition,
         nodes=args.nodes, walltime=args.walltime,
         profile=args.profile, save_config=args.save_config,
-        clean_after=args.clean_after)
+        clean_after=args.clean_after,
+        tidy_run=args.tidy_run)
     converged = sum(1 for row in per_run_log if row["converged"])
     print(f"producer: {converged}/{len(per_run_log)} reference "
           f"solids converged and harvested")

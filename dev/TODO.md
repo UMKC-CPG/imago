@@ -2246,7 +2246,7 @@ shipped.
   Four tests, including one that a convergence-tagged unit sharing
   the calc tag does NOT satisfy the check.
 
-- [ ] C108. Intermediate-scratch cleanup for the producer (and a
+- [x] C108. Intermediate-scratch cleanup for the producer (and a
   reusable cleanup subsystem).  Motivation: the Si seed run
   (2026-07-02) left 3.7 GB of per-calc scratch under each run
   directory's `intermediate ->` symlink (roughly 20 MB per calc
@@ -2289,7 +2289,7 @@ shipped.
   standalone-script boundary and the generic-pruning-hook belong in
   ARCHITECTURE/DESIGN before (c) is coded.  CODE + DESIGN.
 
-  **DESIGN COMPLETE; (c) and (a) BUILT 2026-07-21.  (b) deferred.**
+  **DONE.  (c) and (a) built 2026-07-21; (b) built 2026-07-23.**
 
   Measured first, which reshaped the task.  Scratch is **99.7%** of
   the bytes a run leaves behind -- 3.17 GB of 3.2 GB on a seed-scale
@@ -2327,20 +2327,54 @@ shipped.
   1.6 GB reclaimed from the C109 full workspace, 6 KB left, every
   kept file intact.
 
-  **(b) prune-as-you-go remains**, specified in DESIGN 6.2.12 but
-  unwired.  It matters only for a campaign large enough to exhaust
-  scratch MID-flight; at seed scale `--clean-after` covers it.  It
-  is also the layer that deletes while runs are in progress, which
-  is why the mechanism/policy boundary was settled first.
+  **(b) PRUNE-AS-YOU-GO BUILT 2026-07-23.**  There is no fixed
+  headroom to name as its trigger: `$IMAGO_TEMP` has no per-user
+  quota, so the ceiling is whatever a SHARED filesystem happens to
+  have free at the time -- unguaranteed, and reduced by everyone
+  else's jobs.  (An earlier note here claimed 37 TB free and a
+  ~40,000-calculation threshold; that was the whole shared
+  filesystem, not an allowance, and the figure derived from it is
+  withdrawn.)  A campaign cannot know in advance how much room it
+  will get, which argues for pruning in flight rather than
+  against it.
 
-  **The threshold (b) waits for, measured 2026-07-22.**
-  `$IMAGO_TEMP` sits on pixstor with 37 TB free and no user quota.
-  At the measured 25 MB per calculation, unpruned scratch reaches
-  1 TB at roughly 40,000 calculations in a SINGLE flight and fills
-  the filesystem at about 1.5 million.  Below that, reclaiming at
-  the end covers it.  That is the number to re-check before
-  building (b), rather than treating "thousands of calculations"
-  as the trigger.
+  **The seam, decided 2026-07-23.**  Layer (b) adds NOTHING to
+  kaleidoscope.  A flight already fires `on_outcome` once per unit,
+  in landing order, carrying that unit's run directory -- exactly
+  the moment and the fact a prune needs -- so (b) is a producer
+  wiring: `make_prune_callback` builds the callback, and both the
+  loen pre-flight and the climb flight carry it.  The alternative,
+  a reclaim-policy field on the flight that the dispatcher acts on,
+  was rejected: reclamation reads imago's own names, and inside
+  kaleidoscope the one place engine knowledge belongs is the
+  wingbeat.  The dispatch core beneath it names no imago file at
+  all, and this must not be the change that teaches it one.
+
+  That also corrected a claim the earlier documents carried:
+  DESIGN 6.2.12 and ARCHITECTURE 9.6 both said the reclamation
+  MECHANISM was kaleidoscope's.  It never was -- it lives in
+  `tidy_scratch.py`, a sibling tool -- and both now say so and say
+  why.
+
+  **A prune that fails is contained but never hidden.**  The
+  callback runs inside `collect`, which does NOT guard the hook, so
+  an escaping exception would abandon the whole campaign over
+  housekeeping.  Nothing may escape.  But a REFUSAL (unfinished,
+  nested, too recent) is the mechanism working and is reported
+  quietly, while a FAILURE (a removal attempted and declined, or
+  the mechanism raising) means a permission/mount/lock assumption
+  has broken -- so it is printed when it happens AND carried to an
+  end-of-run summary, because a line an hour deep in a log is lost.
+  Deliberately not fatal: the databases and run log are intact.
+
+  Code: `plan_one_dir` / `reclaim_one_dir` in `tidy_scratch.py`
+  (the per-directory decision the whole-tree sweep now also calls,
+  so in-flight and after-the-fact cannot diverge); the nesting
+  refusal takes its comparison set as an argument, since it is the
+  one refusal a single directory cannot judge alone.  Producer
+  `--tidy-run`, `make_prune_callback`, `report_prune_problems`.
+  17 new tests; 1093 non-integration tests pass.  NOT yet exercised
+  on a live campaign.
 
   **HAND-RUN GAP CLOSED 2026-07-22 (the actual daily cost).**  The
   tool only ever saw kaleidoscope workspaces, but an ordinary
@@ -2386,6 +2420,12 @@ shipped.
   Chain: DESIGN 6.2.12 (two roots, refusals 5-7), PSEUDOCODE 13.8
   (`detect_root_kind`, `find_job_run_dirs`, `hand_run_policy`,
   resolve-then-judge planner), ARCHITECTURE 9.6.  1075 tests pass.
+
+  Layer (b)'s chain: DESIGN 6.2.12 (mechanism placement corrected,
+  how (b) hooks, contained-not-hidden failures), PSEUDOCODE 13.8
+  (`plan_one_dir`, `reclaim_one_dir`) and 11.4 (`make_prune_callback`
+  plus the producer's `clean_after` / `tidy_run` wiring, which had
+  never been specified for layer (a) either), ARCHITECTURE 9.6.
 
 - [x] C109. Decide the default cell -- full (conventional) vs
   primitive -- for the materialized `imago.skl`.  Surfaced by the

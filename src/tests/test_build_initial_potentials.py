@@ -3875,3 +3875,192 @@ class TestCleanAfter:
             lambda plan: (0, 0, [("si/kpt-mesh-2-2-2", "busy")]))
         bip.reclaim_run_scratch(data_root)       # must not raise
         assert "could not reclaim" in capsys.readouterr().out
+
+
+class TestTidyRun:
+    """DESIGN 6.2.12 layer (b).  ``--tidy-run`` prunes each unit's
+    scratch as that unit lands, so a campaign large enough to fill
+    the scratch filesystem does not have to reach its end before
+    anything is freed.
+
+    The wiring is deliberately all on the client side: kaleidoscope
+    is handed a callback through the ``on_outcome`` hook it already
+    fires, and learns nothing about scratch, locks, or the engine's
+    file names."""
+
+    def _flight(self, tmp_path, unit_ids, *, status="done"):
+        """A workspace holding one run directory per id, each with
+        scratch, plus the Flight that owns them and the scratch
+        root.  Enough of a flight for the callback to read
+        ``flight.units``; no dispatch is involved."""
+
+        from kaleidoscope import CalcUnit, Flight
+
+        workspace = tmp_path / "workspace"
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        units = []
+        for unit_id in unit_ids:
+            run = workspace / "wingbeats" / unit_id / "gs_scf-fb"
+            run.mkdir(parents=True)
+            (run / "status.toml").write_text(
+                f'status = "{status}"\n')
+            if status == "done":
+                (run / "result.toml").write_text(
+                    "total_energy = -1.0\n")
+            target = scratch / unit_id / "gs_scf-fb"
+            target.mkdir(parents=True)
+            (target / "gs_scf-fb.hdf5").write_bytes(b"\0" * 4096)
+            os.symlink(str(target), str(run / "intermediate"))
+            units.append(CalcUnit(
+                id=unit_id, structure="imago.skl",
+                calc=("gs_scf-fb",), options={}))
+        flight = Flight(root=str(workspace), units=units)
+        return flight, str(workspace), str(scratch)
+
+    def _entry(self, workspace, unit_id):
+        from kaleidoscope.model import ReportEntry
+        return ReportEntry(
+            id=unit_id, calc=("gs_scf-fb",), status="done",
+            detail="converged",
+            wingbeat_dir=os.path.join(workspace, "wingbeats",
+                                      unit_id, "gs_scf-fb"),
+            runtime_seconds=1.0, message=None)
+
+    def test_a_landing_prunes_that_unit_and_no_other(
+            self, tmp_path, capsys):
+        # The point of the layer: si's scratch goes the moment si
+        #   lands, while ge is still running and keeps its own.
+        flight, workspace, scratch = self._flight(
+            tmp_path, ["si", "ge"])
+        problems = []
+        on_landed = bip.make_prune_callback(
+            flight, workspace, scratch, problems)
+
+        on_landed(self._entry(workspace, "si"))
+        assert not os.path.isdir(
+            os.path.join(scratch, "si", "gs_scf-fb"))
+        assert os.path.isdir(
+            os.path.join(scratch, "ge", "gs_scf-fb"))
+        assert problems == []
+        assert "pruned si/gs_scf-fb" in capsys.readouterr().out
+
+    def test_an_unfinished_unit_is_kept_and_is_not_a_problem(
+            self, tmp_path, capsys):
+        # A refusal is the mechanism working, so it is reported
+        #   quietly and never recorded as something gone wrong.
+        flight, workspace, scratch = self._flight(
+            tmp_path, ["si"], status="running")
+        problems = []
+        on_landed = bip.make_prune_callback(
+            flight, workspace, scratch, problems)
+
+        on_landed(self._entry(workspace, "si"))
+        assert os.path.isdir(
+            os.path.join(scratch, "si", "gs_scf-fb"))
+        assert problems == []
+        assert "kept si/gs_scf-fb" in capsys.readouterr().out
+
+    def test_a_failed_removal_is_recorded_and_announced(
+            self, tmp_path, capsys):
+        # A failure means a filesystem assumption has broken.  It
+        #   must be loud where it happens AND survive to the end of
+        #   the run, because a line an hour deep in a log is lost.
+        import tidy_scratch
+        flight, workspace, scratch = self._flight(tmp_path, ["si"])
+        problems = []
+        on_landed = bip.make_prune_callback(
+            flight, workspace, scratch, problems)
+
+        original = tidy_scratch.apply_reclamation
+        try:
+            tidy_scratch.apply_reclamation = (
+                lambda plan: (0, 0, [("si", "device busy")]))
+            on_landed(self._entry(workspace, "si"))
+        finally:
+            tidy_scratch.apply_reclamation = original
+
+        assert problems == [("si/gs_scf-fb", "device busy")]
+        assert "FAILED to prune" in capsys.readouterr().out
+
+    def test_a_raising_prune_cannot_abandon_the_campaign(
+            self, tmp_path, capsys):
+        # The hazard this guards: kaleidoscope's collect does NOT
+        #   wrap the outcome hook, so an exception escaping here
+        #   would propagate out through the climb and throw away
+        #   hours of cluster time over housekeeping.
+        import tidy_scratch
+        flight, workspace, scratch = self._flight(tmp_path, ["si"])
+        problems = []
+        on_landed = bip.make_prune_callback(
+            flight, workspace, scratch, problems)
+
+        def explode(*args, **kwargs):
+            raise RuntimeError("scratch root vanished")
+
+        original = tidy_scratch.reclaim_one_dir
+        try:
+            tidy_scratch.reclaim_one_dir = explode
+            on_landed(self._entry(workspace, "si"))   # must not raise
+        finally:
+            tidy_scratch.reclaim_one_dir = original
+
+        assert len(problems) == 1
+        assert "prune raised" in problems[0][1]
+        assert "FAILED to prune" in capsys.readouterr().out
+
+    def test_a_nested_sibling_still_stops_the_removal(
+            self, tmp_path):
+        # Refusal 5 is the one a single directory cannot judge on
+        #   its own, so the callback supplies the flight's other
+        #   units as the comparison set.
+        flight, workspace, scratch = self._flight(tmp_path, ["si"])
+        nested = os.path.join(scratch, "si", "gs_scf-fb", "inner")
+        os.makedirs(nested)
+        from kaleidoscope import CalcUnit
+        inner_run = os.path.join(workspace, "wingbeats", "si",
+                                 "gs_scf-fb", "inner")
+        os.makedirs(inner_run)
+        os.symlink(nested, os.path.join(inner_run, "intermediate"))
+        flight.units.append(CalcUnit(
+            id="si", structure="imago.skl",
+            calc=("gs_scf-fb", "inner"), options={}))
+
+        problems = []
+        bip.make_prune_callback(
+            flight, workspace, scratch, problems)(
+                self._entry(workspace, "si"))
+        assert os.path.isdir(nested)
+        assert problems == []
+
+    def test_the_end_of_run_summary_names_every_failure(
+            self, capsys):
+        bip.report_prune_problems([("si/gs_scf-fb", "device busy"),
+                                   ("ge/gs_scf-fb", "read-only")])
+        out = capsys.readouterr().out
+        assert "2 scratch tree(s) could NOT be removed" in out
+        assert "si/gs_scf-fb: device busy" in out
+        assert "ge/gs_scf-fb: read-only" in out
+        # Named as something to look into, not as a failed run.
+        assert "complete and unaffected" in out
+
+    def test_a_clean_run_says_nothing(self, capsys):
+        bip.report_prune_problems([])
+        assert capsys.readouterr().out == ""
+
+    def test_the_climb_flight_carries_the_callback(self, tmp_path):
+        # The flight that matters for this layer: the climb
+        #   dispatches many rungs per solid and is the phase long
+        #   enough to fill scratch before it ends.
+        dispatcher = bip.make_climb_dispatcher(
+            {}, {}, str(tmp_path), tidy_run=True,
+            scratch_root=str(tmp_path / "scratch"),
+            prune_problems=[])
+        assert dispatcher._flight.on_outcome is not None
+
+    def test_without_the_flag_no_callback_is_attached(self,
+                                                      tmp_path):
+        # A campaign that did not ask to tidy behaves exactly as
+        #   before, hook included.
+        dispatcher = bip.make_climb_dispatcher({}, {}, str(tmp_path))
+        assert dispatcher._flight.on_outcome is None
