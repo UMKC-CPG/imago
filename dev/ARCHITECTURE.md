@@ -2504,10 +2504,12 @@ src/scripts/
   meeting an objective acceptance rule (the converged
   k-density landed in the middle 60% of the verification
   grid AND the top three grid points' total-energy
-  variance -- read from the staged entry's `grid_energies`
-  array -- is below threshold); `--all` to promote the
-  whole staging directory after manual review; `--dry-run`
-  preview.
+  spread -- max minus min, read from the staged entry's
+  `grid_energies` array -- is below threshold; a spread,
+  not a variance, so the quantity compares like-for-like
+  against the linear threshold, DESIGN 7.8); `--all` to
+  promote the whole staging directory after manual review;
+  `--dry-run` preview.
   The auto-promotion rule lets a 500-entry seed flight
   promote ~80% of entries unattended, with the curator
   reviewing only the ~20% outliers.

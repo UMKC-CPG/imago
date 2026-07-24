@@ -11156,15 +11156,13 @@ function mesh_of(entry):
 
 ```
 function promote(db_root, mode):
-    # Load the promoted corpus ONCE, keyed by claim.  This is
-    # the one judgment the acceptance rule cannot make from the
-    # staged file alone (DESIGN 7.8); entries/ is small and
-    # local, so the cost is a directory read, not a workspace
+    # Load the promoted corpus ONCE, already keyed by claim.
+    # This is the one judgment the acceptance rule cannot make
+    # from the staged file alone (DESIGN 7.8); entries/ is small
+    # and local, so the cost is a directory read, not a workspace
     # re-read.  staging/ and superseded/ are NOT loaded: only a
     # promoted entry can make a claim already held.
-    promoted = {}                    # dedup_key -> entry
-    for entry in load_promoted_entries(db_root):
-        promoted[dedup_key(entry)] = entry
+    promoted = load_promoted_entries(db_root)   # dedup_key -> entry
 
     # dry-run evaluates every decision below and moves nothing,
     # so a curator sees the whole outcome -- promotions,
