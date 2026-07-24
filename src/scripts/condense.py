@@ -168,6 +168,15 @@ from angle_utils import (
     cluster_angles, get_angle_k,
     LocalRecord, cross_source_cluster)
 
+# The submission file this script writes is a *cluster* question, not
+#   a force-field one, so it is generated from the per-site settings
+#   file every Imago script that submits work shares rather than from
+#   a template written into this source (DESIGN 6.2.11).  The reader
+#   imports no Parsl, so taking it here costs condense.py nothing of
+#   the flight layer it never calls.
+from kaleidoscope.cluster_config import (condense_write_submission,
+                                         load_site_config)
+
 
 # ================================================================
 # BondData: UFF bond parameters from bond_parameters.dat
@@ -495,6 +504,10 @@ class ScriptSettings:
         Default values come from the resource control file at
         $IMAGO_RC/condenserc.py (or a local copy in the current working
         directory).  Command line arguments override rc file defaults.
+
+        The per-site cluster settings are read here too, beside this
+        script's own rc file, because the run ends by writing a SLURM
+        submission file built from them (DESIGN 6.2.11).
         """
 
         # Read default variables from the resource control file.
@@ -516,6 +529,22 @@ class ScriptSettings:
 
         # Record the command line parameters that were used.
         self.record_clp()
+
+        # Read the cluster facts that are not this script's own
+        #   business -- the queue, the account, the rank count, the
+        #   commands that bring LAMMPS within reach -- for the
+        #   submission file the run ends by writing.  An unfilled site
+        #   is refused right here, before any work: the natural place
+        #   to *use* these settings is the last step of
+        #   create_lammps_files, and a refusal there would arrive only
+        #   after the bonds, the angles and the whole LAMMPS input had
+        #   been computed, discarding that work and meeting the user
+        #   again on the rerun.  Reading here also fixes *which* file
+        #   is read, since the loader searches the current directory
+        #   first and create_lammps_files later moves into lammps/.
+        #   It comes after the command line is parsed so that --help
+        #   and a misspelled flag still answer as they always did.
+        self.site = load_site_config()
 
     def assign_rc_defaults(self, default_rc):
         """Assign default values from the resource control file.
@@ -2018,24 +2047,15 @@ print "Lattice constant (Angstrom) is ${length};"
         # ------------------------------------------------
         # Write the slurm submission file
         # ------------------------------------------------
-        slurm_file = "slurm"
-        with open(slurm_file, 'w') as slurm:
-            slurm.write("""\
-#!/bin/bash
-#SBATCH -p rulisp-lab,general
-#SBATCH -A rulisp-lab
-#SBATCH -J lmp
-#SBATCH -o lmp.o%J
-#SBATCH -e lmp.e%J
-#SBATCH -N 1
-#SBATCH -n 125
-#SBATCH -t 00:15:00
-#SBATCH --mem=2G
-#
-export OMP_NUM_THREADS=1
-cd $SLURM_SUBMIT_DIR
-mpirun lmp -in lammps.in
-""")
+        # Built from the site's own settings rather than from a
+        #   template held here, so the queue, the account, the rank
+        #   count and the commands that bring LAMMPS within reach are
+        #   all facts this machine recorded once and every Imago
+        #   script that submits work reads.  Those settings were read
+        #   at settings time and are handed down; an unconfigured site
+        #   was refused there, before any of this run's work, rather
+        #   than here, where the refusal would discard all of it.
+        condense_write_submission(self.settings.site)
 
         # Store data needed by normalize_types.  The bond-side
         # fields remain because they are consumed by follow-up

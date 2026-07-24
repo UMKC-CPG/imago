@@ -115,8 +115,9 @@ def merge_settings(base, overlay):
     the per-queue override, and the per-run flags alike (DESIGN
     6.2.11, decision 1).  Most settings are a single value, and
     overlaying one simply replaces it.  But a setting may itself be a
-    *block* of settings -- ``orchestrator`` is the only one today,
-    holding the driver's cores, memory, and walltime -- and there the
+    *block* of settings -- ``orchestrator`` and ``md`` are the two,
+    holding respectively the driver's cores, memory and walltime, and
+    the MD job's ranks, memory, walltime and bring-up -- and there the
     overlay names only the keys it means to change, leaving the rest
     as the layer beneath gave them.
 
@@ -244,10 +245,11 @@ def apply_queue_overrides(site, partition):
     Raises
     ------
     ConfigError
-        If an override names a setting that does not exist -- almost
-        always a typo, and a silently ignored typo in a resource
-        request is exactly what this settings file exists to prevent
-        -- or if it tries to set ``partitions`` or ``profiles``.
+        If an override names a setting that does not exist -- at the
+        top level or inside a block -- which is almost always a typo,
+        and a silently ignored typo in a resource request is exactly
+        what this settings file exists to prevent; or if it tries to
+        set ``partitions`` or ``profiles``.
     """
     override = site.get("queue_overrides", {}).get(partition)
     if not override:
@@ -263,6 +265,22 @@ def apply_queue_overrides(site, partition):
                 f"queue override for {partition!r} names unknown "
                 f"setting {key!r}; check the spelling against "
                 f"clusterrc.py.")
+        # The guard descends one level, exactly as far as the merge
+        #   below does, so the merge cannot reach a place the guard
+        #   cannot see (DESIGN 6.2.11).  A typo inside a block is the
+        #   quieter fault: it leaves the real key standing at its old
+        #   value beside the stray one, so the run uses the number the
+        #   curator meant to change and nothing says otherwise -- an
+        #   override reading `rank` for `ranks` runs the job at the
+        #   site's width while its author believes they widened it.
+        if isinstance(site[key], dict) and isinstance(
+                override[key], dict):
+            for inner_key in override[key]:
+                if inner_key not in site[key]:
+                    raise ConfigError(
+                        f"queue override for {partition!r} names "
+                        f"unknown setting {key}.{inner_key}; check "
+                        f"the spelling against clusterrc.py.")
 
     # Per key, one level down: a queue naming only the driver's memory
     #   keeps the site's driver cores and walltime (DESIGN 6.2.11).
@@ -672,7 +690,13 @@ def build_orchestrator_sbatch(site, choices, command,
     memory = orchestrator.get("memory")
     walltime = orchestrator.get("walltime") or choices["walltime"]
 
-    lines = ["#!/bin/bash", "#SBATCH --job-name=imago-orchestrator"]
+    # A login shell, so the worker_init below runs in a shell whose
+    #   profile has been read.  Where that bring-up uses ``module``, a
+    #   plain shell would work only when the submitting shell happened
+    #   to be set up already, and would fail from cron, from a workflow
+    #   driver, or under ``sbatch --export=NONE`` (DESIGN 6.2.11).
+    lines = ["#!/bin/bash -l",
+             "#SBATCH --job-name=imago-orchestrator"]
     if site.get("account"):
         lines.append(f"#SBATCH --account={site['account']}")
     lines.append(f"#SBATCH --partition={choices['partition']}")
@@ -692,3 +716,155 @@ def build_orchestrator_sbatch(site, choices, command,
     lines.append(command)
     lines.append("")
     return "\n".join(lines)
+
+
+def build_md_sbatch(site, choices, command, md=None):
+    """Build the text of an ``sbatch`` script that runs an external
+    molecular-dynamics program under MPI (DESIGN 6.2.11).
+
+    This is the second submission-file generator, and it sits beside
+    :func:`build_orchestrator_sbatch` so a reader who finds one finds
+    the other and the two stay alike where they can -- both open with
+    a login shell, for the reason given there.  It differs in four
+    ways, each following from the job being many MPI ranks of an
+    outside program rather than one driver process: it asks for
+    ``--ntasks`` instead of ``--cpus-per-task``; it runs the md
+    block's own bring-up instead of ``worker_init``, and refuses to
+    write a file at all when that bring-up is missing; and it pins one
+    thread per rank.
+
+    ``md`` is the shape to use; a caller that passes none gets the
+    site block alone.  The sizing keys fall back where the site left
+    them unset -- ranks from the node, walltime from the run's
+    resolved value, memory simply unrequested -- but the bring-up does
+    not, so a site with no md block at all is refused rather than
+    handed a job that cannot start.
+
+    ``command`` is the already-quoted command line to execute.
+    Returns the script text; the caller writes it.
+
+    Raises
+    ------
+    ConfigError
+        When the md block records no bring-up.
+    """
+    # Test for ABSENCE, not falsiness, exactly as the orchestrator
+    #   generator does: a caller passing an empty shape is saying
+    #   "request nothing but the fallbacks" and must not silently
+    #   re-inherit the site block.
+    shape = site.get("md", {}) if md is None else md
+    memory = shape.get("memory")                  # None -> no --mem
+    walltime = shape.get("walltime") or choices["walltime"]
+
+    # The bring-up is required HERE rather than in the loader's
+    #   required core.  Without it nothing puts the MD program on the
+    #   path and the job cannot start -- but a flight that never
+    #   condenses must not be refused over it, so this generator is
+    #   the one that insists.  Same emptiness test the loader uses,
+    #   so None and [] are both unfilled.
+    bring_up = shape.get("init")
+    if _is_empty(bring_up):
+        raise ConfigError(
+            "cluster settings file records no md bring-up "
+            "('init' in the 'md' block), so the generated job "
+            "would have no way to find the MD program; fill it in "
+            "clusterrc.py (generate a starter with cluster_probe.py).")
+
+    # Ranks come from the node, never from a number written into the
+    #   source.  Where the site recorded no core count there is
+    #   nothing to derive from, so ask for ONE rank and say so in the
+    #   file itself: a one-rank MD job is visibly wrong to whoever
+    #   opens it, whereas a guessed count would run, and run wrong,
+    #   without ever announcing that the site was never configured.
+    ranks = shape.get("ranks") or site.get("cores_per_node")
+    unsized = ranks is None
+    if unsized:
+        ranks = 1
+
+    lines = ["#!/bin/bash -l", "#SBATCH --job-name=lmp"]
+    if site.get("account"):                       # some sites need none
+        lines.append(f"#SBATCH --account={site['account']}")
+    lines.append(f"#SBATCH --partition={choices['partition']}")
+    lines.append("#SBATCH --nodes=1")
+    lines.append(f"#SBATCH --ntasks={ranks}")
+    if memory:
+        lines.append(f"#SBATCH --mem={memory}")
+    lines.append(f"#SBATCH --time={walltime}")
+    # The passthrough directives are already complete lines, exactly
+    #   as the orchestrator generator forwards them.
+    lines.extend(site.get("extra_scheduler_options", []))
+
+    # The directives are done, so a comment here cannot swallow one.
+    if unsized:
+        lines.append("")
+        lines.append("# One rank only: this site's settings file")
+        lines.append("#   records no cores_per_node, so there was")
+        lines.append("#   nothing to size this job from.  Set it,")
+        lines.append("#   or the md block's ranks, and rerun.")
+
+    # The bring-up runs first so the batch job can find the MD
+    #   program.  The thread pin comes AFTER it, so that a module
+    #   setting a thread count of its own cannot overwrite it: the
+    #   ranks were sized to fill the node, so each must hold one
+    #   core, and a threaded BLAS left to itself would start a thread
+    #   per core in EVERY rank -- on a forty-core node, sixteen
+    #   hundred threads contending for forty cores.
+    lines.append("")
+    lines.extend(bring_up)
+    lines.append("")
+    lines.append("export OMP_NUM_THREADS=1")
+    lines.append("")
+    lines.append(command)
+    lines.append("")
+    # Deliberately NOT written, both to stay alike with the
+    #   orchestrator generator: --output/--error, leaving the
+    #   scheduler's own default naming; and a cd to the submit
+    #   directory, which SLURM has already done.
+    return "\n".join(lines)
+
+
+def condense_write_submission(site):
+    """Write the SLURM submission file for a condensation run.
+
+    Called at the close of ``condense.py``'s ``create_lammps_files``,
+    which has already entered the ``lammps/`` directory, so the file
+    lands beside the input it submits.
+
+    The script reads ``condenserc.py`` for the settings that are its
+    own business and the site file for the cluster facts that are not
+    (DESIGN 6.2.11), and it has no dispatch flags of its own -- so
+    every choice falls through to the site default.  Those defaults
+    are reached through the same resolver a flight uses, handed a flag
+    set with nothing in it, rather than by reading ``partitions[0]``
+    out of the site directly: that is the case :func:`resolve_choices`
+    already serves for a fully configured site passing no flags, and
+    going through it means the day ``condense.py`` grows a
+    ``--partition`` of its own, the resolution needs no redesign.
+
+    The site arrives already loaded, from the script's settings time,
+    and nothing is read from disk here.  Reading it at this point
+    instead would be wrong twice over: an unconfigured site would be
+    refused only after the bonds, the angles and the whole LAMMPS
+    input had been computed, throwing that work away; and by now the
+    script has entered ``lammps/``, so a loader that searches the
+    current directory first could resolve a different settings file
+    than the one the run started under.
+
+    Parameters
+    ----------
+    site : dict
+        The fully overlaid site settings, as returned by
+        :func:`load_site_config` when the script read its settings.
+
+    Raises
+    ------
+    ConfigError
+        When the site records no md bring-up.  The refusal for an
+        unfilled site fires earlier, at settings time.
+    """
+    choices = resolve_choices(site, SimpleNamespace())
+    # The one line naming the MD program; everything above it in the
+    #   generated file came from the site.
+    command = 'mpirun -np "$SLURM_NTASKS" lmp -in lammps.in'
+    with open("slurm", "w") as submission_file:
+        submission_file.write(build_md_sbatch(site, choices, command))

@@ -72,6 +72,8 @@ def _filled_site(**overrides):
         "extra_scheduler_options": [],
         "orchestrator": {"cores": 2, "memory": "8G",
                          "walltime": "24:00:00"},
+        "md": {"ranks": None, "walltime": "01:00:00", "memory": None,
+               "init": ["module load cpg_lammps"]},
     }
     site.update(overrides)
     return site
@@ -674,6 +676,31 @@ def test_queue_override_rejects_an_unknown_setting():
         cc.apply_queue_overrides(site, "debug")
 
 
+def test_queue_override_rejects_an_unknown_setting_in_a_block():
+    """The guard descends one level, exactly as far as the merge does,
+    so the merge cannot reach a place the guard cannot see.  A typo
+    inside a block is the quieter fault: `rank` for `ranks` would leave
+    the real key standing at the site's value beside the stray one, so
+    the job runs at the site's width while its author believes they
+    widened it (DESIGN 6.2.11, decision 1)."""
+    site = _filled_site(
+        queue_overrides={"debug": {"md": {"rank": 999}}})
+    with pytest.raises(cc.ConfigError, match="unknown setting md.rank"):
+        cc.apply_queue_overrides(site, "debug")
+
+
+def test_queue_override_accepts_a_known_setting_in_a_block():
+    """The guard refuses only what the merge would silently drop; a
+    correctly spelled key inside a block still overlays, leaving the
+    block's other keys as the layer beneath gave them."""
+    site = _filled_site(
+        queue_overrides={"debug": {"md": {"ranks": 999}}})
+    block = cc.apply_queue_overrides(site, "debug")["md"]
+    assert block["ranks"] == 999
+    assert block["init"] == ["module load cpg_lammps"]
+    assert block["walltime"] == "01:00:00"
+
+
 def test_queue_override_may_not_set_the_selecting_keys():
     """partitions and profiles choose WHICH overlay applies, so an
     overlay that rewrote them would refer to itself."""
@@ -769,3 +796,208 @@ def test_build_orchestrator_sbatch_copies_passthrough_verbatim():
     script = cc.build_orchestrator_sbatch(site, choices, "run")
     assert "#SBATCH --exclusive" in script
     assert "#SBATCH #SBATCH" not in script
+
+
+# ----------------------------------------------------------------
+#  The md job class: build_md_sbatch and condense_write_submission
+# ----------------------------------------------------------------
+
+def _md_choices(partition="general", walltime="02:00:00"):
+    """The resolved per-run choices an md job is written against."""
+    return {"dispatch": "slurm-per-job", "partition": partition,
+            "nodes": 1, "walltime": walltime}
+
+
+def test_build_md_sbatch_header_and_body():
+    """The md script requests one node of MPI ranks, sets
+    account/partition, runs the md block's own bring-up, pins one
+    thread per rank, then runs the command."""
+    site = _filled_site(account="rulisp-lab")
+    command = 'mpirun -np "$SLURM_NTASKS" lmp -in lammps.in'
+    script = cc.build_md_sbatch(site, _md_choices(), command)
+
+    assert script.startswith("#!/bin/bash -l")
+    assert "#SBATCH --job-name=lmp" in script
+    assert "#SBATCH --account=rulisp-lab" in script
+    assert "#SBATCH --partition=general" in script
+    assert "#SBATCH --nodes=1" in script
+    # Ranks derive from the node, not from a hardcoded count.
+    assert "#SBATCH --ntasks=32" in script
+    # The md block's own walltime wins over the run's choice.
+    assert "#SBATCH --time=01:00:00" in script
+    # No memory line when the md block names none.
+    assert "--mem=" not in script
+    assert "module load cpg_lammps" in script
+    assert script.rstrip().endswith(command)
+
+
+def test_build_md_sbatch_asks_for_ranks_not_cpus_per_task():
+    """An md job is many ranks on one node, so it is sized with
+    --ntasks; --cpus-per-task would size an orchestrator instead."""
+    script = cc.build_md_sbatch(_filled_site(), _md_choices(), "run")
+    assert "--ntasks=" in script
+    assert "--cpus-per-task" not in script
+
+
+def test_build_md_sbatch_prefers_an_explicit_rank_count():
+    """A site that states its own ranks is not overridden by the
+    node's core count."""
+    site = _filled_site(md={"ranks": 8, "init": ["module load lmp"]})
+    script = cc.build_md_sbatch(site, _md_choices(), "run")
+    assert "#SBATCH --ntasks=8" in script
+
+
+def test_build_md_sbatch_walltime_falls_back_to_the_run_choice():
+    """With no md walltime the resolved run walltime is used, so the
+    job always carries a time limit."""
+    site = _filled_site(md={"init": ["module load lmp"]})
+    script = cc.build_md_sbatch(
+        site, _md_choices(walltime="06:00:00"), "run")
+    assert "#SBATCH --time=06:00:00" in script
+
+
+def test_build_md_sbatch_omits_account_when_unset():
+    """A site with no account emits no --account directive."""
+    site = _filled_site(account=None)
+    script = cc.build_md_sbatch(site, _md_choices(), "run")
+    assert "--account" not in script
+
+
+def test_build_md_sbatch_copies_passthrough_verbatim():
+    """extra_scheduler_options are already complete #SBATCH lines, so
+    they are copied rather than given a second directive marker."""
+    site = _filled_site(
+        extra_scheduler_options=["#SBATCH --exclusive"])
+    script = cc.build_md_sbatch(site, _md_choices(), "run")
+    assert "#SBATCH --exclusive" in script
+    assert "#SBATCH #SBATCH" not in script
+
+
+def test_build_md_sbatch_pins_one_thread_after_the_bring_up():
+    """The ranks fill the node, so each must hold a single core.  The
+    pin is written AFTER the bring-up, where a module that sets a
+    thread count of its own cannot overwrite it."""
+    site = _filled_site()
+    script = cc.build_md_sbatch(site, _md_choices(), "run")
+    lines = script.splitlines()
+    assert "export OMP_NUM_THREADS=1" in lines
+    assert (lines.index("module load cpg_lammps")
+            < lines.index("export OMP_NUM_THREADS=1"))
+
+
+def test_build_md_sbatch_without_a_core_count_asks_for_one_rank():
+    """Where the site recorded neither ranks nor cores_per_node there
+    is nothing to size the job from, so it asks for a single rank and
+    says why in the file -- visibly wrong beats plausibly wrong."""
+    site = _filled_site(cores_per_node=None,
+                        md={"init": ["module load lmp"]})
+    script = cc.build_md_sbatch(site, _md_choices(), "run")
+    assert "#SBATCH --ntasks=1" in script
+    assert "records no cores_per_node" in script
+    # The explanation sits below the directives, where a comment
+    #   cannot swallow one.
+    directive_lines = [index for index, line
+                       in enumerate(script.splitlines())
+                       if line.startswith("#SBATCH")]
+    comment_line = next(index for index, line
+                        in enumerate(script.splitlines())
+                        if "records no cores_per_node" in line)
+    assert comment_line > max(directive_lines)
+
+
+def test_build_md_sbatch_refuses_a_missing_bring_up():
+    """Without the md bring-up nothing puts the MD program on the
+    path, so no file is written at all."""
+    site = _filled_site(md={"ranks": 8})
+    with pytest.raises(cc.ConfigError) as raised:
+        cc.build_md_sbatch(site, _md_choices(), "run")
+    assert "init" in str(raised.value)
+
+
+def test_build_md_sbatch_refuses_an_empty_bring_up():
+    """An empty list is unfilled exactly as None is -- the same
+    emptiness test the loader's required core uses."""
+    site = _filled_site(md={"ranks": 8, "init": []})
+    with pytest.raises(cc.ConfigError):
+        cc.build_md_sbatch(site, _md_choices(), "run")
+
+
+def test_build_md_sbatch_refuses_a_site_without_the_block():
+    """A site that has never condensed has no md block, and the
+    sizing keys would fall back -- but the bring-up cannot, so the
+    generator refuses rather than writing an unstartable job."""
+    site = _filled_site()
+    del site["md"]
+    with pytest.raises(cc.ConfigError):
+        cc.build_md_sbatch(site, _md_choices(), "run")
+
+
+def test_build_md_sbatch_takes_an_explicit_shape_over_the_site():
+    """A caller that passes a shape means it: the site block is not
+    silently re-inherited.  Absence, not falsiness, selects the site."""
+    site = _filled_site()
+    shape = {"ranks": 4, "memory": "2G",
+             "init": ["module load other_lammps"]}
+    script = cc.build_md_sbatch(site, _md_choices(), "run", md=shape)
+    assert "#SBATCH --ntasks=4" in script
+    assert "#SBATCH --mem=2G" in script
+    assert "module load other_lammps" in script
+    assert "module load cpg_lammps" not in script
+
+
+def test_both_generators_open_with_a_login_shell():
+    """The rule belongs to the act of generating a submission file,
+    not to either job class: a bring-up made of module commands needs
+    a shell whose profile has run, and both bring-ups may be."""
+    site = _filled_site()
+    choices = _md_choices()
+    assert cc.build_md_sbatch(
+        site, choices, "run").startswith("#!/bin/bash -l")
+    assert cc.build_orchestrator_sbatch(
+        site, choices, "run").startswith("#!/bin/bash -l")
+
+
+def test_build_md_sbatch_omits_output_files_and_the_submit_cd():
+    """Deliberate omissions, both keeping the two generators alike:
+    the scheduler's own output naming is used, and SLURM has already
+    entered the submit directory."""
+    script = cc.build_md_sbatch(_filled_site(), _md_choices(), "run")
+    assert "--output" not in script and "--error" not in script
+    assert "SLURM_SUBMIT_DIR" not in script
+
+
+def test_condense_write_submission_writes_beside_the_input(
+        tmp_path, monkeypatch):
+    """The file lands in the working directory create_lammps_files has
+    already entered, named `slurm`, and every choice falls through to
+    the site default because condense.py sets no dispatch flags."""
+    site = _filled_site(partitions=["general", "gpu"])
+    monkeypatch.chdir(tmp_path)
+
+    cc.condense_write_submission(site)
+
+    written = (tmp_path / "slurm").read_text()
+    # partitions[0] is the site default, reached through the shared
+    #   resolver rather than read out of the site directly.
+    assert "#SBATCH --partition=general" in written
+    assert 'mpirun -np "$SLURM_NTASKS" lmp -in lammps.in' in written
+    assert written.startswith("#!/bin/bash -l")
+
+
+def test_condense_write_submission_reads_nothing_from_disk(
+        tmp_path, monkeypatch):
+    """The site arrives already loaded, from the script's settings
+    time.  Reading it here instead would refuse an unconfigured site
+    only after a whole run's work had been computed and thrown away,
+    and would search a directory the script has since moved into -- so
+    this must not reach the loader at all."""
+    def _refuse_to_be_called(*args, **kwargs):
+        raise AssertionError(
+            "the site must be read at settings time, not here")
+
+    monkeypatch.setattr(cc, "load_site_config", _refuse_to_be_called)
+    monkeypatch.chdir(tmp_path)
+
+    cc.condense_write_submission(_filled_site())
+
+    assert (tmp_path / "slurm").exists()

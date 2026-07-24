@@ -4430,6 +4430,73 @@ on the same data later with no schema change.  Built on P10.
   tool) are settled in DESIGN 6.2.11; ARCH 9.8 RESOLVED.  C81
   layers predictive sizing on top of this.
   CODE; VISION Goals 4/6/7, ARCH 9.4/9.7/9.8, DESIGN 6.2.11.
+- [x] C128. Retire condense.py's hardcoded SLURM template in
+  favour of the md job class.  The template in
+  `create_lammps_files` asks for 125 tasks on a partition
+  whose nodes hold 48, hardcodes the account, and predates
+  the site-config machinery entirely.  Five edits: (a) add
+  the `md` block to `clusterrc.py` -- ranks/walltime/memory
+  plus `init`, the latter shipped blank and flagged REQUIRED;
+  (b) add the same block to `cluster_probe.py`'s own copy of
+  the schema and `md.init` to its blanked keys -- the drift
+  test compares whole dictionaries, so a block added to one
+  file and not the other fails it; (c) add `build_md_sbatch`
+  to `kaleidoscope/cluster_config.py`, beside the
+  orchestrator generator; (d) call it from
+  `create_lammps_files`; (e) tests.
+  Three behaviours to get right, each settled in DESIGN
+  6.2.11.  An unfilled required core makes `load_site_config`
+  raise and condense.py inherits that refusal rather than
+  writing a file built from guesses.  An empty `md.init` is
+  refused by the generator and NOT by `_require_core`, so a
+  site that flies calculations and never condenses is not
+  refused a flight over a setting no flight reads.  And the
+  generator writes `OMP_NUM_THREADS=1` after the bring-up,
+  because ranks sized to fill a node must each hold one core.
+  Note (c) also changes `build_orchestrator_sbatch` to open
+  with `#!/bin/bash -l`: the login-shell rule belongs to the
+  act of generating a submission file, not to either class.
+  Validated by C37/C42, which already call for an end-to-end
+  condense.py run.
+  CODE; ARCH 9.4, DESIGN 6.2.11, PSEUDOCODE 10c/13.7.
+  DONE.  All five edits landed, and the refine pass that
+  followed them changed two things it found.  The site file is
+  now read at *settings time*, in `ScriptSettings.__init__`
+  beside the `condenserc.py` read, and handed down to
+  `condense_write_submission(site)`: refusing an unconfigured
+  site at the moment the file is written would have discarded a
+  whole run's bonds, angles and LAMMPS input first, and the
+  loader searches the current directory, which
+  `create_lammps_files` has by then left for `lammps/`.  And
+  the queue-override typo guard now descends one level, into a
+  block, matching the merge -- a pre-existing gap that let
+  `{"md": {"rank": 999}}` merge to a stray key while the job
+  ran at the site's width.  Still to be validated live by
+  C37/C42.
+- [x] C129. Move the producer's structure cache out of the
+  basis database.  It sat at `share/atomicBDB/cache/structures/`
+  because an earlier draft put it beside a per-solid SCF cache
+  at `.../cache/scf/`; DESIGN 5.7 later dropped that cache in
+  favour of kaleidoscope's run-reuse cache, and the survivor
+  left downloaded CIFs inside the atomic *basis* database,
+  where they are neither per-element nor basis data.  The
+  layout level had never named the location at all -- ARCH 8.1
+  described only the atomicPDB tree -- which is how it drifted
+  there unnoticed.  New home `share/curation/structures/`,
+  beside the flight workspace and run log, so
+  `structure_cache_dir` and `curation_workspace_root` now
+  derive from one root and a campaign's whole footprint clears
+  in one gesture.  The split is along reconstructibility: a
+  deleted structure is re-fetched by the next run, a harvested
+  potential entry cost cluster time and cannot be.
+  ARCHITECTURE 8.1 (new layout block + the rationale),
+  DESIGN 5.7 (names the location; the dropped-SCF-cache
+  paragraph no longer cites the dead path), PSEUDOCODE 11.4
+  (`structure_cache_dir` now specified, not just referenced).
+  CODE.  DONE.  Old cache cleared on disk first -- 74 files,
+  including two stray `makeinput -cif` run directories left
+  inside it and skeletons under the pre-`<cell>` naming rule.
+  Nothing migrated: the cache is rebuilt by the next run.
 - [ ] C81. Provisioning consumer in the flight layer (the
   kaleidoscope flight-builder helper or a thin sibling): query
   the predictor with a proposed config + size, apply a safety

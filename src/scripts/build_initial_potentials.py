@@ -538,15 +538,24 @@ def _fetch_cod_structure(cod_id: int, cod_revision: str,
 
 def structure_cache_dir(pdb_root: str) -> str:
     """The directory the producer caches fetched and converted
-    reference structures in -- ``<data_root>/atomicBDB/cache/
-    structures``, beside the databases -- keyed by ``reference_id``.
+    reference structures in -- ``<data_root>/curation/structures``,
+    keyed by ``reference_id`` (ARCHITECTURE 8.1).
+
+    It sits in the ``curation`` tree beside the flight workspace
+    (:func:`curation_workspace_root`) and the run log rather than
+    under a database, because everything the producer writes there
+    is reconstructible: a deleted structure is re-fetched and
+    re-converted by the next run, whereas a harvested potential
+    entry cost cluster time and cannot be. Keeping the two apart
+    lets the whole campaign footprint be cleared in one gesture.
+
     A full producer run and a ``--materialize-only`` pre-flight share
     it by default, so a pre-flight's converted skeletons are reused by
     the real run with no second fetch.  A pre-flight may redirect to
     its own location (a cache mirror) with ``--materialize-dir``."""
 
     data_root = os.path.dirname(pdb_root.rstrip("/"))
-    return os.path.join(data_root, "atomicBDB", "cache", "structures")
+    return os.path.join(data_root, "curation", "structures")
 
 
 def materialize_structure(ref: ReferenceSolid, manifest_dir: str,
@@ -568,8 +577,9 @@ def materialize_structure(ref: ReferenceSolid, manifest_dir: str,
     skeleton and a crystal's Brillouin-zone integration samples the
     irreducible wedge using that space group (ARCHITECTURE 9.5).
     Both the fetched CIF and the converted skeleton are cached in
-    ``cache_dir`` (the shared ``structure_cache_dir`` beside the
-    databases when not given); the skeleton is the returned artifact.
+    ``cache_dir`` (the shared ``structure_cache_dir`` in the
+    ``curation`` tree when not given); the skeleton is the returned
+    artifact.
     A CIF whose space group ``cif2skl`` cannot resolve is a hard
     error -- the curator then converts it by hand (with ``cif2skl``'s
     ``--space`` override) and supplies the result as a

@@ -736,6 +736,47 @@ contains the same isolated-atom data as one labeled entry,
 plus one or more additional labeled entries from the
 solid-state runs.
 
+The producer's own working artifacts live apart from the
+databases, under a `share/curation/` tree:
+
+```
+share/
+  curation/          Producer working artifacts.  Every
+                     file here is reconstructible by
+                     re-running the producer.
+    structures/        Materialized reference structures:
+                       the CIF fetched from COD and the
+                       skeleton converted from it, keyed
+                       by reference_id (DESIGN 5.7)
+    workspace/         The kaleidoscope flight workspace
+                       the producer dispatches into (9.6);
+                       its run-reuse cache persists across
+                       producer runs
+    run_log.toml       One record per reference solid of
+                       the last run -- converged mesh,
+                       k-point density, SCF iteration
+                       count -- read by the validation
+                       harness (8.6)
+```
+
+The split is along *reconstructibility*.  A harvested entry
+in `s_gaussian_pot.toml` is the product of cluster time and
+cannot be recovered by re-running a script; everything under
+`curation/` can.  Keeping the two apart means the campaign
+footprint can be cleared wholesale, in one gesture, without
+anyone having to reason about which files were expensive.
+
+**Why the structure cache is not under `atomicBDB/`.**  It
+once was, at `share/atomicBDB/cache/structures/`, placed
+beside a per-solid SCF cache that DESIGN 5.7 later dropped
+in favour of kaleidoscope's run-reuse cache (9.6).  Once
+that sibling was gone, the surviving directory left
+downloaded crystal structures sitting inside the atomic
+*basis* database, where they are neither per-element nor
+basis data and where no reader would look for them.
+Grouping them with the producer's other working artifacts
+keeps `atomicBDB/` purely per-element.
+
 ### 8.2 File Format
 
 The augmented database uses TOML.  Files are small (well
@@ -1662,22 +1703,50 @@ in DESIGN 6.2.11, resolving the questions once gathered in 9.8.
 set of job-class defaults.**  Most of the per-site file is cluster
 fact -- the queues, account, per-node cores and memory capacity,
 and the environment bring-up -- true no matter what runs.  The
-remaining settings size a *job*, and there are only two job
+remaining settings size a *job*, and there are only three job
 CLASSES on the cluster, not one per builder: a **worker** (a
-single calculation) and an **orchestrator** (a driver that
-prepares units and fans them out to workers, DESIGN 6.2.11).  A
-future producer that runs as a driver is an instance of the
-orchestrator class -- it reuses the one orchestrator shape,
-overriding on the command line if it differs -- so the file grows
-by job class (bounded), never by orchestrator instance.  Each
-class carries a single site-default resource shape (the worker
-sizing, and a small `orchestrator` group), overridable per run.
-These hand-set shapes are transitional: as the resource-and-cost
-dataspace (section 11) learns to predict a job's memory and
-walltime from its problem size, the per-job *requests* migrate out
-of the file toward prediction, leaving it closer to pure cluster
-fact -- which is why per-node memory is a capacity ceiling, not a
-request.
+single calculation), an **orchestrator** (a driver that
+prepares units and fans them out to workers, DESIGN 6.2.11), and
+an **md** job (an external molecular-dynamics program run under
+MPI as many ranks on one node).  A future producer that runs as a
+driver is an instance of the orchestrator class -- it reuses the
+one orchestrator shape, overriding on the command line if it
+differs -- so the file grows by job class (bounded), never by
+orchestrator instance.  Each class carries a single site-default
+resource shape (the worker sizing, and small `orchestrator` and
+`md` groups), overridable per run.  These hand-set shapes are
+transitional: as the resource-and-cost dataspace (section 11)
+learns to predict a job's memory and walltime from its problem
+size, the per-job *requests* migrate out of the file toward
+prediction, leaving it closer to pure cluster fact -- which is
+why per-node memory is a capacity ceiling, not a request.
+
+**The file is the site's scheduler truth, not kaleidoscope's
+alone.**  The md class exists because `condense.py` writes a
+LAMMPS submission file, and a script that emits a batch job needs
+the same queues, account and per-node facts a flight does.
+Recording those separately in each script's own `*rc.py` would
+leave one fact written down in several places with nothing to say
+which copy had gone stale, so every Imago script that submits
+work reads the cluster facts from this one file, and keeps in its
+own `*rc.py` only what is not about the cluster.
+
+The reader that performs that load sits in kaleidoscope beside
+the dispatch builders, and imports no Parsl: the flight layer
+defers that import to the point of use.  A script may therefore
+share the reader without taking on the dispatcher's
+requirements, and a LAMMPS input builder reads the site file
+without depending on a flight layer it never calls.  That is a
+property to keep deliberately rather than an accident to rely on
+-- it is what lets the two submission-file generators live
+together, where a reader looking for one will find the other.
+
+The md class carries its own bring-up rather than reusing
+`worker_init`, because `worker_init` starts imago and an external
+MD program does not need it.  That separation is what keeps the
+install location of a program Imago merely *launches* out of
+`src/` entirely: a site points the md bring-up at wherever it put
+LAMMPS, and no path to it appears anywhere in the source.
 
 ### 9.5 Structure acquisition: cod_fish.py + cif2skl.py
 
@@ -1854,9 +1923,8 @@ A single structure may host more than one calculation
 (e.g., different bases or property runs), hence the
 optional `<calc>` level under `wingbeats/<id>/`.
 
-This layout also subsumes the producer's content-keyed
-SCF cache (DESIGN 5.7's
-`share/atomicBDB/cache/scf/<reference_id>/`): a
+This layout also serves as the producer's content-keyed SCF
+cache, so the producer needs none of its own (DESIGN 5.7): a
 kaleidoscope `wingbeats/<id>/` directory *is* a cached run,
 so cache-hit/miss logic becomes "is there a completed
 run directory for this id whose inputs still match?"

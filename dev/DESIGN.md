@@ -5638,8 +5638,11 @@ returns its path:
   pre-converted `structure_path` skl instead.
 
 Both artifacts -- the fetched CIF and the converted skeleton --
-are cached on disk, and a converted skeleton is reused when it is
-already present rather than rewritten.  **The cached skeleton's
+are cached on disk under `share/curation/structures/`, beside
+the producer's other reconstructible working artifacts
+(ARCHITECTURE 8.1), and a converted skeleton is reused when it
+is already present rather than rewritten.  **The cached
+skeleton's
 name must therefore carry every manifest setting that changes
 what the conversion writes**, or a later run under different
 settings will silently be handed the earlier run's file.  Today
@@ -5673,16 +5676,13 @@ exactly the failure mode pinning exists to prevent.
 
 **Run-reuse caching is kaleidoscope's job, not the producer's.**
 
-Earlier drafts of this section gave the producer its own
-per-solid SCF cache under `share/atomicBDB/cache/scf/`, with an
-`is_cached(ref, imago_commit)` check that compared a snapshot of
-the SCF inputs plus a byte-for-byte copy of the structure file.
-That machinery is **removed**.  Now that the producer delegates
-SCF to kaleidoscope, the avoid-recompute responsibility moves to
-kaleidoscope's run-reuse cache (DESIGN 6.2.5), which keys each run
-on the structure file's contents together with the makeinput
-options and the Imago build identity.  The properties the old
-producer cache provided are preserved by that one mechanism:
+The producer keeps no SCF cache of its own.  Because it
+delegates every SCF run to kaleidoscope, the avoid-recompute
+responsibility sits with kaleidoscope's run-reuse cache (DESIGN
+6.2.5), which keys each run on the structure file's contents
+together with the makeinput options and the Imago build
+identity.  A single mechanism supplies every property a
+producer-side cache would have had to provide:
 
 - *Edits to harvest declarations stay cheap.*  Adding or changing
   a `[[reference_solid.entry]]` changes neither the structure nor
@@ -8410,14 +8410,16 @@ is not merely avoided, it cannot be written.
 **Every overlay merges per key, at every layer.**  Most
 settings are a single value, and overlaying one simply
 replaces it.  But a setting may itself be a *block* of
-settings -- `orchestrator` is one, holding the driver's
-cores, memory, and walltime -- and there an overlay names
-only the keys it means to change.  The others keep the value
-the layer beneath them gave.  A curator who writes, of the
-debug queue, "the driver needs only two gigabytes there"
-must not thereby lose the driver's core count and time
-limit: they never mentioned those, and would receive not an
-error but two plausible-looking fallbacks in their place.
+settings -- `orchestrator` and `md` are the two, holding
+respectively the driver's cores, memory and walltime, and the
+MD job's ranks, memory, walltime and bring-up -- and there an
+overlay names only the keys it means to change.  The others
+keep the value the layer beneath them gave.  A curator who
+writes, of the debug queue, "the driver needs only two
+gigabytes there" must not thereby lose the driver's core
+count and time limit: they never mentioned those, and would
+receive not an error but two plausible-looking fallbacks in
+their place.
 
 This is the same rule already stated for the per-run
 `--orchestrator-*` flags below, and it is stated once here
@@ -8441,6 +8443,20 @@ failure this file exists to prevent.  And an override may
 not set `partitions` or `profiles`: those choose *which*
 overlay applies, so letting an overlay rewrite them invites
 a rule that refers to itself.
+
+The typo guard descends exactly as far as the merge does --
+one level, into a block.  The two must agree, and the reason
+is that a block is where an unnoticed typo does its quietest
+damage.  A misspelling at the top level leaves a stray
+setting that nothing reads, which is bad enough; a
+misspelling *inside* a block leaves the real key standing at
+its old value beside the stray one, so the run proceeds with
+the number the curator meant to change and no sign that
+anything was ignored.  A queue override reading `rank` for
+`ranks` would let a job run at the site's width while its
+author believed they had widened it.  Checking only the
+outer keys would leave the merge able to reach a place the
+guard cannot see.
 
 **Discovering site facts -- the `cluster_probe.py` tool.**
 The settings file itself stays *pure data* -- like every other
@@ -8826,6 +8842,145 @@ Three properties of the override, each a deliberate choice:
   submits them, and the orchestrator's own walltime continues
   to govern the driver's job unless
   `--orchestrator-walltime` says otherwise.
+
+**A third job class -- the md block.**  `condense.py` writes a
+LAMMPS submission file, and that job is neither a worker nor an
+orchestrator.  A worker is one serial calculation; an
+orchestrator is one driver process; an md job is many MPI ranks
+of an external program filling a single node.  Sizing it as
+either would missize it -- the same argument that separated the
+orchestrator from the worker above, applied once more
+(ARCHITECTURE 9.4).  The block holds `ranks`, `walltime`,
+`memory`, and its own bring-up lines.
+
+**Cluster facts come from the site file; everything else stays
+with the script.**  `condense.py` already reads `condenserc.py`
+for the chemistry and structure settings that are its own
+business.  What it does not own is the cluster: the queue, the
+account, and a node's core count are the same facts a flight
+uses, and writing them down a second time in `condenserc.py`
+would leave one truth in two files with nothing to mark which
+had aged.  So the script reads cluster facts from `clusterrc.py`
+and keeps the rest where they are.  Reading two settings files
+is the price of not duplicating a fact, and it is the cheaper of
+the two prices on offer.
+
+**The md bring-up is its own, not `worker_init`.**  `worker_init`
+starts imago; an external MD program does not need imago, and
+does need something else entirely.  A separate `init` in the md
+block is what lets a site record where it installed LAMMPS
+without that location appearing anywhere in `src/` -- which is
+the whole point of routing this through configuration instead of
+a hard-coded template.
+
+**Ranks derive from the node, and a missing node fact yields one
+rank.**  A condensation run fills a node, so `ranks` defaults to
+`cores_per_node` rather than to a number written into the
+source.  A hard-coded count is exactly what left the previous
+template asking for 125 tasks while also naming a partition
+whose nodes have 48, so that the alternative it appeared to
+offer could never have run.  `cores_per_node` is itself
+optional, and where a site has not recorded it the generator
+asks for a single rank and says so in a comment in the file it
+writes.  A one-rank MD job is visibly wrong to whoever opens it,
+which is the point: guessing a plausible core count instead
+would produce a job that runs, and runs wrong, while never
+announcing that the site was never configured.
+
+**Sizing falls back; the bring-up does not.**  Where a site has
+left the md block's *sizing* keys unset the generator supplies
+them -- ranks from the node, walltime and memory from their
+defaults -- the same latitude the orchestrator block has in
+being allowed to stand empty.  The bring-up is different in
+kind.  A rank count guessed wrong yields a job that runs
+badly; an absent `init` yields a job that cannot start at all,
+because nothing has put the MD program on the path.  So `init`
+is marked in the settings file the way `worker_init` is:
+shipped blank, flagged as required, and left blank by
+`cluster_probe`, which cannot supply it -- where LAMMPS was
+installed is site convention, exactly the fact-versus-policy
+line the probe already draws.  The generator refuses to write
+a submission file without it.
+
+The *enforcement point* is chosen as deliberately as the
+marking.  `init` is not added to the required core that the
+loader checks on every read.  That check guards a dispatch,
+and a site that flies calculations but never condenses has no
+reason to record where an MD program lives; making it globally
+required would refuse a flight over a setting the flight never
+reads.  The requirement is real and it belongs to the md
+generator, which is the only party that needs it.
+
+**An unconfigured site is refused, not papered over.**
+`condense.py` reads the site file through the same loader every
+flight uses and inherits its verdict: where the required core
+is unfilled, the run stops with an error naming what is
+missing.  This is the rule decision 2 already states for a
+dispatch, holding here for the same reason.  A file that looks
+like a working submission while naming the wrong queue, the
+wrong account, and no bring-up is worse than no file, because
+it fails at the scheduler -- later, on another machine, with
+nothing in the failure pointing back at the settings that were
+never filled.  The case this protects is not the machine with
+no configuration at all, which nobody condenses on; it is the
+half-configured one, where enough is present that the omission
+does not announce itself.
+
+That refusal belongs at the *start* of the run, not at the
+moment the file is written.  `condense.py` computes bonds,
+angles and the whole LAMMPS input before it has any use for a
+queue name, and an error surfacing after all of that would
+throw the run away and be met a second time on the rerun.  So
+the site file is read where the script reads its other
+settings, before any work, and the submission file is later
+written from settings already in hand.  This is the same "up
+front, never deep in a run" discipline the loader already
+states for a flight; it is worth restating here only because
+the natural place to *use* the site file is nowhere near the
+right place to *read* it.
+
+Timing decides *which* file is read, besides deciding when the
+refusal lands.  The loader searches the current directory
+before `$IMAGO_RC`, so that a run may carry a settings file of
+its own; and by the point the submission file is written the
+script has moved into `lammps/`.  A read there would resolve
+against a directory the run created rather than the one the
+user launched from -- silently picking up a stray file, or
+silently missing the intended one.  Reading at settings time
+fixes the answer while the working directory still means what
+the user meant by it.
+
+**One thread per rank, written by the generator.**  The job
+fills a node with MPI ranks, so each rank must confine itself
+to one core.  A threaded BLAS left to its own devices assumes
+it has the machine and starts a thread per core *in every
+rank*, which on a forty-core node is sixteen hundred threads
+contending for forty cores.  The generator therefore writes
+`OMP_NUM_THREADS=1` itself rather than leaving it to the site's
+`init`: it follows from the shape of the job -- ranks sized to
+fill the node -- and that shape is the generator's own
+arithmetic, not a site convention.  It is written after the
+bring-up, so a module that sets a thread count of its own
+cannot overwrite it.
+
+**Every generated submission file brings up its own
+environment.**  A bring-up is a sequence of shell commands, and
+on a module-based cluster those are `module` commands, which
+exist only in a shell whose profile has run.  A submission file
+that omits the login shell appears to work whenever it happens
+to be submitted from a shell already set up, and fails from
+`cron`, from a workflow driver, or under `sbatch
+--export=NONE` -- inheriting what it ought to establish.  Worse,
+it fails *there* rather than where it was written, so the report
+is of an unattended job dying rather than of a generator that
+assumed its caller's environment.
+
+Both generators therefore open with a login shell: the md job
+because its `init` is module commands, and the orchestrator job
+because `worker_init` may equally be.  The rule belongs to the
+act of generating a submission file, not to either job class, so
+neither generator is left as the one a site discovers the rule
+through.
 
 **Materialize on the login node, then submit.**  The one step
 that needs the network is the structure fetch -- the

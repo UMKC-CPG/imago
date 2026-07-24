@@ -1935,10 +1935,20 @@ def test_curation_workspace_root_sits_beside_databases():
     assert root == os.path.join("/data", "curation", "workspace")
 
 
-def test_structure_cache_dir_sits_beside_databases():
+def test_structure_cache_dir_sits_in_the_curation_tree():
+    # The cache is producer working material, not database
+    # content, so it lives beside the workspace and run log
+    # rather than under atomicBDB (ARCHITECTURE 8.1).
     cache = structure_cache_dir("/data/atomicPDB")
-    assert cache == os.path.join(
-        "/data", "atomicBDB", "cache", "structures")
+    assert cache == os.path.join("/data", "curation", "structures")
+
+
+def test_structure_cache_and_workspace_share_one_root():
+    # Both derive from the same `curation` tree, so clearing a
+    # campaign's footprint is one directory, not two.
+    cache = structure_cache_dir("/data/atomicPDB")
+    workspace = curation_workspace_root("/data/atomicPDB")
+    assert os.path.dirname(cache) == os.path.dirname(workspace)
 
 
 # ============================================================

@@ -219,12 +219,36 @@ def test_render_starter_lists_heterogeneous_options_not_a_guess():
 
 def test_render_starter_with_no_facts_blanks_partitions(monkeypatch):
     """When the probe found nothing, the rendered file is still valid
-    Python with both required fields blank and flagged."""
+    Python with every required field blank and flagged.
+
+    Three are flagged, not two: the md bring-up is site convention in
+    exactly the way worker_init is -- where an MD program was
+    installed is policy, not a fact any scheduler query reports -- so
+    it is blanked even though the block around it is not required."""
     text = cluster_probe.render_starter_clusterrc({})
     settings = _starter_settings(text)
     assert settings["partitions"] is None
     assert settings["worker_init"] is None
-    assert text.count("# FILL IN") == 2
+    assert settings["md"]["init"] is None
+    assert text.count("# FILL IN") == 3
+
+
+def test_render_starter_flags_a_blank_inside_a_block():
+    """The FILL IN marker reaches one key inside a settings block --
+    as deep as a block ever goes -- so md.init is flagged on its own
+    line rather than the whole block being marked."""
+    text = cluster_probe.render_starter_clusterrc({})
+    lines = [line for line in text.splitlines() if "# FILL IN" in line]
+    assert any(line.strip().startswith("'init'") for line in lines)
+    assert not any(line.strip().startswith("'md'") for line in lines)
+
+
+def test_render_starter_keeps_every_line_within_the_convention():
+    """A settings block is written one key per line, which is what
+    keeps the md block inside the line-length convention -- packed
+    onto one line it would overrun."""
+    text = cluster_probe.render_starter_clusterrc({})
+    assert not [line for line in text.splitlines() if len(line) > 80]
 
 
 def test_write_starter_writes_then_refuses_to_clobber(tmp_path):

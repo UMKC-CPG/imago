@@ -102,11 +102,21 @@ _SETTINGS = [
                       "walltime": "24:00:00"},
      "Resources for a driver job that prepares work and hands it "
      "out, as opposed to one that runs a calculation."),
+    ("md", {"ranks": None, "walltime": "01:00:00", "memory": None,
+            "init": None},
+     "Resources for a molecular-dynamics job -- an outside program "
+     "run as many parallel ranks filling one node.  Blank ranks "
+     "means 'use a whole node's cores'.  The init lines bring that "
+     "program within reach, the way worker_init does for Imago."),
 ]
 
 # The required-core keys: shipped blank, because no scheduler query can
-#   supply them -- the user must.
-_REQUIRED_KEYS = ("partitions", "worker_init")
+#   supply them -- the user must.  A dotted name reaches one key inside
+#   a settings block, which is as deep as a block ever goes: "md.init"
+#   is site convention in exactly the way worker_init is (where an MD
+#   program was installed is policy, not a fact a query reports), so it
+#   is blanked and flagged even though the block around it is not.
+_REQUIRED_KEYS = ("partitions", "worker_init", "md.init")
 
 # Per-node numbers the scheduler can fill, each mapped to the fact key
 #   that holds the distinct values seen when the cluster's nodes
@@ -330,7 +340,27 @@ def _comment_lines(text):
 def _value_lines(key, value, suffix):
     """Render a ``'key': value,`` line, wrapping a long list value
     across several indented lines so nothing exceeds the line-length
-    convention (a scalar that is still too long is left as one line)."""
+    convention (a scalar that is still too long is left as one line).
+
+    A settings *block* with contents is written one key per line
+    rather than packed onto one, both because a packed block overruns
+    the line length and because a key inside it may need its own
+    ``FILL IN`` marker -- ``md.init`` does, being site convention no
+    query can report.  The block is the deepest structure the settings
+    file has, so one level of descent covers it.  An empty block (a
+    site with no per-queue overrides, say) stays on one line, where
+    there is nothing to descend into and ``{}`` says it plainly.
+    """
+    if isinstance(value, dict) and value:
+        lines = [f"        {key!r}: {{"]
+        for inner_key, inner_value in value.items():
+            inner_blank = (f"{key}.{inner_key}" in _REQUIRED_KEYS
+                           and not inner_value)
+            marker = "  # FILL IN" if inner_blank else ""
+            lines.append(f"            {inner_key!r}: "
+                         f"{inner_value!r},{marker}")
+        lines.append(f"        }},{suffix}")
+        return lines
     single = f"        {key!r}: {value!r},{suffix}"
     if len(single) <= 78 or not isinstance(value, (list, tuple)):
         return [single]

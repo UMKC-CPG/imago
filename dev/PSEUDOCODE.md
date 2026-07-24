@@ -3124,6 +3124,12 @@ differences between 10c and 10d outputs are resolved by
 10e during cross-source clustering inside
 `normalize_types`.
 
+`create_lammps_files` writes one further file this section
+does not cover: the SLURM submission file that runs the
+condensation.  That is a job-class question rather than a
+force-field one, so it lives with the other submission-file
+generator, in 13.7 (`condense_write_submission`).
+
 ```
 # Phase 1: Collect all angle observations.  Replaces
 # the angles.dat lookup loop.  The base_tag is built
@@ -6516,6 +6522,18 @@ function resolve_settings(solid, defaults, harvest):
         kpoint_convergence_threshold = threshold)
 
 
+function structure_cache_dir(pdb_root):
+    # Where materialized reference structures are cached
+    # (ARCHITECTURE 8.1): under the producer's `curation`
+    # tree beside its workspace and run log, NOT under a
+    # database.  Everything there is reconstructible by
+    # re-running the producer, so the whole campaign
+    # footprint clears in one gesture.  Derived from
+    # pdb_root's parent so a relocated data root carries
+    # the cache with it.
+    return dirname(pdb_root) + "/curation/structures/"
+
+
 function materialize_structure(ref):
     # Option A (DESIGN 5.7): guarantee that the
     # reference solid's structure exists as a local
@@ -6541,7 +6559,7 @@ function materialize_structure(ref):
     # never falls back to another revision, because a
     # silent fallback would desync the build from the
     # pinned manifest (DESIGN 5.7).
-    cache = "share/atomicBDB/cache/structures/"
+    cache = "share/curation/structures/"
     cif = cache + ref.reference_id + cod_extension(ref)
     # The CACHED SKELETON's name carries every manifest
     # setting that changes what the conversion writes --
@@ -8386,11 +8404,12 @@ this code.
 #
 # Most of the file is cluster FACT (queues, account, per-node
 # capacity, environment bring-up), true no matter what runs.  The
-# rest sizes a job, and there are exactly two job CLASSES: a
-# worker (one calculation, the per-worker keys) and an
-# orchestrator (a driver that prepares units and fans them out,
-# the grouped block at the end).  The file grows by job class,
-# never by builder (ARCHITECTURE 9.4).
+# rest sizes a job, and there are exactly three job CLASSES: a
+# worker (one calculation, the per-worker keys), an orchestrator
+# (a driver that prepares units and fans them out), and an md job
+# (an external MD program run as many MPI ranks on one node) --
+# the last two as the grouped blocks at the end.  The file grows
+# by job class, never by builder (ARCHITECTURE 9.4).
 function clusterrc.parameters_and_defaults():
     return {
         # --- Required core (enough to dispatch at all) ---
@@ -8441,6 +8460,33 @@ function clusterrc.parameters_and_defaults():
             "memory"   : "8G",
             "walltime" : "24:00:00",     # outlast the flight
         },
+        # --- The md job class (DESIGN 6.2.11) ---
+        # An external molecular-dynamics program (LAMMPS today)
+        #   run under MPI: many ranks filling ONE node, so it is
+        #   sized by rank count rather than by the cores-per-task
+        #   an orchestrator asks for.  `ranks` None falls back to
+        #   cores_per_node, and where the site recorded neither,
+        #   to a single rank -- visibly wrong to whoever opens the
+        #   generated file, which is the intent.
+        #
+        # `init` is this class's OWN bring-up: worker_init starts
+        #   imago, which an external program neither needs nor is
+        #   served by, and holding the two apart is what keeps
+        #   that program's install location out of src/ entirely.
+        #   It ships blank and REQUIRED, as worker_init does: the
+        #   sizing keys above merely size a job, whereas an absent
+        #   bring-up leaves nothing on the path to run at all.
+        #   But it is deliberately NOT checked by _require_core --
+        #   that check guards every dispatch, and a site that
+        #   flies calculations and never condenses must not be
+        #   refused a flight over a setting no flight reads.  The
+        #   md generator enforces it instead (build_md_sbatch).
+        "md" : {
+            "ranks"    : None,           # None -> cores_per_node
+            "walltime" : "01:00:00",
+            "memory"   : None,           # None -> no --mem
+            "init"     : None,           # REQUIRED shell bring-up
+        },
     }
 ```
 
@@ -8449,16 +8495,18 @@ function merge_settings(base, overlay):
     # The ONE merge every overlay uses -- profile, queue, and the
     # per-run flags alike (DESIGN 6.2.11, decision 1).  Per key, and
     # one level down: when a setting is itself a BLOCK of settings
-    # (`orchestrator` is the only one today), the overlay names only
-    # the keys it means to change and the rest keep the value the
-    # layer beneath gave them.
+    # (`orchestrator` and `md`), the overlay names only the keys it
+    # means to change and the rest keep the value the layer beneath
+    # gave them.
     #
     # Replacing the whole block instead would silently discard facts
     # the curator never mentioned -- "the driver needs 2G on the
     # debug queue" would also drop its cores and walltime, and they
     # would reappear as plausible-looking fallbacks rather than as
     # an error.  A block holds plain values, never further blocks,
-    # so one level is the whole of the descent.
+    # so one level is the whole of the descent.  The md block's
+    # `init` keeps that intact: a list of shell lines is a value,
+    # exactly as top-level worker_init is, not a nested block.
     result = copy(base)
     for key, value in overlay.items():
         if is_block(base.get(key)) and is_block(value):
@@ -8528,6 +8576,20 @@ function apply_queue_overrides(site, partition):
         if key in ("partitions", "profiles"):
             raise ConfigError(
                 "queue override may not set " + key)
+        # The guard descends one level, exactly as far as the merge
+        # below does, so the merge cannot reach a place the guard
+        # cannot see.  A typo INSIDE a block is the quieter fault:
+        # it leaves the real key standing at its old value beside
+        # the stray one, so the run uses the number the curator
+        # meant to change and nothing says otherwise ("rank" for
+        # "ranks" runs the job at the site's width).
+        if is_block(site[key]) and is_block(override[key]):
+            for inner in override[key]:
+                if inner not in site[key]:
+                    raise ConfigError(
+                        "queue override for " + partition +
+                        " names unknown setting " + key +
+                        "." + inner)
 
     # Per key, one level down: a queue that names only the driver's
     # memory keeps the site's driver cores and walltime.
@@ -8869,7 +8931,12 @@ function build_orchestrator_sbatch(site, choices, command,
     memory   = orch.get("memory")                 # None -> no --mem
     walltime = orch.get("walltime") or choices["walltime"]
 
-    lines = ["#!/bin/bash",
+    # A login shell, so worker_init below runs in a shell whose
+    # profile has been read.  Where that bring-up uses `module`,
+    # a plain shell would work only when the submitting shell had
+    # already been set up, and fail from cron, a workflow driver,
+    # or --export=NONE (DESIGN 6.2.11).
+    lines = ["#!/bin/bash -l",
              "#SBATCH --job-name=imago-orchestrator"]
     if site["account"]:                           # some sites need none
         lines.append("#SBATCH --account=" + site["account"])
@@ -8888,6 +8955,172 @@ function build_orchestrator_sbatch(site, choices, command,
     lines.append("")
     lines.append(command)
     return join_lines(lines)
+```
+
+`join_lines` finishes with a trailing newline, in this generator
+and in the md one below, so the file ends the way a text file is
+expected to end and the last command is a complete line.
+
+**The md generator.**  The second submission-file generator sits
+beside the first, so a reader who finds one finds the other and
+the two stay alike where they can -- both open with a login
+shell, for the reason DESIGN 6.2.11 gives.  It differs in four
+ways, each following from the job being many MPI ranks of an
+external program rather than one driver process: it asks for
+`--ntasks` instead of `--cpus-per-task`; it runs the md block's
+own bring-up instead of `worker_init`, and refuses to write a
+file at all when that bring-up is missing; and it pins one
+thread per rank, because ranks sized to fill a node must each
+hold a single core.
+
+```
+function build_md_sbatch(site, choices, command, md = None):
+    # Test for ABSENCE, not falsiness, exactly as the orchestrator
+    # generator does: a caller passing an empty shape means
+    # "request nothing but the fallbacks" and must not silently
+    # re-inherit the site block.  The SIZING keys fall back; the
+    # bring-up below does not, so a site with no md block at all
+    # is refused rather than handed a job that cannot start.
+    shape    = (md if md is not None else site.get("md", {}))
+    memory   = shape.get("memory")                # None -> no --mem
+    walltime = shape.get("walltime") or choices["walltime"]
+
+    # The bring-up is required HERE rather than in the loader's
+    #   required core (DESIGN 6.2.11).  Without it nothing puts the
+    #   MD program on the path and the job cannot start -- but a
+    #   flight that never condenses must not be refused over it, so
+    #   this generator is the one that insists.  Same emptiness test
+    #   the loader uses: None and [] are both unfilled.
+    bring_up = shape.get("init")
+    if is_empty(bring_up):
+        raise ConfigError("the cluster settings file records no md "
+                          "bring-up (md.init), so the generated job "
+                          "would have no way to find the MD program; "
+                          "fill it in clusterrc.py")
+
+    # Ranks come from the node, never from a number written into
+    #   the source: a hard-coded count is what once asked for 125
+    #   tasks while naming a partition whose nodes hold 48.  Where
+    #   the site recorded no core count there is nothing to derive
+    #   from, so ask for ONE rank and say so in the file itself.
+    #   A one-rank MD job is visibly wrong to whoever opens it,
+    #   whereas a guessed count would run, and run wrong, without
+    #   ever announcing that the site was never configured.
+    ranks   = shape.get("ranks") or site["cores_per_node"]
+    unsized = (ranks is None)
+    if unsized:
+        ranks = 1
+
+    lines = ["#!/bin/bash -l",
+             "#SBATCH --job-name=lmp"]
+    if site["account"]:                           # some sites need none
+        lines.append("#SBATCH --account=" + site["account"])
+    lines.append("#SBATCH --partition=" + choices["partition"])
+    lines.append("#SBATCH --nodes=1")
+    lines.append("#SBATCH --ntasks=" + ranks)
+    if memory:
+        lines.append("#SBATCH --mem=" + memory)
+    lines.append("#SBATCH --time=" + walltime)
+    lines.extend(site["extra_scheduler_options"])   # already #SBATCH
+
+    # Directives are done; a comment here cannot swallow one.
+    if unsized:
+        lines.append("")
+        lines.append("# One rank only: this site's settings file")
+        lines.append("#   records no cores_per_node, so there was")
+        lines.append("#   nothing to size this job from.  Set it,")
+        lines.append("#   or the md block's ranks, and rerun.")
+
+    # The bring-up runs first so the batch job can find the MD
+    #   program.  The thread pin comes AFTER it, so that a module
+    #   setting a thread count of its own cannot overwrite it: the
+    #   ranks were sized to fill the node, so each must hold one
+    #   core, and a threaded BLAS left alone would start a thread
+    #   per core in EVERY rank (DESIGN 6.2.11).
+    lines.append("")
+    lines.extend(bring_up)
+    lines.append("")
+    lines.append("export OMP_NUM_THREADS=1")
+    lines.append("")
+    lines.append(command)
+    # Deliberately NOT written, both to stay alike with the
+    #   orchestrator generator: --output/--error, leaving the
+    #   scheduler's own default naming; and a cd to the submit
+    #   directory, which SLURM has already done.
+    return join_lines(lines)
+```
+
+**`condense.py` calls it for the condensation run.**  The script
+reads `condenserc.py` for the settings that are its own business
+and the site file for the cluster facts that are not (DESIGN
+6.2.11).  It has no dispatch flags of its own, so its per-run
+choices are simply the site's defaults -- but it reaches them
+through the same resolver a flight uses, handed an empty flag
+set, rather than reading `partitions[0]` and `walltime` out of
+the site itself.  That is the case `resolve_choices` already
+serves for a fully configured site that passes no flags, and
+going through it means the day `condense.py` grows a
+`--partition` of its own, the resolution needs no redesign.
+
+It also inherits the loader's refusal.  Where the site's
+required core is unfilled, `load_site_config` raises and no
+submission file is written, rather than one being assembled
+from guesses that would fail later at the scheduler with
+nothing pointing back at the settings (DESIGN 6.2.11).
+
+**The site is read at settings time, not at writing time**
+(DESIGN 6.2.11).  The natural place to *use* the site file is
+the last step of `create_lammps_files`, and that is the wrong
+place to *read* it, for two reasons.  A refusal there arrives
+after the bonds, the angles, the clustering and the whole
+LAMMPS input have been computed, throwing that work away and
+meeting the user again on the rerun; and by then the script has
+entered the `lammps/` directory, so a read that searches the
+current directory first (13.7 `load_site_config`) can resolve a
+different settings file than the run started under.  So
+`ScriptSettings` reads the site beside its `condenserc.py`
+read, before any work, and hands the result down.  It reads it
+*after* parsing the command line, so `--help` and a misspelled
+flag still answer as they always did rather than being met by a
+site-configuration error.
+
+The submission file lands beside `lammps.in` and `lammps.dat`,
+named `slurm`, exactly where the hand-built template used to be
+written, so nothing downstream of it moves.
+
+```
+# Settings time, in ScriptSettings: read the site beside the
+#   script's own rc file, before any work has been done and
+#   while the current directory is still the one the user
+#   launched from.
+function condense_read_settings(cli):
+    settings      = read_rc("condenserc.py")
+    settings      = reconcile(settings, parse_command_line())
+    # Raises where the required core is unfilled, and that
+    #   refusal is inherited deliberately (DESIGN 6.2.11): a
+    #   file naming the wrong queue and carrying no bring-up
+    #   fails later, on another machine, with nothing pointing
+    #   back to here.  Raised HERE so it costs a user nothing
+    #   but the rerun of a run that has not started.
+    settings.site = load_site_config()
+    return settings
+```
+
+```
+function condense_write_submission(site):
+    # Called at the close of create_lammps_files, which has already
+    #   entered the lammps/ directory, so the file lands beside the
+    #   input it submits.  The site arrives already loaded, from
+    #   settings time; nothing is read from disk here.
+    #
+    # No dispatch flags of its own, so every choice falls through
+    #   to the site default -- reached through the shared resolver
+    #   rather than by reading partitions[0] out of the site.
+    choices = resolve_choices(site, flags_with_none_set())
+    # The one line naming the MD program; everything above it in
+    #   the file came from the site.
+    command = 'mpirun -np "$SLURM_NTASKS" lmp -in lammps.in'
+    write_file("slurm", build_md_sbatch(site, choices, command))
 ```
 
 **Materialize on the login node, then submit.**  The one step
@@ -8986,13 +9219,23 @@ function render_starter_clusterrc(facts):
     #   both the required core (worker_init, partitions-if-none) AND
     #   any per-node number the nodes disagreed on, listing the values
     #   seen in a "nodes vary" note.  No login-node facts are written.
+    #
+    # The copy carries every job-class BLOCK the settings file has,
+    #   orchestrator and md alike, in the same order and with the
+    #   same defaults -- the drift test compares whole dictionaries,
+    #   so a block added to one file and not the other fails it.
+    #   "md.init" names a key one level inside a block, which is as
+    #   deep as a block ever goes; it is blanked for the same reason
+    #   worker_init is, being site convention no query can report
+    #   (where an MD program was installed is policy, not fact).
     settings = _starter_schema()
     for key in ["partitions", "cores_per_node",
                 "memory_per_node", "gpus_per_node"]:
         if key in facts: settings[key] = facts[key]
     return render_full_dict(settings, notes = _SETTINGS,
                             options = facts, account_hint = facts,
-                            blanks = ["partitions", "worker_init"])
+                            blanks = ["partitions", "worker_init",
+                                      "md.init"])
 ```
 
 ### 13.8 Scratch reclamation (DESIGN 6.2.12)

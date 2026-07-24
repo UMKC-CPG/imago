@@ -201,6 +201,36 @@ def parameters_and_defaults():
             "memory":   "8G",
             "walltime": "24:00:00",
         },
+
+        # The md job class (DESIGN 6.2.11): an external molecular-
+        #   dynamics program (LAMMPS today) run under MPI as many
+        #   ranks filling ONE node.  It is sized by rank count
+        #   rather than by the cores-per-task an orchestrator asks
+        #   for.  ``ranks`` None falls back to cores_per_node, and
+        #   where the site recorded neither, to a single rank --
+        #   visibly wrong to whoever opens the generated file,
+        #   which is the intent: a guessed count would run, and run
+        #   wrong, without ever announcing that nothing was set.
+        #
+        # ``init`` is this class's OWN environment bring-up.
+        #   worker_init starts imago, which an external program
+        #   neither needs nor is served by, and holding the two
+        #   apart is what keeps that program's install location out
+        #   of the Imago source entirely: a site points this at
+        #   wherever it put LAMMPS.  REQUIRED before a condensation
+        #   run, because without it nothing places the MD program
+        #   on the path and the job cannot start.  It is not part
+        #   of the required core the loader checks on every read,
+        #   though -- that check guards every dispatch, and a site
+        #   that flies calculations and never condenses must not be
+        #   refused a flight over a setting no flight reads.  The
+        #   generator that writes the submission file enforces it.
+        "md": {
+            "ranks":    None,
+            "walltime": "01:00:00",
+            "memory":   None,
+            "init":     None,       # REQUIRED: list[str]
+        },
     }
 
     return settings
