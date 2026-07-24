@@ -11127,13 +11127,114 @@ modes; promotion is a `mv` of the file from
 contents (and provenance) never change.
 
 ```
+function dedup_key(entry):
+    # The identity of the CLAIM an entry makes (DESIGN 7.8):
+    # same system, same settings, same structure.  The three
+    # settings fields are the predictor's sub-model partition,
+    # so a gaussian and a gaussian-0.1 run of one solid are
+    # NOT re-runs of each other.  The structure's basename, not
+    # its path, because the path records only where the
+    # structure cache sat and that has moved (ARCH 8.1).
+    # imago_commit is deliberately absent: it is what the
+    # comparison examines, not what the key partitions on.
+    return (entry.signature.system_type,
+            entry.context.basis,
+            entry.context.functional,
+            entry.context.kpoint_integration,
+            basename(entry.provenance.source_structure))
+
+
+function mesh_of(entry):
+    # The entry's converged mesh, or None when it has no
+    # verification block at all (a manual entry, 7.9).  Both
+    # absences read the same to the dedup: an answer that
+    # cannot be compared.
+    if entry.verification is None:
+        return None
+    return entry.verification.converged_mesh
+```
+
+```
 function promote(db_root, mode):
+    # Load the promoted corpus ONCE, keyed by claim.  This is
+    # the one judgment the acceptance rule cannot make from the
+    # staged file alone (DESIGN 7.8); entries/ is small and
+    # local, so the cost is a directory read, not a workspace
+    # re-read.  staging/ and superseded/ are NOT loaded: only a
+    # promoted entry can make a claim already held.
+    promoted = {}                    # dedup_key -> entry
+    for entry in load_promoted_entries(db_root):
+        promoted[dedup_key(entry)] = entry
+
+    # dry-run evaluates every decision below and moves nothing,
+    # so a curator sees the whole outcome -- promotions,
+    # retirements, and conflicts -- before a file is touched.
+    dry = (mode == "dry-run")
+
     for system_type in VALID_SYSTEM_TYPES:
         staged = sorted(glob(
             join(db_root, "staging", system_type), "*.toml"))
+
+        # Resolve re-runs WITHIN this batch first, so at most one
+        # candidate per claim is ever compared against entries/
+        # (DESIGN 7.8).  Sorted order makes it deterministic; the
+        # later generated_at wins.  NOTE: this is where promotion
+        # stops judging each staged file in isolation -- staging
+        # IS a uniqueness namespace under this rule.
+        batch = {}                   # dedup_key -> (path, entry)
         for path in staged:
             entry = load_entry(path, system_type, {})
+            key = dedup_key(entry)
+            if key not in batch:
+                batch[key] = (path, entry)
+                continue
+            keep, drop = by_generated_at(batch[key], (path, entry))
+            batch[key] = keep
+            if not dry:
+                move_to_superseded(drop.path, db_root, system_type)
+            record(drop.entry, "superseded",
+                   "a later run in this batch makes the same claim")
 
+        for key, (path, entry) in sorted_by_path(batch):
+            prior = promoted.get(key)
+            if prior is not None:
+                # converged_mesh is OPTIONAL (DESIGN 7.2): a
+                #   manual or curator-authored entry carries no
+                #   verification block and so no mesh.  A missing
+                #   mesh on either side cannot be shown to agree,
+                #   so it falls to the conflict branch rather than
+                #   being waved through (DESIGN 7.8).
+                if (mesh_of(prior) is not None
+                        and mesh_of(prior) == mesh_of(entry)):
+                    # REDUNDANT.  The promoted entry stands
+                    #   untouched -- promotion only ever ADDS to
+                    #   entries/, so a reviewed entry stays
+                    #   byte-identical for as long as it lives
+                    #   there.  The staged copy is retired, not
+                    #   deleted.
+                    if not dry:
+                        move_to_superseded(
+                            path, db_root, system_type)
+                    record(entry, "superseded",
+                           "already promoted as " + prior.entry_id)
+                    continue
+                # CONFLICT: one claim, two meshes.  Never
+                #   automatic in ANY mode -- deciding which is
+                #   right is a physics judgment, not a timestamp
+                #   comparison, and resolving it may mean removing
+                #   an entry from entries/, which this tool has no
+                #   verb for.  Report both and leave the staged
+                #   file where it is; the curator resolves it by
+                #   hand (DESIGN 7.8).
+                report_conflict(entry, prior)    # meshes+commits
+                record(entry, "conflicted",
+                       "promoted entry " + prior.entry_id
+                       + " reports a different converged mesh")
+                continue
+
+            # No prior claim: the ordinary path, decided by mode.
+            # `all` still reached the dedup above -- it waives the
+            # quality rule, not the correctness guard.
             if mode == "dry-run":
                 print_would_promote(entry,
                     auto_promote_ok(entry))
@@ -11153,6 +11254,30 @@ function promote(db_root, mode):
                     remove_file(path)
                 # SKIP: leave in staging.
 ```
+
+```
+function move_to_superseded(path, db_root, system_type):
+    # Retire a staged entry that a promoted one already claims.
+    # Mirrors move_to_entries: a pure rename into
+    # superseded/<system_type>/, refusing a pre-existing
+    # destination rather than overwriting.  Retired and not
+    # deleted so the record of what a re-run produced stays
+    # recoverable, and so staging/ does not accrete files that
+    # every later promotion pass re-examines (ARCH 10.1).
+    destination = join(db_root, "superseded", system_type,
+                       basename(path))
+    if exists(destination):
+        raise "superseded collision; resolve by hand"
+    rename(path, destination)
+    return destination
+```
+
+`promote` returns one `(entry_id, action)` record per staged
+file, so a caller or a test sees the outcome without parsing
+printed text.  The dedup adds two actions to the existing
+`promoted` / `skipped` / `deleted` (and the `would-` forms):
+`superseded` for a retired re-run and `conflicted` for one
+claim with two meshes.
 
 ```
 function auto_promote_ok(entry):

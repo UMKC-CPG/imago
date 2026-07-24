@@ -11415,6 +11415,125 @@ Promotion is a `mv` operation -- the file's contents
 do not change.  This keeps provenance intact across
 the staging boundary.
 
+**Re-run dedup at promotion.**  Promotion is also where a
+re-run of an already-promoted solid is caught, because it
+is the only stage that sees both the incoming entry and
+the promoted corpus.  The harvest cannot: it writes one
+entry per converged solid and has no view of what a
+curator accepted months ago.  Nor does any existing guard
+fire -- a re-run mints a fresh `entry_id` by construction,
+since the slug hashes the flight id, structure, and
+timestamp (7.5), so the collision refusal in `save_entry`
+and `move_to_entries` never sees a collision at all.
+
+Without this check a solid run ten times contributes ten
+entries the predictor counts as ten independent
+observations.  That is worse than untidy.  With
+`neighbor_count = 5` (7.6), five copies of one calculation
+fill the entire neighbor set; the weighted variance
+collapses to zero and the confidence comes out near 1.0.
+A single observation is then delivered as certainty, and
+that certainty drives the flight builder into its
+narrowest, least skeptical search (3.12.4) -- including
+past the crystalline opening floor, which the confident
+mode skips on the assumption that a real prediction sits
+above it.
+
+*What counts as the same claim.*  Two entries are re-runs
+of one another when they agree on
+
+    (system_type, basis, functional, kpoint_integration,
+     basename(provenance.source_structure))
+
+Each part earns its place.  The three settings fields are
+already the predictor's sub-model partition (7.6): a
+`gaussian` and a `gaussian-0.1` run of one solid are
+different physics and must both survive.  The structure's
+*basename* is used rather than its full path, because the
+path records only where the structure cache happened to
+sit and that location has moved (ARCHITECTURE 8.1); the
+basename is `<reference_id>-<cell>.skl` (5.7), which is
+the identity actually wanted, since a `full` and a `prim`
+run of one COD entry are genuinely different structures.
+`imago_commit` is deliberately *not* in the key: it is
+what the comparison examines, not what partitions it.
+
+*What counts as agreement.*  The `converged_mesh` (7.2),
+not the k-density.  The mesh is what a later run would
+actually use, so two entries resolving to the same mesh
+make the same operational claim however their densities
+round.  It is also an exact integer comparison, which
+keeps a tolerance knob out of the rule entirely.
+
+`converged_mesh` is optional in the schema: a manual or
+curator-authored entry (7.9) carries no verification block
+and so no mesh.  When either side of a matched pair lacks
+one the meshes cannot be compared, and the pair is treated
+as a conflict rather than waved through.  The claim is
+duplicated and the answers cannot be shown to agree --
+which is exactly a curator's question, not a tool's.  The
+common shape is a hand-seeded entry meeting a later flight
+harvest of the same structure, and that deserves a human
+look on its own merits.
+
+*Three outcomes.*  For a staged entry whose key matches a
+promoted one:
+
+- **Redundant** (same mesh).  The promoted entry stands
+  untouched and the staged one is retired to
+  `superseded/<system_type>/`.  Promotion therefore only
+  ever *adds* to `entries/`; an entry a curator reviewed
+  stays byte-identical for as long as it lives there.
+- **Conflict** (different mesh, or a mesh missing on
+  either side).  Never promoted automatically, in any
+  mode.  Both entries are reported with their meshes and
+  their `imago_commit` values, and the staged file stays
+  in staging for the curator.  It stays there rather than
+  being retired because resolving it may mean removing an
+  entry from `entries/`, and promotion has no verb for
+  that -- deliberately, since a tool that can retract a
+  reviewed entry is a tool that can do so by accident.
+- **New** (no key match).  The ordinary path; the
+  acceptance rule above decides it.
+
+A conflict is the case that earns the whole rule, because
+it is the one a script must not resolve.  Two answers to
+one question means either the code changed between the
+runs -- in which case which answer is right is a physics
+judgment, not a timestamp comparison -- or the pipeline is
+not deterministic, which is a defect worth surfacing
+rather than averaging away.  Keeping "the newest" would
+silently discard the evidence that behaviour changed;
+keeping "the first" would silently keep a superseded
+number.  Reporting both is the only honest option, and it
+follows the same line drawn for the scratch prune (6.2.12):
+the mechanism working is quiet, an assumption breaking is
+loud.
+
+*Within one staging batch.*  Two staged files can share a
+key before either is promoted -- the ordinary shape of a
+re-run harvested twice.  The batch is resolved first, by
+the same rule, and only the survivor is compared against
+`entries/`.  This is a change of contract: promotion
+currently judges each staged file in isolation, on the
+stated ground that staging is not the uniqueness namespace.
+Under this rule it is, and the isolation goes.
+
+*Every mode applies it, `--all` included.*  Refusing to
+store one claim twice is a correctness guard, not a
+quality judgment, and `--all` waives only the latter --
+it means "I have reviewed these," not "store them however
+many times they appear."
+
+*One documented property is amended.*  The acceptance rule
+is specified above as reading the staged file alone, which
+is why harvest records `grid_energies` at all.  The dedup
+check needs the promoted corpus as well.  The intent of
+the original rule survives: what it avoided was depending
+on the *flight workspace*, which is large, remote, and
+reclaimable (6.2.12).  `entries/` is small, local, and
+already the thing being written into.
+
 **Why staging exists.**  An automated harvest is not
 the same as scientific endorsement.  Bugs in the
 harvest script, a verification grid that converged at

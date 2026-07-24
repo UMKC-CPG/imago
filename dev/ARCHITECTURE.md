@@ -2245,6 +2245,18 @@ share/
                             files move from staging/ into
                             entries/; the staging area is
                             not consumed by the predictor.
+    superseded/             Entries retired at promotion
+                            because a promoted entry
+                            already makes the same claim
+                            (DESIGN 7.8).  Mirrors the
+                            same system_type partition.
+                            Retired, not deleted: the
+                            record of what a re-run
+                            produced stays recoverable,
+                            and staging/ does not accrete
+                            files that every later
+                            promotion pass re-examines.
+                            Not consumed by the predictor.
     SCHEMA_VERSION          Single line containing a bare
                             decimal integer (e.g. `1\n`).
                             Bumped on schema change.
@@ -2499,6 +2511,15 @@ src/scripts/
   The auto-promotion rule lets a 500-entry seed flight
   promote ~80% of entries unattended, with the curator
   reviewing only the ~20% outliers.
+  Promotion is also where a re-run of an already-promoted
+  solid is caught, because it is the only stage that sees
+  both the incoming entry and the promoted corpus (DESIGN
+  7.8).  The harvest cannot: it writes one entry per
+  converged solid and has no view of what a curator
+  accepted months ago.  Every mode applies the check,
+  `--all` included -- refusing to store the same claim
+  twice is a correctness guard, not a quality judgment,
+  and `--all` waives only the latter.
 - Both databases grow incrementally and in place (the
   initial-potential DB does too, DESIGN 5.2.3); the
   difference is what gates the growth.  The

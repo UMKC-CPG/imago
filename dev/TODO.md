@@ -4497,6 +4497,39 @@ on the same data later with no schema change.  Built on P10.
   including two stray `makeinput -cif` run directories left
   inside it and skeletons under the pre-`<cell>` naming rule.
   Nothing migrated: the cache is rebuilt by the next run.
+- [x] C130. Dedup re-runs at promotion.  The guidance dataspace
+  had no dedup at any stage, and nothing else could supply one:
+  the harvest writes one entry per converged solid with no view
+  of the promoted corpus, and a re-run mints a fresh `entry_id`
+  by construction (the slug hashes flight id, structure, and
+  timestamp), so no collision check ever fired.  Found while
+  clearing staging before the seed re-run -- 67 staged files
+  describing 8 solids, one of them (`si_cmce`) recorded at two
+  wildly different densities either side of the C125 metal fix.
+  With `neighbor_count = 5` the copies would have filled the
+  whole neighbour set, collapsed the variance to zero, and
+  reported a single measurement as near-certainty, which drives
+  the climb into its narrowest search and past the crystalline
+  opening floor.
+  Claim key is `(system_type, basis, functional,
+  kpoint_integration, basename(source_structure))` -- settings
+  in, because they are the sub-model partition; basename not
+  path, because the cache moved in C129; `imago_commit` out,
+  because it is what the comparison examines.  Agreement is the
+  `converged_mesh`, an exact integer test with no tolerance
+  knob.  Three outcomes: redundant retires the staged copy to a
+  new `superseded/` area (promotion only ever ADDS to
+  `entries/`); a differing or uncomparable mesh is a CONFLICT
+  that is reported and left in staging, never resolved
+  automatically; anything else takes the ordinary per-mode path.
+  Every mode applies it, `--all` included -- it waives the
+  quality rule, not the correctness guard.  Batch duplicates
+  resolve among themselves first, which retires the standing
+  claim that staging is not a uniqueness namespace.
+  ARCHITECTURE 10.1 (`superseded/`) + 10.5, DESIGN 7.8,
+  PSEUDOCODE 15.7.  CODE.  DONE.  +9 tests, 1123 pass.
+  Not yet exercised on a live corpus: the seed re-run is the
+  first campaign whose staging this will judge.
 - [ ] C81. Provisioning consumer in the flight layer (the
   kaleidoscope flight-builder helper or a thin sibling): query
   the predictor with a proposed config + size, apply a safety

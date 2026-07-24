@@ -44,7 +44,9 @@ def _make_entry(*, converged_at=100.0,
                 gap_ev=2.0, gap_kind="direct", structure="si.skl",
                 generated_at="2026-01-01T00:00:00Z",
                 metric_threshold=1.0, system_type="crystalline",
-                lattice="cubic", verification="default"):
+                lattice="cubic", verification="default",
+                converged_mesh=None, commit="abc123",
+                kpoint_integration="gaussian-0.1"):
     """Build an in-memory GuidanceEntry for the rule tests.  The
     defaults describe a clean, auto-promotable crystalline sweep:
     converged at the 0.2 position with a perfectly flat top of
@@ -67,7 +69,8 @@ def _make_entry(*, converged_at=100.0,
             grid_energies=(tuple(grid_energies)
                            if grid_energies is not None else None),
             converged_at=converged_at,
-            converged_mesh=None,
+            converged_mesh=(tuple(converged_mesh)
+                            if converged_mesh is not None else None),
             metric="total_energy",
             metric_threshold=metric_threshold,
             predictor_confidence=0.9,
@@ -77,10 +80,10 @@ def _make_entry(*, converged_at=100.0,
         entry_id="", generated_at=generated_at, source="flight",
         signature=Signature(system_type, composition, family, onehot),
         measured=Measured(gap_ev, gap_kind, 0.0, 0.0, converged_at),
-        context=Context("fb", "gga-pbe", "gaussian-0.1", 1.0e-6,
+        context=Context("fb", "gga-pbe", kpoint_integration, 1.0e-6,
                         8, 100.0),
         verification=verification,
-        provenance=Provenance("flight", structure, "abc123",
+        provenance=Provenance("flight", structure, commit,
                               "guidance_harvest.py"))
 
 
@@ -246,3 +249,166 @@ def test_ask_choice_normalizes_and_defaults_to_skip():
     assert gp._ask_choice(lambda p: "") == "SKIP"
     bad_then_good = iter(["huh?", "s"])
     assert gp._ask_choice(lambda p: next(bad_then_good)) == "SKIP"
+
+
+# --------------------------------------------------------------
+#  Re-run dedup (DESIGN 7.8; PSEUDOCODE 15.7)
+# --------------------------------------------------------------
+# A re-run of an already-promoted solid is invisible to every
+# other guard: the harvest cannot see the promoted corpus, and the
+# entry_id slug hashes the timestamp, so a second run of one solid
+# never collides.  Promotion is the only stage that can catch it,
+# and these tests pin the three outcomes -- redundant, conflict,
+# and genuinely new -- plus the batch and dry-run behaviour.
+
+def _promote_one(db_root, **kwargs):
+    """Stage an entry and promote it into entries/, returning the
+    entry so a test can compare a later re-run against it."""
+
+    path = _stage(db_root, **kwargs)
+    gp.move_to_entries(path, db_root, "crystalline")
+    return path
+
+
+def test_dedup_key_ignores_where_the_structure_cache_sits():
+    """The key uses the structure's basename, not its path: the
+    cache has moved once already (ARCHITECTURE 8.1) and a path
+    change must not make a re-run look like a new solid."""
+    old = _make_entry(structure="/share/atomicBDB/cache/si.skl")
+    new = _make_entry(structure="/share/curation/structures/si.skl")
+    assert gp.dedup_key(old) == gp.dedup_key(new)
+
+
+def test_dedup_key_separates_integration_sub_models():
+    """A gaussian and a gaussian-0.1 run of one solid are
+    different physics -- the predictor keeps them in separate
+    sub-models, so the dedup must not merge them."""
+    plain = _make_entry(kpoint_integration="gaussian")
+    smeared = _make_entry(kpoint_integration="gaussian-0.1")
+    assert gp.dedup_key(plain) != gp.dedup_key(smeared)
+
+
+def test_rerun_agreeing_on_mesh_is_retired_not_promoted(tmp_path):
+    """Same claim, same converged mesh: the promoted entry stands
+    untouched and the staged copy moves to superseded/."""
+    db_root = str(tmp_path / "db")
+    _promote_one(db_root, converged_mesh=(6, 6, 6),
+                 generated_at="2026-01-01T00:00:00Z")
+    _stage(db_root, converged_mesh=(6, 6, 6),
+           generated_at="2026-02-02T00:00:00Z")
+
+    results = gp.promote(db_root, "auto-promote", output=lambda m: None)
+
+    assert [action for _, action in results] == ["superseded"]
+    assert _count(db_root, "entries") == 1
+    assert _count(db_root, "staging") == 0
+    assert _count(db_root, "superseded") == 1
+
+
+def test_rerun_disagreeing_on_mesh_is_a_conflict(tmp_path):
+    """Same claim, different converged mesh -- the shape a code
+    change produces.  Nothing moves, and the staged file stays in
+    staging for the curator to adjudicate."""
+    db_root = str(tmp_path / "db")
+    _promote_one(db_root, converged_mesh=(6, 6, 6), commit="old111",
+                 generated_at="2026-01-01T00:00:00Z")
+    _stage(db_root, converged_mesh=(2, 4, 4), commit="new222",
+           generated_at="2026-02-02T00:00:00Z")
+
+    said = []
+    results = gp.promote(db_root, "auto-promote", output=said.append)
+
+    assert [action for _, action in results] == ["conflicted"]
+    assert _count(db_root, "entries") == 1            # untouched
+    assert _count(db_root, "staging") == 1            # left alone
+    assert _count(db_root, "superseded") == 0
+    # The report has to name both sides well enough to compare
+    # them by hand -- both meshes and both commits.
+    report = "\n".join(said)
+    assert "CONFLICT" in report
+    assert "old111" in report and "new222" in report
+    assert "[6, 6, 6]" in report and "[2, 4, 4]" in report
+
+
+def test_a_mesh_that_cannot_be_compared_conflicts(tmp_path):
+    """converged_mesh is optional (a manual entry has none).  An
+    absent mesh cannot be shown to agree, so the pair goes to the
+    curator rather than being waved through."""
+    db_root = str(tmp_path / "db")
+    _promote_one(db_root, converged_mesh=None,
+                 generated_at="2026-01-01T00:00:00Z")
+    _stage(db_root, converged_mesh=(6, 6, 6),
+           generated_at="2026-02-02T00:00:00Z")
+
+    results = gp.promote(db_root, "auto-promote", output=lambda m: None)
+
+    assert [action for _, action in results] == ["conflicted"]
+    assert _count(db_root, "staging") == 1
+    assert _count(db_root, "entries") == 1
+
+
+def test_all_mode_does_not_bypass_the_dedup(tmp_path):
+    """--all waives the quality rule, not the correctness guard:
+    it must still refuse to store one claim twice."""
+    db_root = str(tmp_path / "db")
+    _promote_one(db_root, converged_mesh=(6, 6, 6),
+                 generated_at="2026-01-01T00:00:00Z")
+    _stage(db_root, converged_mesh=(6, 6, 6),
+           generated_at="2026-02-02T00:00:00Z")
+
+    results = gp.promote(db_root, "all", output=lambda m: None)
+
+    assert [action for _, action in results] == ["superseded"]
+    assert _count(db_root, "entries") == 1
+    assert _count(db_root, "superseded") == 1
+
+
+def test_duplicates_within_one_batch_resolve_to_the_newest(tmp_path):
+    """Two staged files can share a claim before either is
+    promoted -- the ordinary shape of a solid harvested twice.
+    The later run wins and the earlier is retired."""
+    db_root = str(tmp_path / "db")
+    _stage(db_root, converged_mesh=(6, 6, 6),
+           generated_at="2026-01-01T00:00:00Z")
+    _stage(db_root, converged_mesh=(6, 6, 6),
+           generated_at="2026-03-03T00:00:00Z")
+
+    results = gp.promote(db_root, "all", output=lambda m: None)
+
+    actions = sorted(action for _, action in results)
+    assert actions == ["promoted", "superseded"]
+    assert _count(db_root, "entries") == 1
+    assert _count(db_root, "superseded") == 1
+    assert _count(db_root, "staging") == 0
+
+
+def test_dry_run_reports_the_dedup_but_moves_nothing(tmp_path):
+    """A curator must be able to see every outcome -- including
+    retirements -- before a single file is touched."""
+    db_root = str(tmp_path / "db")
+    _promote_one(db_root, converged_mesh=(6, 6, 6),
+                 generated_at="2026-01-01T00:00:00Z")
+    _stage(db_root, converged_mesh=(6, 6, 6),
+           generated_at="2026-02-02T00:00:00Z")
+
+    results = gp.promote(db_root, "dry-run", output=lambda m: None)
+
+    assert [action for _, action in results] == ["would-supersede"]
+    assert _count(db_root, "staging") == 1            # nothing moved
+    assert _count(db_root, "superseded") == 0
+    assert _count(db_root, "entries") == 1
+
+
+def test_distinct_structures_are_not_duplicates(tmp_path):
+    """The six diamond-silicon COD entries are near-identical in
+    the feature space but are genuinely different structures.  The
+    dedup keys on the structure, so all of them promote."""
+    db_root = str(tmp_path / "db")
+    for name in ("si_a.skl", "si_b.skl", "si_c.skl"):
+        _stage(db_root, structure=name, converged_mesh=(6, 6, 6))
+
+    results = gp.promote(db_root, "all", output=lambda m: None)
+
+    assert [action for _, action in results] == ["promoted"] * 3
+    assert _count(db_root, "entries") == 3
+    assert _count(db_root, "superseded") == 0
