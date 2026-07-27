@@ -11,10 +11,7 @@ Version: 1.0
 Last Updated: March 2026
 
 Author:      Mohammed Belhadj Larbi
-Developer:   Mohammed Belhadj Larbi
 Institution: University of Missouri-Kansas City (UMKC)
-
-This code was fully designed and implemented by Mohammed Belhadj Larbi.
 
 -----------------------------------------------------------------------------
 Description
