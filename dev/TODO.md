@@ -173,6 +173,23 @@
   a reader can cite.  Feeds D20, which needs the DOI for the
   banner text.
 
+- [x] A13. Establish the runtime output control facility
+  (ARCHITECTURE 12).  Written 2026-07-27 alongside D20, which
+  is its first client.  IMAGO_VERBOSENESS takes a
+  comma-separated list of category NAMES; the bitmask is
+  private.  A numeric form was considered and deliberately
+  rejected: accepting one publishes the bit assignment as soon
+  as anyone writes it into a job script, and this project
+  records every invocation into a `command` file, so those
+  settings persist -- renumbering afterward silently changes
+  what old scripts do.  Names can be reordered freely and an
+  unrecognized one can be reported; a numeric form can be added
+  later without breaking anything, but cannot be withdrawn.
+  Three behaviours fixed: unset means `normal` not silent,
+  unknown names warn and continue, `none` is explicit.  Only
+  the `banner` category is defined; the categories that matter
+  for the debugging and parallelization campaigns are
+  deliberately left unenumerated so that work names them.
 ---
 
 ## DESIGN
@@ -479,30 +496,60 @@
   (8.9).  Pins the two-layer build record: coarse bucketed
   knobs as features + the full verbatim compile_string as
   provenance.
-- [ ] D20. Design the runtime citation banner (VISION
-  Principles.15, ARCHITECTURE 1.1).  Imago should print a
-  "if you use these results, please cite" block in its output
-  header, the way LAMMPS, VASP, and Quantum ESPRESSO do.  This
-  is the highest-leverage attribution mechanism available:
-  unlike a license header or a CITATION.cff, it reaches the
-  person at the moment they have results in hand and are
-  writing the paper, which is when attribution is actually
-  decided.  Open questions for the design: which output streams
-  carry it (log header only, or every primary output file);
-  whether the text is compiled in or read from an installed
-  data file so it tracks CITATION.cff without a rebuild; how
-  the DOI reaches it once minted (A12); whether a quiet flag
-  may suppress it and what the default is; and how it composes
-  with upstream citations when a run exercises a method that
-  carries its own reference.  Unlike the file header
-  convention, this one changes program output, so it needs
-  DESIGN and then PSEUDOCODE coverage before any code -- the
-  gate applies here in full.
-
+- [x] D20. Design the runtime citation banner (VISION
+  Principles.15, ARCHITECTURE 1.1 and 12).  Written 2026-07-27
+  as DESIGN 10.  Imago prints a "if you use these results,
+  please cite" block, the way LAMMPS, VASP, and Quantum
+  ESPRESSO do -- the highest-leverage attribution mechanism
+  available, because unlike a license header or CITATION.cff it
+  reaches the person at the moment they have results in hand
+  and are writing the paper.  Every open question is now
+  settled.  SPLIT IN TWO (10.2): an identity block at startup
+  (art, version, Imago's own citation) and a methods block at
+  the end, because at startup the program does not yet know
+  which methods a run will exercise.  Art is LITERAL TEXT, not
+  generated (10.3) -- it was hand-kerned from the project logo
+  and no script reproduces that; 51 columns to match the
+  character(len=51) opLabels.  Art AND citation text live in
+  src/data/banner.txt (10.3, 10.4), installed to share and
+  found through IMAGO_DATA exactly as elementData.f90 and
+  potential.f90 already find elements.dat -- no new mechanism
+  and no new failure mode, since a broken IMAGO_DATA kills
+  elementData before the banner is ever reached.  An earlier
+  draft argued for compiling the citation in; that rested on a
+  false premise about the cost of a data file and was corrected
+  once the existing mechanism was checked.  Destination (10.6) is
+  the log and nothing else: not the tabular DOS/bond/optc
+  outputs, which are parsed positionally, and not the three
+  HDF5 files either -- an attribute was considered and rejected,
+  because citation guidance belongs in the human-readable
+  output and cluttering data files to restate it buys nothing a
+  reader sees.  Methods block (10.5) is a
+  registry pairing each DESIGN References entry with a
+  predicate reading state the engine already holds
+  (kPointIntgCode and the like).  Suppression via
+  ARCHITECTURE 12 rather than a flag (10.7): the engine's
+  arguments are positional, so a flag would change the argv
+  contract in Fortran and Python together.
 ---
 
 ## PSEUDOCODE
 
+- [ ] P11. Write pseudocode for the runtime output control
+  facility and the citation banner (ARCHITECTURE 12, DESIGN
+  10).  Two modules.  O_Verboseness: the category name table
+  as single source of truth, initVerboseness parsing
+  IMAGO_VERBOSENESS into a private mask, isVerbose querying it
+  by named parameter.  O_Banner: the identity block, the
+  citation text, and the methods registry with its predicates.
+  Specify the call sites precisely -- initVerboseness and the
+  identity block go into parseCommandLine between the
+  open(20,...) at commandLine.f90:91 and the timeStampStart(24)
+  that follows, which is the only slot where the log unit
+  exists and the first timestamp has not yet fired.  Within
+  that slot initVerboseness MUST precede the identity block,
+  which is gated on the mask it sets (DESIGN 10.6); the two
+  are adjacent and the order is easy to reverse by accident.
 - [x] P1. Transcribe exact Bloechl middle-range DOS formula
   for e2 <= E < e3 (PSEUDOCODE 2, Bloechl eqs. 14-16)
 - [x] P2. Transcribe cornerIntgWt_LAT formulas for partial

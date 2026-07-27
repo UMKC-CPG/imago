@@ -12623,3 +12623,245 @@ calibration in 9.6.
   first, then integral assembly, then the solve -- and the
   validation gate between each stage, is sequenced here as
   implementation begins.
+
+---
+
+## 10. Runtime Citation Banner
+
+### 10.1 Why the Program Prints Its Own Citation
+
+VISION principle 15 holds that Imago must be built so its credit
+survives being passed on. The licensing machinery of
+ARCHITECTURE 1.1 does part of that: `NOTICE` travels with any
+derivative work, `CITATION.cff` is machine-readable, and a DOI
+gives a reference list something to point at. All of it is
+addressed at someone who is redistributing or packaging the
+code.
+
+None of it reaches the person writing the paper. That person ran
+a calculation, has results in front of them, and is composing a
+methods section. They will cite what they can see. Printing the
+citation into the output they are already reading is the only
+mechanism in this project that reaches attribution at the moment
+it is actually decided, which is why LAMMPS, VASP, and Quantum
+ESPRESSO all do it. Measured against every other step in the
+attribution chain, this is the one with the highest expected
+effect.
+
+It also serves a second purpose that has nothing to do with
+credit. A log that names the code, its version, and the methods
+a run exercised is a provenance record. Six months later it
+answers "what produced this number" without recourse to memory.
+
+### 10.2 Two Blocks, Not One
+
+The banner is split in two, and the split follows from when
+information becomes available.
+
+The **identity block** prints at startup: the butterfly, the
+wordmark, the version, and the citation for Imago itself. All of
+it is known before any work begins.
+
+The **methods block** prints at the end of the run: the
+references for the specific methods that run actually exercised.
+This cannot go at the top, because at startup the program does
+not yet know whether the tetrahedron integration will be used or
+whether UFF parameters will be consulted. Attempting to print it
+early would mean either listing everything Imago could
+conceivably do -- which trains the reader to skip it -- or
+guessing from the job code, which would be wrong whenever a
+branch is not taken.
+
+Splitting also matches how the reader works. The identity block
+answers "what is this" on opening the log. The methods block
+answers "what do I cite" when the run is finished and the
+results are in hand.
+
+### 10.3 The Identity Block
+
+The block is the logo rendered as text: the monarch above, the
+`imago` wordmark below, then the version and citation lines.
+
+Three properties are fixed.
+
+**Width is 51 columns.** This is not arbitrary. `O_TimeStamps`
+declares its operation labels as `character(len=51)` and prints
+its rules at that width, so the banner sits directly above
+output already committed to that column. A wider banner would
+have to widen every `opLabel` with it.
+
+**The art is literal text, not generated.** It was produced by
+sampling the project logo and then hand-kerned -- the letter
+spacing between `i` and `m` differs from the spacing between the
+remaining letters, because uniform tracking over-separates a
+one-column letter. No script reproduces that adjustment. The
+generator was a starting point; the checked-in text is the
+source of truth, and it is edited directly if it is edited at
+all.
+
+**It lives in `src/data/banner.txt`**, installed to `share`
+alongside `elements.dat` and the rest, and located at run time
+through the `IMAGO_DATA` environment variable. This is the
+mechanism the engine already uses -- `elementData.f90` and
+`potential.f90` both resolve their data files exactly this way
+-- so the banner introduces no new runtime dependency and no
+new failure mode. If `IMAGO_DATA` is wrong, `elementData` fails
+first and the run never reaches the banner, which means the
+file's availability is already guaranteed by the same condition
+that makes the run work at all.
+
+Keeping the art in a data file rather than compiling it in has
+a second benefit. `imago.py` is what a user actually invokes,
+and its output is more visible than the engine's log. A shared
+file lets the driver print the same banner without duplicating
+the artwork in a second language.
+
+**A parser must not "fix" the whitespace.** Trailing spaces are
+insignificant, but leading spaces carry the kerning and the
+centring. A reader that strips or normalizes leading whitespace
+destroys the alignment, and a well-meaning editor configured to
+trim whitespace on save will do the same to the file itself.
+
+### 10.4 The Citation Text
+
+The identity block closes with the citation, whose fields are
+the same ones `CITATION.cff` carries: title, author, version,
+DOI, and repository URL.
+
+They live in `src/data/banner.txt` with the artwork, below it
+and separated by a blank line, rather than being compiled into
+the Fortran.
+
+An earlier draft of this section argued the opposite -- that
+the version and DOI change only at release, which is already a
+rebuild, so a data file would add a failure mode for no gain.
+That reasoning rested on a false premise. Reading an installed
+data file is not a new mechanism here and carries no new failure
+mode, for the reasons given in 10.3, so the cost side of that
+argument was close to zero and the conclusion did not follow.
+
+Keeping the citation beside the artwork gives one file a human
+edits when the DOI of TODO A12 arrives, instead of a Fortran
+literal that must be found and recompiled. It also avoids
+duplicating the fields in a second language when `imago.py`
+prints the same block.
+
+`CITATION.cff` remains the authoritative record; `banner.txt`
+restates it for display, and the two must be updated together.
+That duplication is real but it is now between two text files a
+maintainer edits in one sitting, rather than between a text file
+and compiled source.
+
+Until the DOI of TODO A12 exists, the citation names the
+repository and states that a DOI is pending. It must not invent
+one.
+
+### 10.5 Methods Actually Exercised
+
+The `## References` section of this document already carries the
+citations that Imago's methods rest on: Monkhorst and Pack for
+the reciprocal-space mesh, Bloechl and co-workers for the
+tetrahedron integration, and Rappe and co-workers for the UFF
+parameters. These are the references a methods section needs,
+and today a user has to know to go looking for them.
+
+The methods block closes that gap. It is a registry pairing each
+reference with a predicate answering "did this run use it," and
+at the end of the run it prints only those whose predicate is
+true. A run using a Monkhorst-Pack mesh and Gaussian broadening
+prints one reference; the same run with tetrahedron integration
+prints two.
+
+Keeping the registry beside the References section matters:
+adding a method to Imago and adding its citation become one
+task, and a reference that no predicate can ever select is
+visibly dead. The predicates read state the engine already
+holds, such as `kPointIntgCode` distinguishing Gaussian from
+tetrahedron integration, so nothing new has to be tracked to
+support this.
+
+### 10.6 Where the Banner Goes
+
+**The log (unit 20), and nowhere else.** The identity block
+prints immediately after the log is opened in
+`parseCommandLine` and before the first operation timestamp;
+the methods block prints at the end of the run. The slot at the
+head is forced -- the unit does not exist earlier.
+
+Within that slot the order is also forced. `initVerboseness`
+(ARCHITECTURE 12.2) must run before the identity block, because
+the block is gated on the mask that call sets. Reversed, the
+banner would test an uninitialized mask. The two are adjacent
+and the dependency is easy to miss, which is why it is stated
+here rather than left for the pseudocode to infer.
+
+**Not the tabular outputs.** The DOS, bond order, and optical
+spectra files are consumed by plotting scripts that parse them
+positionally. A banner in those files would be a breaking change
+to a data format for no gain, since nobody reads them by eye.
+
+**Not the HDF5 files either.** Attaching a citation string to a
+root group was considered, on the argument that provenance
+should travel with the data rather than with the log. It is not
+adopted. A run writes three separate HDF5 files -- `hdf5SCF`,
+`hdf5PSCF`, and `hdf5Field` -- so the question is never simply
+"the HDF5 file", and answering it would mean deciding which of
+them count as a primary result. More to the point, the same
+reasoning that keeps the banner out of the tabular outputs
+applies with equal force here: these are data files, read by
+programs, and citation guidance in the human-readable output is
+what the guidance is for. Cluttering the data to restate it buys
+nothing a reader will ever see.
+
+### 10.7 Suppression
+
+The identity block is governed by the `banner` category of
+ARCHITECTURE 12, and is included in the `normal` default. A
+flight that does not want it sets `IMAGO_VERBOSENESS` without
+`banner`.
+
+Suppression is expressed through the environment rather than a
+command-line flag because the engine has no flags. Its arguments
+are positional -- `parseCommandLine` reads bare `getarg` values
+in fixed order and `imago.py` builds the invocation as a
+positional string -- so introducing an option would mean
+changing the argument contract in Fortran and in Python
+together, and in every other caller, for what is a cosmetic
+toggle. The environment variable avoids that entirely, and a
+flight sets it once rather than per unit.
+
+The cost being avoided is real. The seed run of section 7
+dispatched 87 units; at roughly thirty lines each the identity
+block alone would contribute some 2,600 lines of decoration to a
+single flight, and flights will grow.
+
+The methods block is not suppressed. It is a handful of lines,
+it is the part a reader is actually meant to copy into a paper,
+and a flight that has turned the artwork off has no reason to
+discard the citations the run earned.
+
+### 10.8 Open Design Questions
+
+- **Whether the build should generate `banner.txt`'s citation
+  lines from `CITATION.cff`.** Doing so would remove the
+  duplication accepted in 10.4 and make the `.cff` file the
+  single source, at the cost of a generation step and a
+  dependency on parsing YAML at configure time. Cheaper than the
+  compiled-in variant it replaces, but still not free. Worth
+  revisiting once the DOI exists and the fields stop changing.
+- **Whether `imago.py` should print the banner too.** The driver
+  is what a user invokes and its output is more visible than the
+  engine's log. Reading the same `banner.txt` would cost little,
+  but printing the block twice in one run would be worse than
+  printing it once, so the two would have to agree on which of
+  them owns it.
+- **How a method with no predicate is caught.** A reference
+  whose predicate can never be true is dead weight, and a method
+  added without a predicate is silently uncited -- the failure
+  that matters. Neither is visible without someone checking, and
+  it is not obvious what would check it.
+- **Whether `atomSCF`, `gaussFit`, and `contract` print it.**
+  They are separate executables with their own log units and
+  their own `open(20,...)` calls. They are also rarely run
+  directly by a user composing a paper, so the benefit is
+  smaller and the duplication real.

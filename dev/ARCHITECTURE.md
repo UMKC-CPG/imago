@@ -125,6 +125,14 @@ to specify. The gate requiring pseudocode before editing `src/`
 therefore does not apply to them, and this section is the
 specification the header pass was written against.
 
+**The runtime half.** Everything above is addressed at someone
+redistributing or packaging Imago. It never reaches the person
+who ran a calculation and is writing up the results, who will
+cite whatever the output puts in front of them. That reader is
+served by the runtime citation banner specified in DESIGN 10,
+governed by section 12, and the two halves together are what
+VISION principle 15 asks for.
+
 ---
 
 ## 2. Module Map
@@ -3060,3 +3068,136 @@ These are not near-term, but the granular-observation design
   build block should also be referenced from the convergence
   side -- against the no-cross-reference boundary (11.7) --
   is an open question to settle in DESIGN, not assume now.
+
+---
+
+## 12. Runtime Output Control
+
+*Serves VISION Goal 7 (parallelize across scales and devices)
+and VISION Principle 15 (attribution). Consumed by DESIGN 10.*
+
+The engine currently writes to its log unconditionally. Every
+`write (20,...)` in the Fortran fires on every run, so the only
+way to reduce output is to stop calling the code that produces
+it. That is workable while the log is small, but it does not
+survive high-throughput use: a flight of a hundred units
+multiplies every decorative line by a hundred, and the debugging
+and parallelization work of Goal 7 will want diagnostics that
+are useful when requested and intolerable by default.
+
+The facility has two constituencies, which is why it is
+established here rather than inside the design that first needs
+it. Principle 15 requires the program to state its own citation,
+and that block must be suppressible or it becomes noise a
+high-throughput user learns to ignore. Goal 7 requires
+diagnostics that would drown an ordinary run. Both are asking
+for the same thing: output that is present when wanted and
+absent when not.
+
+This section establishes a single facility for that control. It
+is deliberately minimal today -- one category is defined and one
+call site uses it -- because the interesting decision, which
+categories exist and what each includes, belongs with the
+debugging and optimization work rather than ahead of it. What is
+settled now is the mechanism, chosen so that deciding the
+categories later costs nothing.
+
+### 12.1 The Contract Is Names, Not Numbers
+
+Verboseness is requested through the environment variable
+`IMAGO_VERBOSENESS`, whose value is a comma-separated list of
+category names:
+
+```
+IMAGO_VERBOSENESS=normal          # the default when unset
+IMAGO_VERBOSENESS=none
+IMAGO_VERBOSENESS=banner,timing   # order is irrelevant
+```
+
+Internally the selection is one integer whose bits correspond to
+categories, tested with the `btest` intrinsic. That
+representation is private. **Names are the public contract and
+bit positions are an implementation detail**, and the
+distinction is the point of the design rather than a stylistic
+preference.
+
+A numeric form (`IMAGO_VERBOSENESS=25`) was considered and
+deliberately not adopted. Accepting a number publishes the bit
+assignment the moment anyone writes one into a job script, and
+this project records every invocation into a `command` file, so
+such settings persist in the permanent record. Renumbering
+afterward silently changes what old scripts do. Names have no
+such cost: they can be reordered freely, and an unrecognized one
+can be reported where a stray bit cannot. A numeric form can be
+added later without breaking anything if it proves wanted; it
+cannot be withdrawn.
+
+Names are also the readable choice. `banner,integrals` states
+what it asks for; `25` requires the reader to decompose it into
+bits and consult a table, which is the same objection this
+project makes to naming a variable `np` instead of `nuc_pot`.
+
+### 12.2 Structure
+
+An `O_Verboseness` module holds the parsed mask and the name
+table that defines it. The table -- one entry pairing each
+category name with its bit position -- is the single source of
+truth, which is what makes adding a category a one-line change
+rather than a structural one.
+
+`initVerboseness` reads the environment variable once, splits it
+on commas, matches each token against the table, and sets the
+corresponding bits. It is called from `parseCommandLine`
+immediately after the log file is opened and before the first
+operation timestamp. That slot is forced: the log unit does not
+exist earlier, and the first timestamp is already output that a
+category should be able to govern.
+
+`isVerbose` answers whether one category is active. **Callers
+pass a named parameter and never a literal bit number.** If any
+call site hardcodes a position, renumbering stops being free and
+the property that makes the design safe is lost.
+
+Three behaviours are fixed:
+
+- **Unset means `normal`, not silent.** A fresh installation
+  with no environment configured must produce a useful log; a
+  mute program would look broken.
+- **Unknown names warn and continue.** A typo must not kill a
+  long cluster job, but it must not silently do nothing either,
+  so the parser reports what it did not recognize to the log.
+- **`none` is explicit.** Silence is a thing a caller asks for
+  by name, not a thing it falls into by leaving a variable
+  empty.
+
+### 12.3 Scope Today
+
+One category is defined: `banner`, governing the identity and
+citation block specified in DESIGN 10. `normal` includes it.
+
+The categories that will matter for the debugging and
+parallelization work -- SCF iteration detail, integral and setup
+diagnostics, resource reporting, developer trace -- are
+deliberately not enumerated here. Naming them before knowing
+what those campaigns need would fix a vocabulary against
+guesswork. Each is added later by appending one row to the name
+table, declaring one parameter, and gating the relevant writes.
+
+Retrofitting the existing unconditional writes across the
+Fortran is a separate and much larger task. It is not required
+by DESIGN 10 and is not begun here.
+
+### 12.4 Module Map Additions
+
+- **O_Verboseness** (`verboseness.f90`): the mask, the category
+  name table, `initVerboseness`, `isVerbose`, and the category
+  parameters. Depends on nothing but `O_Kinds`, so any module
+  may use it without creating a cycle.
+- **O_Banner** (`banner.f90`): the identity block, the citation
+  text, and the method-citation registry of DESIGN 10. Uses
+  `O_Verboseness`.
+
+Note that `O_TimeStamps` declares a `banner` variable
+(`timeStamps.f90:24`) that nothing reads -- it is dead, and
+predates this work. It should be removed rather than confused
+with `O_Banner`.

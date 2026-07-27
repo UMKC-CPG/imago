@@ -17,6 +17,7 @@ atomicBDB.tgz atomicPDB.tgz
 bond_parameters.dat
 elements.dat
 isotopes.dat
+banner.txt
 curve_colors.dat curve_marks.dat curve_styles.dat precursorDB.tgz
 spaceDB.tgz sybdDB.tgz
 xc_code.dat)
