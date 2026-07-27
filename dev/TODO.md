@@ -4623,6 +4623,37 @@ on the same data later with no schema change.  Built on P10.
   (`set_verbosity` / `narrate` / `print_materialize_report`, and
   the prune callback's narration branches).  CODE.  DONE.
   +6 tests, 1128 pass.
+- [x] C132. The run-reuse cache could not survive a second run.
+  Found live: the seed was auto-promoted and re-run, and the
+  campaign died eight seconds in, before dispatching a unit,
+  with `FileNotFoundError` out of `filecmp` inside the
+  loen pre-flight's hit-test.  Two defects, and NEITHER was code
+  drifting from a spec -- both were holes in the spec itself,
+  which is why the chain had not caught them.
+  (a) `prepare_units` pointed the `structure.dat` KeyFile source
+  at `<staging>/structure.dat`, but makeinput writes
+  `<staging>/inputs/structure.dat`.  The two sides of the
+  byte-compare are NOT symmetric: a run directory carries the
+  file both at its root and under `inputs/`, because imago reads
+  it flattened at the root when the unit runs, while a prepare
+  directory is never run and so is never flattened.  PSEUDOCODE
+  referenced `prepare_units` twice and never specified it -- the
+  function had no governing section at all -- so the spec was
+  WRITTEN, then the code fixed to match.
+  (b) `cache_key_matches` guarded the staged side but not the
+  source, and the code implemented that faithfully, so the SPEC
+  was wrong.  `filecmp.cmp` stats its arguments and raises rather
+  than returning False, so one absent file aborted a whole
+  campaign -- Principle 10 inverted, a per-unit doubt failing the
+  flight.  The rule is now stated: a key file unreadable on
+  EITHER side is a miss, never an error.
+  Latent since the cache was written, because the compare is
+  reached only once a prior `cache_key.toml` exists and its
+  scalars match.  Every seed run until now began from a wiped
+  workspace, so no run had ever executed it.
+  DESIGN 6.2.5, PSEUDOCODE 13.4 (`cache_key_matches`) + 11.4
+  (new `prepare_units`).  CODE.  DONE.  +4 tests, 1132 pass;
+  each verified to FAIL against the restored defects.
 - [ ] C81. Provisioning consumer in the flight layer (the
   kaleidoscope flight-builder helper or a thin sibling): query
   the predictor with a proposed config + size, apply a safety

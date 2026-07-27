@@ -3887,6 +3887,84 @@ class TestMaterializeReporting:
 
 
 # ============================================================
+#  The prepare pass and the cache key's source path
+#  (DESIGN 6.2.5)
+# ============================================================
+
+class TestPrepareUnitsKeyFileSource:
+    """The prepare pass must point each KeyFile's source at the
+    file makeinput actually wrote, which lives one level down
+    under ``inputs/``."""
+
+    def _flight_of_one(self, tmp_path):
+        from kaleidoscope import CalcUnit, Flight
+        from kaleidoscope.model import KeyFields, KeyFile
+
+        structure = tmp_path / "imago.skl"
+        structure.write_text("title\nx\nend\n")
+        unit = CalcUnit(
+            id="si_test", structure=str(structure),
+            calc=("gs_scf-fb",), options={},
+            key_fields=KeyFields(
+                scalars={},
+                # Provisional, exactly as standard_key_fields
+                #   leaves it: the prepare pass re-points it.
+                files=[KeyFile(name="structure.dat",
+                               source="PROVISIONAL")]))
+        return Flight(root=str(tmp_path / "ws"), units=[unit]), unit
+
+    def _fake_makeinput(self, monkeypatch):
+        """Stand in for makeinput, writing only what matters here:
+        its output under ``inputs/``, the way the real one does."""
+        import makeinput
+
+        def build_run_dir(structure, options, run_dir,
+                          settings=None):
+            inputs = os.path.join(run_dir, makeinput.INPUTS_DIR)
+            os.makedirs(inputs, exist_ok=True)
+            with open(os.path.join(inputs, "structure.dat"),
+                      "w") as handle:
+                handle.write("cell 1 2 3\n")
+            return run_dir
+
+        monkeypatch.setattr(makeinput, "build_run_dir",
+                            build_run_dir)
+        return makeinput
+
+    def test_source_resolves_to_a_file_that_exists(
+            self, tmp_path, monkeypatch):
+        # THE regression guard.  The source is handed to a byte
+        #   comparison that stats it, so a path naming a file
+        #   that was never written is not a subtle wrongness --
+        #   it raises, and takes the campaign with it.
+        self._fake_makeinput(monkeypatch)
+        flight, unit = self._flight_of_one(tmp_path)
+
+        bip.prepare_units(flight, str(tmp_path / "ws"))
+
+        source = unit.key_fields.files[0].source
+        assert os.path.exists(source), (
+            f"prepare pointed the cache key at {source}, which "
+            "does not exist")
+
+    def test_source_sits_under_the_inputs_directory(
+            self, tmp_path, monkeypatch):
+        # Named separately from the existence check because this
+        #   is the *reason* the path is what it is: a prepare
+        #   directory is never run, so it is never flattened, and
+        #   the file exists only under inputs/ (DESIGN 6.2.5).
+        makeinput = self._fake_makeinput(monkeypatch)
+        flight, unit = self._flight_of_one(tmp_path)
+
+        bip.prepare_units(flight, str(tmp_path / "ws"))
+
+        expected = os.path.join(
+            unit.prepared_dir, makeinput.INPUTS_DIR,
+            "structure.dat")
+        assert unit.key_fields.files[0].source == expected
+
+
+# ============================================================
 #  --clean-after: the producer reaches the standalone tool
 #  (DESIGN 6.2.12 layer (a))
 # ============================================================

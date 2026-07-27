@@ -1838,10 +1838,26 @@ def prepare_units(flight: Flight, workspace: str, units=None) -> None:
         unit.prepared_dir = staging
         # Re-point the structure.dat KeyFile source at the freshly
         #   built copy (standard_key_fields left it provisional).
+        #
+        # Note the makeinput.INPUTS_DIR level.  makeinput writes
+        #   its outputs under `inputs/` in whatever directory it
+        #   builds.  A RUN directory also carries them flattened
+        #   at its own root, because that is where imago reads
+        #   them when the unit runs -- but a PREPARE directory is
+        #   never run, so it is never flattened, and its
+        #   structure.dat exists only under `inputs/` (DESIGN
+        #   6.2.5).  The two sides of the byte-compare are
+        #   therefore not symmetric: staged is
+        #   <wingbeat_dir>/<name>, source is
+        #   <staging>/inputs/<name>.  Omitting this level costs
+        #   nothing on a first run, because the compare is not
+        #   reached until a prior cache_key.toml exists, and then
+        #   breaks every re-run over a surviving workspace.
         for key_file in unit.key_fields.files:
             if key_file.name == "structure.dat":
                 key_file.source = os.path.join(
-                    staging, "structure.dat")
+                    staging, makeinput.INPUTS_DIR,
+                    "structure.dat")
 
 
 # ==================================================================

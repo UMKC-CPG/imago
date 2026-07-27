@@ -405,6 +405,35 @@ def test_cache_misses_on_byte_differing_key_file(tmp_path):
     assert cache_key_matches(unit, wingbeat_dir) is False
 
 
+def test_cache_misses_when_the_staged_copy_is_gone(tmp_path):
+    """A run directory left half-written -- the key snapshot
+    present but the staged file missing -- is a miss, not an
+    error."""
+    wingbeat_dir, unit = _staged_unit(
+        tmp_path, "LATTICE 1 2 3\n", "LATTICE 1 2 3\n",
+        {"kpoints": "4x4x4"})
+    os.remove(os.path.join(wingbeat_dir, "structure.skl"))
+    assert cache_key_matches(unit, wingbeat_dir) is False
+
+
+def test_cache_misses_when_the_source_is_gone(tmp_path):
+    """The other side of the same rule (DESIGN 6.2.5).  A source
+    can vanish between runs -- a prepare directory reclaimed as
+    scratch, a structure cache that moved -- and that must mean
+    "re-run this unit", never an exception.
+
+    This is the case that cost a live campaign: filecmp raises
+    rather than returning False on a missing file, so an
+    unguarded source turned one absent file into a crash that
+    abandoned a whole flight before its first unit dispatched.
+    """
+    wingbeat_dir, unit = _staged_unit(
+        tmp_path, "LATTICE 1 2 3\n", "LATTICE 1 2 3\n",
+        {"kpoints": "4x4x4"})
+    os.remove(unit.key_fields.files[0].source)
+    assert cache_key_matches(unit, wingbeat_dir) is False
+
+
 def test_is_cache_hit_requires_done_status(tmp_path):
     """A matching key is necessary but not sufficient: the run
     must also have reached the ``done`` status.  A still-running

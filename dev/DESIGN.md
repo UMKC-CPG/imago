@@ -7540,6 +7540,20 @@ deep the per-unit tree is.
    `cache_key.toml`, set `status = "queued"`, dispatch,
    and update `status.toml` through the lifecycle.
 
+**A key file that cannot be read is a miss, not an
+error.**  The byte-comparison has two sides -- the
+freshly built source and the copy staged in the run
+directory -- and either may be absent: a prepare
+directory reclaimed as scratch, a structure cache that
+moved between runs, a run directory left half-written by
+a job that died.  Every one of those means the same
+thing, that this unit's identity cannot be established,
+and the answer is always the same: re-run the unit rather
+than trust it.  Raising instead lets a single unreadable
+file abort a campaign that has already paid for hours of
+converged rungs -- Principle 10 inverted, a per-unit
+doubt failing the whole flight.
+
 Resuming a flight is therefore *nothing more than
 re-running it*: the hit-test over every unit naturally
 skips the completed ones and re-dispatches the rest.
@@ -7593,6 +7607,23 @@ byte-compares this freshly built `structure.dat` against the
 prior run's staged copy (the prepare step must not clobber
 that reference before the test -- a PSEUDOCODE detail) and,
 only on a miss, launches the expensive imago SCF.
+
+**The two sides of the compare are not symmetric.**
+makeinput writes its outputs into an `inputs/`
+subdirectory of whatever directory it builds.  A *run*
+directory additionally carries them flattened at its own
+root, because that is where imago reads them when the unit
+actually runs.  A *prepare* directory is never run, so it
+is never flattened, and its `structure.dat` therefore
+exists only under `inputs/`.  The staged copy is thus
+`<wingbeat_dir>/<name>` while the freshly built source is
+`<prepare_dir>/inputs/<name>`, and a client pointing a
+KeyFile's source at a prepare directory must say so.
+Assuming the two look alike is a mistake that stays hidden
+until the *second* run over a surviving workspace: the
+byte-compare is only reached once a prior `cache_key.toml`
+exists, so a first run from a clean workspace never
+exercises it.
 Deciding a hit in the driver, from local files, is what
 keeps a re-run cheap: a hit never
 reaches the scheduler, so the surviving misses are the only

@@ -5494,6 +5494,51 @@ kaleidoscope run-reuse cache of DESIGN 6.2.5 subsumes
 it).
 
 ```
+function prepare_units(flight, workspace, units = None):
+    # The driver-side prepare pass (DESIGN 6.2.5).  The cache
+    # keys on makeinput's OUTPUT, so makeinput must run before
+    # the hit-test can read it -- and it runs HERE, in the
+    # driver, which is what lets a hit be decided from local
+    # files and never reach the scheduler.
+    #
+    # `units` selects which of the flight's units to prepare.
+    # It defaults to every unit (a one-shot flight); the climb
+    # passes only the rungs it has newly decided (4e.7), so an
+    # accreting flight re-prepares nothing it already staged.
+    targets = flight.units if units is None else units
+    for unit in targets:
+        # Each unit is staged into its own area, deliberately
+        # SEPARATE from its run directory: the hit-test is about
+        # to byte-compare against the PRIOR run's staged copy,
+        # so building over that copy first would destroy the
+        # very reference the comparison needs (the "must not
+        # clobber" rule).
+        staging = join(workspace, "prepare", unit.id, *unit.calc)
+        makeinput_options, _ = partition_options(unit.options)
+        build_run_dir(unit.structure, makeinput_options, staging)
+        unit.prepared_dir = staging
+
+        # Re-point each KeyFile's source at the copy just built.
+        # standard_key_fields left it provisional because only
+        # this pass knows where the unit was staged.
+        #
+        # Note the INPUTS_DIR level.  makeinput writes its
+        # outputs under `inputs/` in the directory it builds; a
+        # run directory also carries them flattened at its root,
+        # because that is where imago reads them when the unit
+        # runs, but a prepare directory is never run and so is
+        # never flattened (DESIGN 6.2.5).  The source therefore
+        # lives at `<staging>/inputs/<name>` even though the
+        # staged side is `<wingbeat_dir>/<name>`.  Omitting the
+        # level costs nothing on a first run -- the compare is
+        # not reached until a prior cache_key.toml exists -- and
+        # then fails every re-run.
+        for key_file in unit.key_fields.files:
+            key_file.source = join(staging, INPUTS_DIR,
+                                   key_file.name)
+```
+
+```
 function buildInitialPotentials(manifest_path,
         force, single_element, dispatch_shape,
         partition, nodes, walltime, profile,
@@ -8141,10 +8186,21 @@ function cache_key_matches(unit, wingbeat_dir):
     # source against the copy already staged in the run dir under
     # its name.  No hashing -- a developer can diff the files to
     # see why a cache missed (DESIGN 6.2.5 / 5.7).
+    #
+    # BOTH sides are guarded, and a file that cannot be read is a
+    # MISS rather than an error (DESIGN 6.2.5).  Either may be
+    # absent -- a prepare directory reclaimed as scratch, a
+    # structure cache that moved, a run directory left half
+    # written by a job that died -- and all of those mean the one
+    # thing: this unit's identity cannot be established, so re-run
+    # it rather than trust it.  Raising here would let a single
+    # unreadable file abort a campaign that had already paid for
+    # hours of converged rungs.
     for key_file in unit.key_fields.files:
         staged = join(wingbeat_dir, key_file.name)
-        if not exists(staged) \
-           or not files_byte_equal(key_file.source, staged):
+        if not exists(staged) or not exists(key_file.source):
+            return False
+        if not files_byte_equal(key_file.source, staged):
             return False
     return True
 ```

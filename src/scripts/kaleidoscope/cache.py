@@ -62,7 +62,19 @@ def cache_key_matches(unit, wingbeat_dir):
     """True iff the unit's *current* key matches the snapshot in
     the run directory (DESIGN 6.2.5).  The scalars must match
     field-by-field, and every declared key file must byte-equal
-    its staged copy under the run directory."""
+    its staged copy under the run directory.
+
+    A key file that cannot be read -- on EITHER side -- is a
+    miss, never an error.  Either side may legitimately be
+    absent: a prepare directory reclaimed as scratch, a
+    structure cache that moved between runs, a run directory
+    left half-written by a job that died.  All of those mean the
+    same thing, that this unit's identity cannot be established,
+    and the answer is always to re-run it rather than trust it.
+    Raising instead would let one unreadable file abort a
+    campaign that had already paid for hours of converged rungs.
+    """
+
     saved = _read_cache_key(wingbeat_dir)
     if saved is None:
         return False
@@ -72,10 +84,14 @@ def cache_key_matches(unit, wingbeat_dir):
         return False
 
     # Key files: byte-compare each current source against the
-    #   copy staged in the run directory (no hashing).
+    #   copy staged in the run directory (no hashing).  Both
+    #   paths are checked before the compare, because filecmp
+    #   raises rather than returning False on a missing file.
     for key_file in unit.key_fields.files:
         staged = os.path.join(wingbeat_dir, key_file.name)
         if not os.path.exists(staged):
+            return False
+        if not os.path.exists(key_file.source):
             return False
         if not filecmp.cmp(key_file.source, staged,
                            shallow=False):
