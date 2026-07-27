@@ -6000,9 +6000,17 @@ function make_prune_callback(flight, workspace, scratch_root,
                    record.failure)
         else:
             # A removal, or an ordinary refusal.  Both are the
-            # mechanism working, and are reported at the quiet
-            # level the standalone tool uses.
-            report_prune(record)
+            # mechanism working as designed, so both are
+            # NARRATION under the 5.7 reporting rule: silent
+            # unless --verbose asked to see them.  The two
+            # FAILURE branches above print either way, because
+            # those say an assumption has stopped holding.
+            if record.removed:
+                narrate("tidy-run: pruned " + label
+                        + ", freeing " + human_bytes(record.bytes))
+            else:
+                narrate("tidy-run: kept " + label + ": "
+                        + record.reason)
     return on_landed
 
 
@@ -6638,7 +6646,61 @@ function materialize_only(manifest_path, pdb_root,
             report.append(ok_row(ref, skl))
         except materialize_error as e:
             report.append(fail_row(ref, e))
-    return report          # the CLI prints it plus a tally
+    return report   # the CLI reports it: failures always, the
+                    #   rest only when asked (print_materialize_
+                    #   report, below)
+
+
+# ---- Reporting (DESIGN 5.7) ----------------------------------
+# Outcomes and problems always; narration only on request.  The
+#   setting is module-level, established once from the parsed
+#   flags before any work starts, because how the process talks
+#   to its user is not a property of how a flight converges --
+#   threading it down into the prune hook would put a reporting
+#   concern inside four functions about physics and dispatch.
+
+module_state narrate_progress = false
+
+function set_verbosity(verbose):
+    # Called by main() as its FIRST action, before the manifest
+    #   is read or a structure fetched, so that every later
+    #   report -- including one from a failure during start-up --
+    #   is already governed by what the user asked for.
+    narrate_progress = verbose
+
+function narrate(message):
+    # Per-item progress.  Silent unless --verbose was given.
+    if narrate_progress:
+        print(message)
+
+
+function print_materialize_report(report):
+    # A clean pre-flight is SILENT.  Eight structures that all
+    #   arrived tell the curator nothing to act on, and a line
+    #   printed on every successful run is a line that stops
+    #   being read -- which is how a real failure would come to
+    #   hide among them.
+    failures = [row for row in report if not row.ok]
+
+    for row in report:
+        if row.ok:
+            narrate("  [ok  ] " + row.reference_id + ": "
+                    + row.source)
+            narrate("          -> " + row.skl_path)
+        else:
+            # Always, and regardless of --verbose: this is the
+            #   fetch error the curator needs in order to act.
+            print("  [FAIL] " + row.reference_id + ": "
+                  + row.source)
+            print("          " + row.message)
+
+    # The tally earns its line only when it says something: how
+    #   much of the set survived a partial failure, or the
+    #   confirmation someone asked for with --verbose.
+    if failures or narrate_progress:
+        print("materialize: " + count(ok rows) + "/"
+              + count(report) + " reference structures fetched "
+              + "and converted")
 
 
 function main_submit_mode(argv, args, data_root):

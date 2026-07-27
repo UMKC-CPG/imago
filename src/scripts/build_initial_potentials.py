@@ -3192,14 +3192,17 @@ def make_prune_callback(flight, workspace: str, scratch_root: str,
                   f"{record['failure']}")
         elif record["ok"]:
             freed = tidy_scratch.human_bytes(record["bytes"])
-            print(f"producer: tidy-run pruned {label}, "
-                  f"freeing {freed}")
+            narrate(f"producer: tidy-run pruned {label}, "
+                    f"freeing {freed}")
         else:
-            # An ordinary refusal: the mechanism working.  Reported
-            #   quietly so the reason is on the record without
-            #   reading as an alarm.
-            print(f"producer: tidy-run kept {label}: "
-                  f"{record['reason']}")
+            # An ordinary refusal: the mechanism working.  Both
+            #   this and the removal above are narration under the
+            #   DESIGN 5.7 rule -- silent unless --verbose asked to
+            #   see them.  The two failure branches above print
+            #   either way, because those say an assumption behind
+            #   6.2.12 has stopped holding.
+            narrate(f"producer: tidy-run kept {label}: "
+                    f"{record['reason']}")
 
     return on_landed
 
@@ -3280,20 +3283,73 @@ def _default_pdb_root() -> str:
     return os.path.join(data_dir, "atomicPDB") if data_dir else ""
 
 
+#: Whether to print the per-item narration that ``--verbose``
+#:   turns on.  This is module-level state rather than an argument
+#:   threaded through the build because it describes how the
+#:   process talks to its user, not how a flight converges: passing
+#:   it down into the prune hook would put a reporting concern
+#:   inside four functions that are otherwise about physics and
+#:   dispatch (DESIGN 5.7).
+_narrate_progress = False
+
+
+def set_verbosity(verbose: bool) -> None:
+    """Record whether per-item narration was asked for.
+
+    Called by :func:`main` as its first action, before the manifest
+    is read or any structure fetched, so that every later report --
+    including one describing a failure during start-up -- is
+    already governed by what the user asked for.
+    """
+
+    global _narrate_progress
+    _narrate_progress = verbose
+
+
+def narrate(message: str) -> None:
+    """Print one line of per-item progress, or nothing at all.
+
+    Narration says what the run is *doing*; it is silent unless
+    ``--verbose`` asked for it.  Outcomes and problems do not come
+    through here -- they use ``print`` directly, because a failure
+    the user has to act on must not depend on a flag (DESIGN 5.7).
+    """
+
+    if _narrate_progress:
+        print(message)
+
+
 def _print_materialize_report(report: list[dict[str, Any]]) -> None:
-    """Print the per-solid pre-flight result -- one line per solid
-    plus a final tally -- in the style of the producer's summary."""
+    """Report the structure pre-flight: what failed, and -- when
+    asked -- what was fetched (DESIGN 5.7 reporting rule).
+
+    A clean pre-flight prints NOTHING.  Eight structures that all
+    arrived tell the curator nothing to act on, and a block of
+    output on every successful run is a block that stops being
+    read, which is precisely how a real failure would come to hide
+    among them.  A solid that failed is always named, with its
+    reason, because that is the fetch error the curator needs.
+    """
+
+    failures = [row for row in report if not row["ok"]]
 
     for row in report:
-        mark = "ok  " if row["ok"] else "FAIL"
-        print(f"  [{mark}] {row['reference_id']}: {row['source']}")
         if row["ok"]:
-            print(f"          -> {row['skl_path']}")
+            narrate(f"  [ok  ] {row['reference_id']}: "
+                    f"{row['source']}")
+            narrate(f"          -> {row['skl_path']}")
         else:
+            print(f"  [FAIL] {row['reference_id']}: "
+                  f"{row['source']}")
             print(f"          {row['message']}")
-    ready = sum(1 for row in report if row["ok"])
-    print(f"materialize: {ready}/{len(report)} reference structures "
-          f"fetched and converted")
+
+    # The tally earns its line only when it says something: how
+    #   much of the set survived a partial failure, or the
+    #   confirmation somebody asked for with --verbose.
+    if failures or _narrate_progress:
+        ready = len(report) - len(failures)
+        print(f"materialize: {ready}/{len(report)} reference "
+              f"structures fetched and converted")
 
 
 def submit_orchestrator_batch(argv: list[str], args,
@@ -3379,6 +3435,12 @@ def main(argv=None) -> int:
         "--force", action="store_true",
         help="bypass the run-reuse cache so every reference run "
              "re-executes (default: reuse any cached runs)")
+    parser.add_argument(
+        "--verbose", action="store_true",
+        help="narrate each step as it happens: every reference "
+             "solid as it is fetched and converted, and every "
+             "scratch tree as it is pruned or kept (default: print "
+             "only failures, warnings and closing tallies)")
     parser.add_argument(
         "--dispatch", default=None,
         choices=["local", "slurm-pooled", "slurm-per-job"],
@@ -3466,6 +3528,11 @@ def main(argv=None) -> int:
     #   library caller may drive main(argv) from a different process).
     flags = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(flags)
+
+    # First, before the manifest is read or a structure fetched, so
+    #   that every later report -- including one describing a
+    #   failure during start-up -- already obeys what was asked for.
+    set_verbosity(args.verbose)
 
     if not args.pdb_root:
         parser.error("--pdb-root not given and $IMAGO_DATA is unset")

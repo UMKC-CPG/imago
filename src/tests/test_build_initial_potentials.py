@@ -3806,6 +3806,84 @@ def test_build_climb_config_under_trained_climbs_serially():
 
 
 # ============================================================
+#  Reporting: outcomes and problems, not progress (DESIGN 5.7)
+# ============================================================
+
+class TestMaterializeReporting:
+    """A clean pre-flight says nothing; a broken one says exactly
+    what broke.  The narration in between is what ``--verbose``
+    buys."""
+
+    def _rows(self, *, failing=()):
+        """Build a report of three solids, failing the named ones."""
+
+        rows = []
+        for name in ("si_a", "si_b", "si_c"):
+            if name in failing:
+                rows.append({
+                    "reference_id": name, "ok": False,
+                    "source": "COD 12345", "skl_path": "",
+                    "message": "fetch failed: HTTP 404"})
+            else:
+                rows.append({
+                    "reference_id": name, "ok": True,
+                    "source": "COD 12345",
+                    "skl_path": f"/cache/{name}-prim.skl",
+                    "message": ""})
+        return rows
+
+    def test_a_clean_preflight_prints_nothing(
+            self, capsys, monkeypatch):
+        # The behaviour the rule exists for.  Eight structures that
+        #   all arrived give the curator nothing to act on, and a
+        #   block printed on every successful run is a block that
+        #   stops being read.
+        monkeypatch.setattr(bip, "_narrate_progress", False)
+        bip._print_materialize_report(self._rows())
+        assert capsys.readouterr().out == ""
+
+    def test_a_failure_is_printed_without_being_asked(
+            self, capsys, monkeypatch):
+        # The fetch error is what the curator must act on, so it
+        #   must never depend on having guessed to pass a flag.
+        monkeypatch.setattr(bip, "_narrate_progress", False)
+        bip._print_materialize_report(self._rows(failing=("si_b",)))
+        out = capsys.readouterr().out
+        assert "[FAIL] si_b" in out
+        assert "HTTP 404" in out
+        # The solids that succeeded stay quiet even now: they are
+        #   not the news, and they would pad the one line that is.
+        assert "si_a" not in out
+        # The tally earns its place here -- it says how much of the
+        #   set survived.
+        assert "materialize: 2/3" in out
+
+    def test_verbose_narrates_every_solid_and_the_tally(
+            self, capsys, monkeypatch):
+        # --verbose restores the old behaviour verbatim, which is
+        #   what makes it safe to have taken it away by default.
+        monkeypatch.setattr(bip, "_narrate_progress", True)
+        bip._print_materialize_report(self._rows())
+        out = capsys.readouterr().out
+        for name in ("si_a", "si_b", "si_c"):
+            assert f"[ok  ] {name}" in out
+            assert f"/cache/{name}-prim.skl" in out
+        assert "materialize: 3/3" in out
+
+    def test_the_verbose_flag_reaches_the_module_setting(self):
+        # The flag is plumbed through one module-level setting
+        #   rather than an argument, so the connection between the
+        #   parsed flag and the reporting helpers is worth pinning.
+        try:
+            bip.set_verbosity(True)
+            assert bip._narrate_progress is True
+            bip.set_verbosity(False)
+            assert bip._narrate_progress is False
+        finally:
+            bip.set_verbosity(False)
+
+
+# ============================================================
 #  --clean-after: the producer reaches the standalone tool
 #  (DESIGN 6.2.12 layer (a))
 # ============================================================
@@ -3938,9 +4016,15 @@ class TestTidyRun:
             runtime_seconds=1.0, message=None)
 
     def test_a_landing_prunes_that_unit_and_no_other(
-            self, tmp_path, capsys):
+            self, tmp_path, capsys, monkeypatch):
         # The point of the layer: si's scratch goes the moment si
         #   lands, while ge is still running and keeps its own.
+        #
+        # A successful prune is narration, so it is verbose-only
+        #   (DESIGN 5.7).  Narration is turned on here because the
+        #   assertion is about WHICH unit was pruned, and that fact
+        #   only reaches the screen when it has been asked for.
+        monkeypatch.setattr(bip, "_narrate_progress", True)
         flight, workspace, scratch = self._flight(
             tmp_path, ["si", "ge"])
         problems = []
@@ -3955,10 +4039,30 @@ class TestTidyRun:
         assert problems == []
         assert "pruned si/gs_scf-fb" in capsys.readouterr().out
 
+    def test_a_successful_prune_is_silent_by_default(
+            self, tmp_path, capsys, monkeypatch):
+        # Housekeeping that worked is not news.  A campaign prunes
+        #   once per unit, so leaving these on would bury the
+        #   failures below them in hundreds of lines saying that
+        #   nothing went wrong (DESIGN 5.7).
+        monkeypatch.setattr(bip, "_narrate_progress", False)
+        flight, workspace, scratch = self._flight(tmp_path, ["si"])
+        problems = []
+        on_landed = bip.make_prune_callback(
+            flight, workspace, scratch, problems)
+
+        on_landed(self._entry(workspace, "si"))
+        assert not os.path.isdir(
+            os.path.join(scratch, "si", "gs_scf-fb"))
+        assert problems == []
+        assert capsys.readouterr().out == ""
+
     def test_an_unfinished_unit_is_kept_and_is_not_a_problem(
-            self, tmp_path, capsys):
-        # A refusal is the mechanism working, so it is reported
-        #   quietly and never recorded as something gone wrong.
+            self, tmp_path, capsys, monkeypatch):
+        # A refusal is the mechanism working, so it is narration
+        #   rather than a problem: visible on request, never
+        #   recorded as something gone wrong.
+        monkeypatch.setattr(bip, "_narrate_progress", True)
         flight, workspace, scratch = self._flight(
             tmp_path, ["si"], status="running")
         problems = []

@@ -4530,6 +4530,32 @@ on the same data later with no schema change.  Built on P10.
   PSEUDOCODE 15.7.  CODE.  DONE.  +9 tests, 1123 pass.
   Not yet exercised on a live corpus: the seed re-run is the
   first campaign whose staging this will judge.
+- [x] C131. Report outcomes and problems, not progress.  The
+  producer narrated every reference solid it fetched and every
+  scratch tree it pruned, so a clean eight-solid pre-flight
+  filled the screen with lines saying that nothing was wrong,
+  and a 79-unit campaign added one prune line per unit.  That is
+  where a real failure goes to hide, which is VISION 10 read at
+  the level of one run: a failure surfaced among two hundred
+  lines of success has not been surfaced.
+  The rule: a run says what it achieved and what went wrong, and
+  does not narrate what it is doing.  Silent on a clean
+  pre-flight; every fetch failure named with its reason whether
+  or not anyone asked; the pre-flight tally printed only when
+  something failed (it then says how much of the set survived)
+  or on request.  Prune *failures* stay loud, prune *refusals*
+  are the mechanism working and became narration.  `--verbose`
+  restores the old behaviour verbatim, which is what makes it
+  safe to have taken away.
+  Verbosity is one module-level setting established by `main`
+  before any work, NOT an argument: it describes how the process
+  talks to its user, not how a flight converges, and threading
+  it would have put a reporting concern inside four functions
+  about physics and dispatch.
+  DESIGN 5.7 (Reporting + the `--verbose` flag), PSEUDOCODE
+  (`set_verbosity` / `narrate` / `print_materialize_report`, and
+  the prune callback's narration branches).  CODE.  DONE.
+  +6 tests, 1128 pass.
 - [ ] C81. Provisioning consumer in the flight layer (the
   kaleidoscope flight-builder helper or a thin sibling): query
   the predictor with a proposed config + size, apply a safety

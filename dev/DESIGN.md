@@ -5884,8 +5884,49 @@ Predict in density, search in mesh, record in density.
    k-density chosen for each solid, and the Imago commit.  The
    validation harness (5.8) reads this log.
 
+**Reporting: outcomes and problems, not progress.**  A run says
+what it achieved and what went wrong with it.  It does not
+narrate what it is doing.  This is VISION Principle 10 read at
+the level of a single run: failures are to be *surfaced*, and a
+failure printed among two hundred lines reporting that nothing
+went wrong has not been surfaced in any sense that matters.
+
+A pre-flight in which every reference structure arrives intact
+prints nothing at all, because there is nothing the curator has
+to act on; a structure that fails to materialize is named, with
+its reason, whether or not anyone asked for detail.  The same
+split governs the in-flight tidying of 6.2.12: a scratch tree
+that will not remove is a broken assumption and is always
+reported, while a tree pruned or refused according to policy is
+the mechanism working and is not.
+
+The narration is worth keeping for the occasions when a fetch or
+a prune misbehaves and the question is *which* one, so
+`--verbose` restores it rather than deleting it.  This is the
+split `tidy_scratch.py` already draws between its summary and
+its per-item listing, and the reason is the same: output printed
+on every successful run stops being read, and real failures then
+hide inside it.
+
+Verbosity is deliberately **not** threaded through the build's
+signatures.  It is a property of how the process talks to its
+user, not of how a flight converges, and passing it down through
+`converge_by_climb` into the prune hook would put a reporting
+concern into four functions that are otherwise about physics and
+dispatch.  It is instead one module-level setting, established
+once from the parsed flags before any work begins and read by
+the reporting helpers alone.
+
 **Flags:**
 
+- `--verbose`: print the per-item narration that is otherwise
+  suppressed -- each reference solid as it is fetched and
+  converted, and each scratch tree as it is pruned or refused.
+  Failures and warnings appear with or without it, as does the
+  closing summary of a completed build.  The pre-flight's own
+  tally is not a closing summary and follows the rule above: it
+  is printed when something failed, because it then says how much
+  of the set survived, and when this flag asks for it.
 - `--force`: forward a cache-bypass to kaleidoscope so every
   dispatched unit re-runs from scratch instead of reusing the
   run-reuse cache (DESIGN 6.2.5).  Fresh results are still written
