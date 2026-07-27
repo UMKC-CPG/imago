@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
 
 """vasp2skl.py -- Convert a VASP position file to an Imago
 skeleton file.

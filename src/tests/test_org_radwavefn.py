@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_org_radwavefn.py -- Tests for Grasp2K wavefunction parser.
 
 Uses Carbon MB test data from jobs/atoms/MB/C/.

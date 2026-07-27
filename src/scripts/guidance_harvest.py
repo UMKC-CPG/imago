@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """guidance_harvest.py -- turn a finished kaleidoscope flight into
 staged historical-guidance entries (DESIGN 7.8 harvest half;
 PSEUDOCODE 15.7).

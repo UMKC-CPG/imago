@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for cod_fish.py -- the COD acquisition front-end (ARCHITECTURE
 9.5).
 

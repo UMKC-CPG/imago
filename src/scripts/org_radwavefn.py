@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Parser for Grasp2K Dirac 4-component relativistic wavefunctions (rwfn.out).
 
 Reads Grasp2K output (rwfn.out) containing numerical radial wavefunctions

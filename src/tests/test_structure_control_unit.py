@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Unit tests for StructureControl math and geometry utilities.
 
 These tests exercise pure-computation methods that do not depend on reading

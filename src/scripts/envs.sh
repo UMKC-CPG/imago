@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 # envs.sh -- switch the active Imago toolchain between build "flavors".
 #
 # This file is meant to be *sourced* (not executed), normally from your

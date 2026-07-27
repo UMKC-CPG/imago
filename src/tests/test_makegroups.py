@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_makegroups.py -- Unit and integration tests for makegroups.py,
 the bispectrum grouping orchestrator (DESIGN 5.10; PSEUDOCODE 11.3.f;
 TODO C58).

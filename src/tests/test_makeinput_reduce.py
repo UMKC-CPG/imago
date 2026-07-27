@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_makeinput_reduce.py -- Regression + unit tests for the reduce
 grouping scheme and the Phase-2 matcher protocol (C54; ARCHITECTURE
 8.9, DESIGN 5.6.4).

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Expand a structure sketch into a complete curation manifest.
 
 This is the authoring step between ``cod_fish`` and

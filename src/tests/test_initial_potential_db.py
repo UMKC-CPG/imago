@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_initial_potential_db.py -- Unit tests for the
 per-element potential database file-format library
 (``src/scripts/initial_potential_db.py``).

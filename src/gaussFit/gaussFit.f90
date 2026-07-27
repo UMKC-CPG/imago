@@ -1,3 +1,6 @@
+!! SPDX-License-Identifier: ECL-2.0
+!! Copyright (c) 2026 Paul Rulis
+
 program gaussfit
 
 ! The purpose of this program is to take a given numerically expressed function

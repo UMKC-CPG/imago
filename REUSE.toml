@@ -1,0 +1,73 @@
+# REUSE.toml -- blanket copyright and licensing declarations.
+#
+# Most of Imago carries its licensing in a two-line comment header at
+# the top of each source file (see ARCHITECTURE.md section 1.1).  That
+# is not possible for every file in the tree: a compressed database
+# has nowhere to put a comment, and peppering headers through the
+# design documents and test fixtures would clutter them to no purpose.
+# This file declares the copyright and license for those files in
+# bulk, which is the mechanism the REUSE specification provides for
+# exactly this situation.
+#
+# Per-file headers take precedence over anything declared here, so a
+# file that grows its own header later does not need to be removed
+# from these lists.
+#
+# Verify with:  reuse lint
+
+version = 1
+
+SPDX-PackageName = "Imago"
+SPDX-PackageSupplier = "Paul Rulis <rulisp@umkc.edu>"
+SPDX-PackageDownloadLocation = "https://github.com/umkc-cpg/imago"
+
+
+# Documentation and project metadata.  This covers the design document
+# chain in dev/, the published documentation in docs/, the developer
+# tooling under .claude/, and the top-level notes.
+[[annotations]]
+path = [
+    "**.md",
+    "docs/**",
+    ".claude/**",
+    "NOTICE",
+    "CITATION.cff",
+]
+SPDX-FileCopyrightText = "2026 Paul Rulis"
+SPDX-License-Identifier = "ECL-2.0"
+
+
+# Build system and configuration files.  These are project source in
+# every meaningful sense, but several are formats where a leading
+# comment is either unconventional or actively unsafe to add.
+[[annotations]]
+path = [
+    ".gitignore",
+    ".imago/imagorc",
+    "CMakeLists.txt",
+    "CMakePresets.json",
+    "docs/_config.yml",
+    "src/data/elemental_groups.toml",
+    "src/tests/pyproject.toml",
+]
+SPDX-FileCopyrightText = "2026 Paul Rulis"
+SPDX-License-Identifier = "ECL-2.0"
+
+
+# Databases, example skeleton inputs, and test fixtures.  Binary and
+# tabular formats with no comment syntax available.
+#
+# NOTE: src/data/spaceDB.tgz needs your decision.  Its contents derive
+# from the Birkbeck College crystallographic tables credited in NOTICE,
+# so declaring it ECL-2.0 asserts a license over material that did not
+# originate here.  The compilation and encoding are ours; the
+# underlying tables are not.  Consider splitting it into its own
+# annotation once you have settled what the upstream terms allow.
+[[annotations]]
+path = [
+    "skl/**",
+    "src/data/**",
+    "src/tests/fixtures/**",
+]
+SPDX-FileCopyrightText = "2026 Paul Rulis"
+SPDX-License-Identifier = "ECL-2.0"

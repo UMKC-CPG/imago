@@ -1,3 +1,6 @@
+!! SPDX-License-Identifier: ECL-2.0
+!! Copyright (c) 2026 Paul Rulis
+
 module O_PSCFEigVecHDF5
 
    ! Use the HDF5 module (for hsize_t and hid_t).

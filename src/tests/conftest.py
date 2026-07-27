@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """conftest.py -- Shared fixtures and path helpers for the Imago test suite.
 
 All test files in src/tests/ automatically receive the fixtures defined here.

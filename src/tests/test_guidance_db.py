@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_guidance_db.py -- Tests for the historical-guidance
 dataspace library (DESIGN 7 / PSEUDOCODE 15), foundation layer.
 

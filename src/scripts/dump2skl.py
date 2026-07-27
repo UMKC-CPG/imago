@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
 
 """dump2skl.py -- Convert a LAMMPS dump file to an imago skeleton file.
 

@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for the flight -> guidance-entry harvest
 (guidance_harvest.py; DESIGN 7.8 / PSEUDOCODE 15.7).
 

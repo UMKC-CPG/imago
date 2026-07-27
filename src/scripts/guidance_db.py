@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """guidance_db.py -- Historical-guidance dataspace file-format
 and predictor library.
 

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """build_initial_potentials.py -- the augmented potential
 database *producer* (DESIGN 5.7; PSEUDOCODE 11.4).
 

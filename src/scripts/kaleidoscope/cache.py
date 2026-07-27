@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """kaleidoscope.cache -- the run-reuse cache
 (DESIGN 6.2.5; PSEUDOCODE 13.4).
 

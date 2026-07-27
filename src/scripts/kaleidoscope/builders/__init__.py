@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """kaleidoscope.builders -- the option-axis flight builders
 (DESIGN 6.2 "flight-builder split"; 6.2.8).
 

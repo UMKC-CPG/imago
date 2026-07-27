@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for the predict-then-verify flight builder
 (kaleidoscope.builders.kpoint_convergence; DESIGN 6.2.8 / 7.7;
 PSEUDOCODE 15.6).

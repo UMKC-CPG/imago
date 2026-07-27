@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 # CMake file for the Imago engine: gamma-point (real) build.
 
 # Document the current location

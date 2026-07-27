@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 # Source level CMake file for Imago
 
 # Document that we are at the source level.

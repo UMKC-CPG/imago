@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """angle_utils.py -- Geometry-derived angle clustering and the
 matching UFF-derived angular force constants.
 

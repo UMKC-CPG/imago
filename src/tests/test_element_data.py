@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for element_data.py -- ElementData class.
 
 These tests verify that ElementData correctly reads $IMAGO_DATA/elements.dat

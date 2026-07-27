@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for the shared space-group operation reader
 (``symmetry.read_conv_abc_point_ops``; PSEUDOCODE 4b.4; DESIGN
 2.7 / 3.2) and the ``StructureControl.point_ops`` accessor over it.

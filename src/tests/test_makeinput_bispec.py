@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_makeinput_bispec.py -- Unit tests for the bispectrum matcher
 (C55, C89; ARCHITECTURE 8.9, DESIGN 5.10, PSEUDOCODE 11.3).
 

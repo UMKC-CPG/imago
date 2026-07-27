@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_o.py -- Imago test suite entry point.
 
 Run from the repository root:

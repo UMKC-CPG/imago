@@ -1,3 +1,6 @@
+!! SPDX-License-Identifier: ECL-2.0
+!! Copyright (c) 2026 Paul Rulis
+
 ! A module for storing the potential function coefficients and charge density
 !   coefficients.
 module O_SCFPotRhoHDF5

@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Curation-manifest schema library (DESIGN 5.7).
 
 The curation manifest is the hand-authored file that drives the

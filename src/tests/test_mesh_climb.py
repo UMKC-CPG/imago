@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for the producer-side k-point mesh primitives
 (``mesh_climb``; DESIGN 3.12 / 2.7; PSEUDOCODE 4c / 4e.1).
 

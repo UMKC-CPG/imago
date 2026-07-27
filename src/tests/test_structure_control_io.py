@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Integration tests for StructureControl file I/O.
 
 Tests in this module exercise reading structure files and verifying that the

@@ -1,3 +1,6 @@
+!! SPDX-License-Identifier: ECL-2.0
+!! Copyright (c) 2026 Paul Rulis
+
 module CommandLine_O
 
    use O_Kinds

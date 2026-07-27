@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
 
 """cod_fish.py -- Acquisition front-end for the Crystallography Open
 Database (COD).

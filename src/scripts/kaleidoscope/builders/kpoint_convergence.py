@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """kaleidoscope.builders.kpoint_convergence -- the k-point
 convergence builder the adaptive mesh climb uses (DESIGN 7.7 /
 3.12; PSEUDOCODE 4e.7).

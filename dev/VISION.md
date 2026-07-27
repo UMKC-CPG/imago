@@ -365,3 +365,20 @@ flight instead of an exhaustive grid search.
     rewrites, and the decision for each kernel is backed by
     the cost dataspace (Goal 6) rather than asserted up
     front.
+15. **Attribution is a non-negotiable, not a formality.** Imago
+    cites the work it derives from, and it is built so that credit
+    survives being passed on. Two obligations follow from that.
+    Where an algorithm or dataset comes from published work, the
+    source is cited in the code beside the thing it explains, so
+    that a student reading cold can find the paper rather than
+    guess at it. And where Imago itself is redistributed or built
+    upon, its own credit travels with it: the license requires
+    that NOTICE accompany any derivative work, which is why
+    upstream sources belong there rather than in a comment a fork
+    can quietly drop. Copyright ownership and authorship credit
+    are distinct, and are recorded separately -- a uniform
+    copyright holder in every file header, and per-author credit
+    in the file itself and in CITATION.cff. Conflating the two is
+    the common failure mode. This is the same obligation that
+    governs a methods section, and the source is where students
+    first learn that it applies to software as well as to prose.

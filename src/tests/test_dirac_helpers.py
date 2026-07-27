@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_dirac_helpers.py -- Tests for Dirac quantum number conversion helpers
 and ElementData integration with the Grasp2K pipeline scripts.
 """

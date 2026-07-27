@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for cif2skl.py -- the space-group-preserving CIF to imago.skl
 converter (ARCHITECTURE 9.5).
 

@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for interFit.py imago output writer (Phase 4).
 
 These tests validate the write_imago_atom_type, write_imago_pot_type, and

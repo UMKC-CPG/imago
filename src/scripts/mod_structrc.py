@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
 
 """mod_structrc.py -- Default parameters for mod_struct.py.
 

@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_tidy_scratch.py -- unit tests for the scratch reclamation
 tool (``src/scripts/tidy_scratch.py``; DESIGN 6.2.12, PSEUDOCODE
 13.8).

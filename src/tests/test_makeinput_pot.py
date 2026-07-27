@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_makeinput_pot.py -- Unit tests for makeinput.py's
 augmented-potential-database consumer helpers (C47).
 

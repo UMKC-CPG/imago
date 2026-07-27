@@ -1,3 +1,6 @@
+!! SPDX-License-Identifier: ECL-2.0
+!! Copyright (c) 2026 Paul Rulis
+
 program imagoKkc
 !Written by Paul Rulis.  Adapted from EPS1 by Dr. Y.-N. Xu.
 !Last modified on April 1, 2022 by Alysse Weigand and Paul Rulis

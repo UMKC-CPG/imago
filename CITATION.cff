@@ -1,0 +1,52 @@
+# Citation File Format (CFF) metadata.  GitHub reads this file to
+# render the "Cite this repository" panel, and tools such as
+# `cffconvert` turn it into BibTeX, EndNote, or APA entries.  Keeping
+# it accurate is what makes Imago citable by machine rather than by
+# a reader guessing at the right form.
+#
+# Format reference: https://citation-file-format.github.io
+cff-version: 1.2.0
+
+# Shown above the generated citation on the GitHub landing page.
+message: >-
+  If you use Imago in published work, please cite it using the
+  metadata below.
+
+title: Imago
+type: software
+
+abstract: >-
+  Imago is an all-electron electronic structure code implementing
+  the OLCAO (Orthogonalized Linear Combination of Atomic Orbitals)
+  method.  It applies to crystals, amorphous solids, nanoparticles,
+  molecules, interfaces, and grain boundaries.  Core electrons are
+  treated explicitly with no pseudopotentials, periodic boundary
+  conditions are used throughout even for non-periodic systems,
+  wavefunctions are expressed as linear combinations of atomic
+  orbitals, and valence orbitals are orthogonalized to the core to
+  shrink the secular equation.
+
+authors:
+  - family-names: Rulis
+    given-names: Paul
+    orcid: https://orcid.org/0000-0001-5783-0206
+    affiliation: University of Missouri-Kansas City
+
+repository-code: https://github.com/umkc-cpg/imago
+license: ECL-2.0
+
+keywords:
+  - electronic structure
+  - density functional theory
+  - all-electron
+  - OLCAO
+  - LCAO
+  - computational materials science
+
+# Fill these three in at the first tagged release.  `doi` comes from
+# Zenodo once the repository is connected and a release is tagged;
+# it is the identifier that belongs in a paper's reference list.
+#
+## version: 1.0.0
+## date-released: YYYY-MM-DD
+## doi: 10.5281/zenodo.XXXXXXX

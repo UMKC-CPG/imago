@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_makeinput_gamma.py -- the Gamma-point k-point sentinel.
 
 Locks the rule from DESIGN 3.5: a shift is meaningful only when an

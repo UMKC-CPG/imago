@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """tidy_scratch.py -- reclaim the intermediate scratch an imago
 run leaves behind (DESIGN 6.2.12; PSEUDOCODE 13.8).
 

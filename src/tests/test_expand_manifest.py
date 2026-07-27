@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for expand_manifest, the sketch-to-manifest authoring tool.
 
 The pure builders (:func:`sparse_solid`, :func:`build_mechanical`,

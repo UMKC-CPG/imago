@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """matchers.py -- The Phase-2 matcher protocol (ARCHITECTURE 8.9).
 
 A *matcher* is a uniform interface over one local-environment descriptor

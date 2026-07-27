@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for the curator promotion helper (guidance_promote.py;
 DESIGN 7.8 curator half / PSEUDOCODE 15.7).
 

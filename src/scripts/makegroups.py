@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
 
 """makegroups.py -- Group the atoms of a non-crystalline structure into
 species by their bispectrum local-environment fingerprints.

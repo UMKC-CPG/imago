@@ -1,0 +1,32 @@
+Imago
+Copyright (c) 2026 Paul Rulis
+
+Developed by the Computational Physics Group (CPG) at the
+University of Missouri-Kansas City.
+
+Licensed under the Educational Community License, Version 2.0.
+See the LICENSE file at the root of this distribution.
+
+Imago is the successor to the long-running OLCAO codebase. The
+OLCAO (Orthogonalized Linear Combination of Atomic Orbitals)
+method was developed at the University of Missouri-Kansas City
+and retains its established name; Imago is the rebranded and
+re-engineered implementation of it.
+
+If you use Imago in published work, please cite it. Machine-
+readable citation metadata is in CITATION.cff at the repository
+root.
+
+
+-------------------------------------------------------------------
+Third-party material
+-------------------------------------------------------------------
+
+Crystallographic space group data
+  Used by: src/scripts/makeSGDB.py
+
+  The set of space groups and alternate origins, the space group
+  names, and the notational scheme are derived from "A Hypertext
+  Book of Crystallographic Space Group Diagrams and Tables,"
+  Copyright 1997-1999 Birkbeck College, University of London.
+  Available at: http://img.chem.ucl.ac.uk/sgp/mainmenu.htm

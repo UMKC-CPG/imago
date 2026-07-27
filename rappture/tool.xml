@@ -1,4 +1,6 @@
 <?xml version="1.0"?>
+<!-- SPDX-License-Identifier: ECL-2.0 -->
+<!-- Copyright (c) 2026 Paul Rulis -->
 <run>
     <tool>
         <title>Orthogonalized Linear Combination of Atomic Orbitals</title>

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """guidance_promote.py -- the curator's promotion helper for the
 historical-guidance dataspace (DESIGN 7.8 curator half;
 PSEUDOCODE 15.7).

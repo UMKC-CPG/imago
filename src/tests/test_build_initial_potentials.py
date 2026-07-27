@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_build_initial_potentials.py -- Unit tests for the
 augmented-potential-database producer (C48).
 

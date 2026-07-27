@@ -39,7 +39,91 @@ dev/
   DESIGN.md            Algorithmic design
   PSEUDOCODE.md        Algorithm specifications
   TODO.md              Task list by level
+LICENSE                ECL-2.0, verbatim (1.1)
+LICENSES/              Same text as LICENSES/ECL-2.0.txt, the
+                       location the REUSE tooling reads (1.1)
+NOTICE                 Attribution notices that travel with any
+                       redistribution (1.1)
+CITATION.cff           Machine-readable citation metadata (1.1)
+REUSE.toml             Blanket licensing for files that cannot
+                       carry a comment header (1.1)
+CONTRIBUTING.md        Licensing, credit, and chain discipline
+README.md              Landing page: what Imago is, license,
+                       citation
+BUILD.md               Production and debugging builds
 ```
+
+### 1.1 Licensing and Attribution Files
+
+Imago is licensed under the Educational Community License,
+Version 2.0 (ECL-2.0), the same license used by the OLCAO
+codebase it succeeds. This section implements VISION principle
+15. Six root-level files carry the licensing and attribution
+machinery, and they divide the work along a distinction that is
+easy to blur: `LICENSE` states the terms, `NOTICE` states who
+must be credited, and `CITATION.cff` states how to cite the work
+in a paper. `REUSE.toml` supplies that same information in bulk
+for files that have nowhere to put a comment, `LICENSES/` holds
+a second copy of the license text at the path the REUSE tooling
+requires, and `CONTRIBUTING.md` tells a contributor how to keep
+all of them correct.
+
+`NOTICE` is the load-bearing one. Section 4(d) of the license
+requires that any derivative work reproduce its contents, so it
+is the mechanism by which credit -- to Imago itself and to
+upstream sources such as the Birkbeck College space group tables
+used by `makeSGDB.py` -- survives into work built on top of this
+code. Third-party material added to the tree must gain an entry
+there.
+
+**File header convention.** Every shipped source file carries a
+two-line header identifying the license and the copyright
+holder. This covers Fortran, Python, CMake, shell, and XML, and
+it applies wherever the file lives -- not only under `src/`, but
+also the nanoHUB integration in `rappture/` and `middleware/`,
+which is distributed just as the engine is:
+
+```fortran
+!! SPDX-License-Identifier: ECL-2.0
+!! Copyright (c) 2026 Paul Rulis
+```
+
+Python, CMake, and shell files use `##` in place of `!!`. The
+doubled comment markers mark these lines as structured content
+so that `rewrap_prose.py` will not reflow them. XML takes a
+plain `<!-- -->` comment instead, because the doubling convention
+exists solely for the reflow tool and that tool does not process
+XML.
+
+Anything the language requires to come first stays first, and
+the header slots in beneath it: a `#!/usr/bin/env python3`
+shebang in Python and shell, and the `<?xml version="1.0"?>`
+declaration in XML.
+
+The header is uniform across the tree and does not vary per
+file. `SPDX-License-Identifier` is a machine-readable tag that
+license scanners recognize, which makes the tree auditable
+without reading it. Per-file authorship is recorded separately,
+in an `Author:` line inside the file's own header block or
+docstring, and cumulatively in the `authors:` list of
+`CITATION.cff`. Copyright ownership and authorship credit are
+distinct, and conflating them in the copyright line is the
+failure mode this convention exists to prevent.
+
+**Verification.** The tree is compliant with version 3.3 of the
+REUSE specification, which is checked by running `reuse lint` at
+the repository root. It reports every file lacking recognizable
+copyright and licensing information and exits non-zero if any
+are found, so adding an untagged file breaks a check that
+currently passes. A new file either gains a header or gains
+coverage from a `REUSE.toml` annotation.
+
+**Why this level.** File headers are governed here rather than
+in PSEUDOCODE because they carry no algorithmic content: there
+are no inputs, outputs, or control flow for a pseudocode section
+to specify. The gate requiring pseudocode before editing `src/`
+therefore does not apply to them, and this section is the
+specification the header pass was written against.
 
 ---
 

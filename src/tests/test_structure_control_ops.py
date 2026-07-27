@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for structural operations: supercell, bonding, coordinate transforms.
 
 These tests verify that multi-step operations produce correct results for

@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """kaleidoscope -- the high-throughput Imago flight dispatcher
 (VISION Goal 4; ARCHITECTURE 9.4, 9.6; DESIGN 6.2; PSEUDOCODE
 13).

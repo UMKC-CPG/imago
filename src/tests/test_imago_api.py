@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_imago_api.py -- Unit tests for imago.py's callable API
 (C63; DESIGN 6.1; PSEUDOCODE 12).
 

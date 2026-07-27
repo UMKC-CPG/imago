@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """kaleidoscope.dispatch -- the flight driver
 (DESIGN 6.2.3; PSEUDOCODE 13.5).
 

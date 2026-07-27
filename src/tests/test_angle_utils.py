@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_angle_utils.py -- Unit tests for the geometry-derived
 angle clustering and force-constant helpers in angle_utils.py.
 

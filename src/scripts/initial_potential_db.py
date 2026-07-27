@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """initial_potential_db.py -- Per-element potential database
 file-format library.
 

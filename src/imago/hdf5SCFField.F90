@@ -1,3 +1,6 @@
+!! SPDX-License-Identifier: ECL-2.0
+!! Copyright (c) 2026 Paul Rulis
+
 module O_SCFFieldHDF5
 
    ! Use the HDF5 module for HDF5 defined types (e.g. size_t and hid_t).

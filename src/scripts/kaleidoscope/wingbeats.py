@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """kaleidoscope.wingbeats -- the pluggable wingbeat seam
 (DESIGN 6.2.2; PSEUDOCODE 13.2).
 

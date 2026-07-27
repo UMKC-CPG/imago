@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
 
 # PROGRAM: makeSYBD.py
 # PURPOSE: To write a data file that is usable by plotting software

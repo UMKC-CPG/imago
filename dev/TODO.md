@@ -35,6 +35,16 @@
   guessing.  Kept separate from Goal 5 because cost is
   hardware-specific where convergence guidance is portable
   (ARCHITECTURE 11, DESIGN 8).
+- [x] V4. Add Principle 15 (attribution is a non-negotiable,
+  not a formality) to VISION.  Done 2026-07-27 alongside the
+  licensing chain landing (A10): the architecture had grown a
+  convention governing every shipped source file while the top
+  of the chain recorded no principle motivating it.  States the
+  two obligations that follow -- cite the work Imago derives
+  from, and build so that Imago's own credit survives
+  redistribution -- and fixes the copyright-versus-authorship
+  distinction the file header convention rests on
+  (VISION Principles.15).
 
 ---
 
@@ -124,6 +134,44 @@
   to other prongs; 11.8 open questions (fingerprint + build-knob
   granularity, peak-memory capture, node contention, censored
   data, portable normalization).
+- [x] A10. Licensing and attribution machinery (ARCHITECTURE
+  1.1).  Done 2026-07-27.  Imago shipped with no license at all,
+  which made it technically all-rights-reserved and left nothing
+  for a downstream reader to attribute to.  Settled on ECL-2.0,
+  continuing OLCAO's choice: verbatim LICENSE, NOTICE carrying
+  the OLCAO lineage and the Birkbeck College space group
+  provenance, CITATION.cff with ORCID, CONTRIBUTING.md stating
+  the copyright-versus-authorship policy, README.md, and a
+  two-line SPDX + copyright header on all 259 shipped source
+  files (256 under src/ plus rappture/ and middleware/).  The
+  tree is REUSE 3.3 compliant, verified by `reuse lint` at
+  313/313 files, with REUSE.toml covering data and documentation
+  that cannot hold a comment.  Governed at ARCHITECTURE rather
+  than PSEUDOCODE because file headers carry no algorithmic
+  content; see the "Why this level" note in 1.1.
+- [ ] A11. Decide the licensing status of src/data/spaceDB.tgz
+  (ARCHITECTURE 1.1).  The REUSE.toml blanket rule declares
+  src/data/** as ECL-2.0, which sweeps in spaceDB.tgz -- whose
+  contents derive from the Birkbeck College crystallographic
+  tables credited in NOTICE.  The compilation and encoding are
+  ours; the underlying tables are not, so the blanket
+  declaration asserts a license over material that did not
+  originate here.  Crystallographic tables are largely
+  uncopyrightable facts, so this may well be fine, but it is a
+  claim rather than a formality and should not rest on a glob
+  pattern.  Resolve by either confirming the blanket rule or
+  splitting spaceDB.tgz into its own annotation.  A NOTE in
+  REUSE.toml flags the question at the point of decision.
+- [ ] A12. Mint a DOI and complete CITATION.cff (ARCHITECTURE
+  1.1).  Connect the repository to Zenodo, tag a release, and
+  backfill the three fields left commented in CITATION.cff:
+  version, date-released, and doi.  The DOI is what a reference
+  list can actually point at -- a repository URL is not a
+  citable object and does not accrue credit through the
+  indexing services -- so this is the step that converts the
+  citation metadata from a statement of intent into something
+  a reader can cite.  Feeds D20, which needs the DOI for the
+  banner text.
 
 ---
 
@@ -431,6 +479,25 @@
   (8.9).  Pins the two-layer build record: coarse bucketed
   knobs as features + the full verbatim compile_string as
   provenance.
+- [ ] D20. Design the runtime citation banner (VISION
+  Principles.15, ARCHITECTURE 1.1).  Imago should print a
+  "if you use these results, please cite" block in its output
+  header, the way LAMMPS, VASP, and Quantum ESPRESSO do.  This
+  is the highest-leverage attribution mechanism available:
+  unlike a license header or a CITATION.cff, it reaches the
+  person at the moment they have results in hand and are
+  writing the paper, which is when attribution is actually
+  decided.  Open questions for the design: which output streams
+  carry it (log header only, or every primary output file);
+  whether the text is compiled in or read from an installed
+  data file so it tracks CITATION.cff without a rebuild; how
+  the DOI reaches it once minted (A12); whether a quiet flag
+  may suppress it and what the default is; and how it composes
+  with upstream citations when a run exercises a method that
+  carries its own reference.  Unlike the file header
+  convention, this one changes program output, so it needs
+  DESIGN and then PSEUDOCODE coverage before any code -- the
+  gate applies here in full.
 
 ---
 

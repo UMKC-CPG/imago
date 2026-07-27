@@ -1,3 +1,6 @@
+!! SPDX-License-Identifier: ECL-2.0
+!! Copyright (c) 2026 Paul Rulis
+
 !      SUBROUTINES SPLIFT, SPLIQ, AND SPLINT FOR ATOMIC PROGRAM
 module SplineSubs
 

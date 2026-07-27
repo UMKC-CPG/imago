@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """symmetry.py -- the structure toolchain's space-group operations
 (ARCHITECTURE 2, 7; PSEUDOCODE 4b.4).
 

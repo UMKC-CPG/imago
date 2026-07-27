@@ -1,4 +1,6 @@
 #!/bin/bash
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
 
 # Get the name and path of this invoke script and replace any link
 #   with the full path name.

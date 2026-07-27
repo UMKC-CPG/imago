@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
 
 """cif2skl.py -- Convert a CIF crystal structure into an imago.skl file,
 preserving the space group.

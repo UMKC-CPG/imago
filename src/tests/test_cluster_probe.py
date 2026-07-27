@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for cluster_probe.py -- the discovery tool that generates a
 starter ``clusterrc.py`` (DESIGN 6.2.11; PSEUDOCODE 13.7).
 

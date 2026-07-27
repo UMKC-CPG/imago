@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_makeinput_build_api.py -- Unit tests for makeinput.py's
 callable build API (C68(a); DESIGN 6.3; PSEUDOCODE 14).
 

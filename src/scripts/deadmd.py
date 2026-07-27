@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """
 =============================================================================
 DEAD_MD: Dynamic Evolutionary Algorithm-Driven Molecular Dynamics
@@ -6,9 +9,6 @@ DEAD_MD: Dynamic Evolutionary Algorithm-Driven Molecular Dynamics
 
 Version: 1.0
 Last Updated: March 2026
-
-Copyright (c) 2026
-Mohammed Belhadj Larbi
 
 Author:      Mohammed Belhadj Larbi
 Developer:   Mohammed Belhadj Larbi

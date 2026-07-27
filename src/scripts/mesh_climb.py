@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """mesh_climb.py -- the producer-side k-point mesh primitives and
 the adaptive-climb search over them (DESIGN 3.12; PSEUDOCODE 4c /
 4e).

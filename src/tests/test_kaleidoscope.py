@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """test_kaleidoscope.py -- Unit tests for the kaleidoscope
 flight dispatcher (C68; DESIGN 6.2; PSEUDOCODE 13).
 

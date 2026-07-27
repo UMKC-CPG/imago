@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
 
 # Matrices are printed in the order in which they are provided in the
 #   matrix_list array. Each matrix is handled according to whatever special

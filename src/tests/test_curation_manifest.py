@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for the curation-manifest schema library's writer.
 
 These exercise :func:`curation_manifest.format_manifest` and its

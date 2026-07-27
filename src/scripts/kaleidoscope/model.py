@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """kaleidoscope.model -- the flight data model
 (DESIGN 6.2.1, 6.2.2, 6.2.6; PSEUDOCODE 13.1, 13.2, 13.6).
 

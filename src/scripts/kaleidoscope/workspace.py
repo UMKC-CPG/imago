@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """kaleidoscope.workspace -- run-directory layout, id rules,
 and the status.toml lifecycle (DESIGN 6.2.4; PSEUDOCODE 13.3).
 

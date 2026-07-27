@@ -1,3 +1,6 @@
+## SPDX-License-Identifier: ECL-2.0
+## Copyright (c) 2026 Paul Rulis
+
 """Tests for clusterrc.py -- the per-site cluster dispatch settings
 file (DESIGN 6.2.11; PSEUDOCODE 13.7).
 

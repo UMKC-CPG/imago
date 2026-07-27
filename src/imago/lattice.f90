@@ -1,3 +1,6 @@
+!! SPDX-License-Identifier: ECL-2.0
+!! Copyright (c) 2026 Paul Rulis
+
 module O_Lattice  ! Lattice and superlattice object.
 
    ! Import necessary modules.
