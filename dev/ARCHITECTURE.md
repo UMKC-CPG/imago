@@ -3193,9 +3193,31 @@ by DESIGN 10 and is not begun here.
   name table, `initVerboseness`, `isVerbose`, and the category
   parameters. Depends on nothing but `O_Kinds`, so any module
   may use it without creating a cycle.
-- **O_Banner** (`banner.f90`): the identity block, the citation
-  text, and the method-citation registry of DESIGN 10. Uses
-  `O_Verboseness`.
+- **O_Banner** (`banner.f90`): the identity block and the
+  citation text of DESIGN 10. Uses `O_Verboseness` and nothing
+  else.
+- **O_MethodCitations** (`methodCitations.f90`): the
+  method-citation registry of DESIGN 10.5 and its predicates.
+  Uses `O_KPoints`, and later whatever further engine state a
+  new predicate reads.
+
+The last two were one module in the first draft of this
+section, and that arrangement cannot be compiled. The identity
+block prints from `parseCommandLine`, so `O_CommandLine` must
+use it; the registry's predicates read `kPointIntgCode`, so it
+must use `O_KPoints`; and `kpoints.f90` already uses
+`O_CommandLine`. A single module holding both halves closes the
+cycle `O_CommandLine -> O_Banner -> O_KPoints ->
+O_CommandLine`, which no build order resolves.
+
+Splitting them costs nothing, because the seam is one DESIGN
+10.2 has already drawn. That section separates the two blocks
+by when their information becomes available, and the same fact
+governs what each may depend on: a block that prints before the
+work begins can depend on nothing the work produces, and a
+block that prints after it is finished may depend on all of it.
+PSEUDOCODE 17.1 records the reasoning and the alternative that
+was rejected.
 
 Note that `O_TimeStamps` declares a `banner` variable
 (`timeStamps.f90:24`) that nothing reads -- it is dead, and

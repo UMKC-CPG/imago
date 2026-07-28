@@ -535,21 +535,35 @@
 
 ## PSEUDOCODE
 
-- [ ] P11. Write pseudocode for the runtime output control
+- [x] P11. Write pseudocode for the runtime output control
   facility and the citation banner (ARCHITECTURE 12, DESIGN
-  10).  Two modules.  O_Verboseness: the category name table
-  as single source of truth, initVerboseness parsing
-  IMAGO_VERBOSENESS into a private mask, isVerbose querying it
-  by named parameter.  O_Banner: the identity block, the
-  citation text, and the methods registry with its predicates.
-  Specify the call sites precisely -- initVerboseness and the
-  identity block go into parseCommandLine between the
-  open(20,...) at commandLine.f90:91 and the timeStampStart(24)
-  that follows, which is the only slot where the log unit
-  exists and the first timestamp has not yet fired.  Within
-  that slot initVerboseness MUST precede the identity block,
-  which is gated on the mask it sets (DESIGN 10.6); the two
-  are adjacent and the order is easy to reverse by accident.
+  10).  Written 2026-07-28 as PSEUDOCODE 17.  THREE modules,
+  not the two ARCHITECTURE 12.4 planned: one module holding
+  both the identity block and the methods registry closes the
+  Fortran cycle O_CommandLine -> O_Banner -> O_KPoints ->
+  O_CommandLine, because kpoints.f90:1093 already uses
+  O_CommandLine.  The split falls on the seam DESIGN 10.2 drew
+  -- a block that prints before the work begins can depend on
+  nothing the work produces -- so O_Banner keeps the identity
+  block and depends only on O_Verboseness, while a new
+  O_MethodCitations holds the registry and may read engine
+  state freely.  ARCHITECTURE 12.4 corrected to match; that is
+  the legitimate upward edit, since the constraint is factual
+  and was only visible at this level.  Also settled here: the
+  category table pairs name with bit implicitly (bit = row
+  index - 1), so no second column can drift; `normal` and
+  `none` are reserved set-valued aliases, not categories;
+  tokens combine by union and nothing subtracts; matching is
+  case-insensitive; every failure path warns to unit 20 and
+  continues, unlike elementData's fatal IMAGO_DATA check.  The
+  read and write formats must be '(a)' and never list-directed,
+  or every line of art shifts one column right of the len=51
+  timestamp rules; and the read buffer is 132, not 51, because
+  the citation lines run to 64 today and would truncate.  Two
+  registry entries, not three: UFF appears nowhere in
+  src/imago/, so the Rappe reference belongs to the Python
+  force-field path and an entry for it would be dead on
+  arrival.  Feeds C133.
 - [x] P1. Transcribe exact Bloechl middle-range DOS formula
   for e2 <= E < e3 (PSEUDOCODE 2, Bloechl eqs. 14-16)
 - [x] P2. Transcribe cornerIntgWt_LAT formulas for partial
@@ -4701,6 +4715,23 @@ on the same data later with no schema change.  Built on P10.
   DESIGN 6.2.5, PSEUDOCODE 13.4 (`cache_key_matches`) + 11.4
   (new `prepare_units`).  CODE.  DONE.  +4 tests, 1132 pass;
   each verified to FAIL against the restored defects.
+- [ ] C133. Code the output control facility and the citation
+  banner (PSEUDOCODE 17).  Three new Fortran modules --
+  verboseness.f90, banner.f90, methodCitations.f90 -- added to
+  the imagoG and imago source lists in the ordering PSEUDOCODE
+  17.9 fixes, which is forced by the module dependencies and
+  not free to choose.  Two call sites: initVerboseness then
+  printIdentityBlock between the open(20,...) and the
+  timeStampStart(24) in parseCommandLine, in that order and no
+  other; printMethodsBlock at the end of Imago in imago.F90.
+  Delete the dead `banner` variable at timeStamps.f90:24 in the
+  same change, before it can be confused with O_Banner.  Verify
+  by eye that the art lands flush with the len=51 timestamp
+  rules -- a list-directed write shifts it one column and looks
+  almost right.  Then check that IMAGO_VERBOSENESS unset, set
+  to `none`, set to `banner`, and set to a typo each behave as
+  PSEUDOCODE 17.3 says, the last of them warning and running to
+  completion.
 - [ ] C81. Provisioning consumer in the flight layer (the
   kaleidoscope flight-builder helper or a thin sibling): query
   the predictor with a proposed config + size, apply a safety

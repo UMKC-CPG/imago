@@ -12772,6 +12772,14 @@ true. A run using a Monkhorst-Pack mesh and Gaussian broadening
 prints one reference; the same run with tetrahedron integration
 prints two.
 
+The registry the engine carries is narrower than the References
+list, and must be. UFF appears nowhere in the Fortran: those
+parameters belong to the force-field path of section 4.8, which
+is Python, as do the Cornell, Jorgensen, and LAMMPS references
+beside them. An engine-side entry for any of them could never
+be selected. If that path should announce its own citations, it
+announces them from `make_reactions.py`.
+
 Keeping the registry beside the References section matters:
 adding a method to Imago and adding its citation become one
 task, and a reference that no predicate can ever select is

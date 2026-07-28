@@ -12369,3 +12369,520 @@ does not currently cover:
    consumer must not ship with it unset, so the seed (C82) is a
    hard prerequisite for the provisioning consumer (C81), not
    merely a source of accuracy.
+
+## 17. Output Control and Citation Banner (DESIGN 10, ARCH 12)
+
+Two facilities, specified together because one gates the other.
+`O_Verboseness` decides what the engine is willing to say; the
+banner modules are its first and so far only client.
+
+Everything below is Fortran-side.  The line and file references
+are to the engine as it stands, and the call sites are named
+exactly, because DESIGN 10.6 makes the ordering load-bearing and
+an ordering error here is silent -- the banner would test an
+uninitialized mask and simply not print.
+
+### 17.1 The module split, and why it is three modules not two
+
+ARCHITECTURE 12.4 maps this onto two modules, `O_Verboseness`
+and a single `O_Banner` holding both the identity block and the
+method-citation registry.  That map cannot be compiled.  The
+identity block prints from `parseCommandLine`, so `O_CommandLine`
+must `use` it; the registry's predicates read `kPointIntgCode`,
+so it must `use O_KPoints`; and `kpoints.f90:1093` already reads
+`use O_CommandLine, only: doSYBD_SCF, ...`.  One module holding
+both halves therefore closes a Fortran module cycle:
+
+```
+O_CommandLine -> O_Banner -> O_KPoints -> O_CommandLine
+```
+
+which no compilation order resolves.  The constraint is factual
+and forced, not a preference.
+
+The split that removes it falls on a seam DESIGN 10.2 has
+already drawn.  That section separates the two blocks by when
+their information becomes available: the identity block knows
+everything it needs before any work begins, and the methods
+block cannot be written until the run is over.  The same fact
+governs what each may depend on.  A module that prints before
+the work starts can depend on nothing the work produces, and a
+module that prints after it is finished may depend on all of it.
+So:
+
+- **`O_Verboseness`** (`verboseness.f90`) -- the mask, the
+  category table, and the query.  Depends on nothing.
+- **`O_Banner`** (`banner.f90`) -- the identity block: locate
+  `banner.txt`, echo it, gated on the `banner` category.
+  Depends on `O_Verboseness` only.
+- **`O_MethodCitations`** (`methodCitations.f90`) -- the
+  registry of DESIGN 10.5 and its predicates.  Depends on
+  `O_KPoints` and whatever later state a future predicate
+  needs; placed late in the build so it may.
+
+This keeps the property DESIGN 10.5 says matters -- that adding
+a method and adding its citation are one task -- which the
+alternative loses.  The alternative is to leave the registry
+inside `O_Banner` and pass its predicate inputs down as
+arguments from a call site that already holds them.  That also
+breaks the cycle, but it makes every new reference an edit to a
+subroutine signature and to its call in `imago.F90`, so the
+citation stops being a local addition.
+
+**ARCHITECTURE 12.4 needs its module list corrected to match.**
+This is the one legitimate upward edit: the constraint was
+discovered at this level and the higher level is factually
+wrong, not merely less detailed.
+
+### 17.2 O_Verboseness: the category table
+
+The table is the single source of truth of ARCHITECTURE 12.2.
+Bit positions do not appear in it, because they do not need to:
+a category's bit *is* its row index minus one.  There is then no
+second column that can drift out of step with the first, and the
+translation from name to bit exists in exactly one expression.
+
+```
+module O_Verboseness
+
+    numCategories = 1
+
+    # The public contract.  Callers pass these, never a number.
+    # The value is a row index, not a bit position; nothing
+    # outside this module ever sees a bit position at all.
+    integer, parameter :: VERB_BANNER = 1
+
+    character(len=20), dimension(numCategories) :: categoryName
+    logical,           dimension(numCategories) :: categoryInNormal
+
+    # Private.  Bit i-1 of the mask is row i of the table.
+    integer, private :: verbosenessMask
+
+subroutine initCategoryTable
+    categoryName(VERB_BANNER)     = "banner"
+    categoryInNormal(VERB_BANNER) = .true.
+```
+
+Two names are reserved and may never be used for a category:
+`normal` and `none`.  They are not categories but set-valued
+aliases -- `normal` expands to every row whose
+`categoryInNormal` is true, and `none` expands to the empty set.
+Adding a category is one row of `initCategoryTable`, one
+`parameter`, and a decision about whether the default includes
+it; nothing else moves.
+
+The mask is a default `integer`, so bit 30 is the last usable
+position and the table has a ceiling of 31 rows.  That is far
+beyond any plausible category count, but it is a real limit and
+the parser should not pretend otherwise (17.3).
+
+### 17.3 initVerboseness: parsing IMAGO_VERBOSENESS
+
+```
+subroutine initVerboseness
+
+    character(len=1024) :: requestString
+    integer :: readStatus, valueLength
+
+    call initCategoryTable
+    verbosenessMask = 0
+
+    call get_environment_variable (NAME="IMAGO_VERBOSENESS", &
+          & VALUE=requestString, LENGTH=valueLength, &
+          & STATUS=readStatus)
+
+    # Unset is not silent (ARCHITECTURE 12.2).  Status 1 means
+    # the variable does not exist; a variable that exists but
+    # holds only blanks is the same request.
+    if ((readStatus == 1) .or. (len_trim(requestString) == 0)) then
+        call applyNormalDefault
+        return
+    endif
+
+    # Status -1 means the value was longer than the buffer and
+    # has been truncated, which would silently drop trailing
+    # categories.  Say so, then parse what did arrive.
+    if (readStatus == -1) then
+        warn to unit 20: "IMAGO_VERBOSENESS is", valueLength,
+              "characters and was truncated to 1024; trailing"
+              " categories were ignored."
+    elseif (readStatus /= 0) then
+        warn to unit 20: "could not read IMAGO_VERBOSENESS"
+              " (status", readStatus, "); using the normal"
+              " default."
+        call applyNormalDefault
+        return
+    endif
+
+    # Split on commas and set one bit per recognized token.
+    for each comma-delimited token in requestString:
+        candidate = lowercase(trim(adjustl(token)))
+        if (len_trim(candidate) == 0) cycle    # ",," or trailing
+        if (candidate == "none") cycle         # contributes nothing
+        if (candidate == "normal") then
+            call applyNormalDefault             # OR-ed in, not assigned
+            cycle
+        endif
+        matched = .false.
+        do row = 1, numCategories
+            if (candidate == trim(categoryName(row))) then
+                verbosenessMask = ibset(verbosenessMask, row - 1)
+                matched = .true.
+                exit
+            endif
+        enddo
+        if (.not. matched) then
+            warn to unit 20: "unrecognized IMAGO_VERBOSENESS"
+                  " category '", trim(candidate), "' ignored."
+        endif
+
+subroutine applyNormalDefault
+    do row = 1, numCategories
+        if (categoryInNormal(row)) then
+            verbosenessMask = ibset(verbosenessMask, row - 1)
+        endif
+    enddo
+```
+
+Four parsing decisions are settled here rather than left to the
+code, because each is the kind of thing that gets decided by
+accident otherwise.
+
+**Tokens combine by union, and nothing subtracts.**  `none` is
+the empty set, so `none,banner` is exactly `banner` -- it is not
+a mute switch that a later token overrides.  A caller that wants
+silence writes `none` alone.  Likewise `normal,banner` is
+`normal`, since `banner` is already in it.
+
+**Matching is case-insensitive.**  `BANNER` and `Banner` are the
+same request.  ARCHITECTURE 12.2 requires an unrecognized name
+to be reported, and a case difference is not the kind of mistake
+that report is for; treating it as one would produce a warning
+that names a category the user can plainly see in their own
+environment.
+
+**Empty tokens are skipped in silence.**  A trailing comma is a
+typo with no ambiguity about intent, and warning about it would
+train the reader to ignore the warnings that matter.
+
+**Nothing here stops the run.**  Every failure path warns to
+unit 20 and continues, per ARCHITECTURE 12.2: a mistyped
+environment variable must not kill a queued cluster job hours
+after it was submitted.  This is the opposite of how
+`elementData.f90:76` treats a missing `IMAGO_DATA`, and the
+difference is deliberate -- missing element data makes the run
+impossible, whereas a bad verboseness request only makes the log
+wrong.
+
+### 17.4 isVerbose: the query
+
+```
+logical function isVerbose (category)
+
+    integer, intent(in) :: category    # a table row, e.g. VERB_BANNER
+
+    if ((category < 1) .or. (category > numCategories)) then
+        warn to unit 20: "isVerbose called with out-of-range"
+              " category", category, "-- treating as off."
+        isVerbose = .false.
+        return
+    endif
+
+    isVerbose = btest (verbosenessMask, category - 1)
+```
+
+The bounds test catches an out-of-range literal, and that is all
+it can catch.  ARCHITECTURE 12.2's rule that callers never pass
+a bare number is not mechanically enforceable -- a hardcoded `1`
+is indistinguishable from `VERB_BANNER` at run time -- so it
+remains a review discipline.  Worth stating plainly, since a
+guard that catches part of a problem invites the belief that it
+catches all of it.
+
+### 17.5 O_Banner: echoing banner.txt
+
+```
+module O_Banner
+
+    use O_Verboseness, only: isVerbose, VERB_BANNER
+
+subroutine echoBannerFile
+
+    character(len=100) :: dataDirectory
+    character(len=100) :: bannerFileName
+    character(len=132) :: lineBuffer
+    integer, parameter :: bannerUnit = 314
+    integer :: openStatus, readStatus
+
+    call get_environment_variable (NAME="IMAGO_DATA", &
+          & VALUE=dataDirectory, STATUS=openStatus)
+    if (openStatus /= 0) return          # see the note below
+    bannerFileName = trim(dataDirectory)//"/banner.txt"
+
+    open (unit=bannerUnit, file=bannerFileName, &
+          & form='formatted', status='old', IOSTAT=openStatus)
+    if (openStatus /= 0) then
+        write (20,*) "Could not open ", trim(bannerFileName)
+        write (20,*) "Continuing without the identity block."
+        return
+    endif
+
+    do
+        read (bannerUnit, fmt='(a)', IOSTAT=readStatus) lineBuffer
+        if (readStatus /= 0) exit
+        write (20, fmt='(a)') trim(lineBuffer)
+    enddo
+
+    close (bannerUnit)
+```
+
+Four details carry the whole section.
+
+**The read and write formats are `'(a)'`, never list-directed.**
+This is the concrete Fortran form of the warning in DESIGN 10.3
+that a reader must not "fix" the whitespace.  `read` under
+`fmt='(a)'` preserves leading blanks, which carry the kerning
+and the centring; `write` under `fmt='(a)'` starts at column one.
+A list-directed `write (20,*)` would insert a leading blank on
+every line, shifting the whole butterfly one column right of the
+`fmt='(a51)'` rules that `O_TimeStamps` prints directly beneath
+it.  The result would look almost right, which is worse than
+looking wrong.
+
+**`trim` is safe and `adjustl` is not.**  `trim` removes trailing
+blanks only, which are insignificant.  `adjustl` would left-
+justify and destroy the art.  The distinction is easy to lose
+when tidying this routine later.
+
+**The buffer is 132 characters, not 51.**  DESIGN 10.3 fixes the
+*artwork* at 51 columns to match `opLabels`, and the art obeys
+that -- its widest line is 50.  The citation lines beneath it do
+not and need not: the longest today is 64 characters, the one
+naming the repository URL.  A `character(len=51)` buffer would
+silently truncate the citation the block exists to deliver, and
+the DOI line of TODO A12 will be longer still.
+
+**A missing `IMAGO_DATA` returns quietly.**  It cannot happen in
+practice: `Imago` calls `initElementData` before
+`parseCommandLine` (`imago.F90`), and that routine stops the run
+outright when `IMAGO_DATA` is unreadable, so a run that reaches
+the banner has already proved the variable good.  The test is
+there so the routine is honest on its own terms rather than
+relying on a caller two files away, and it is silent because
+anything it could say has already been said by the code that
+actually failed.
+
+The unit number is 314 because 313 belongs to `elementData.f90`,
+9 to `potential.f90`, and 20 to the log.  Any free number does;
+the point is that it was checked.
+
+### 17.6 printIdentityBlock
+
+```
+subroutine printIdentityBlock
+
+    if (.not. isVerbose(VERB_BANNER)) return
+
+    call echoBannerFile
+    write (20,*)
+    call flush (20)
+```
+
+The gate is the only thing this routine adds, and it is the
+reason `initVerboseness` must already have run (DESIGN 10.6).
+The trailing blank line and the `flush` follow what
+`timeStampStart` already does, so the banner and the first
+timestamp rule are separated the same way every later pair is.
+
+No version string is composed here.  `banner.txt` is echoed
+whole, and the version and DOI live in it as text (DESIGN 10.4),
+to be filled in by TODO A12.
+
+### 17.7 O_MethodCitations: the registry and its predicates
+
+DESIGN 10.5 specifies a registry pairing each reference with a
+predicate answering "did this run use it."  The predicates read
+state the engine already holds.
+
+```
+module O_MethodCitations
+
+    numMethodRefs = 2
+    maxRefLines   = 4
+
+    integer, parameter :: METHOD_MONKHORST_PACK = 1
+    integer, parameter :: METHOD_BLOECHL_LAT    = 2
+
+    character(len=76), dimension(maxRefLines,numMethodRefs) :: refText
+    integer,           dimension(numMethodRefs) :: refNumLines
+
+subroutine initMethodCitations
+    refNumLines(METHOD_MONKHORST_PACK) = 3
+    refText(1,METHOD_MONKHORST_PACK) = &
+      & "  H. J. Monkhorst, J. D. Pack, ""Special points for"
+    refText(2,METHOD_MONKHORST_PACK) = &
+      & "  Brillouin-zone integrations,"" Phys. Rev. B 13, 5188"
+    refText(3,METHOD_MONKHORST_PACK) = &
+      & "  (1976).  DOI: 10.1103/PhysRevB.13.5188"
+    ... likewise Bloechl, Jepsen and Andersen, Phys. Rev. B 49,
+    ... 16223 (1994), DOI 10.1103/PhysRevB.49.16223
+
+logical function methodWasUsed (methodRef)
+
+    use O_KPoints, only: kPointStyleCode, kPointIntgCode
+
+    select case (methodRef)
+    case (METHOD_MONKHORST_PACK)
+        # Style 1 is an explicit mesh plus shift and style 2 a
+        # minimum density; both build a Monkhorst-Pack mesh.
+        # Style 0 is a bare list of k-points the user supplied,
+        # which is not necessarily one (kpoints.f90:20-30).
+        methodWasUsed = ((kPointStyleCode == 1) .or. &
+                       & (kPointStyleCode == 2))
+    case (METHOD_BLOECHL_LAT)
+        methodWasUsed = (kPointIntgCode == 1)
+    case default
+        methodWasUsed = .false.
+    end select
+
+subroutine printMethodsBlock
+
+    call initMethodCitations
+
+    # Say nothing at all rather than print an empty invitation.
+    if (no methodWasUsed(ref) is true) return
+
+    write (20,*)
+    write (20,fmt='(a51)') &
+      & '***************************************************'
+    write (20,*) "Methods exercised by this run.  Please cite:"
+    write (20,*)
+    do methodRef = 1, numMethodRefs
+        if (.not. methodWasUsed(methodRef)) cycle
+        do line = 1, refNumLines(methodRef)
+            write (20,fmt='(a)') trim(refText(line,methodRef))
+        enddo
+        write (20,*)
+    enddo
+    call flush (20)
+```
+
+The registry is not gated on verboseness (DESIGN 10.7): it is a
+handful of lines, and it is the part a reader is meant to copy
+into a paper.
+
+**Two entries, not three.**  DESIGN 10.5 names Rappe and
+co-workers alongside Monkhorst-Pack and Bloechl, but the UFF
+parameters have no presence in the engine -- `UFF` does not
+appear anywhere in `src/imago/`.  That reference belongs to the
+force-field path of DESIGN 4.8, which is Python, and so do
+Cornell, Jorgensen, and the LAMMPS reference beside it in the
+`## References` list.  Adding a registry entry no predicate can
+ever select would create exactly the dead weight DESIGN 10.8
+worries about, in the first version of the file.  If those
+methods should announce themselves, it is `make_reactions.py`
+and `create_lammps_files` that must do it, and that is a
+separate task on the Python side.
+
+Both entries restate a citation that `## References` in DESIGN
+already carries.  The duplication is accepted for the same
+reason 10.4 accepts it for the citation text -- the engine
+cannot read a design document -- and the two must be edited
+together.
+
+### 17.8 Call sites
+
+**The identity block, in `parseCommandLine`
+(`commandLine.f90:91`).**  The two new calls go between the
+`open` and the `timeStampStart` that currently follows it on the
+next line:
+
+```
+    open (20,file='fort.20',status='unknown',form='formatted')
+
+    call initVerboseness        # MUST come first: it sets the
+    call printIdentityBlock     #   mask the banner tests.
+
+    call timeStampStart (24)
+```
+
+The slot is forced from both sides.  Nothing may print earlier
+because unit 20 does not exist earlier, and nothing may print
+later because `timeStampStart(24)` writes the first rule of the
+log, which the banner must sit above.
+
+The order within the slot is forced too, and this is the one
+place in the whole section where a mistake is invisible.
+Reversed, `printIdentityBlock` tests a mask that is still zero,
+`isVerbose` returns false, and the routine returns without
+printing or complaining.  The run succeeds and the banner is
+simply absent.  Nothing in the compiler or the output will point
+at the cause.
+
+**The methods block, at the end of `Imago` (`imago.F90`).**  It
+goes after the `doLoEn` branch and immediately before
+`end subroutine Imago`, which is the last point at which every
+branch that could have exercised a method has run.
+
+### 17.9 Build wiring
+
+`verboseness.f90`, `banner.f90`, and `methodCitations.f90` are
+added to the two source lists that build an engine --
+`src/imago/real/CMakeLists.txt` (target `imagoG`) and
+`src/imago/complex/CMakeLists.txt` (target `imago`).  The
+`auxiliary` targets do not use `O_CommandLine` and need none of
+this.
+
+Those lists are ordered by module dependency, and the ordering
+is what 17.1 is about, so it is not free to choose:
+
+- `verboseness.f90` before `commandLine.f90`, and it may go
+  immediately after `kinds.f90` since it depends on nothing.
+- `banner.f90` after `verboseness.f90` and before
+  `commandLine.f90`.
+- `methodCitations.f90` after `kpoints.f90`, and before
+  `imago.F90` which calls it.  Anywhere in that range works.
+
+`src/data/banner.txt` is already in the `DATABASES` list of
+`src/data/CMakeLists.txt` and installs to `share` with the rest,
+so no build change is needed for the artwork itself.
+
+### 17.10 What this section does not specify
+
+**The dead `banner` variable.**  `O_TimeStamps` declares
+`character(len=51) :: banner` at `timeStamps.f90:24` and nothing
+reads it.  It predates this work and should be deleted in the
+same change that adds `O_Banner`, before the two can be confused
+for each other.  It is noted here rather than specified because
+deleting an unread variable needs no design.
+
+**Retrofitting the existing writes.**  ARCHITECTURE 12.3 puts
+the existing unconditional `write (20,...)` calls out of scope,
+and they stay out of scope here.  One category exists and one
+call site consults it.
+
+**The categories themselves.**  Everything the debugging and
+parallelization campaign will want -- SCF iteration detail,
+integral diagnostics, resource reporting, developer trace -- is
+deliberately absent, per ARCHITECTURE 12.3.  The shape above is
+what makes that cheap later: a row, a parameter, and a gate.
+
+Two questions this pass could not close.
+
+1. **Whether `printMethodsBlock` should fire when the run
+   aborts.**  Every `stop` in the engine bypasses the end of
+   `Imago`, so a run that dies in the secular equation prints no
+   methods block, having already exercised the mesh it would
+   have cited.  That is arguably correct -- a failed run has no
+   results to cite -- but it is a consequence of where the call
+   sits rather than a decision anyone made, and DESIGN 10.6 does
+   not address it.
+
+2. **How a method added without a predicate is caught.**  This
+   is DESIGN 10.8's open question and the pseudocode does not
+   answer it.  Worth recording what this section did *not* do
+   about it: the split of 17.1 puts `O_MethodCitations` next to
+   the engine state its predicates read, which makes a missing
+   predicate easier for a reader to notice, and nothing more.
+   It remains true that a method can be added to Imago and go
+   uncited with no symptom at all.
