@@ -13,6 +13,7 @@ subroutine Imago
    use O_CommandLine
    use O_TimeStamps, only: initOperationLabels
    use O_ElementData,     only: initElementData
+   use O_MethodCitations, only: printMethodsBlock
 
    ! Initialize the logging labels.
    call initOperationLabels
@@ -99,6 +100,27 @@ subroutine Imago
    if (doLoEn == 1) then
       call loen(0)
    endif
+
+   ! Print the citations for the methods this run actually exercised. This
+   !   is the last thing the run does because it is only now settled which
+   !   branches above were taken.
+   call printMethodsBlock
+
+   ! Close the log here and only here. It is opened once, at the outermost
+   !   level in parseCommandLine, and closing it anywhere but the matching
+   !   outermost level leaves a trap for whatever is appended to the end of
+   !   a run later: a write to the closed unit does not fail, it silently
+   !   reconnects and truncates the file.
+   close (20)
+
+   ! Signal to the calling imago.py script that the program completed
+   !   without an abortive error. This is the last statement of the run and
+   !   must stay that way: it certifies everything above it, so anything
+   !   placed after it would be work the certificate has already promised
+   !   was finished. Certifying from a cleanup routine instead, as was done
+   !   before, means certifying one stage while later stages have yet to
+   !   run.
+   open (unit=2,file='fort.2',status='unknown')
 
 end subroutine Imago
 
@@ -1351,12 +1373,9 @@ subroutine loen(inSCF)
       call bispec ! Use the bispectrum component method.
    endif
 
-   ! Close the output file
-   close (20)
-
-   ! Open a file to signal completion of the program.
-   open (unit=2,file='fort.2',status='unknown')
-   
+   ! The log stays open and the completion signal is not raised here. Both
+   !   belong to the whole run rather than to this stage, and both happen
+   !   once, at the end of Imago.
 
 end subroutine loen
 
@@ -1382,9 +1401,9 @@ subroutine cleanUpSCF
    close (8) ! SCF Potential
    close (13) ! Magnetic moments
    close (14) ! Energy data per iteration
-   if(doPSCF < 0) then
-      close (20) ! Primary output
-   endif
+
+   ! The primary output stays open. It is closed once, at the end of Imago,
+   !   after the method citations have been written to it.
 
    ! Deallocate all the other as of yet un-deallocated arrays.
    call cleanUpAtomTypes
@@ -1402,8 +1421,9 @@ subroutine cleanUpSCF
       call cleanUpSecularEqn
    endif
 
-   ! Open file to signal completion of the program to the calling imago script.
-   open (unit=2,file='fort.2',status='unknown')
+   ! The completion signal is not raised here. A post-SCF stage may still
+   !   be ahead, so this routine is in no position to certify that the run
+   !   succeeded. That happens once, at the end of Imago.
 
 end subroutine cleanUpSCF
 
@@ -1423,9 +1443,10 @@ subroutine cleanUpPSCF
 
    implicit none
 
-   ! Close any opened files.
+   ! Close any opened files. The primary output is not among them; it is
+   !   closed once, at the end of Imago, after the method citations have
+   !   been written to it.
    close (8)
-   close (20)
 
    ! Deallocate all the other as of yet un-deallocated arrays.
    call cleanUpAtomTypes
@@ -1441,8 +1462,8 @@ subroutine cleanUpPSCF
       call cleanUpSecularEqn
    endif
 
-   ! Open file to signal completion of the program to the calling imago script.
-   open (unit=2,file='fort.2',status='unknown')
+   ! The completion signal is not raised here. It belongs to the whole run
+   !   rather than to this stage, and happens once, at the end of Imago.
 
 end subroutine cleanUpPSCF
 

@@ -4715,23 +4715,43 @@ on the same data later with no schema change.  Built on P10.
   DESIGN 6.2.5, PSEUDOCODE 13.4 (`cache_key_matches`) + 11.4
   (new `prepare_units`).  CODE.  DONE.  +4 tests, 1132 pass;
   each verified to FAIL against the restored defects.
-- [ ] C133. Code the output control facility and the citation
-  banner (PSEUDOCODE 17).  Three new Fortran modules --
-  verboseness.f90, banner.f90, methodCitations.f90 -- added to
-  the imagoG and imago source lists in the ordering PSEUDOCODE
-  17.9 fixes, which is forced by the module dependencies and
-  not free to choose.  Two call sites: initVerboseness then
-  printIdentityBlock between the open(20,...) and the
-  timeStampStart(24) in parseCommandLine, in that order and no
-  other; printMethodsBlock at the end of Imago in imago.F90.
-  Delete the dead `banner` variable at timeStamps.f90:24 in the
-  same change, before it can be confused with O_Banner.  Verify
-  by eye that the art lands flush with the len=51 timestamp
-  rules -- a list-directed write shifts it one column and looks
-  almost right.  Then check that IMAGO_VERBOSENESS unset, set
-  to `none`, set to `banner`, and set to a typo each behave as
-  PSEUDOCODE 17.3 says, the last of them warning and running to
-  completion.
+- [x] C133. Code the output control facility and the citation
+  banner (PSEUDOCODE 17).  DONE 2026-07-28.  Three new Fortran
+  modules -- verboseness.f90, banner.f90, methodCitations.f90 --
+  in both engine source lists; initVerboseness then
+  printIdentityBlock in parseCommandLine; printMethodsBlock at
+  the end of Imago; dead `banner` variable removed from
+  timeStamps.f90.  Verified on a live silicon SCF: the art
+  lands byte for byte identical to banner.txt, so it is flush
+  with the len=51 timestamp rules; all seven IMAGO_VERBOSENESS
+  cases behave (unset, none, banner, BANNER, banner+typo,
+  none,banner, and ",,banner,"), with the typo warning and the
+  run completing; and both registry entries print when their
+  predicates hold.
+  THE FIRST RUN DESTROYED ITS OWN LOG, and the spec was what
+  was wrong.  cleanUpSCF, cleanUpPSCF, and loen each closed
+  unit 20 before the end of Imago, so printMethodsBlock wrote
+  to a closed unit -- which does not fail.  Fortran reconnects
+  it to fort.20 and truncates, leaving an 8-line file holding
+  only the citation that had just erased 900 lines of results.
+  Nothing in the chain could have caught it: every level agreed
+  with the level above it and the error was in all of them.
+  Only running it found it.
+  The same three routines also raised the fort.2 success
+  signal, which DESIGN 6.1.2 says certifies the binary ran
+  without an abortive error and which imago.py:1598 treats as
+  its sole success gate.  Since every 200-series job runs both
+  stages in one invocation, cleanUpSCF certified success before
+  the post-SCF stage had begun -- and gfortran exits 0 on both
+  STOP and STOP 'message', so the return code did not catch it
+  either.  A post-SCF abort was reported as success.  Both are
+  one defect: a whole-run event raised from a routine that
+  knows about a single stage.  The tail of the run is now
+  ordered once at the outermost level -- citations, close (20),
+  fort.2 -- and printMethodsBlock inquires whether the log is
+  open, complaining to stdout rather than writing if it is not,
+  so a future early close costs the citations instead of
+  everything.  DESIGN 10.6 and PSEUDOCODE 17.7/17.8 corrected.
 - [ ] C81. Provisioning consumer in the flight layer (the
   kaleidoscope flight-builder helper or a thin sibling): query
   the predictor with a proposed config + size, apply a safety

@@ -80,6 +80,8 @@ subroutine parseCommandLine
 
    ! Use necessary modules.
    use O_TimeStamps
+   use O_Verboseness, only: initVerboseness
+   use O_Banner, only: printIdentityBlock
 
    ! Make sure that there are no accidental variable declarations.
    implicit none
@@ -89,6 +91,19 @@ subroutine parseCommandLine
 
    ! Open the file that will be written to as output for this program.
    open(20,file='fort.20',status='unknown',form='formatted')
+
+   ! Establish what this run is willing to print, and then print the
+   !   identity block. This slot is forced from both sides: nothing may
+   !   print earlier because unit 20 does not exist earlier, and nothing
+   !   may print later because the timestamp below writes the first rule of
+   !   the log, which the banner must sit above.
+   !
+   ! The order of these two calls is forced as well, and a mistake here is
+   !   invisible. Reversed, printIdentityBlock tests a mask that is still
+   !   zero and returns without printing or complaining, so the run
+   !   succeeds and the banner is simply missing.
+   call initVerboseness
+   call printIdentityBlock
 
    ! Record the date and time that we start.
    call timeStampStart (24)

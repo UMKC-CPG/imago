@@ -12796,6 +12796,59 @@ prints immediately after the log is opened in
 the methods block prints at the end of the run. The slot at the
 head is forced -- the unit does not exist earlier.
 
+**The log is closed once, at the end, after the methods block.**
+It is not today. `cleanUpSCF` closes unit 20 when no post-SCF
+stage follows, `cleanUpPSCF` closes it unconditionally, and
+`loen` closes it before signalling completion, so by the time
+the run ends the log is already shut. Writing to a closed unit
+does not fail: Fortran reconnects it to `fort.20` and truncates,
+which destroys the whole log and leaves behind only the
+citation that destroyed it. This was found by running the code,
+not by reading it.
+
+The correction is to close the log where it is opened -- once,
+at the outermost level, after everything that writes to it has
+finished. A file opened in `parseCommandLine` and closed in
+three separate cleanup routines is fragile whatever is appended
+to the run, and the alternative of having the methods block
+reopen the file would leave that fragility in place while
+hiding its next symptom.
+
+The block still asks whether the unit is open before writing. If
+it is not, it says so on standard output and prints nothing to
+the log. That is deliberately not a repair: a later change that
+re-introduces an early close should cost the citations and
+announce itself, rather than silently costing the run's entire
+output the way it did the first time.
+
+**The `fort.2` completion signal moves with it, and for the same
+reason.** Section 6.1.2 says `fort.2` certifies that the binary
+ran without an abortive error, and `imago.py` treats its
+presence as the sole success gate. The engine does not keep that
+promise. The file is created at the end of `cleanUpSCF`,
+`cleanUpPSCF`, and `loen` -- the same three inner routines -- and
+every post-SCF job runs both stages in one invocation, so
+`cleanUpSCF` certifies success and the entire post-SCF stage
+then runs afterward. A `stop` during that stage leaves the
+certificate already on disk, and since `STOP` and
+`STOP 'message'` both exit zero under gfortran the return code
+does not catch it either. The driver reports success for a run
+that died.
+
+Both are the same defect: an event that belongs to the whole run
+emitted from a routine that only knows about one stage of it. So
+the tail of the run is ordered once, at the outermost level,
+where each step means what it says:
+
+1. the methods block -- the last write to the log
+2. `close (20)` -- the log is complete and on disk
+3. `fort.2` -- every one of the above happened
+
+This also survives the stage combinations the engine is intended
+to grow into. One signal at the end certifies whatever set of
+stages was requested; a signal per stage cannot, which is what
+today's failure demonstrates.
+
 Within that slot the order is also forced. `initVerboseness`
 (ARCHITECTURE 12.2) must run before the identity block, because
 the block is gated on the mask that call sets. Reversed, the

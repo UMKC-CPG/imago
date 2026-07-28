@@ -12749,6 +12749,17 @@ subroutine printMethodsBlock
 
     call initMethodCitations
 
+    # The log must still be open.  Writing to a closed unit does
+    # not fail -- Fortran reconnects it to fort.20 and truncates,
+    # taking the run's whole log with it (DESIGN 10.6).  Say so
+    # where it can still be seen, and write nothing.
+    inquire (unit=20, opened=logIsOpen)
+    if (.not. logIsOpen) then
+        write (6,*) "The log was closed before the citations"
+              " could be written; they are omitted."
+        return
+    endif
+
     # Say nothing at all rather than print an empty invitation.
     if (no methodWasUsed(ref) is true) return
 
@@ -12824,6 +12835,53 @@ goes after the `doLoEn` branch and immediately before
 `end subroutine Imago`, which is the last point at which every
 branch that could have exercised a method has run.
 
+**Relocating the close of the log, in `imago.F90`.**  That last
+point is, as the engine stands, after the log has already been
+closed, so the call above cannot be added on its own.  Three
+`close (20)` statements are removed and replaced by one:
+
+```
+    # cleanUpSCF:  close (20) under "if (doPSCF < 0)"  -- REMOVE
+    # cleanUpPSCF: close (20)                          -- REMOVE
+    # loen:        close (20) before opening fort.2    -- REMOVE
+
+    # The fort.2 completion signal moves for the same reason
+    # (DESIGN 10.6).  All three of these certify success from a
+    # routine that knows about one stage only, and cleanUpSCF's
+    # fires before the post-SCF stage has even begun.
+    # cleanUpSCF:  open (unit=2,file='fort.2',...)      -- REMOVE
+    # cleanUpPSCF: open (unit=2,file='fort.2',...)      -- REMOVE
+    # loen:        open (unit=2,file='fort.2',...)      -- REMOVE
+
+    # end of Imago, after every branch above.  The order is the
+    # meaning: nothing may follow the signal.
+    call printMethodsBlock
+    close (20)
+    open (unit=2,file='fort.2',status='unknown')
+```
+
+DESIGN 10.6 gives the reasoning; what matters here is that this
+is a correction to existing code, not an addition beside it.
+Leaving those closes in place and having the methods block
+reopen the file would also work, and is the wrong repair: the
+log would still be opened at one level and closed at three, and
+the next thing appended to the end of a run would meet the same
+trap.
+
+Nothing else depends on either being early.  The conditional on
+`cleanUpSCF`'s close exists only to keep the log alive for a
+post-SCF stage, which closing once at the end does
+unconditionally and better; and a run that reaches the end of
+`Imago` at all is exactly the run whose success `fort.2` is
+meant to certify.
+
+The relocation is not a design change.  DESIGN 6.1.2 already
+states that `fort.2` certifies the binary ran without an
+abortive error, and `imago.py` already treats it that way. The
+code does not implement that, which makes this the ordinary
+case of code disagreeing with a specification, repaired in the
+direction the chain requires.
+
 ### 17.9 Build wiring
 
 `verboseness.f90`, `banner.f90`, and `methodCitations.f90` are
@@ -12877,6 +12935,21 @@ Two questions this pass could not close.
    results to cite -- but it is a consequence of where the call
    sits rather than a decision anyone made, and DESIGN 10.6 does
    not address it.
+
+   The first draft of this section had a worse version of the
+   same blind spot, and it is worth recording how it was caught.
+   It placed the call at the end of `Imago` without noticing
+   that the log is closed before that point, so the first real
+   run wrote its citations into a freshly truncated `fort.20`
+   and destroyed every line the calculation had produced.  The
+   code implemented the pseudocode faithfully; the pseudocode
+   was wrong.  Nothing in the chain would have found it, because
+   every level had been checked against the level above and the
+   error was introduced at the bottom of the stack of documents
+   and inherited upward from the code's actual behaviour.  Only
+   running it found it.  That is the argument for the guard now
+   in 17.7 and for treating "it compiles and the section reads
+   correctly" as the weakest kind of evidence.
 
 2. **How a method added without a predicate is caught.**  This
    is DESIGN 10.8's open question and the pseudocode does not

@@ -21,7 +21,6 @@ module O_TimeStamps
    character(len=10) :: date
    character(len=10) :: tempTime
    character(len=12) :: time
-   character(len=51) :: banner
    character(len=51), dimension(34) :: opLabels
    integer :: numOpCodes
 
