@@ -43,13 +43,21 @@ class KeyFile:
 class KeyFields:
     """The client-declared cache identity of a calculation
     (DESIGN 6.2.5).  ``scalars`` are compared verbatim,
-    field-by-field (e.g. a k-point spec, a convergence
-    threshold, an Imago commit).  ``files`` are compared by
-    byte-comparison against their staged copies.  Only the
-    client knows which inputs define identity for its
+    field-by-field (e.g. a convergence threshold).  ``files``
+    are compared by byte-comparison against their staged copies.
+    Only the client knows which inputs define identity for its
     calculations, so it supplies these; kaleidoscope never
     guesses (a too-broad key risks false hits and wrong
-    science, a too-narrow key risks needless re-runs)."""
+    science, a too-narrow key risks needless re-runs).
+
+    The key asks whether this is the same *calculation*, not
+    whether its result is still good.  The engine build is
+    therefore deliberately outside it: a rebuilt engine does not
+    make a stored result wrong when that result is a starting
+    point later work re-converges, while comparing the build
+    would miss the cache on every ordinary development commit.
+    The build travels on ``CalcUnit.record`` instead -- recorded
+    per run, never compared."""
     scalars: dict = field(default_factory=dict)
     files: list = field(default_factory=list)   # list[KeyFile]
 
@@ -83,6 +91,26 @@ class CalcUnit:
                       that share a structure id.  Keeping the core
                       ignorant of its meaning honors Principle 9.
     - ``key_fields``: the cache identity (DESIGN 6.2.5).
+    - ``record``    : free-form facts ABOUT the run that are not
+                      inputs TO it -- the engine build identity is
+                      the standing case (DESIGN 6.2.4/6.2.5).  The
+                      driver copies the mapping verbatim into
+                      ``status.toml``'s ``[record]`` table when the
+                      unit launches, and the dispatch core never
+                      interprets, compares, or acts on a value in
+                      it: it is deliberately not part of the cache
+                      key and not part of the FlightReport.  It
+                      exists so a curator reading a directory
+                      months later, or a reuse plan naming what
+                      produced a stored result, has something to
+                      read.  Because it is written at launch it
+                      stays put across a cache hit, describing the
+                      run that produced the result rather than the
+                      flight that reused it.  A *wingbeat* may read
+                      a value it recognises and copy it into its own
+                      result file, which is how the Imago wingbeat
+                      gets the build into ``result.toml`` for a
+                      guidance entry's provenance (DESIGN 6.2.2).
     - ``prepared_dir``: the per-unit staging directory the
                       producer's prepare step fills with the built
                       inputs (structure.dat, imago.dat, ...), or
@@ -100,6 +128,7 @@ class CalcUnit:
     kind: str = "convergence"
     key_fields: KeyFields = field(default_factory=KeyFields)
     prepared_dir: Optional[str] = None
+    record: dict = field(default_factory=dict)
 
 
 @dataclass

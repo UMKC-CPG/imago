@@ -298,8 +298,37 @@ def is_gapless(rung, gap_threshold):
     ``rung`` exposes a ``.gap`` in eV, taken from its result's
     ``gap_ev``; a rung whose gap is unknown (``None``) is treated as
     NON-metallic, so a missing reading never spuriously stops a
-    climb."""
-    return rung.gap is not None and rung.gap <= gap_threshold
+    climb.
+
+    A thin wrapper over :func:`is_gapless_value`: this side knows how
+    to find a gap on a *rung*, that side holds what the gap means.
+    The guidance harvest calls the same core on a parsed
+    ``result.toml`` (:func:`build_entry`), so the climb's metal
+    short-circuit and the harvest's metal skip cannot drift apart
+    (DESIGN 7.8)."""
+    return is_gapless_value(rung.gap, gap_threshold)
+
+
+def is_gapless_value(gap_ev, gap_threshold):
+    """Return whether a bare band-gap reading is metallic -- at or
+    below ``gap_threshold`` (DESIGN 3.12.3 / 7.8).
+
+    ``gap_threshold`` is an ABSOLUTE band gap in eV, not a per-atom
+    energy: low enough that no real insulator crosses it, high enough
+    to catch a true metal's near-zero reading.
+
+    A MISSING gap (``None``) is NOT metallic.  Both callers depend on
+    that, for the same reason from opposite ends: in the climb an
+    absent reading must not stop a search that was converging, and in
+    the harvest it must not suppress a guidance entry a genuine
+    insulator earned.  Defaulting the other way would make an unwired
+    gap look like a collection with no insulators in it -- the sort of
+    failure nobody thinks to question.
+
+    The scalar core, so the rung-shaped :func:`is_gapless` and the
+    result-dict-shaped call in :func:`build_entry` share ONE rule and
+    neither caller has to build a shape it does not have."""
+    return gap_ev is not None and gap_ev <= gap_threshold
 
 
 # Two runs of the same resolved mesh are the same calculation and
@@ -476,7 +505,45 @@ def build_entry(workspace_root, source_structure, prediction,
     tolerance, stored as the entry's ``metric_threshold`` (DESIGN
     7.8) -- distinct from the run's ``scf_threshold``.  The
     ``entry_id`` is left empty here; :func:`save_entry` fills it with
-    the deterministic slug."""
+    the deterministic slug.
+
+    Returns None for a METAL, which stages no guidance entry at all
+    (DESIGN 7.8).  An entry's whole content is the claim "for a
+    structure like this, this k-density is converged," and a metal
+    cannot make it: its energy does not converge in k-points at any
+    mesh worth paying for, and the climb acknowledges this by
+    short-circuiting at the first gapless rung and settling there as
+    a deliberately rough potential (DESIGN 3.12.3).  That settled
+    rung is a stopping point, not a converged density.  Recording it
+    as one would feed the predictor a claim nobody made -- and
+    disproportionately, since a metal is often the only member of its
+    lattice family in a young collection and would then dominate
+    every prediction for that family through the distance weighting
+    of DESIGN 7.6.  The guard sits HERE, in the one builder both
+    harvest paths share, so neither can grow its own version of the
+    rule.  The producer's potential harvest is unaffected: a rough
+    starting potential is exactly what that database is for."""
+
+    # The metal test, before any other work: the cut is read off the
+    #   prediction record, which is how a manifest knob reaches a
+    #   standalone tool that never sees a manifest (the same channel
+    #   kpoint_threshold uses, DESIGN 7.8 step 3d').  is_gapless_value
+    #   is the scalar core the climb's rung-shaped is_gapless also
+    #   calls, so one rule serves both -- including its side on
+    #   missing data: an UNKNOWN gap is NOT metallic, because a
+    #   missing reading must never silently suppress an entry a real
+    #   insulator earned.
+    metal_gap_threshold = prediction.get("metal_gap_threshold")
+    if metal_gap_threshold is None:
+        raise ValueError(
+            source_structure + ": prediction record carries no "
+            "metal_gap_threshold (the absolute eV band gap below "
+            "which a run counts as metallic, which the producer "
+            "resolves from the manifest and stamps on the record, "
+            "DESIGN 7.8)")
+    if is_gapless_value(chosen_result.get("gap_ev"),
+                        metal_gap_threshold):
+        return None
 
     # The SCF threshold is a per-run fact from the chosen run's
     #   result.toml, recorded in the entry's context; it is SEPARATE
@@ -553,6 +620,13 @@ def build_entry(workspace_root, source_structure, prediction,
         predictor_neighbor_ids=tuple(
             prediction["neighbor_entry_ids"]))
 
+    # The build behind the run, read from result.toml like every other
+    #   per-run fact: the wingbeat echoed it there out of the unit's
+    #   `record` (DESIGN 6.2.2/6.2.4), so this harvest stays on its
+    #   three sources and never opens the dispatch core's status.toml.
+    #   _UNKNOWN_COMMIT remains the floor for a run that recorded
+    #   nothing -- non-empty, so the schema's rule-11 check passes and
+    #   a curator can spot it on review.
     commit = chosen_result.get("imago_commit") or _UNKNOWN_COMMIT
     provenance = Provenance(
         flight_id=flight_id_of(workspace_root),
@@ -733,6 +807,15 @@ def harvest_flight(workspace_root, db_root, dataspace):
             dataspace, structure, kpoint_threshold,
             collapsed_densities, collapsed_energies,
             kpoint_densities[idx], result_tomls[idx])
+
+        # g'. A metal builds no entry (DESIGN 7.8): build_entry
+        #    returns None and BOTH harvest paths skip on it, so the
+        #    one place the rule lives is the one builder they share.
+        if entry is None:
+            summaries.append(
+                unit_id + ": metal -- no guidance entry staged")
+            continue
+
         path = save_entry(entry, db_root)
         summaries.append(unit_id + ": staged " + path)
 

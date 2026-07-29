@@ -126,6 +126,30 @@ class PredictionRecord:
                                harvest reads its own sub-model back
                                from its own record (DESIGN 6.2.9 /
                                7.8 step 3f).
+    - ``kpoint_convergence_threshold`` /
+      ``metal_gap_threshold`` : the two RESOLVED manifest knobs the
+                               harvest needs and cannot look up for
+                               itself.  The guidance harvest is a
+                               standalone tool pointed at a finished
+                               workspace and never sees a manifest,
+                               so the producer stamps both here when
+                               it builds the flight -- the same
+                               channel, and the same reason, as
+                               ``system_type`` and the sub-model
+                               above.  The first is the grid-flatness
+                               tolerance in eV per atom (the solid's
+                               own value, else the manifest
+                               ``[harvest]`` block, else 5e-4;
+                               DESIGN 5.7 / 7.8 step 3c).  The second
+                               is the absolute band gap in eV at or
+                               below which a run counts as metallic
+                               -- the database-wide
+                               ``[kpoint_climb]`` knob the climb
+                               reads as ``config.metal_gap_threshold``
+                               -- so the climb's metal short-circuit
+                               and the harvest's metal skip apply ONE
+                               resolved number (DESIGN 3.12.3 / 7.8
+                               step 3d').
     """
     policy: str
     predicted_kpoint_density: float | None
@@ -139,6 +163,8 @@ class PredictionRecord:
     basis: str = ""
     functional: str = ""
     kpoint_integration: str = ""
+    kpoint_convergence_threshold: float = 0.0
+    metal_gap_threshold: float = 0.0
 
 
 # ------------------------------------------------------------------
@@ -211,8 +237,20 @@ def decode_mesh_value(token):
 
 # The producer's cache identity for a converged-potential run
 #   (DESIGN 6.2.1): the scalar settings that define "the same
-#   calculation" plus the structure file, byte-compared.
-_KEY_SCALAR_NAMES = ("converg", "imago_commit")
+#   calculation" plus the structure file, byte-compared.  Just
+#   ``converg``, the SCF convergence limit -- a makeinput option, and
+#   the concrete name for DESIGN's "scf_threshold".
+#
+#   The engine build identity is deliberately NOT here.  The key asks
+#   whether this is the same CALCULATION, not whether its result is
+#   still good (DESIGN 6.2.5): a rebuilt engine does not make a stored
+#   potential wrong, since that potential is a starting point every
+#   later SCF re-converges, while comparing the build would miss the
+#   cache on every ordinary development commit and change the physics
+#   almost never.  It travels on ``CalcUnit.record`` instead --
+#   recorded per run, printed in the driver's reuse plan, never
+#   compared.
+_KEY_SCALAR_NAMES = ("converg",)
 
 
 def standard_key_fields(structure, options):
@@ -220,14 +258,11 @@ def standard_key_fields(structure, options):
     (DESIGN 6.2.1/6.2.5): the structure file byte-compared, plus
     the scalar settings that define run identity.
 
-    The scalar names are taken from ``options`` when present
-    (DESIGN 6.2.1/6.2.10 list ``converg`` and ``imago_commit``).
-    ``converg`` (the SCF convergence limit) is naturally in the
-    makeinput options; the build-identity ``imago_commit`` is
-    producer-injected -- it is
-    carried in ``options`` when the producer (C74) supplies it and
-    silently omitted otherwise, so this helper never has to learn
-    how the build stamps its own commit (a C78 concern).
+    The scalar names are taken from ``options`` when present, and in
+    v1 that is the single ``converg`` -- the SCF convergence limit,
+    naturally a makeinput option (DESIGN 6.2.10).  Nothing about the
+    engine build appears here; see ``_KEY_SCALAR_NAMES`` above for
+    why, and ``CalcUnit.record`` for where it goes instead.
 
     The single key file ``"structure.dat"`` is byte-compared
     against the staged copy under the run directory.  It is
@@ -274,7 +309,7 @@ def _load_structure(structure):
 #  dispatches.  The climb (mesh_climb) chooses which meshes to build.
 # ------------------------------------------------------------------
 
-def build_mesh_unit(structure, options, mesh, id):
+def build_mesh_unit(structure, options, mesh, id, record=None):
     """Build one explicit-mesh convergence ``CalcUnit`` for the
     adaptive climb (DESIGN 7.7; PSEUDOCODE 4e.7).
 
@@ -306,6 +341,18 @@ def build_mesh_unit(structure, options, mesh, id):
     id
         The unit id.  The producer passes the material's reference
         id, which the round adapter reads back to route the energy.
+    record
+        Free-form facts ABOUT the run rather than inputs TO it --
+        in practice ``{"imago_commit": <sha>}`` (DESIGN 6.2.4).
+        This is where the build identity travels, and it must not
+        ride in ``options``: every key there is a real tool input,
+        which is what keeps makeinput's strict unknown-key check a
+        pure typo backstop.  The driver stamps it into
+        ``status.toml`` at launch and the wingbeat echoes it into
+        ``result.toml``.  Leave it None and the whole
+        recorded-not-compared path is empty -- the reuse plan names
+        no build, and a guidance entry's provenance reads
+        ``"unknown"``.
     """
     unit_options = dict(options)
     unit_options["scfkp"] = list(mesh)
@@ -320,11 +367,13 @@ def build_mesh_unit(structure, options, mesh, id):
         structure=structure,
         options=unit_options,
         wingbeat="imago",
+        record=dict(record or {}),
         key_fields=standard_key_fields(structure, options))
 
 
 def predict_kpoint_density(structure, dataspace, system_type,
-                           submodel, center=None):
+                           submodel, center=None,
+                           harvest_thresholds=None):
     """Predict the converged k-point density for one structure,
     laying no grid (DESIGN 7.7; PSEUDOCODE 4e.7).
 
@@ -339,6 +388,16 @@ def predict_kpoint_density(structure, dataspace, system_type,
     A curator-pinned ``center`` (the 5.7 ``kpoint_spec`` density
     override) BYPASSES the predictor: the density is the pinned
     value at full confidence, and the record documents the override.
+
+    ``harvest_thresholds`` carries the two resolved manifest knobs
+    the harvest cannot look up for itself --
+    ``kpoint_convergence_threshold`` and ``metal_gap_threshold`` --
+    which are stamped onto the record here because this record is
+    the one per-structure channel the harvest recovers (PSEUDOCODE
+    15.6).  A caller that omits them leaves both at 0.0, which reads
+    as "no tolerance and no metal": the flatness test then converges
+    nothing and the metal test rejects nothing, so a producer must
+    pass them.
 
     Returns
     -------
@@ -358,6 +417,15 @@ def predict_kpoint_density(structure, dataspace, system_type,
     query_sig = compute_signature(
         resolved, system_type, dataspace.group_table)
 
+    # The resolved knobs both harvest paths read back off this
+    #   record.  Pulled out once here so the override branch and the
+    #   predicted branch below cannot stamp different values.
+    thresholds = dict(harvest_thresholds or {})
+    kpoint_threshold = float(
+        thresholds.get("kpoint_convergence_threshold", 0.0))
+    metal_gap_threshold = float(
+        thresholds.get("metal_gap_threshold", 0.0))
+
     if center is not None:
         # Curator override (5.7 kpoint_spec.density): the predictor
         #   is never consulted; the density is the pinned value.
@@ -373,7 +441,9 @@ def predict_kpoint_density(structure, dataspace, system_type,
             feature_vector=query_sig,
             basis=submodel["basis"],
             functional=submodel["functional"],
-            kpoint_integration=submodel["kpoint_integration"])
+            kpoint_integration=submodel["kpoint_integration"],
+            kpoint_convergence_threshold=kpoint_threshold,
+            metal_gap_threshold=metal_gap_threshold)
         return float(center), 1.0, False, record
 
     result = predict(
@@ -391,6 +461,8 @@ def predict_kpoint_density(structure, dataspace, system_type,
         feature_vector=query_sig,
         basis=submodel["basis"],
         functional=submodel["functional"],
-        kpoint_integration=submodel["kpoint_integration"])
+        kpoint_integration=submodel["kpoint_integration"],
+        kpoint_convergence_threshold=kpoint_threshold,
+        metal_gap_threshold=metal_gap_threshold)
     return (result.predicted_kpoint_density, result.confidence,
             result.is_under_trained, record)

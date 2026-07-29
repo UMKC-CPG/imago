@@ -205,9 +205,12 @@ def mesh_of(entry: GuidanceEntry):
 
     ``converged_mesh`` is optional in the schema and a manual
     entry carries no verification block at all (DESIGN 7.2 /
-    7.9).  Both absences read the same way to the dedup: an
-    answer that cannot be compared, which falls to the conflict
-    branch rather than being waved through.
+    7.9).
+
+    REPORTING ONLY -- no branch tests this value.  The occupied case
+    acts the same whether two meshes agree or not, because promotion
+    has no verb for retracting a reviewed entry unasked, so the mesh
+    is shown to the person and nothing else (DESIGN 7.8, VISION 16).
     """
 
     if entry.verification is None:
@@ -217,7 +220,17 @@ def mesh_of(entry: GuidanceEntry):
 
 def load_promoted_entries(db_root: str) -> dict:
     """Read every promoted entry under ``db_root/entries/`` and
-    return them keyed by :func:`dedup_key`.
+    return them keyed by :func:`dedup_key`, each value the pair
+    ``(path, entry)``.
+
+    It yields PAIRS rather than bare entries because REPLACE retires
+    the file a promoted entry occupies and therefore needs its path.
+    Storing bare entries would leave a second REPLACE against the
+    same claim with nothing to retire.  The paths cost nothing to
+    carry -- this walk already has them -- and deriving them from an
+    ``entry_id`` instead would work only because
+    :func:`guidance_db.save_entry` happens to name each file
+    ``<entry_id>.toml``, an invariant not worth leaning on.
 
     This is the one judgment :func:`auto_promote_ok` cannot make
     from the staged file alone, so the promotion pass loads the
@@ -229,9 +242,9 @@ def load_promoted_entries(db_root: str) -> dict:
 
     A later file silently wins a key collision here.  Two
     promoted entries sharing a claim is a pre-existing state this
-    pass cannot fix (it has no verb for removing a promoted
-    entry), and refusing to run at all would leave the curator
-    with no way to promote anything else.
+    pass cannot fix unasked (its only retraction verb is a curator's
+    REPLACE, per record), and refusing to run at all would leave the
+    curator with no way to promote anything else.
     """
 
     promoted: dict = {}
@@ -243,24 +256,8 @@ def load_promoted_entries(db_root: str) -> dict:
             #   entry on its own, and the entry_id uniqueness rule
             #   is enforced by the loader that builds a dataspace.
             entry = load_entry(path, system_type, {})
-            promoted[dedup_key(entry)] = entry
+            promoted[dedup_key(entry)] = (path, entry)
     return promoted
-
-
-def _by_generated_at(first: tuple, second: tuple) -> tuple:
-    """Order two ``(path, entry)`` pairs sharing a claim into
-    ``(keep, drop)``: the later ``generated_at`` is kept.
-
-    Timestamps are ISO-8601 UTC, so a string comparison orders
-    them correctly.  Ties fall back to the path so the outcome is
-    deterministic rather than dependent on directory order.
-    """
-
-    first_stamp = (first[1].generated_at, first[0])
-    second_stamp = (second[1].generated_at, second[0])
-    if first_stamp >= second_stamp:
-        return first, second
-    return second, first
 
 
 # ==============================================================
@@ -367,17 +364,21 @@ def format_summary(entry: GuidanceEntry) -> str:
     return "\n".join(lines)
 
 
-def _format_conflict(staged: GuidanceEntry,
-                     prior: GuidanceEntry) -> str:
-    """Render the CONFLICT report: one claim, two converged
-    meshes (DESIGN 7.8).
+def format_occupied(staged: GuidanceEntry,
+                    prior: GuidanceEntry) -> str:
+    """Render the OCCUPIED report: the collection already holds a
+    record for this claim (DESIGN 7.8).
 
-    Both sides are shown with their mesh and their Imago commit,
-    because a mesh that changed across a commit is the expected
-    shape of this -- the code's behaviour moved -- and which
-    answer is right is then a physics judgment.  The report names
-    what to compare rather than choosing, and says plainly that
-    nothing was moved.
+    Both sides are shown with their converged mesh, their date, and
+    the build behind them, because a mesh that moved across a build
+    is the expected shape of a re-run and which answer is better is
+    then a physics judgment -- one a person makes, not a comparison
+    (VISION 16).  The meshes are PRINTED, never tested: the action is
+    the same either way, since promotion only ever adds to
+    ``entries/`` on its own initiative.  Interactive review offers
+    REPLACE on top of this report; the unattended modes retire the
+    newcomer to ``superseded/`` and leave the promoted entry exactly
+    as the curator accepted it.
     """
 
     def describe(entry: GuidanceEntry) -> str:
@@ -389,8 +390,8 @@ def _format_conflict(staged: GuidanceEntry,
 
     return "\n".join([
         "=" * 60,
-        "CONFLICT: " + staged.entry_id + " re-runs a promoted "
-        "claim with a different answer.",
+        "OCCUPIED: " + staged.entry_id + " re-runs a claim the "
+        "collection already holds.",
         "  structure : "
         + os.path.basename(staged.provenance.source_structure),
         "  settings  : " + staged.context.basis + "/"
@@ -399,12 +400,19 @@ def _format_conflict(staged: GuidanceEntry,
         "  promoted  : " + prior.entry_id + "  " + describe(prior),
         "  staged    : " + staged.entry_id + "  "
         + describe(staged),
-        "  Nothing moved.  Compare the two runs and resolve by "
-        "hand: keep",
-        "  the promoted entry and delete the staged file, or "
-        "remove the",
-        "  promoted entry first and re-run this promotion.",
     ])
+
+
+def entries_path(db_root: str, system_type: str,
+                 staged_path: str) -> str:
+    """Where a staged file lands once promoted.  Promotion is a pure
+    rename that keeps the basename, so this is the one formula for
+    that destination: :func:`move_to_entries` computes the same thing
+    and returns it, and ``dry-run`` -- which renames nothing but must
+    still model the promoted index -- asks here instead."""
+
+    return os.path.join(db_root, "entries", system_type,
+                        os.path.basename(staged_path))
 
 
 # ==============================================================
@@ -433,6 +441,33 @@ def _ask_choice(ask) -> str:
         # Anything else: re-prompt rather than guess.
 
 
+def _ask_occupied_choice(ask) -> str:
+    """Prompt the curator on an OCCUPIED claim until they answer
+    REPLACE, SKIP, or DELETE, and return the canonical word.
+
+    REPLACE is the only route by which anything ever leaves
+    ``entries/``, and it exists solely behind this per-record prompt
+    (DESIGN 7.8).  The standing objection -- a tool that can retract
+    a reviewed entry can do so by accident -- is an argument against
+    an *automatic* retraction and does not reach an explicit one;
+    without the verb, the report names a situation the curator could
+    act on only by moving files by hand, which is a worse place to
+    leave them.  PROMOTE is deliberately not offered: promoting
+    beside the existing record is the one outcome the uniqueness rule
+    exists to prevent.  An empty answer defaults to SKIP."""
+
+    while True:
+        answer = ask("REPLACE / SKIP / DELETE [r/s/d]: ")
+        normalized = answer.strip().lower()
+        if normalized in ("r", "replace"):
+            return "REPLACE"
+        if normalized in ("s", "skip", ""):
+            return "SKIP"
+        if normalized in ("d", "delete"):
+            return "DELETE"
+        # Anything else: re-prompt rather than guess.
+
+
 def promote(db_root: str, mode: str = "interactive", *,
             ask=input, output=print):
     """Walk every ``staging/<system_type>/`` file under ``db_root``
@@ -440,7 +475,7 @@ def promote(db_root: str, mode: str = "interactive", *,
 
     Returns a list of ``(entry_id, action)`` records -- where
     ``action`` is one of ``promoted`` / ``skipped`` / ``deleted``
-    / ``superseded`` / ``conflicted`` (the acting modes) or
+    / ``superseded`` / ``replaced`` (the acting modes) or
     ``would-promote`` / ``would-skip`` / ``would-supersede``
     (``dry-run``) -- so a caller or a test can see what happened
     without parsing printed text.  ``ask`` and ``output`` are
@@ -453,38 +488,53 @@ def promote(db_root: str, mode: str = "interactive", *,
     staging file aborts the run loudly (naming the file).
 
     Before any mode runs, each staged entry is checked against the
-    promoted corpus for a re-run of a claim already held (DESIGN
-    7.8).  A re-run whose converged mesh agrees is retired to
-    ``superseded/``; one whose mesh disagrees -- or cannot be
-    compared -- is reported and left in staging for the curator,
-    never promoted automatically.  Every mode applies this,
-    ``--all`` included: refusing to store one claim twice is a
-    correctness guard, and ``--all`` waives only the quality
-    rule."""
+    promoted corpus for a claim already held (DESIGN 7.8).  That
+    check is an EXISTENCE test, not a comparison: either the
+    collection holds a record for the claim or it does not, and the
+    converged meshes are printed rather than tested, because the
+    action is the same whether they agree or not.  An occupied claim
+    leaves the promoted entry byte-identical and retires the newcomer
+    to ``superseded/``; interactive review adds REPLACE, the only
+    route by which anything ever leaves ``entries/``.  Every mode
+    applies the test, ``--all`` included: refusing to store one claim
+    twice is a correctness guard, and ``--all`` waives only the
+    quality rule.
+
+    Nothing special happens WITHIN one staging batch, which is the
+    point.  Two staged files can share a claim before either is
+    promoted -- the ordinary shape of a re-run harvested twice -- and
+    the promoted index below is updated as entries are promoted, so
+    the second file simply finds the claim occupied and takes the
+    branch above.  There is no separate batch-resolution pass and no
+    tie-break on ``generated_at``; both were machinery for saving one
+    rule from having to apply twice in a row.  One consequence is
+    worth stating because it reverses an older contract: promotion no
+    longer judges each staged file in isolation, and ``staging/`` IS
+    a uniqueness namespace."""
 
     if mode not in VALID_MODES:
         raise ValueError(
             "unknown promote mode " + repr(mode)
             + " (one of " + repr(VALID_MODES) + ")")
 
-    # The promoted corpus, keyed by claim, read once up front.
+    # The promoted corpus, keyed by claim, read once up front and
+    #   carrying each entry's path so REPLACE can retire the file it
+    #   names.  ONE shape throughout -- key -> (path, entry) -- and
+    #   the index is LIVE, not a snapshot: every branch below that
+    #   fills a slot updates it, which is what makes a within-batch
+    #   duplicate fall out of the ordinary rule (DESIGN 7.8).
     promoted = load_promoted_entries(db_root)
     # dry-run evaluates every decision below and moves nothing, so
-    #   a curator sees the whole outcome -- promotions,
-    #   retirements, and conflicts -- before a file is touched.
+    #   a curator sees the whole outcome -- promotions and
+    #   retirements alike -- before a file is touched.
     dry = (mode == "dry-run")
 
     results = []
     for system_type in VALID_SYSTEM_TYPES:
         subdir = os.path.join(db_root, "staging", system_type)
+        # Sorted for determinism only.
         staged = sorted(glob.glob(os.path.join(subdir, "*.toml")))
 
-        # Resolve re-runs WITHIN this batch first, so at most one
-        #   candidate per claim is compared against entries/.  This
-        #   is where promotion stops judging each staged file in
-        #   isolation: under the dedup rule staging IS a uniqueness
-        #   namespace, where previously it was not.
-        batch: dict = {}                 # dedup_key -> (path, entry)
         for path in staged:
             # Fresh seen_ids per file: entry_id uniqueness across
             #   the corpus is the dataspace loader's rule, and a
@@ -492,60 +542,64 @@ def promote(db_root: str, mode: str = "interactive", *,
             #   positive.  The CLAIM-level check is dedup_key.
             entry = load_entry(path, system_type, {})
             key = dedup_key(entry)
-            if key not in batch:
-                batch[key] = (path, entry)
-                continue
-            keep, drop = _by_generated_at(batch[key], (path, entry))
-            batch[key] = keep
-            drop_path, drop_entry = drop
-            if not dry:
-                move_to_superseded(drop_path, db_root, system_type)
-            output(drop_entry.entry_id + ": "
-                   + ("would be superseded" if dry else "superseded")
-                   + " -- a later run in this batch makes the same "
-                   "claim")
-            results.append(
-                (drop_entry.entry_id,
-                 "would-supersede" if dry else "superseded"))
+            prior = promoted.get(key)
 
-        # Sort on the path alone: GuidanceEntry is frozen but not
-        #   ordered, so letting a tuple comparison fall through to
-        #   it would raise the day two paths ever tie.
-        for path, entry in sorted(batch.values(),
-                                  key=lambda item: item[0]):
-            prior = promoted.get(dedup_key(entry))
             if prior is not None:
-                prior_mesh = mesh_of(prior)
-                if (prior_mesh is not None
-                        and prior_mesh == mesh_of(entry)):
-                    # REDUNDANT.  The promoted entry stands
-                    #   untouched -- promotion only ever ADDS to
-                    #   entries/, so an entry the curator reviewed
-                    #   stays byte-identical for as long as it
-                    #   lives there.  The staged copy is retired.
-                    if not dry:
-                        move_to_superseded(
-                            path, db_root, system_type)
-                    output(entry.entry_id + ": "
-                           + ("would be superseded" if dry
-                              else "superseded")
-                           + " -- already promoted as "
-                           + prior.entry_id)
-                    results.append(
-                        (entry.entry_id,
-                         "would-supersede" if dry else "superseded"))
+                prior_path, prior_entry = prior
+                # OCCUPIED.  Report both -- meshes, dates, builds --
+                #   and retire the newcomer.  The promoted entry is
+                #   left exactly as the curator accepted it; nothing
+                #   here can retract it unasked.
+                output(format_occupied(entry, prior_entry))
+
+                if mode == "interactive":
+                    choice = _ask_occupied_choice(ask)
+                    if choice == "REPLACE":
+                        # The promoted entry's own file is retired,
+                        #   which is why its path had to be carried.
+                        #   The index then points at the newcomer's
+                        #   destination, so a later REPLACE against
+                        #   this same claim has something to retire.
+                        destination = entries_path(
+                            db_root, system_type, path)
+                        if not dry:
+                            move_to_superseded(
+                                prior_path, db_root, system_type)
+                            destination = move_to_entries(
+                                path, db_root, system_type)
+                        promoted[key] = (destination, entry)
+                        output("  replaced " + prior_entry.entry_id
+                               + " -> " + destination)
+                        results.append((entry.entry_id, "replaced"))
+                        continue
+                    if choice == "DELETE":
+                        if not dry:
+                            os.remove(path)
+                        output("  deleted")
+                        results.append((entry.entry_id, "deleted"))
+                        continue
+                    output("  skipped (left in staging)")
+                    results.append((entry.entry_id, "skipped"))
                     continue
-                # CONFLICT: one claim, two answers.  Never
-                #   automatic in ANY mode -- deciding which is
-                #   right is a physics judgment, not a timestamp
-                #   comparison, and resolving it may mean removing
-                #   an entry from entries/, which this tool has no
-                #   verb for.  Report both and leave the staged
-                #   file alone.
-                output(_format_conflict(entry, prior))
-                results.append((entry.entry_id, "conflicted"))
+
+                if not dry:
+                    move_to_superseded(path, db_root, system_type)
+                output("  " + ("would be superseded" if dry
+                               else "superseded")
+                       + " -- already promoted as "
+                       + prior_entry.entry_id)
+                results.append(
+                    (entry.entry_id,
+                     "would-supersede" if dry else "superseded"))
                 continue
 
+            # FREE: the ordinary path, decided by mode.  ``all`` still
+            #   passed the existence test above -- it waives the
+            #   quality rule, not the correctness guard.  Each branch
+            #   that fills the slot stores (path, entry), the one
+            #   shape the index has; move_to_entries returns the
+            #   destination it renamed to, so the path recorded is the
+            #   file that now exists rather than a guess at it.
             if mode == "dry-run":
                 ok = auto_promote_ok(entry)
                 output(format_summary(entry))
@@ -554,10 +608,20 @@ def promote(db_root: str, mode: str = "interactive", *,
                 results.append(
                     (entry.entry_id,
                      "would-promote" if ok else "would-skip"))
+                # A dry run must model the index too, or a second
+                #   staged file claiming this slot would be reported
+                #   as free when a real run would find it taken.  It
+                #   moves nothing, so it records where the file WOULD
+                #   land.
+                if ok:
+                    promoted[key] = (
+                        entries_path(db_root, system_type, path),
+                        entry)
 
             elif mode == "all":
                 new_path = move_to_entries(
                     path, db_root, system_type)
+                promoted[key] = (new_path, entry)
                 output(entry.entry_id + ": promoted -> " + new_path)
                 results.append((entry.entry_id, "promoted"))
 
@@ -565,6 +629,7 @@ def promote(db_root: str, mode: str = "interactive", *,
                 if auto_promote_ok(entry):
                     new_path = move_to_entries(
                         path, db_root, system_type)
+                    promoted[key] = (new_path, entry)
                     output(entry.entry_id
                            + ": promoted -> " + new_path)
                     results.append((entry.entry_id, "promoted"))
@@ -580,6 +645,7 @@ def promote(db_root: str, mode: str = "interactive", *,
                 if choice == "PROMOTE":
                     new_path = move_to_entries(
                         path, db_root, system_type)
+                    promoted[key] = (new_path, entry)
                     output("  promoted -> " + new_path)
                     results.append((entry.entry_id, "promoted"))
                 elif choice == "DELETE":
@@ -616,11 +682,13 @@ def main(argv=None):
                     "entries from staging/ into entries/.  With no "
                     "mode flag the default is interactive review of "
                     "each staged entry.  In every mode, a staged "
-                    "entry that re-runs a solid already promoted "
-                    "under the same settings is retired to "
-                    "superseded/ when its converged mesh agrees, "
-                    "and reported as a conflict and left in "
-                    "staging when it does not.")
+                    "entry whose claim the collection already holds "
+                    "(same structure, same settings) is reported "
+                    "beside the promoted entry and retired to "
+                    "superseded/; the promoted entry is never "
+                    "changed.  Interactive review additionally "
+                    "offers REPLACE, the only way an entry ever "
+                    "leaves entries/.")
     parser.add_argument(
         "--db-root", default=_default_db_root(),
         help="the historicalGuidanceDB root "

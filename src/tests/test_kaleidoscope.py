@@ -931,10 +931,11 @@ def test_imago_runner_commits_prepared_inputs(tmp_path, monkeypatch):
 
 
 def test_partition_options_routes_by_recognised_key_set():
-    """The wingbeat splits a unit's options three ways (DESIGN
-    6.2.10): imago run-time selections go to imago, the cache-only
-    build identity is dropped, and everything else goes to the
-    strict makeinput build."""
+    """The wingbeat splits a unit's options TWO ways and no more
+    (DESIGN 6.2.10): imago run-time selections go to imago, and
+    everything else goes to the strict makeinput build.  There is no
+    third "dropped before forwarding" bucket -- every key in
+    ``options`` is a real tool input."""
     from kaleidoscope.wingbeats import _partition_options
     options = {
         "scf_basis": "fb",         # imago run-time selection
@@ -942,15 +943,28 @@ def test_partition_options_routes_by_recognised_key_set():
         "xccode": 100,             # makeinput
         "scfkpint": 1,             # makeinput
         "converg": 1.0e-6,         # makeinput
-        "imago_commit": "abc123",  # cache-only -> dropped
     }
     makeinput_options, imago_options = _partition_options(options)
     assert imago_options == {"scf_basis": "fb", "job": "scf"}
     assert makeinput_options == {
         "xccode": 100, "scfkpint": 1, "converg": 1.0e-6}
-    # The build identity reaches neither tool.
-    assert "imago_commit" not in imago_options
-    assert "imago_commit" not in makeinput_options
+    # Every key landed somewhere: nothing is silently swallowed, which
+    #   is what keeps makeinput's strict check a pure typo backstop.
+    assert (set(makeinput_options) | set(imago_options)
+            == set(options))
+
+
+def test_bookkeeping_is_not_an_option():
+    """A fact ABOUT a run does not ride in ``options`` (DESIGN
+    6.2.10).  With no third bucket to swallow it, an unrecognised key
+    now falls through to makeinput -- which is the point: it is
+    forwarded so makeinput's strict check can name it as the typo it
+    almost certainly is, rather than being dropped in silence."""
+    from kaleidoscope.wingbeats import _partition_options
+    makeinput_options, imago_options = _partition_options(
+        {"imago_commit": "abc123"})
+    assert imago_options == {}
+    assert makeinput_options == {"imago_commit": "abc123"}
 
 
 # ==============================================================

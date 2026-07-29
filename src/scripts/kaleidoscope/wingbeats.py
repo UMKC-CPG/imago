@@ -25,30 +25,23 @@ from .model import WingbeatOutcome, KaleidoscopeError
 from .workspace import emit_scalar, toml_line
 
 
-# Option keys that are neither a makeinput build setting nor an imago
-#   run-time selection, but kaleidoscope's own run-reuse bookkeeping
-#   (DESIGN 6.2.10).  ``imago_commit`` is the build identity that busts
-#   the run-reuse cache across imago versions (DESIGN 6.2.5).  The
-#   default wingbeat drops these before forwarding, so neither tool
-#   ever sees them; this is safe because the cache identity is captured
-#   separately in ``unit.key_fields`` at build time, not from the
-#   forwarded options.
-CACHE_ONLY_KEYS = frozenset({"imago_commit"})
-
-
 def _partition_options(options):
     """Split a unit's options into the makeinput build set and the
-    imago run set, dropping kaleidoscope's cache-only bookkeeping
-    (DESIGN 6.2.10).  Routing is by each tool's recognised-key set:
+    imago run set (DESIGN 6.2.10).  Routing is by each tool's
+    recognised-key set, TWO buckets and no third:
 
     - a key in ``imago.OPTION_KEYS`` (job, edge, scf_basis, ...) is
       an imago run-time selection -> the imago set;
-    - a key in ``CACHE_ONLY_KEYS`` (imago_commit) is kaleidoscope's
-      own bookkeeping -> dropped before forwarding, reaching neither
-      tool (its cache identity is captured separately in the unit's
-      key_fields at build time, DESIGN 6.2.5);
     - every other key -> the makeinput build set, where makeinput's
       strict unknown-key check stays the typo backstop.
+
+    There is deliberately no "dropped before forwarding" bucket.
+    ``options`` is a dictionary of *tool inputs*, so a fact that
+    reaches neither tool has no business in it; bookkeeping such as
+    the engine build identity rides on ``unit.record`` instead
+    (DESIGN 6.2.4).  That is what keeps makeinput's strictness
+    meaningful here -- an unrecognised key is now always a typo,
+    never a deliberate passenger.
 
     Returns ``(makeinput_options, imago_options)``."""
     import imago
@@ -57,8 +50,6 @@ def _partition_options(options):
     for key, value in options.items():
         if key in imago.OPTION_KEYS:
             imago_options[key] = value
-        elif key in CACHE_ONLY_KEYS:
-            continue
         else:
             makeinput_options[key] = value
     return makeinput_options, imago_options
@@ -139,7 +130,7 @@ class ImagoWingbeat(Wingbeat):
         self._stage_inputs(unit, wingbeat_dir)
         result = imago.run_prepared(wingbeat_dir, settings=settings)
 
-        self._persist_result(wingbeat_dir, result)
+        self._persist_result(wingbeat_dir, result, unit.record)
 
         # Map the Imago-native status onto the generic outcome:
         #   "ran" covers CONVERGED / NOT_CONVERGED / SKIPPED;
@@ -217,17 +208,31 @@ class ImagoWingbeat(Wingbeat):
         return False
 
     @staticmethod
-    def _persist_result(wingbeat_dir, result):
+    def _persist_result(wingbeat_dir, result, record=None):
         """Write the ImagoResult to ``<wingbeat_dir>/result.toml`` for
         the client's harvest.  Flat scalar fields first, then an
         ``[outputs]`` table of logical-key -> path and a ``[job]``
-        table echoing what ran."""
+        table echoing what ran.
+
+        One *recorded* fact rides along with the measured ones: the
+        engine build identity out of the unit's ``record`` mapping
+        (DESIGN 6.2.4), written as ``imago_commit``.  A guidance
+        entry's provenance reads it here (DESIGN 7.8), which keeps
+        that harvest on the three per-run sources it already has and
+        off the dispatch core's ``status.toml``.  The engine's own
+        word wins when it has one: imago does not report its build
+        yet (TODO C84), and when it does, preferring
+        ``result.imago_commit`` over the recorded value is the whole
+        change -- one substitution in one field of one file."""
         os.makedirs(wingbeat_dir, exist_ok=True)
         path = os.path.join(wingbeat_dir, "result.toml")
+        build = getattr(result, "imago_commit", None) or (
+            (record or {}).get("imago_commit"))
         with open(path, "w") as result_file:
             result_file.write(
                 toml_line("status", result.status.value)
             )
+            result_file.write(toml_line("imago_commit", build))
             result_file.write(toml_line("success", result.success))
             result_file.write(toml_line("converged",
                                        result.converged))

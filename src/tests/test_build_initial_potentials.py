@@ -1209,7 +1209,7 @@ def _write_failed(workspace, unit_id, calc):
 # ---- pure helpers --------------------------------------------
 
 def test_make_producer_options_emits_coded_tool_settings():
-    options = make_producer_options(_ref(), "abc123")
+    options = make_producer_options(_ref())
     # Dest-keyed, coded -- each tool's own vocabulary (DESIGN
     #   6.2.10): functional->xccode, kpoint_integration->scfkpint,
     #   basis->scf_basis, scf_threshold->converg, shift->kpshift.
@@ -1217,13 +1217,16 @@ def test_make_producer_options_emits_coded_tool_settings():
     assert options["xccode"] == 100              # wigner
     assert options["scfkpint"] == 1              # linear-tetrahedral
     assert options["converg"] == pytest.approx(1.0e-6)
-    assert options["imago_commit"] == "abc123"
     assert options["kpshift"] == [0.0, 0.0, 0.0]
     # No physics-name keys leak in: the sub-model travels separately
     #   (DESIGN 6.2.8), and the swept k-density is added per grid
-    #   point by the builder, not pinned in the fixed options.
+    #   point by the builder, not pinned in the fixed options.  Nor
+    #   does the build identity: it reaches neither tool, so it rides
+    #   on unit.record instead and its presence here would abort every
+    #   unit on makeinput's strict unknown-key check (DESIGN 6.2.10).
     for absent in ("basis", "functional", "kpoint_integration",
-                   "scf_threshold", "kpoint_shift", "kpd"):
+                   "scf_threshold", "kpoint_shift", "kpd",
+                   "imago_commit"):
         assert absent not in options
     # A bare integration token names no smearing width, so no
     #   thermal-smearing option leaks in: makeinput keeps its rc
@@ -1255,7 +1258,7 @@ def test_make_producer_options_forwards_smearing_sigma():
     #   makeinput's ``thermsmear`` option (-> THERMAL_SMEARING_SIGMA)
     #   while the integration code stays Gaussian (0).
     options = make_producer_options(
-        _ref(kpoint_integration="gaussian-0.1"), "abc123")
+        _ref(kpoint_integration="gaussian-0.1"))
     assert options["scfkpint"] == 0
     assert options["thermsmear"] == pytest.approx(0.1)
 
@@ -2298,8 +2301,12 @@ def _install_climb_mocks(monkeypatch, workspace, *,
     guidance contribution fired."""
 
     def fake_predict(struct, dataspace, system_type, submodel,
-                     center=None):
+                     center=None, harvest_thresholds=None):
         seed = float(center) if center is not None else 100.0
+        # The real builder stamps the two resolved thresholds onto the
+        #   record (DESIGN 7.8); the mock must too, or Phase 3's
+        #   build_entry has no metal cut and no flatness tolerance.
+        thresholds = dict(harvest_thresholds or {})
         record = PredictionRecord(
             policy=("curator_override" if center is not None
                     else "verify_around_prediction"),
@@ -2307,7 +2314,11 @@ def _install_climb_mocks(monkeypatch, workspace, *,
             is_under_trained=False, system_type=system_type,
             basis=submodel["basis"],
             functional=submodel["functional"],
-            kpoint_integration=submodel["kpoint_integration"])
+            kpoint_integration=submodel["kpoint_integration"],
+            kpoint_convergence_threshold=thresholds.get(
+                "kpoint_convergence_threshold", 5.0e-4),
+            metal_gap_threshold=thresholds.get(
+                "metal_gap_threshold", 0.05))
         return seed, 0.9, False, record
 
     monkeypatch.setattr(bip, "predict_kpoint_density", fake_predict)
@@ -2580,7 +2591,7 @@ def test_build_initial_potentials_resolves_defaults(
         lambda path: types.SimpleNamespace(num_atoms=2))
 
     def asserting_predict(struct, dataspace, system_type, submodel,
-                          center=None):
+                          center=None, harvest_thresholds=None):
         # The submodel must carry the resolved run settings, not
         #   None: assert the [defaults] flowed through to the
         #   predictor, and the resolved kpoint_spec.density is center.
@@ -2588,13 +2599,23 @@ def test_build_initial_potentials_resolves_defaults(
         assert submodel["functional"] == "wigner"
         assert submodel["kpoint_integration"] == "linear-tetrahedral"
         assert center == 60.0
+        # The resolved harvest knobs must arrive here too -- this is
+        #   the only channel by which they reach the harvest, which
+        #   never sees a manifest (DESIGN 7.8).
+        assert harvest_thresholds["kpoint_convergence_threshold"] \
+            == pytest.approx(5.0e-4)
+        assert harvest_thresholds["metal_gap_threshold"] > 0.0
         record = PredictionRecord(
             policy="curator_override",
             predicted_kpoint_density=60.0, confidence=0.9,
             is_under_trained=False, system_type=system_type,
             basis=submodel["basis"],
             functional=submodel["functional"],
-            kpoint_integration=submodel["kpoint_integration"])
+            kpoint_integration=submodel["kpoint_integration"],
+            kpoint_convergence_threshold=harvest_thresholds[
+                "kpoint_convergence_threshold"],
+            metal_gap_threshold=harvest_thresholds[
+                "metal_gap_threshold"])
         return 60.0, 0.9, False, record
 
     monkeypatch.setattr(bip, "predict_kpoint_density",
@@ -2650,7 +2671,8 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
     #   element database or result.toml needed).
     monkeypatch.setattr(
         bip, "predict_kpoint_density",
-        lambda struct, ds, st, sm, center=None: (
+        lambda struct, ds, st, sm, center=None,
+        harvest_thresholds=None: (
             60.0, 0.9, False, PredictionRecord(
                 policy="curator_override",
                 predicted_kpoint_density=60.0, confidence=0.9,

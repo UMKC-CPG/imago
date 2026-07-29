@@ -49,6 +49,7 @@ def _make_workspace(tmp_path, kpds, energies, *,
                     gaps=None, kinds=None, mags=None, meshes=None,
                     scf_threshold=1.0, write_scf_threshold=True,
                     kpoint_convergence_threshold=5.0e-4,
+                    metal_gap_threshold=0.05,
                     write_gap=True, add_loen=False,
                     policy="verify_around_prediction",
                     system_type="crystalline", confidence=0.9,
@@ -86,11 +87,15 @@ def _make_workspace(tmp_path, kpds, energies, *,
             "is_under_trained": False,
             "basis": "fb", "functional": "gga-pbe",
             "kpoint_integration": "gaussian-0.1",
-            # The producer stamps the resolved per-atom k-point
-            #   flatness tolerance on the record; the harvest reads
-            #   it as the convergence metric_threshold (DESIGN 7.8).
+            # The producer stamps both resolved thresholds on the
+            #   record, because this harvest never sees a manifest
+            #   (DESIGN 7.8): the per-atom k-point flatness tolerance
+            #   it reads as the convergence metric_threshold, and the
+            #   absolute eV gap below which a run is a metal and
+            #   stages no entry at all.
             "kpoint_convergence_threshold":
-                kpoint_convergence_threshold}}
+                kpoint_convergence_threshold,
+            "metal_gap_threshold": metal_gap_threshold}}
     serialize_flight(Flight(root=root, units=units, sweep=sweep,
                             metadata=metadata))
 

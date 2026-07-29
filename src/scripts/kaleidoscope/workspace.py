@@ -154,7 +154,16 @@ def write_status(wingbeat_dir, **fields):
     skipped.  The five lifecycle ``status`` values are
     kaleidoscope-owned and generic (queued / running / done /
     failed / lost); convergence is never a status -- it rides in
-    the wingbeat-supplied ``detail`` (DESIGN 6.2.4)."""
+    the wingbeat-supplied ``detail`` (DESIGN 6.2.4).
+
+    A dict-valued field is written as a TOML sub-table rather than
+    a scalar, and every scalar line is emitted before the first
+    sub-table header because TOML requires that order.  This is
+    what carries the ``[record]`` table (DESIGN 6.2.4): the unit's
+    free-form facts about the run, stamped once at launch and
+    preserved by the merge through every later lifecycle rewrite,
+    so the value describing the run is not erased at the first
+    transition after it."""
     os.makedirs(wingbeat_dir, exist_ok=True)
     merged = read_status(wingbeat_dir) or {}
     for key, value in fields.items():
@@ -162,8 +171,16 @@ def write_status(wingbeat_dir, **fields):
             merged[key] = value
     path = os.path.join(wingbeat_dir, "status.toml")
     with open(path, "w") as status_file:
+        tables = []
         for key, value in merged.items():
-            status_file.write(toml_line(key, value))
+            if isinstance(value, dict):
+                # Held back: a sub-table header must follow every
+                #   bare key of the table that contains it.
+                tables.append((key, value))
+            else:
+                status_file.write(toml_line(key, value))
+        for key, table in tables:
+            _serialize_table(status_file, key, table)
 
 
 def read_status(wingbeat_dir):
@@ -188,7 +205,9 @@ def _serialize_table(flight_file, header, table):
     requires, since within a table every bare ``key = value`` must
     precede any sub-table header.
 
-    This emits the optional ``[flight.sweep]`` block and each
+    Shared by both TOML files the core writes: it emits
+    ``status.toml``'s ``[record]`` table (DESIGN 6.2.4) and, in
+    ``flight.toml``, the optional ``[flight.sweep]`` block and each
     opaque ``[flight.<key>]`` metadata table.  Metadata tables are
     written VERBATIM: the dispatch core never inspects their
     contents (Principle 9), it only round-trips them so a

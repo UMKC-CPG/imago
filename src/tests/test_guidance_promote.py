@@ -308,10 +308,13 @@ def test_rerun_agreeing_on_mesh_is_retired_not_promoted(tmp_path):
     assert _count(db_root, "superseded") == 1
 
 
-def test_rerun_disagreeing_on_mesh_is_a_conflict(tmp_path):
-    """Same claim, different converged mesh -- the shape a code
-    change produces.  Nothing moves, and the staged file stays in
-    staging for the curator to adjudicate."""
+def test_a_disagreeing_mesh_takes_the_same_branch(tmp_path):
+    """Same claim, DIFFERENT converged mesh -- the shape a code change
+    produces.  The mesh is not a branch: the outcome is the ordinary
+    occupied one, because promotion has no verb for retracting a
+    reviewed entry unasked, so all a comparison could ever decide is
+    whether the newcomer was archived or left in staging to be
+    re-reported by every later pass (DESIGN 7.8)."""
     db_root = str(tmp_path / "db")
     _promote_one(db_root, converged_mesh=(6, 6, 6), commit="old111",
                  generated_at="2026-01-01T00:00:00Z")
@@ -321,33 +324,37 @@ def test_rerun_disagreeing_on_mesh_is_a_conflict(tmp_path):
     said = []
     results = gp.promote(db_root, "auto-promote", output=said.append)
 
-    assert [action for _, action in results] == ["conflicted"]
+    assert [action for _, action in results] == ["superseded"]
     assert _count(db_root, "entries") == 1            # untouched
-    assert _count(db_root, "staging") == 1            # left alone
-    assert _count(db_root, "superseded") == 0
-    # The report has to name both sides well enough to compare
-    # them by hand -- both meshes and both commits.
+    assert _count(db_root, "staging") == 0            # archived
+    assert _count(db_root, "superseded") == 1
+    # The report still has to name both sides well enough to compare
+    # them by hand -- both meshes and both builds.  That is where a
+    # disagreement gets resolved: by a person, not by a branch.
     report = "\n".join(said)
-    assert "CONFLICT" in report
+    assert "OCCUPIED" in report
     assert "old111" in report and "new222" in report
     assert "[6, 6, 6]" in report and "[2, 4, 4]" in report
 
 
-def test_a_mesh_that_cannot_be_compared_conflicts(tmp_path):
+def test_a_mesh_that_cannot_be_compared_is_not_special(tmp_path):
     """converged_mesh is optional (a manual entry has none).  An
-    absent mesh cannot be shown to agree, so the pair goes to the
-    curator rather than being waved through."""
+    absent mesh used to count as disagreement; now it is simply
+    printed as ``<none recorded>`` and the claim is occupied either
+    way."""
     db_root = str(tmp_path / "db")
     _promote_one(db_root, converged_mesh=None,
                  generated_at="2026-01-01T00:00:00Z")
     _stage(db_root, converged_mesh=(6, 6, 6),
            generated_at="2026-02-02T00:00:00Z")
 
-    results = gp.promote(db_root, "auto-promote", output=lambda m: None)
+    said = []
+    results = gp.promote(db_root, "auto-promote", output=said.append)
 
-    assert [action for _, action in results] == ["conflicted"]
-    assert _count(db_root, "staging") == 1
+    assert [action for _, action in results] == ["superseded"]
+    assert _count(db_root, "staging") == 0
     assert _count(db_root, "entries") == 1
+    assert "<none recorded>" in "\n".join(said)
 
 
 def test_all_mode_does_not_bypass_the_dedup(tmp_path):

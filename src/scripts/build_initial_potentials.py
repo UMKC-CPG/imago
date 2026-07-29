@@ -763,8 +763,31 @@ def _thermsmear_for(token: str) -> float | None:
             f"(e.g. 'gaussian-0.1')")
 
 
-def make_producer_options(ref: ReferenceSolid,
-                          imago_commit: str) -> dict[str, Any]:
+def _producer_record(imago_commit: str) -> dict[str, Any]:
+    """The producer's per-run bookkeeping, hung on every unit it
+    dispatches (DESIGN 6.2.4).
+
+    These are facts ABOUT a run rather than inputs TO it, which is
+    why they travel here and not in ``make_producer_options``: the
+    build identity reaches neither makeinput nor imago.  The driver
+    stamps the mapping into each run's ``status.toml`` at launch --
+    where the reuse plan reads it to name the build behind a reused
+    result -- and the wingbeat echoes the commit into ``result.toml``,
+    where a guidance entry's provenance picks it up (DESIGN 6.2.2 /
+    7.8).
+
+    It is never COMPARED.  A rebuilt engine does not invalidate a
+    stored starting potential, since every later SCF re-converges it,
+    and keying the cache on the build would instead discard the whole
+    workspace on each ordinary commit (DESIGN 6.2.5).
+
+    One value serves the whole build: it describes this run of the
+    producer, not any one reference solid."""
+
+    return {"imago_commit": imago_commit}
+
+
+def make_producer_options(ref: ReferenceSolid) -> dict[str, Any]:
     """The fixed (non-swept) run settings for a reference solid's
     convergence flight, in each tool's own coded vocabulary
     (DESIGN 6.2.10 / PSEUDOCODE 11.4).
@@ -789,9 +812,12 @@ def make_producer_options(ref: ReferenceSolid,
                                   token names a smearing width)
       - ``kpoint_spec.shift``  -> ``kpshift``
 
-    Also carried: ``imago_commit``, the build identity that (with
-    ``converg``) forms kaleidoscope's run-reuse cache key (DESIGN
-    6.2.5); the wingbeat drops it before forwarding.
+    EVERY key here is a real tool input, and that is the property to
+    preserve: it is what keeps makeinput's strict unknown-key check a
+    pure typo backstop rather than a rule with exceptions (DESIGN
+    6.2.10).  The engine build identity is therefore absent -- it
+    reaches neither tool and is not part of the cache key, so it
+    travels on ``CalcUnit.record`` instead (see ``_producer_record``).
 
     This dict carries NO physics-name keys.  The human sub-model
     (basis / functional / kpoint_integration) travels to the
@@ -813,7 +839,6 @@ def make_producer_options(ref: ReferenceSolid,
         "xccode": xccode,
         "scfkpint": _scfkpint_for(ref.kpoint_integration),
         "converg": ref.scf_threshold,
-        "imago_commit": imago_commit,
     }
     shift = ref.kpoint_spec.get("shift")
     if shift is not None:
@@ -974,7 +999,8 @@ def assert_loen_coverage(units: list, refs: list,
 
 def build_loen_units(ref: ReferenceSolid, struct_path: str,
                      options: dict[str, Any],
-                     characterization: list) -> list:
+                     characterization: list,
+                     record: dict[str, Any] | None = None) -> list:
     """Structure-only ``imago -loen -scf no`` units, one per distinct
     Fortran-side fingerprint declaration (PSEUDOCODE 11.4; DESIGN 5.10
     producer half).
@@ -1012,7 +1038,10 @@ def build_loen_units(ref: ReferenceSolid, struct_path: str,
 
     ``options`` is the solid's ``make_producer_options`` dict; the loen
     overrides are layered on a copy so the convergence units are
-    untouched."""
+    untouched.  ``record`` is the producer's per-run bookkeeping
+    (:func:`_producer_record`), carried here as well as on the climb
+    rungs: a reused loen run is reported in the driver's reuse plan
+    with the build behind it, exactly as a reused rung is."""
 
     # The declaration set comes from the SAME rule the harvest
     #   applies, widened to every environment this solid could present
@@ -1046,6 +1075,7 @@ def build_loen_units(ref: ReferenceSolid, struct_path: str,
             options=loen_options,
             calc=(calc_tag,),
             kind="fingerprint",
+            record=dict(record or {}),
             key_fields=standard_key_fields(
                 struct_path, loen_options)))
     return units
@@ -2485,13 +2515,18 @@ class _ClimbDispatcher:
     send-off and collect, and the real result reader -- so a caller can
     unit-test the climb with the toolchain seam mocked (each live run
     needs a real imago, C74).  ``force`` bypasses the run-reuse cache.
+    ``record`` is the producer's per-run bookkeeping
+    (:func:`_producer_record`), handed to every unit this dispatcher
+    builds -- one value for the whole build, since it describes the
+    producer's run and not any one material (DESIGN 6.2.4).
     """
 
     def __init__(self, structures, options_by_material, workspace,
                  flight, executor, force, prepare_fn, send_off_fn,
-                 collect_next_fn, read_fn):
+                 collect_next_fn, read_fn, record=None):
         self._structures = structures
         self._options = options_by_material
+        self._record = dict(record or {})
         self._workspace = workspace
         self._flight = flight
         self._executor = executor
@@ -2514,7 +2549,8 @@ class _ClimbDispatcher:
             for mesh in meshes:
                 unit = build_mesh_unit(
                     self._structures[material],
-                    self._options[material], mesh, material)
+                    self._options[material], mesh, material,
+                    record=self._record)
                 self._origin[_unit_key(unit)] = (material, list(mesh))
                 new_units.append(unit)
                 self._flight.units.append(unit)
@@ -2555,8 +2591,8 @@ def make_climb_dispatcher(structures, options_by_material, workspace,
                           send_off_fn=send_off,
                           collect_next_fn=collect_next,
                           read_fn=_read_unit_result, force=False,
-                          tidy_run=False, scratch_root="",
-                          prune_problems=None):
+                          record=None, tidy_run=False,
+                          scratch_root="", prune_problems=None):
     """Build the climb dispatcher ``converge_by_climb`` drives
     (DESIGN 7.7; PSEUDOCODE 4e.7).
 
@@ -2568,9 +2604,10 @@ def make_climb_dispatcher(structures, options_by_material, workspace,
     ``Config`` for a cluster shape), and the ONE shared ``executor``
     every send runs beneath.  That single executor is what the loen
     pre-flight and every climb rung run under, so the whole run rides
-    one warm pool (DESIGN 6.2.11) and its units land in one tree.  See
-    :class:`_ClimbDispatcher` for the send / next_rung contract and the
-    injected seams."""
+    one warm pool (DESIGN 6.2.11) and its units land in one tree.
+    ``record`` is the per-run bookkeeping every built unit carries
+    (:func:`_producer_record`).  See :class:`_ClimbDispatcher` for the
+    send / next_rung contract and the injected seams."""
     flight = Flight(
         root=workspace, units=[],
         parsl_config=parsl_config,
@@ -2589,7 +2626,8 @@ def make_climb_dispatcher(structures, options_by_material, workspace,
 
     return _ClimbDispatcher(
         structures, options_by_material, workspace, flight, executor,
-        force, prepare_fn, send_off_fn, collect_next_fn, read_fn)
+        force, prepare_fn, send_off_fn, collect_next_fn, read_fn,
+        record=record)
 
 
 def record_converged(rung, rungs, config):
@@ -2839,6 +2877,14 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     thresholds, max_count = mesh_climb.climb_policy_from_manifest(
         manifest.harvest.get("kpoint_climb", {}))
 
+    # The per-run bookkeeping every dispatched unit carries: facts
+    #   ABOUT a run rather than inputs TO it (DESIGN 6.2.4).  Named
+    #   `unit_record` rather than `record` because the per-structure
+    #   PredictionRecord below is also a "record", and the two are
+    #   unrelated -- this one never reaches the predictor and is never
+    #   compared by the cache.
+    unit_record = _producer_record(imago_commit)
+
     # ----- Phase 1: build.  Refresh the isolated baselines, then per
     # solid: materialize the structure, PREDICT its seed k-point
     # density (no grid), and build its ClimbConfig.  The convergence
@@ -2859,7 +2905,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
     for ref in manifest.reference_solids:
         struct = materialize_structure(ref, manifest_dir, pdb_root)
         struct_of[ref.reference_id] = struct
-        options = make_producer_options(ref, imago_commit)
+        options = make_producer_options(ref)
         options_of[ref.reference_id] = options
         # The predictor and the PredictionRecord speak the human
         # physics names, not the codes, so the sub-model travels in
@@ -2877,10 +2923,23 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         #   kpoint_spec.density is the curator override (predictor
         #   bypassed); otherwise None and predict runs, flagging
         #   under-trained when the dataspace has no useful prior (7.9).
-        density, confidence, under_trained, record = \
+        #   The two resolved knobs the harvest cannot look up for
+        #   itself travel with the prediction (PSEUDOCODE 15.6): this
+        #   solid's per-atom flatness tolerance, and the database-wide
+        #   metal gap cut the climb reads as
+        #   config.metal_gap_threshold, so the climb's metal
+        #   short-circuit and the harvest's metal skip apply the SAME
+        #   resolved number (DESIGN 3.12.3 / 7.8).
+        harvest_thresholds = {
+            "kpoint_convergence_threshold":
+                ref.kpoint_convergence_threshold,
+            "metal_gap_threshold": thresholds.metal_gap_threshold,
+        }
+        density, confidence, under_trained, prediction = \
             predict_kpoint_density(
                 struct, dataspace, ref.system_type, submodel,
-                center=ref.kpoint_spec.get("density"))
+                center=ref.kpoint_spec.get("density"),
+                harvest_thresholds=harvest_thresholds)
         seed_densities[ref.reference_id] = density
         # Everything the climb needs for this solid, gathered once: the
         #   reciprocal geometry the rung mechanics read, the confidence-
@@ -2888,22 +2947,21 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         configs[ref.reference_id] = build_climb_config(
             ref, struct, confidence, under_trained,
             thresholds, max_count)
-        # Store the record as a plain dict (metadata must be TOML-
-        #   serializable), and stamp the resolved per-atom k-point
-        #   flatness tolerance onto it: the guidance harvest reads
-        #   both, and the tolerance is a manifest/resolved fact absent
-        #   from any run's result.toml (DESIGN 7.8 / 5.7).
-        predictions[ref.reference_id] = asdict(record)
-        predictions[ref.reference_id][
-            "kpoint_convergence_threshold"] = (
-                ref.kpoint_convergence_threshold)
+        # Store it as a plain dict (metadata must be TOML-
+        #   serializable).  Both resolved thresholds are already
+        #   fields of the record itself rather than stamped on
+        #   afterwards, so there is exactly one list of what a
+        #   prediction record carries and the harvest's reads cannot
+        #   outrun it (DESIGN 7.8 / 5.7).
+        predictions[ref.reference_id] = asdict(prediction)
         # Geometry-only fingerprint units: one structure-only
         #   `-loen -scf no` unit per Fortran-side declaration.  The
         #   bispectrum fingerprint depends on geometry alone, so these
         #   need not wait for a converged mesh; they dispatch in the
         #   pre-flight below and their run dirs persist for the harvest.
         loen_units.extend(build_loen_units(
-            ref, struct, options, manifest.characterization))
+            ref, struct, options, manifest.characterization,
+            record=unit_record))
 
     # ----- Fail fast, before anything is dispatched (DESIGN
     # 5.10.6).  Every Fortran-side declaration the Phase 3 harvest
@@ -2990,7 +3048,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         dispatcher = make_climb_dispatcher(
             struct_of, options_of, workspace,
             parsl_config=parsl_config, executor=executor,
-            prepare_fn=prepare_fn, force=force,
+            prepare_fn=prepare_fn, force=force, record=unit_record,
             tidy_run=prune_enabled, scratch_root=scratch_root,
             prune_problems=prune_problems)
         materials = [ref.reference_id
@@ -3031,7 +3089,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         #   result.toml for the iteration count and measured character.
         converged = build_mesh_unit(
             struct, options_of[ref.reference_id], outcome.mesh,
-            ref.reference_id)
+            ref.reference_id, record=unit_record)
         converged_result = _read_unit_result(workspace, converged)
         per_run_log.append(
             make_run_log_entry(ref, harvest_inputs, converged_result))
@@ -3087,10 +3145,16 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         #   facts, with the converged run's result.toml (gap /
         #   magnetization / SCF threshold / exact mesh / commit), feed
         #   the SHARED build_entry -- the same builder the standalone
-        #   density harvest uses -- and save_entry stages it.  A
-        #   converged climb always carries >= 3 distinct rungs (the
-        #   two-sided stop test, DESIGN 3.12.3), so every converged
-        #   solid contributes an entry.
+        #   density harvest uses -- and save_entry stages it.  A climb
+        #   that stopped on its TWO-SIDED test carries at least the
+        #   three distinct rungs that test required (DESIGN 3.12.3),
+        #   so its ladder is long enough for the curator to re-judge.
+        #   The metal short-circuit is the exception -- it stops at
+        #   the FIRST gapless rung, so its ladder can be a single
+        #   point and its settled density is no convergence claim at
+        #   all -- and build_entry returns None for it (DESIGN 7.8).
+        #   Not every converged solid contributes an entry; every
+        #   converged NON-METAL does.
         entry = guidance_harvest.build_entry(
             workspace, struct, predictions[ref.reference_id],
             dataspace, guidance_harvest.load_structure(struct),
@@ -3099,7 +3163,14 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             harvest_inputs["grid_energies"],
             harvest_inputs["converged_kpoint_density"],
             converged_result)
-        guidance_harvest.save_entry(entry, guidance_root)
+        if entry is not None:
+            guidance_harvest.save_entry(entry, guidance_root)
+        else:
+            # The potential above WAS harvested: a rough starting
+            #   potential is exactly what that database wants from a
+            #   metal.  Only the convergence claim is withheld.
+            print(ref.reference_id + ": metal -- potential "
+                  "harvested, no guidance entry staged")
 
     # ----- Write outputs: every affected element file, plus the
     # run log the 5.8 validation harness reads.

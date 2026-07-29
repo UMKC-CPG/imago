@@ -57,6 +57,31 @@ from .wingbeats import resolve_wingbeat
 _COLLECT_POLL_SECONDS = 0.5
 
 
+#  Whether the driver prints its per-unit reuse lines.  A module-level
+#    switch, not an argument threaded through send_off: verbosity
+#    describes how the process talks to its user, not how a flight
+#    dispatches, so threading it would put a reporting concern into the
+#    signature of every function between a client's main() and the
+#    printer (DESIGN 5.7 -- the same reasoning, and the same
+#    conclusion, as the producer's side of the boundary).  Owning a
+#    verbosity switch costs kaleidoscope none of its ignorance about
+#    what a unit computes, because reporting is not domain knowledge.
+_verbose = False
+
+
+def set_verbose(enabled):
+    """Turn the driver's per-unit narration on or off.  A client calls
+    this ONCE from its entry point, before any work begins, alongside
+    whatever verbosity switch it keeps for its own reporting."""
+    global _verbose
+    _verbose = bool(enabled)
+
+
+def is_verbose():
+    """Whether per-unit narration is currently enabled."""
+    return _verbose
+
+
 class TaskLost(Exception):
     """A unit whose executor task vanished with no WingbeatOutcome --
     a cluster-side loss (manager/worker death, expired
@@ -242,13 +267,23 @@ def make_executor(parsl_config):
 def _prepare_miss(flight, unit, wingbeat_dir):
     """Set up a cache miss for launch: create the run directory,
     snapshot the cache key, and mark the unit ``queued`` (DESIGN
-    6.2.5)."""
+    6.2.5).
+
+    The unit's ``record`` is stamped here too, once, alongside the
+    key snapshot -- the key holds what is *compared*, the record
+    holds what is only ever *read by a person* (DESIGN 6.2.4).  It
+    is written on the miss only, so a later hit leaves it
+    describing the run that produced the stored result rather than
+    the flight that reused it.  An empty record is passed as None
+    so no bare ``[record]`` header is written for a client that
+    hangs nothing on its units."""
     os.makedirs(wingbeat_dir, exist_ok=True)
     write_cache_key(wingbeat_dir, unit)
     write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
                  status="queued",
                  wingbeat=(unit.wingbeat or flight.default_wingbeat),
-                 submitted_at=now_iso())
+                 submitted_at=now_iso(),
+                 record=(dict(unit.record) or None))
 
 
 def report_entry_from_status(unit, wingbeat_dir):
@@ -273,6 +308,69 @@ def completed_future():
     entry is rebuilt from the existing ``status.toml`` when the hit is
     collected (DESIGN 6.2.3)."""
     return _LocalFuture()
+
+
+def reuse_plan(flight, units, force=False):
+    """What the driver is ABOUT to do, decided from local files and
+    nothing else and computed without touching a thing (DESIGN
+    6.2.5).  Returns one ``(unit, action, detail)`` triple per unit,
+    where ``action`` is ``"reuse"`` or ``"run"``.
+
+    This is what stands in for the automatic staleness guard the
+    cache key no longer applies.  The build behind a reused result is
+    *reported*, so a curator who has since fixed that build can
+    re-run on purpose with ``force``; it is not silently *compared*,
+    which would discard every stored result on every rebuild and give
+    a false miss -- the one that costs hours -- no escape valve at
+    all.  Read-only, so a preview and the real send share it."""
+    plan = []
+    for unit in units:
+        wingbeat_dir = unit_run_dir(flight, unit)
+        if not force and is_cache_hit(unit, wingbeat_dir):
+            prior = read_status(wingbeat_dir) or {}
+            plan.append((unit, "reuse", {
+                "finished_at": prior.get("finished_at"),
+                "record": prior.get("record", {})}))
+        else:
+            # ``force`` is why a unit runs when a hit was available;
+            #   the plan says so rather than leaving it to be guessed.
+            plan.append((unit, "run", {
+                "reason": ("forced" if force
+                           else "no usable result")}))
+    return plan
+
+
+def _describe_reuse(unit, action, detail):
+    """One plan line: what happens to a unit and, on a reuse, the
+    facts a judgment would want -- when the result finished and the
+    build recorded behind it (DESIGN 6.2.5)."""
+    where = "/".join((unit.id,) + tuple(unit.calc))
+    if action != "reuse":
+        return f"  run   {where}  ({detail.get('reason', '')})"
+    finished = detail.get("finished_at") or "unknown time"
+    build = (detail.get("record") or {}).get(
+        "imago_commit", "unrecorded build")
+    return f"  reuse {where}  ({finished}, {build})"
+
+
+def print_reuse_plan(plan, per_unit=False):
+    """Announce the plan before anything is spent (DESIGN 6.2.5).
+
+    The counts always print, because the counts are the decision
+    being announced.  The per-unit lines are that decision's evidence
+    and are held back unless asked for: the climb calls
+    :func:`send_off` once per round, so an unconditional line per
+    unit would refill the screen with narration on the very path
+    DESIGN 5.7 cleared.  ``per_unit`` is passed in rather than read
+    here -- callers set it from :func:`is_verbose`, or to True for a
+    preview, whose whole purpose is those lines -- which keeps this a
+    pure printer."""
+    if per_unit:
+        for unit, action, detail in plan:
+            print(_describe_reuse(unit, action, detail))
+    reuse_count = sum(1 for _, action, _ in plan if action == "reuse")
+    print(f"{reuse_count} to reuse, "
+          f"{len(plan) - reuse_count} to run")
 
 
 def dispatch_unit(flight, unit, executor, force):
@@ -309,10 +407,19 @@ def send_off(flight, units, executor, force=False):
     The flight's WHOLE unit list is (re)serialized here, not just the
     launched subset, so ``flight.toml`` records every unit asked for
     even as a climb's list grows across successive sends (DESIGN
-    7.7)."""
+    7.7).
+
+    The reuse plan is announced before anything is spent: the counts
+    always, the per-unit lines only under the module-level verbosity
+    switch (DESIGN 6.2.5).  It is recomputed inside
+    :func:`dispatch_unit` below rather than threaded through from
+    here, because a hit-test is a few local file reads and a stale
+    plan would be worse than a repeated one."""
     validate_flight(flight)
     os.makedirs(flight.root, exist_ok=True)
     serialize_flight(flight)
+    print_reuse_plan(reuse_plan(flight, units, force),
+                     per_unit=is_verbose())
     outstanding = []                  # (unit, future)
     for unit in units:
         future = dispatch_unit(flight, unit, executor, force)
@@ -372,7 +479,7 @@ def collect_next(flight, outstanding):
         time.sleep(_COLLECT_POLL_SECONDS)
 
 
-def dispatch(flight, executor=None, force=False):
+def dispatch(flight, executor=None, force=False, preview=False):
     """Run every unit in the flight and return a FlightReport
     (DESIGN 6.2.3): the one-shot convenience form of the two public
     phases -- send every unit off, then collect them all in unit
@@ -390,7 +497,19 @@ def dispatch(flight, executor=None, force=False):
     re-launches even if a completed ``status.toml`` already exists.
     The switch lives here, on the driver, because the cache it governs
     is owned by the driver -- not by the executor and not by any one
-    client."""
+    client.
+
+    ``preview`` prints the reuse plan and stops.  No executor is even
+    built, so the decision to spend can be made BEFORE a flight starts
+    rather than watched going past during it (DESIGN 6.2.5).  Its
+    per-unit lines print whether or not verbosity is on, since a
+    preview showing only the counts would answer nothing the caller
+    could not already guess.  It returns an EMPTY report rather than a
+    partial one: no unit ran, so there is nothing to report on."""
+    if preview:
+        print_reuse_plan(
+            reuse_plan(flight, flight.units, force), per_unit=True)
+        return FlightReport(entries=[])
     owns_executor = executor is None
     if executor is None:
         executor = make_executor(flight.parsl_config)
