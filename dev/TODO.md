@@ -4658,6 +4658,14 @@ on the same data later with no schema change.  Built on P10.
   PSEUDOCODE 15.7.  CODE.  DONE.  +9 tests, 1123 pass.
   Not yet exercised on a live corpus: the seed re-run is the
   first campaign whose staging this will judge.
+  **Superseded in design by C134 (2026-07-29), before ever running
+  live.**  The mesh-agreement test, the three outcomes, and the
+  batch pre-pass described above are all gone: the check is now a
+  plain existence test with two outcomes, the mesh is printed
+  rather than compared, and a live in-memory index makes the
+  within-batch case fall out of the ordinary rule.  Read C134 for
+  what is actually being built; this entry is kept as the record of
+  what was tried and why it was cut.
 - [x] C131. Report outcomes and problems, not progress.  The
   producer narrated every reference solid it fetched and every
   scratch tree it pruned, so a clean eight-solid pre-flight
@@ -4770,17 +4778,26 @@ on the same data later with no schema change.  Built on P10.
 - [ ] C84. Have Imago stamp its own build commit into its
   output so the guidance/resource harvests record a real
   build identity instead of the `"unknown"` fallback.
-  Background: the C74 producer echoes `imago_commit` through
-  the run options into the wingbeat-written `result.toml`
-  (the near-term fix the harvests read), but that records
-  what the *producer* believed it ran, which can drift from
-  the binary actually executed.  The robust upgrade is for
-  the running binary to report its own build commit (e.g.
+  Background: the build identity is *recorded, never compared*
+  (DESIGN 6.2.5).  The producer hangs it on each unit's `record`
+  mapping, the driver stamps it into `status.toml` for the reuse
+  plan, and the wingbeat echoes it into `result.toml` where a
+  guidance entry's provenance reads it (C134).  It reached
+  `result.toml` through neither path before C134, which is why
+  every entry on disk today records `"unknown"`.  Even once it
+  does, it records what the *producer* believed it ran, which can
+  drift from the binary actually executed.  The robust upgrade is
+  for the running binary to report its own build commit (e.g.
   from the C78 `build_info.toml`, or a compiled-in version
-  string), which the wingbeat then copies into `result.toml`
-  in place of the echoed value.  Pairs with C78 (build
+  string), which the wingbeat then prefers over the recorded
+  value -- PSEUDOCODE 13.2 already writes the echo as a
+  fallback, so this lands as a substitution in one field of one
+  file rather than new plumbing.  Pairs with C78 (build
   identity) and C79 (wingbeat/imago.py capture hooks).
-  CODE (Fortran + wingbeat); DESIGN 7.2; ARCH 11.
+  CODE (Fortran + wingbeat); DESIGN 6.2.2, 7.2; ARCH 11.
+  Its priority rises with C134: the cache no longer compares the
+  build at all, so a *recorded* identity is the only thing telling
+  a curator what produced a reused result.
 
 - [ ] C115. Settle the DESIGN 8.9 open questions, plus two gaps
   the PSEUDOCODE 16 pass surfaced.  Writing section 8's
@@ -4817,6 +4834,53 @@ on the same data later with no schema change.  Built on P10.
   seed (C82) is a hard prerequisite for C81, not merely a source
   of accuracy.  Say so in DESIGN 8.8.
   DESIGN 8.6/8.7/8.8/8.9; PSEUDOCODE 16.9.
+
+- [ ] C134. Code the cache-key and guidance-uniqueness
+  simplification.  Both mechanisms had grown to ask a question
+  neither could answer: the cache asked whether a stored result was
+  still *good*, and promotion asked whether two entries *agreed*.
+  Both hold starting guesses that downstream machinery
+  re-converges, so the honest question in each place is the same
+  and much smaller -- does a result for this already exist? -- with
+  two outcomes and no quality judgment.  Anything expensive or
+  irreversible becomes a verb a person types.  Design landed
+  2026-07-29 across VISION 16, ARCH 9.6 / 10.1 / 10.5, DESIGN 6.2.2
+  / 6.2.4 / 6.2.5 / 6.2.10 / 7.8, PSEUDOCODE 4e.2 / 4e.7 / 11.4 /
+  13.1 / 13.2 / 13.3 / 13.5 / 15.6 / 15.7.  Three code steps, in
+  this order:
+  (a) **The key, and the record that replaces the guard.**
+  `_KEY_SCALAR_NAMES` becomes `("converg",)`; the producer stops
+  putting `imago_commit` in `options` and hangs `{imago_commit:
+  <sha>}` on each unit's new `record` instead; `dispatch_unit`
+  stamps it into `status.toml` at launch and `write_status`
+  preserves the `[record]` table across every later rewrite; the
+  wingbeat echoes it into `result.toml`; `CACHE_ONLY_KEYS` and its
+  partition branch are deleted.  **The two halves of that last
+  point must land together** -- with the bucket gone a key reaching
+  neither tool raises, so a `make_producer_options` still emitting
+  `imago_commit` aborts every unit with `unknown makeinput option`,
+  the very C74 failure the seam was written to fix.
+  (b) **The reuse plan and preview.**  `reuse_plan` /
+  `print_reuse_plan` / `dispatch(preview=True)`; counts always, the
+  per-unit lines under the driver's own module-level verbosity
+  switch or in a preview.  DESIGN 5.7's rule holds here: the climb
+  calls `send_off` once per round, so unconditional per-unit lines
+  would refill the screen C131 cleared.
+  (c) **Promotion, the metal skip, and the prediction record.**
+  `promote` loses the batch pre-pass and `_by_generated_at`
+  entirely and keeps ONE live index shaped `key -> (path, entry)`;
+  the occupied branch reports both entries and retires the
+  newcomer, with REPLACE offered in interactive mode only.
+  `build_entry` returns None for a gapless run via a new scalar
+  `is_gapless_value` that the rung-shaped `is_gapless` also calls,
+  and both harvest paths skip on None.  `PredictionRecord` gains
+  the two resolved knobs the standalone harvest cannot look up,
+  `kpoint_convergence_threshold` (today stamped onto the dict after
+  the fact) and `metal_gap_threshold`.
+  Also: the two staged metal entries `crystalline-fbd1b7` and
+  `crystalline-214bb2` are si_cmce runs the new rule would never
+  have produced, and want deleting by hand.
+  CODE.
 
 ---
 

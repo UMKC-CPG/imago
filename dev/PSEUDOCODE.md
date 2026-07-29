@@ -1704,7 +1704,15 @@ function is_gapless(rung, gap_threshold):
     # signal, unlike the retired proxy that inferred metallicity from
     # a finer mesh raising the energy and so missed the common
     # small-amplitude oscillator.  This judges ONE rung, not a stride.
-    return rung.gap <= gap_threshold
+    #
+    # A thin wrapper over the scalar rule (is_gapless_value, 15.7):
+    # this side knows how to find a gap on a RUNG, that side holds
+    # what the gap means -- including that an unknown gap (None) is
+    # NOT metallic, so a missing reading never stops a climb that was
+    # converging.  The guidance harvest calls the same core on a
+    # result dict, so the climb's metal short-circuit and the
+    # harvest's metal skip cannot drift apart (DESIGN 7.8).
+    return is_gapless_value(rung.gap, gap_threshold)
 
 
 function at_ceiling(mesh, max_count):
@@ -2264,23 +2272,35 @@ function decodeMeshValue(token):
     return [int(part) for part in split(token, "-")]
 
 
-function build_mesh_unit(structure, options, mesh, id):
+function build_mesh_unit(structure, options, mesh, id, record):
     # One explicit-mesh convergence unit (DESIGN 7.7 / 6.2.1).
     # `scfkp` is the makeinput key for an explicit axial-count mesh
     # (a style-code-1 k-point file); `kpt-mesh` is its calc-tag axis.
     # The cache identity is the same one the density units used
     # (6.2.1), so a mesh re-run in a later round is a cache hit and
     # costs nothing.
+    #
+    # `record` is where the build identity travels (DESIGN 6.2.4 /
+    # 6.2.10): a fact ABOUT the run, not an input TO it, so it must
+    # not ride in `options` -- every key there is a real tool input,
+    # which is what keeps makeinput's strict unknown-key check a
+    # pure typo backstop.  The driver stamps it into status.toml at
+    # launch (13.5) and the wingbeat echoes it into result.toml
+    # (13.2).  Without it set HERE the whole recorded-not-compared
+    # path is empty: the reuse plan would name no build and a
+    # guidance entry's provenance would read "unknown" forever.
     unit_options = copy(options)
     unit_options["scfkp"] = mesh                 # [a, b, c]
     calc = buildCalcTag({ "kpt-mesh": encodeMeshValue(mesh) })
     return CalcUnit(id=id, calc=calc, structure=structure,
                     options=unit_options, wingbeat="imago",
+                    record=record,
                     key_fields=standardKeyFields(structure, options))
 
 
 function predict_kpoint_density(structure, dataspace, system_type,
-                                submodel, center):
+                                submodel, center,
+                                harvest_thresholds):
     # The prediction HALF of the former grid builder (7.7 steps 1-2
     # and 5): signature -> predict -> PredictionRecord.  It lays NO
     # grid -- the climb seeds from the density and picks its mode and
@@ -2305,15 +2325,23 @@ function predict_kpoint_density(structure, dataspace, system_type,
         confidence = result.confidence
         under_trained = result.is_under_trained
         policy = "predict_then_climb"
-    record = buildPredictionRecord(policy, density, confidence,
-                                   under_trained, result, sig,
-                                   system_type, submodel)
-    return density, confidence, under_trained, record
+    # Named `prediction`, not `record`: `record` is the unit's
+    #   build-identity bookkeeping in the neighbouring builders
+    #   (4e.7 / DESIGN 6.2.4), and the two are unrelated.
+    #   `harvest_thresholds` carries the two resolved manifest knobs
+    #   the harvest cannot look up for itself -- the grid-flatness
+    #   tolerance and the metal gap cut (15.6) -- so they are stamped
+    #   here, on the one per-structure record the harvest recovers.
+    prediction = buildPredictionRecord(policy, density, confidence,
+                                       under_trained, result, sig,
+                                       system_type, submodel,
+                                       harvest_thresholds)
+    return density, confidence, under_trained, prediction
 
 
 function make_climb_dispatcher(structures, options_by_material,
                                workspace, parsl_config, executor,
-                               force, tidy_run = False,
+                               force, record, tidy_run = False,
                                scratch_root = "",
                                prune_problems = None):
     # Build the dispatcher converge_by_climb (4e.5) drives, closing
@@ -2325,6 +2353,10 @@ function make_climb_dispatcher(structures, options_by_material,
     # `force` bypasses the run-reuse cache exactly as the pre-flight
     # dispatch does.  The material key doubles as the unit id
     # (materials ARE the reference ids the producer already uses).
+    # `record` is the producer's per-run bookkeeping, in practice
+    # `{imago_commit: <sha>}`, handed to every unit this dispatcher
+    # builds; ONE value for the whole build, since it describes the
+    # producer's run and not any one material (DESIGN 6.2.4).
     #
     # ONE flight spans the whole climb -- its root is the workspace --
     #   and its unit list ACCRETES as rungs are decided.  Each send
@@ -2361,7 +2393,7 @@ function make_climb_dispatcher(structures, options_by_material,
             for mesh in mesh_lists[m]:
                 unit = build_mesh_unit(structures[m],
                                        options_by_material[m], mesh,
-                                       id = m)
+                                       id = m, record = record)
                 origin[identity(unit)] = (m, mesh)
                 append(new_units, unit)
                 append(flight.units, unit)
@@ -5565,6 +5597,17 @@ function buildInitialPotentials(manifest_path,
     timestamp    = iso8601_now_utc()
     workspace    = curation_workspace_root()
 
+    # The producer's per-run bookkeeping, hung on every unit it
+    #   dispatches (DESIGN 6.2.4).  It is what the reuse plan prints
+    #   behind a reused result (13.5) and what a guidance entry's
+    #   provenance records (15.7), and it is never compared: a
+    #   rebuilt engine does not invalidate a stored starting
+    #   potential (DESIGN 6.2.5).  One value for the whole build --
+    #   it describes this run of the producer, not any one solid --
+    #   and deliberately NOT a member of any solid's `options`,
+    #   because it reaches neither makeinput nor imago.
+    record = {"imago_commit": imago_commit}
+
     # ===== Phase 1: build =============================
     # Step 1a: refresh "isolated" entries.  atomSCF
     # changes propagate every run.  The isolated
@@ -5631,10 +5674,12 @@ function buildInitialPotentials(manifest_path,
         # physics -- functional -> xccode, kpoint_integration ->
         # scfkpint (a "gaussian-0.1" width -> thermsmear /
         # THERMAL_SMEARING_SIGMA), basis -> scf_basis, scf_threshold
-        # -> converg, shift -> kpshift -- and adds the imago_commit
-        # cache identity.  Kept for the whole climb: every round's
-        # mesh unit copies them (build_mesh_unit, 4e.7).
-        options = make_producer_options(ref, imago_commit)
+        # -> converg, shift -> kpshift.  EVERY key here is a real
+        # tool input; the build identity is not one and travels on
+        # unit.record instead (DESIGN 6.2.10, and see `record` just
+        # below).  Kept for the whole climb: every round's mesh unit
+        # copies them (build_mesh_unit, 4e.7).
+        options = make_producer_options(ref)
         options_of[ref.reference_id] = options
 
         # The predictor and the PredictionRecord speak the human
@@ -5654,10 +5699,22 @@ function buildInitialPotentials(manifest_path,
         # density (bypasses the predictor); otherwise None and
         # predict runs, returning is_under_trained when the
         # dataspace has no useful prior (7.9).
-        density, confidence, under_trained, record = \
+        # The two resolved knobs the harvest cannot look up travel
+        #   with the prediction (15.6): this solid's per-atom
+        #   flatness tolerance, and the database-wide metal gap cut
+        #   the climb reads as config.metal_gap_threshold (4e.3), so
+        #   the climb's short-circuit and the harvest's metal skip
+        #   apply the SAME resolved number.  Named `prediction`
+        #   here, since `record` above is the unit bookkeeping.
+        harvest_thresholds = {
+            "kpoint_convergence_threshold":
+                ref.kpoint_convergence_threshold,
+            "metal_gap_threshold": thresholds.metal_gap_threshold}
+        density, confidence, under_trained, prediction = \
             predict_kpoint_density(
                 struct, dataspace, ref.system_type,
-                submodel, center = ref.kpoint_spec.density)
+                submodel, center = ref.kpoint_spec.density,
+                harvest_thresholds = harvest_thresholds)
         seed_densities[ref.reference_id] = density
 
         # Everything the climb needs for THIS solid, gathered once
@@ -5669,15 +5726,13 @@ function buildInitialPotentials(manifest_path,
             ref, struct, confidence, under_trained,
             thresholds, max_count)
 
-        # Store the record as a plain dict (metadata must be TOML-
-        # serializable), and stamp the resolved per-atom k-point
-        # flatness tolerance onto it: the guidance harvest reads
-        # both, and the tolerance is a manifest/resolved fact
-        # absent from any run's result.toml (DESIGN 7.8 / 5.7).
-        predictions[ref.reference_id] = as_dict(record)
-        predictions[ref.reference_id][
-            "kpoint_convergence_threshold"] = (
-                ref.kpoint_convergence_threshold)
+        # Store it as a plain dict (metadata must be TOML-
+        # serializable).  Both resolved thresholds are already
+        # fields of the record itself (15.6) rather than stamped on
+        # afterwards, so there is exactly one list of what a
+        # prediction record carries and the harvest's reads cannot
+        # outrun it (DESIGN 7.8 / 5.7).
+        predictions[ref.reference_id] = as_dict(prediction)
 
         # Geometry-only fingerprint units: one structure-only
         # `-loen -scf no` unit per Fortran-side declaration, tagged
@@ -5686,7 +5741,8 @@ function buildInitialPotentials(manifest_path,
         # wait for a converged mesh; they dispatch in the pre-flight
         # below, and their run dirs persist for the harvest.
         loen_units.extend(build_loen_units(
-            ref, struct, options, manifest.characterization))
+            ref, struct, options, record,
+            manifest.characterization))
 
     # Fail fast, before anything is dispatched (DESIGN 5.10.6).
     # Every Fortran-side declaration the Phase 3 harvest could
@@ -5797,7 +5853,8 @@ function buildInitialPotentials(manifest_path,
         dispatcher = make_climb_dispatcher(
             struct_of, options_of, workspace,
             parsl_config = parsl_config, executor = executor,
-            force = force, tidy_run = prune_enabled,
+            force = force, record = record,
+            tidy_run = prune_enabled,
             scratch_root = scratch_root,
             prune_problems = prune_problems)
         materials = [ref.reference_id
@@ -5835,7 +5892,7 @@ function buildInitialPotentials(manifest_path,
         # measured character the guidance entry needs.
         converged = build_mesh_unit(
             struct, options_of[ref.reference_id], outcome.mesh,
-            id = ref.reference_id)
+            id = ref.reference_id, record = record)
         converged_result = read_result_toml(workspace, converged)
         # The run log records the converged mesh AND its k-density
         # (both from record_converged) and the SCF iteration count.
@@ -5911,10 +5968,15 @@ function buildInitialPotentials(manifest_path,
         # two paths cannot diverge -- and save_entry stages it.
         # build_entry reads the exact converged mesh from the
         # result.toml (15.7), the same source in both paths, so the
-        # climb hands only the density and ladder here.  A converged
-        # climb always carries at least the three distinct rungs the
-        # stop test required (4e.3), so every converged solid
-        # contributes an entry.
+        # climb hands only the density and ladder here.  A climb
+        # that stopped on its TWO-SIDED test carries at least the
+        # three distinct rungs that test required (4e.3), so its
+        # ladder is long enough for the curator to re-judge.  The
+        # metal short-circuit is the exception -- it stops at the
+        # first gapless rung, so its ladder can be a single point
+        # and its density is no convergence claim -- and build_entry
+        # returns None for it (15.7).  Not every converged solid
+        # contributes an entry; every converged NON-METAL does.
         entry = build_entry(
             workspace, struct, predictions[ref.reference_id],
             dataspace, load_structure(struct),
@@ -5922,7 +5984,11 @@ function buildInitialPotentials(manifest_path,
             harvest.grid_values, harvest.grid_energies,
             harvest.converged_kpoint_density,
             converged_result)
-        save_entry(entry, "share/historicalGuidanceDB/")
+        if entry is not None:
+            save_entry(entry, "share/historicalGuidanceDB/")
+        else:
+            log(ref.reference_id + ": metal -- potential harvested,"
+                + " no guidance entry")
 
     # ===== Write outputs ==============================
     # All affected element files via the deterministic
@@ -6926,7 +6992,7 @@ function harvestFingerprints(flight, ref, env,
     return fingerprints
 
 
-function buildLoenUnits(ref, struct_path, options,
+function buildLoenUnits(ref, struct_path, options, record,
                         characterization):
     # One structure-only `imago -loen -scf no` unit per distinct
     # Fortran-side declaration (DESIGN 5.10).  A bispectrum
@@ -6967,11 +7033,15 @@ function buildLoenUnits(ref, struct_path, options,
         loen_options["scf_basis"] = "no"
         loen_options["loeninput"] = loen_input_values(
             matcher, d["sub_spec"])
+        # `record` carries the build identity here too (DESIGN
+        #   6.2.4): a reused loen run is reported in the reuse plan
+        #   with the build behind it, exactly as a reused rung is.
         units.append(CalcUnit(
             id        = ref.reference_id,
             structure = struct_path,
             calc      = [calc_tag],
             options   = loen_options,
+            record    = record,
             kind      = "fingerprint"))
     return units
 
@@ -7890,8 +7960,10 @@ dataclass KeyFile:
                      #   that staged copy
 
 dataclass KeyFields:
-    scalars : dict   # verbatim-compared identity fields,
-                     #   e.g. {scf_threshold, imago_commit}
+    scalars : dict   # verbatim-compared identity fields; for the
+                     #   producer just {converg} (DESIGN 6.2.5).
+                     #   The engine build is NOT among them: it is
+                     #   recorded per run and never compared
     files   : list   # KeyFile entries to byte-compare (name +
                      #   source); naming both keeps the core from
                      #   guessing how inputs map onto staged files
@@ -7926,6 +7998,15 @@ dataclass CalcUnit:
                                #   kinds it understands (e.g.
                                #   "fingerprint" for loen runs)
     key_fields  : KeyFields    # client-declared identity
+    record      : dict         # free-form facts ABOUT the run
+                               #   that are not inputs TO it --
+                               #   the engine build identity is
+                               #   the standing case.  Copied
+                               #   verbatim into status.toml's
+                               #   [record] at launch and never
+                               #   compared, interpreted, or put
+                               #   in the report (DESIGN 6.2.4/
+                               #   6.2.5).  Default {}
 
 dataclass Flight:
     root             : str     # workspace root directory
@@ -8011,8 +8092,7 @@ class ImagoWingbeat implements Wingbeat:
         # request and falls back to its DEFAULT job, a ground-state
         # SCF.  (`-loen -scf no` never runs an SCF itself; the
         # unwanted SCF is purely the dropped-settings fallback --
-        # the "SCF after loen" the seed run hit.)  imago_commit is
-        # a cache-only scalar, not an imago.OPTION_KEYS member.
+        # the "SCF after loen" the seed run hit.)
         stage_inputs(unit, wingbeat_dir)
         imago_opts = { key : value
                        for key, value in unit.options.items()
@@ -8024,8 +8104,21 @@ class ImagoWingbeat implements Wingbeat:
         # Persist the §12.1 ImagoResult for the client to
         # reload (13.6).  kaleidoscope never reads it; it is
         # the wingbeat -> client handoff, kept domain-side.
-        write_toml(join(wingbeat_dir, "result.toml"),
-                   as_dict(result))
+        #
+        # One RECORDED fact rides along with the measured ones: the
+        # build identity out of unit.record (DESIGN 6.2.4), written
+        # as `imago_commit`.  A guidance entry's provenance reads it
+        # here (15.7), which keeps that harvest on the three sources
+        # it already has and off the core's status.toml.  The
+        # engine's own word wins when it has one -- imago does not
+        # report its build yet (TODO C84), and when it does this
+        # `or` stops preferring the producer's belief without any
+        # other change.
+        fields = as_dict(result)
+        if "imago_commit" not in fields:
+            fields["imago_commit"] = unit.record.get(
+                                         "imago_commit")
+        write_toml(join(wingbeat_dir, "result.toml"), fields)
 
         # Map the Imago-native status onto the generic
         # outcome.  "Ran" covers CONVERGED / NOT_CONVERGED
@@ -8051,12 +8144,17 @@ function stage_inputs(unit, wingbeat_dir):
     #     of a dir a prior launch built -> nothing to do;
     #   - neither (a client that did not prepare) -> BUILD from the
     #     unit's structure and makeinput-side options.
+    # Two buckets, not three (DESIGN 6.2.10): every key in
+    # `options` is a real tool input, so what is not an imago key
+    # is a makeinput dest and makeinput's strict unknown-key check
+    # is once again a pure typo backstop.  Bookkeeping that reaches
+    # neither tool rides on unit.record instead of being carried
+    # here and dropped again.
     if unit.prepared_dir is not None:
         commit_prepared_inputs(unit.prepared_dir, wingbeat_dir)
     else if not is_prepared(wingbeat_dir):
         mk_opts = { k : v for k, v in unit.options.items()
-                    if k not in imago.OPTION_KEYS
-                    and k not in CACHE_ONLY_KEYS }
+                    if k not in imago.OPTION_KEYS }
         makeinput.build_run_dir(unit.structure, mk_opts,
                                 wingbeat_dir)
 
@@ -8143,6 +8241,16 @@ function write_status(wingbeat_dir, **fields):
     # convergence rides in `detail`, never in `status`.
     # Omit started_at/finished_at/runtime_seconds until
     # they exist; omit calc when it is the empty tuple.
+    #
+    # A [record] table already present in the file SURVIVES a
+    # rewrite (DESIGN 6.2.4): the lifecycle rewrites the status
+    # fields many times, but the record is stamped once at launch
+    # and describes the run, so re-reading and carrying it forward
+    # is what keeps it from being erased at the first transition.
+    prior = read_status(wingbeat_dir)
+    if prior is not None and "record" in prior \
+            and "record" not in fields:
+        fields["record"] = prior["record"]
     write_toml(join(wingbeat_dir, "status.toml"), fields)
 
 function read_status(wingbeat_dir):
@@ -8229,7 +8337,19 @@ failure never aborts the flight (Principle 10).  Resuming a
 flight is just re-running it: the hit-test skips the `done`
 units and re-dispatches the rest -- unless the re-run switch
 (`force`) is set, which bypasses the cache so every unit
-re-launches (DESIGN 6.2.5).
+re-launches (DESIGN 6.2.5).  Before any of that, the driver
+prints its **reuse plan**.  The closing counts -- how many units
+it will reuse, how many it will run -- always print, because that
+is the decision being announced.  The per-unit lines behind them
+(reuse or run, and on a reuse the finish time and recorded build
+behind the result) are that count's evidence and print only under
+`verbose`, per the reporting rule of DESIGN 5.7: the climb calls
+`send_off` once per round (4e.5), so an unconditional line per
+unit would refill the screen C131 cleared, on the very path it
+cleared.  `force` is the ordinary way a re-run is asked for, and
+`preview` prints the plan in full -- lines and counts, `verbose`
+or not, since reading them one by one is what a preview is for --
+and dispatches nothing.
 
 The driver runs each unit through an *executor* -- the seam
 that hides where the work actually lands.  A `LocalExecutor`
@@ -8276,6 +8396,48 @@ with demand (DESIGN 6.2.11's pooled shape) instead of rebuilding
 it per rung.
 
 ```
+function reuse_plan(flight, units, force):
+    # What the driver is ABOUT to do, decided from local files and
+    # nothing else, and computed without touching a thing (DESIGN
+    # 6.2.5).  This is what stands in for the automatic staleness
+    # guard the cache key no longer applies: the build behind a
+    # reused result is REPORTED, so a curator who has since fixed
+    # that build can re-run on purpose, rather than SILENTLY
+    # COMPARED, which would discard every stored result on every
+    # rebuild.  Read-only, so `preview` and the real send share it.
+    plan = []
+    for unit in units:
+        wingbeat_dir = unit_run_dir(flight, unit)
+        if not force and is_cache_hit(unit, wingbeat_dir):   # 13.4
+            prior = read_status(wingbeat_dir)
+            plan.append((unit, "reuse", {
+                "finished_at": prior.get("finished_at"),
+                "record":      prior.get("record", {})}))
+        else:
+            # `force` is why it runs when a hit was available; the
+            # plan says so rather than leaving the reader to guess.
+            plan.append((unit, "run",
+                {"reason": "forced" if force else "no usable result"}))
+    return plan
+
+
+function print_reuse_plan(plan, per_unit=False):
+    # The counts are the decision and always print; the per-unit
+    # lines are the evidence for them and are held back unless
+    # asked for (DESIGN 5.7 / 6.2.5).  `per_unit` is true when the
+    # module-level verbosity is on OR the caller is a preview,
+    # whose entire purpose is those lines -- so the flag is passed
+    # in rather than read here, keeping this a pure printer.
+    #
+    # On a reuse the line carries the facts a judgment would want:
+    # when the result finished, and the build recorded behind it.
+    if per_unit:
+        for (unit, action, detail) in plan:
+            print(unit.id, unit.calc, action, detail)
+    print(count_of(plan, "reuse"), "to reuse,",
+          count_of(plan, "run"), "to run")
+
+
 function send_off(flight, units, executor, force):
     # Phase 1, made callable on its own: launch a chosen set of
     # units and return one future per unit WITHOUT waiting on any
@@ -8287,12 +8449,32 @@ function send_off(flight, units, executor, force):
     validate_flight(flight)            # 13.3
     makedirs(flight.root, exist_ok=True)
     serialize_flight(flight)           # 13.1
+    # Announce before spending: counts always, the per-unit lines
+    # only when the module-level verbosity switch is on (DESIGN
+    # 5.7).  The plan is recomputed inside dispatch_unit below
+    # rather than threaded through, because a hit-test is a few
+    # local file reads and a stale plan would be worse than a
+    # repeated one.
+    print_reuse_plan(reuse_plan(flight, units, force),
+                     per_unit = is_verbose())
     outstanding = []                   # list of (unit, future)
     for unit in units:
         outstanding.append(
             (unit, dispatch_unit(flight, unit, executor, force)))
     return outstanding
 ```
+
+`is_verbose()` reads a module-level switch the driver's own
+reporting helper owns, set once by whichever client is driving
+(the producer's `main` sets it alongside its own, DESIGN 5.7).  It
+is deliberately NOT a `send_off` argument: verbosity describes how
+the process talks to its user, not how a flight dispatches, and
+threading it would put a reporting concern into the signature of
+every function between `main` and the printer -- the same
+reasoning, and the same conclusion, as the producer's side of the
+boundary.  Reporting is not domain knowledge, so owning a
+verbosity switch costs kaleidoscope none of its ignorance about
+k-points (Principle 9).
 
 ```
 function collect(flight, unit, fut):
@@ -8343,7 +8525,8 @@ function collect_next(flight, outstanding):
 ```
 
 ```
-function dispatch(flight, executor=None, force=False):
+function dispatch(flight, executor=None, force=False,
+                  preview=False):
     # The one-shot convenience form: send every unit off, then
     # collect them all in unit order (DESIGN 6.2.3).  Behaviour is
     # identical to the pre-split driver, so every existing caller
@@ -8351,6 +8534,19 @@ function dispatch(flight, executor=None, force=False):
     # directly instead.  We tear the executor down at the end only
     # if we built it here (a caller-supplied executor is the
     # caller's to close).
+    #
+    # `preview` prints the plan and stops -- no executor is even
+    # built, so the decision to spend can be made BEFORE a flight
+    # starts rather than watched going past during it (DESIGN
+    # 6.2.5).  Here the per-unit lines print whether or not
+    # verbosity is on: a preview that showed only the counts would
+    # answer nothing the caller could not already guess.  It
+    # returns an empty report, not a partial one: no unit ran, so
+    # there is nothing to report on.
+    if preview:
+        print_reuse_plan(reuse_plan(flight, flight.units, force),
+                         per_unit = True)
+        return FlightReport(entries = [])
     owns_executor = (executor is None)
     if executor is None:
         executor = make_executor(flight.parsl_config)  # below
@@ -8398,13 +8594,19 @@ function dispatch_unit(flight, unit, executor, force):
         # entry back from the existing status.toml.
         return completed_future()
     # Miss: prepare the dir, snapshot the key, mark queued,
-    # and hand the unit to the executor.
+    # and hand the unit to the executor.  The unit's `record`
+    # is stamped here, once, alongside the key snapshot: the key
+    # holds what is COMPARED, the record holds what is only ever
+    # read by a person (DESIGN 6.2.4/6.2.5).  It is written on the
+    # miss only, so a later hit leaves it describing the run that
+    # produced the stored result, not the flight that reused it.
     makedirs(wingbeat_dir, exist_ok=True)
     write_cache_key(wingbeat_dir, unit)          # 13.4
     write_status(wingbeat_dir, id=unit.id, calc=unit.calc,
         status="queued",
         wingbeat=(unit.wingbeat or flight.default_wingbeat),
-        submitted_at=now())
+        submitted_at=now(),
+        record=unit.record)
     return executor.submit_unit(
         unit, wingbeat_dir, flight.default_wingbeat)
 ```
@@ -10814,6 +11016,30 @@ dataclass PredictionRecord:    # 7.7-derived; serialized as
                                     #   differ in sub-model is
                                     #   still harvestable (DESIGN
                                     #   6.2.9 / 7.8 step 3f)
+    kpoint_convergence_threshold : float  # the two RESOLVED
+    metal_gap_threshold          : float  #   manifest knobs the
+                                    #   harvest needs and cannot
+                                    #   look up: it is a standalone
+                                    #   tool pointed at a finished
+                                    #   workspace and never sees a
+                                    #   manifest, so the producer
+                                    #   stamps both here when it
+                                    #   builds the flight (DESIGN
+                                    #   7.8 steps 3c / 3d').  The
+                                    #   first is the grid-flatness
+                                    #   tolerance, eV per atom, from
+                                    #   the solid's own value else
+                                    #   [harvest] else 5e-4 (5.7);
+                                    #   the second is the absolute
+                                    #   band gap in eV below which a
+                                    #   run counts as metallic, the
+                                    #   database-wide
+                                    #   [kpoint_climb] knob the
+                                    #   climb reads as
+                                    #   config.metal_gap_threshold
+                                    #   (4e.3), so both harvest
+                                    #   paths and the climb apply
+                                    #   ONE resolved value
 ```
 
 
@@ -10849,16 +11075,24 @@ function build_calc_tag(calc_axes):
 
 ```
 # The scalar option keys that define the producer's run identity
-#   (DESIGN 6.2.1/6.2.10): `converg` (the SCF convergence limit,
-#   a makeinput option -- the concrete name for DESIGN's
-#   "scf_threshold") and `imago_commit` (the build identity,
-#   producer-injected).  Taken from a unit's options when present.
-KEY_SCALAR_NAMES = ("converg", "imago_commit")
+#   (DESIGN 6.2.1/6.2.10): just `converg`, the SCF convergence
+#   limit, a makeinput option and the concrete name for DESIGN's
+#   "scf_threshold".  Taken from a unit's options when present.
+#
+#   The engine build identity is NOT here.  The key asks whether
+#   this is the same CALCULATION, not whether its result is still
+#   good (DESIGN 6.2.5): a rebuilt engine does not make a stored
+#   potential wrong, since that potential is a starting point every
+#   later SCF re-converges, while comparing the build would miss
+#   the cache on every ordinary development commit.  It travels on
+#   `CalcUnit.record` instead -- recorded per run, printed in the
+#   reuse plan, never compared (13.1 / 13.5).
+KEY_SCALAR_NAMES = ("converg",)
 
 
 function standard_key_fields(structure, options):
     # DESIGN 6.2.5: the producer's cache identity -- the scalars
-    # taken from `options` (the SCF threshold and imago_commit)
+    # taken from `options` (the SCF threshold, and nothing else)
     # plus one key file, `structure.dat`, byte-compared.  The key
     # file is makeinput's OUTPUT, not the raw skeleton: it bakes
     # in every input that changes the result (the type/species
@@ -10929,8 +11163,12 @@ produced them -- and every site that compares them against the
 per-atom eV `metric_threshold` normalizes at the point of use
 (`pick_converged` here, `auto_promote_ok` in the promoter); the
 physical values keep the record honest, and `cell_atom_count` is
-recorded alongside for the conversion.  `imago_commit` falls back
-to `"unknown"` when the producer injected none.  `spin_polarization`
+recorded alongside for the conversion.  `imago_commit` is a
+*recorded* fact rather than a measured one: the producer hangs it on
+each unit's `record` (11.4), the driver stamps it into `status.toml`
+and the wingbeat echoes it into `result.toml` (13.2/13.5), and this
+harvest reads it there with the other per-run facts, falling back to
+`"unknown"` for a run that recorded none.  `spin_polarization`
 is recorded as `0.0` -- imago surfaces the magnetic *moment*, not
 a polarization, so the predictor keys its spin character on
 `total_magnetization` instead (DESIGN 7.6).
@@ -11069,6 +11307,13 @@ function harvest_flight(workspace_root, db_root, dataspace):
             c_kpoint_densities, c_energies,
             kpoint_densities[idx], rts[idx])
 
+        # g'. A metal builds no entry (DESIGN 7.8).  build_entry
+        #    returns None and BOTH harvests skip on it, so the one
+        #    place the rule lives is the one builder they share.
+        if entry is None:
+            log(unit_id + ": metal -- no guidance entry staged")
+            continue
+
         # h. Stage it.  save_entry fills entry_id = slug.
         path = save_entry(entry, db_root)
         log(unit_id + ": staged " + path)
@@ -11105,6 +11350,31 @@ function build_entry(workspace_root, source_structure, prediction,
     # the commit come from chosen_result; the sub-model and
     # system_type from the prediction record (its sole home,
     # 6.2.9); the cell facts and signature from the loaded structure.
+    #
+    # A METAL BUILDS NO ENTRY -- return None (DESIGN 7.8).  An
+    # entry's whole content is "for a structure like this, this
+    # k-density is converged," and a metal cannot make that claim:
+    # its energy does not converge in k-points, and the climb
+    # short-circuits at the FIRST gapless rung and settles there
+    # as a deliberately rough potential (DESIGN 3.12.3).  That
+    # settled rung is a stopping point, not a converged density,
+    # and the predictor would read it as evidence -- often as the
+    # only member of its lattice family, and so as the dominant
+    # neighbor for every later query in that family (7.6).  The
+    # guard sits HERE, in the shared builder, so neither harvest
+    # path can grow its own version of the rule.
+    #
+    # The cut is read off the prediction record, which is how a
+    # manifest knob reaches a standalone tool that never sees a
+    # manifest (15.6, the same channel kpoint_threshold uses).  The
+    # test itself is `is_gapless_value`, the scalar core the climb's
+    # rung-shaped `is_gapless` also calls (4e.2), so one rule serves
+    # both -- including its side on missing data: an UNKNOWN gap is
+    # not metallic, because a missing reading must never silently
+    # suppress an entry a real insulator earned.
+    if is_gapless_value(chosen_result.get("gap_ev"),
+                        prediction["metal_gap_threshold"]):
+        return None
     system_type = prediction["system_type"]
     sig = compute_signature(structure, system_type,
                             dataspace.group_table)
@@ -11152,9 +11422,37 @@ function build_entry(workspace_root, source_structure, prediction,
         provenance   = Provenance(
             flight_id        = flight_id_of(workspace_root),
             source_structure = source_structure,
+            # The build behind the run, read from result.toml like
+            #   every other per-run fact -- the wingbeat echoed it
+            #   there out of the unit's `record` (13.2), so this
+            #   harvest stays on its three sources and never opens
+            #   the dispatch core's status.toml.  "unknown" remains
+            #   the floor for a run that recorded nothing; it is
+            #   non-empty, so the schema's rule-11 check passes and
+            #   a curator can spot it on review.
             imago_commit     = chosen_result.get("imago_commit")
                                or "unknown",
             curator          = "guidance_harvest.py"))
+
+
+function is_gapless_value(gap_ev, gap_threshold):
+    # The metal test, on a bare gap reading (DESIGN 3.12.3 / 7.8).
+    # `gap_threshold` is an ABSOLUTE band gap in eV -- not a per-atom
+    # energy -- low enough that no real insulator crosses it and high
+    # enough to catch a true metal's near-zero reading.
+    #
+    # A MISSING gap (None) is NOT metallic.  Both callers depend on
+    # that side of it, for the same reason from opposite ends: in the
+    # climb an absent reading must not stop a search that was
+    # converging (4e.2), and in the harvest it must not suppress an
+    # entry a genuine insulator earned.  Defaulting the other way
+    # would make an unwired gap look like a collection with no
+    # insulators in it, which is the failure nobody would question.
+    #
+    # The scalar core, so the rung-shaped is_gapless (4e.2) and the
+    # result-dict-shaped call in build_entry share ONE rule; neither
+    # caller has to build a shape it does not have.
+    return gap_ev is not None and gap_ev <= gap_threshold
 
 
 function per_atom_ev(total_energy_hartree, cell_atom_count):
@@ -11264,9 +11562,10 @@ function dedup_key(entry):
 
 function mesh_of(entry):
     # The entry's converged mesh, or None when it has no
-    # verification block at all (a manual entry, 7.9).  Both
-    # absences read the same to the dedup: an answer that
-    # cannot be compared.
+    # verification block at all (a manual entry, 7.9).  REPORTING
+    # ONLY: no branch tests this value.  The occupied case acts
+    # the same whether the meshes agree or not (DESIGN 7.8), so
+    # the mesh is shown to the person and nothing else.
     if entry.verification is None:
         return None
     return entry.verification.converged_mesh
@@ -11274,13 +11573,30 @@ function mesh_of(entry):
 
 ```
 function promote(db_root, mode):
-    # Load the promoted corpus ONCE, already keyed by claim.
-    # This is the one judgment the acceptance rule cannot make
-    # from the staged file alone (DESIGN 7.8); entries/ is small
-    # and local, so the cost is a directory read, not a workspace
-    # re-read.  staging/ and superseded/ are NOT loaded: only a
-    # promoted entry can make a claim already held.
-    promoted = load_promoted_entries(db_root)   # dedup_key -> entry
+    # Load the promoted corpus ONCE, already keyed by claim, and
+    # keep each entry's PATH beside it so REPLACE can retire the
+    # file it names.  This is the one judgment the acceptance rule
+    # cannot make from the staged file alone (DESIGN 7.8);
+    # entries/ is small and local, so the cost is a directory
+    # read, not a workspace re-read.  staging/ and superseded/ are
+    # NOT loaded: only a promoted entry can hold a claim.
+    #
+    # The index is LIVE, not a snapshot: every branch below that
+    # fills a slot updates it, which is what makes a within-batch
+    # duplicate fall out of the ordinary rule (DESIGN 7.8).
+    #
+    # ONE shape throughout: key -> (path, entry), where `path` is
+    # where that entry's file lives NOW, under entries/.  Every
+    # slot-filling branch stores the pair, never a bare entry,
+    # because REPLACE has to retire the file the promoted entry
+    # occupies and therefore needs its path.  Store bare entries and
+    # a SECOND replace against the same claim has nothing to retire.
+    # load_promoted_entries walks entries/*/*.toml, so the paths cost
+    # nothing to carry; deriving them from the entry_id instead would
+    # work today only because save_entry happens to name each file
+    # <entry_id>.toml, and that is an invariant not worth leaning on.
+    promoted = load_promoted_entries(db_root)   # key -> (path,
+                                                #         entry)
 
     # dry-run evaluates every decision below and moves nothing,
     # so a curator sees the whole outcome -- promotions,
@@ -11288,90 +11604,150 @@ function promote(db_root, mode):
     dry = (mode == "dry-run")
 
     for system_type in VALID_SYSTEM_TYPES:
+        # Sorted for determinism only.  There is NO separate
+        # batch-resolution pass and no generated_at tie-break: the
+        # index below is updated as entries are promoted, so a
+        # second staged file making a claim the first just filled
+        # simply finds it occupied and takes the ordinary branch
+        # (DESIGN 7.8).  One rule, applied uniformly, is why
+        # staging IS a uniqueness namespace without extra
+        # machinery to make it one.
         staged = sorted(glob(
             join(db_root, "staging", system_type), "*.toml"))
 
-        # Resolve re-runs WITHIN this batch first, so at most one
-        # candidate per claim is ever compared against entries/
-        # (DESIGN 7.8).  Sorted order makes it deterministic; the
-        # later generated_at wins.  NOTE: this is where promotion
-        # stops judging each staged file in isolation -- staging
-        # IS a uniqueness namespace under this rule.
-        batch = {}                   # dedup_key -> (path, entry)
         for path in staged:
             entry = load_entry(path, system_type, {})
             key = dedup_key(entry)
-            if key not in batch:
-                batch[key] = (path, entry)
-                continue
-            keep, drop = by_generated_at(batch[key], (path, entry))
-            batch[key] = keep
-            if not dry:
-                move_to_superseded(drop.path, db_root, system_type)
-            record(drop.entry, "superseded",
-                   "a later run in this batch makes the same claim")
-
-        for key, (path, entry) in sorted_by_path(batch):
             prior = promoted.get(key)
+
             if prior is not None:
-                # converged_mesh is OPTIONAL (DESIGN 7.2): a
-                #   manual or curator-authored entry carries no
-                #   verification block and so no mesh.  A missing
-                #   mesh on either side cannot be shown to agree,
-                #   so it falls to the conflict branch rather than
-                #   being waved through (DESIGN 7.8).
-                if (mesh_of(prior) is not None
-                        and mesh_of(prior) == mesh_of(entry)):
-                    # REDUNDANT.  The promoted entry stands
-                    #   untouched -- promotion only ever ADDS to
-                    #   entries/, so a reviewed entry stays
-                    #   byte-identical for as long as it lives
-                    #   there.  The staged copy is retired, not
-                    #   deleted.
-                    if not dry:
-                        move_to_superseded(
-                            path, db_root, system_type)
-                    record(entry, "superseded",
-                           "already promoted as " + prior.entry_id)
+                prior_path, prior_entry = prior
+                # OCCUPIED.  An existence test, not a comparison:
+                #   the collection holds one record per structure
+                #   per settings, and this claim is already held.
+                #   Report both -- meshes, dates, builds -- and
+                #   retire the newcomer.  The promoted entry is
+                #   left byte-identical; nothing here can retract
+                #   it.  The meshes are PRINTED, never tested: the
+                #   action is the same whether they agree or not,
+                #   and a disagreement is a person's question
+                #   (DESIGN 7.8, VISION 16).
+                report_occupied(entry, prior_entry)
+                                        # meshes + dates + builds
+
+                # Interactive review is the ONLY mode offering
+                #   REPLACE, and REPLACE is the only route by
+                #   which anything leaves entries/.  Unattended
+                #   modes never retract.
+                if mode == "interactive":
+                    choice = ask("REPLACE / SKIP / DELETE")
+                    if choice == "REPLACE":
+                        # The promoted entry's own file is retired,
+                        #   which is why its path had to be carried.
+                        #   `destination` is where the newcomer now
+                        #   lives, so the index keeps pointing at a
+                        #   real file and a later REPLACE against
+                        #   this same claim has something to retire.
+                        destination = entries_path(
+                            db_root, system_type, path)
+                        if not dry:
+                            move_to_superseded(
+                                prior_path, db_root, system_type)
+                            destination = move_to_entries(
+                                path, db_root, system_type)
+                        promoted[key] = (destination, entry)
+                        record(entry, "replaced",
+                               "replaced " + prior_entry.entry_id)
+                        continue
+                    if choice == "DELETE":
+                        if not dry:
+                            remove_file(path)
+                        record(entry, "deleted", "")
+                        continue
+                    record(entry, "skipped", "left in staging")
                     continue
-                # CONFLICT: one claim, two meshes.  Never
-                #   automatic in ANY mode -- deciding which is
-                #   right is a physics judgment, not a timestamp
-                #   comparison, and resolving it may mean removing
-                #   an entry from entries/, which this tool has no
-                #   verb for.  Report both and leave the staged
-                #   file where it is; the curator resolves it by
-                #   hand (DESIGN 7.8).
-                report_conflict(entry, prior)    # meshes+commits
-                record(entry, "conflicted",
-                       "promoted entry " + prior.entry_id
-                       + " reports a different converged mesh")
+
+                if not dry:
+                    move_to_superseded(path, db_root, system_type)
+                record(entry, "superseded",
+                       "already promoted as " + prior_entry.entry_id)
                 continue
 
-            # No prior claim: the ordinary path, decided by mode.
-            # `all` still reached the dedup above -- it waives the
-            # quality rule, not the correctness guard.
+            # FREE: the ordinary path, decided by mode.  `all`
+            # still passed the existence test above -- it waives
+            # the quality rule, not the correctness guard.
+            # Each branch that fills the slot stores (path, entry),
+            # the one shape the index has; move_to_entries returns
+            # the destination it renamed to, so the path recorded is
+            # the file that now exists rather than a guess at it.
             if mode == "dry-run":
                 print_would_promote(entry,
                     auto_promote_ok(entry))
+                # A dry run must model the index too, or a second
+                # staged file claiming this slot would be reported
+                # as free when a real run would find it taken.  It
+                # moves nothing, so it records where the file WOULD
+                # land.
+                if auto_promote_ok(entry):
+                    promoted[key] = (entries_path(db_root,
+                                         system_type, path), entry)
             elif mode == "all":
-                move_to_entries(path, db_root, system_type)
+                promoted[key] = (
+                    move_to_entries(path, db_root, system_type),
+                    entry)
             elif mode == "auto-promote":
                 if auto_promote_ok(entry):
-                    move_to_entries(path, db_root, system_type)
+                    promoted[key] = (
+                        move_to_entries(path, db_root, system_type),
+                        entry)
                 # else: leave in staging for review.
             else:                                # interactive
                 print_summary(entry)             # sig+measured
                                                  #   +verif+prov
                 choice = ask("PROMOTE / SKIP / DELETE")
                 if choice == "PROMOTE":
-                    move_to_entries(path, db_root, system_type)
+                    promoted[key] = (
+                        move_to_entries(path, db_root, system_type),
+                        entry)
                 elif choice == "DELETE":
                     remove_file(path)
                 # SKIP: leave in staging.
 ```
 
 ```
+function load_promoted_entries(db_root):
+    # The promoted corpus, keyed by claim: key -> (path, entry).  It
+    # yields PAIRS, not bare entries, because REPLACE retires the
+    # file a promoted entry occupies and so needs its path (above).
+    # Only entries/ is read -- staging/ and superseded/ hold no
+    # claims -- and it is a directory read of small local files, not
+    # the flight-workspace re-read the single-file acceptance rule
+    # exists to avoid (DESIGN 7.8).
+    #
+    # On two promoted files sharing one claim the later read wins,
+    # silently.  That is a pre-existing state this pass cannot fix
+    # (it has no verb for removing a promoted entry unasked), and
+    # refusing to run would leave the curator unable to promote
+    # anything else either.
+    promoted = {}
+    for system_type in VALID_SYSTEM_TYPES:
+        for path in sorted(glob(
+                join(db_root, "entries", system_type), "*.toml")):
+            entry = load_entry(path, system_type, {})
+            promoted[dedup_key(entry)] = (path, entry)
+    return promoted
+
+
+function entries_path(db_root, system_type, staged_path):
+    # Where a staged file lands once promoted.  Promotion is a pure
+    # rename that keeps the basename, so this is the one formula for
+    # that destination; move_to_entries computes the same thing and
+    # returns it, and dry-run -- which renames nothing but must still
+    # model the index (above) -- asks here instead.
+    return join(db_root, "entries", system_type,
+                basename(staged_path))
+
+
 function move_to_superseded(path, db_root, system_type):
     # Retire a staged entry that a promoted one already claims.
     # Mirrors move_to_entries: a pure rename into
@@ -11390,10 +11766,11 @@ function move_to_superseded(path, db_root, system_type):
 
 `promote` returns one `(entry_id, action)` record per staged
 file, so a caller or a test sees the outcome without parsing
-printed text.  The dedup adds two actions to the existing
-`promoted` / `skipped` / `deleted` (and the `would-` forms):
-`superseded` for a retired re-run and `conflicted` for one
-claim with two meshes.
+printed text.  The uniqueness rule adds two actions to the
+existing `promoted` / `skipped` / `deleted` (and the `would-`
+forms): `superseded` for a retired re-run, and `replaced` for
+the curator-driven swap that is the only way an entry ever
+leaves `entries/`.
 
 ```
 function auto_promote_ok(entry):

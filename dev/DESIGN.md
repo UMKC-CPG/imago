@@ -5691,9 +5691,12 @@ producer-side cache would have had to provide:
 - *Content, not path.*  The cache compares structure file
   *contents*, so renaming a `structure_path` file on disk does
   not force a re-run.
-- *Build- and threshold-sensitive.*  Changing `scf_threshold`,
-  the k-point grid, or the Imago build identity invalidates the
-  cached run, as it must.
+- *Threshold-sensitive, build-insensitive.*  Changing the SCF
+  convergence limit or the k-point grid invalidates the cached run,
+  as it must.  Rebuilding the engine does not: the build identity is
+  recorded beside each run and never compared (6.2.5, VISION 16), so
+  a re-run after a rebuild is something a curator asks for with
+  `--force` rather than something the cache decides for them.
 
 The reason the old design preferred direct comparison over a
 content hash still holds — at ~100 reference solids run by hand,
@@ -5869,14 +5872,20 @@ Predict in density, search in mesh, record in density.
       mesh stored beside the density cannot differ between them.
       Every reference solid the producer converges thus becomes
       training data that sharpens the predictor for the next
-      solid.  A converged climb always carries at least the three
-      distinct rungs its stop test required (3.12.3), so the
-      stored flatness ladder is always long enough for the
-      curator's `auto_promote_ok` to re-judge -- every converged
-      solid contributes an entry, and a curator-pinned seed is
-      verified by the climb like any other (there is no unverified
-      single-point "trust" harvest here, unlike the density-era
-      helper, DESIGN 7).
+      solid.  A climb that stops on its *two-sided* test carries
+      at least the three distinct rungs that test required
+      (3.12.3), so the stored flatness ladder is long enough for
+      the curator's `auto_promote_ok` to re-judge, and a
+      curator-pinned seed is verified by the climb like any other
+      (there is no unverified single-point "trust" harvest here,
+      unlike the density-era helper, DESIGN 7).  The metal
+      short-circuit is the exception and the reason this is not
+      stated as "every converged solid contributes an entry": it
+      stops at the *first* gapless rung, so its ladder can be a
+      single point and its settled density is not a convergence
+      claim at all.  Metals therefore stage no guidance entry
+      (7.8); their potential is still harvested, which is what
+      this database wanted from them.
 6. Save each affected `ElementDatabase` to disk via
    `initial_potential_db.save()` (5.5).
 7. Write `share/curation/run_log.toml` capturing the manifest
@@ -6577,10 +6586,12 @@ API to tell it:
 3. **Under what conditions did it run?**  The SCF
    settings actually used -- basis, k-point spec,
    convergence threshold, Imago build commit -- so the
-   producer can fill the provenance fields of 5.2 and
-   so kaleidoscope can form its run-reuse cache key
-   (`kpoint_spec` + `scf_threshold` +
-   `imago_commit` + structure bytes, ARCHITECTURE 9.6).
+   producer can fill the provenance fields of 5.2, and so
+   kaleidoscope can form its run-reuse cache key (the SCF
+   convergence limit plus the resolved structure bytes;
+   ARCHITECTURE 9.6).  The build commit is wanted here for
+   the provenance record only -- it is written down beside
+   each run and never compared (6.2.5).
 4. **How much work did it take?**  The SCF iteration
    count, both for the producer's run log and for the
    20%-iteration-reduction validation harness (5.8).
@@ -7127,8 +7138,8 @@ solid into a small **verification sub-grid** of
 predict-then-verify algorithm of 7.7.  Every unit in that
 sub-grid shares `id = reference_id`, the curated skl as
 `structure`, the default (Imago) wingbeat, and the same
-`key_fields` (scalar `scf_threshold` and
-`imago_commit`; the structure file as a key file); they
+`key_fields` (the SCF convergence limit as the one scalar,
+the structure file as a key file -- 6.2.5); they
 differ in `calc` (the per-grid-point tag per 6.2.4) and in
 the swept k-density value carried in `options`.
 
@@ -7238,7 +7249,15 @@ of what convergence means.
   the full `ImagoResult` into the run directory** as
   `result.toml` (6.2.6), so the Imago-native detail
   survives for the client to reload without
-  kaleidoscope ever parsing it.
+  kaleidoscope ever parsing it.  Alongside the measured
+  fields it echoes one recorded fact into that file: the build
+  identity from the unit's `record` mapping (6.2.4), written as
+  `imago_commit`.  A guidance entry's provenance reads it there
+  (7.8), which keeps that harvest on the one per-run file it
+  already reads instead of opening the core's `status.toml`.
+  The echo is where TODO C84 lands: once the binary reports its
+  own build, the wingbeat prefers the engine's word and the
+  recorded value becomes the fallback.
 - An **ASE wingbeat** wraps `ImagoCalculator` (D12) for
   units that need ASE-MD or ASE-relaxation semantics; it
   too ultimately calls the 6.1 API underneath.
@@ -7503,7 +7522,33 @@ started_at       = <iso8601>    # omitted until running
 finished_at      = <iso8601>    # omitted until terminal
 runtime_seconds  = <float>      # omitted until terminal
 message          = "<text>"
+
+[record]                        # omitted when unit.record is empty
+<name>           = "<value>"    # free-form; see below
 ```
+
+**The `[record]` table: written down, never interpreted.**  A client
+may hang facts on a `CalcUnit`'s `record` mapping that belong to
+the run but are not inputs to it -- the engine build identity is
+the standing case (6.2.5).  Kaleidoscope copies the mapping
+verbatim into this table when the unit launches, and the dispatch
+core never interprets, compares, or acts on a single value in it.
+It is deliberately not part of the cache key and deliberately not
+part of the `FlightReport` (6.2.6): it exists so a curator reading
+a directory months later, or a reuse plan naming what produced a
+stored result, has something to read.  Because it is written at
+launch it stays put across a cache hit, describing the run that
+produced the result rather than the flight that reused it.
+
+A *wingbeat* may read a value it recognises and copy it into its
+own result file, and the Imago wingbeat does exactly that with the
+build identity, echoing it into `result.toml` (6.2.2) so a guidance
+entry's provenance can record it (7.8).  This keeps each reader on
+the file that is its own: the core writes and reads `status.toml`
+and never opens a wingbeat's result, while a domain harvest reads
+`result.toml` and never opens the core's lifecycle file.  One fact
+therefore lands in two files, which cannot disagree -- both are
+copied from the same `record` mapping at launch.
 
 The five `status` values are kaleidoscope-owned and
 generic.  `queued` / `running` are lifecycle;
@@ -7561,13 +7606,12 @@ skips the completed ones and re-dispatches the rest.
 **The key has two parts**, mirroring the producer's
 existing `is_cached_v2` (DESIGN 5.7) and generalizing it:
 
-- **Scalar fields** -- written verbatim into
-  `cache_key.toml` as TOML and compared field-by-field
-  (the producer's `scf_threshold` and `imago_commit`;
-  the swept k-density is not among them -- each k-point
-  grid is its own unit with its own calc tag and run
-  directory, 6.2.4, so the run-dir path already keeps
-  them distinct).
+- **Scalar fields** -- written verbatim into `cache_key.toml` as
+  TOML and compared field-by-field.  For the producer that is a
+  single field, the SCF convergence limit (`converg`).  The swept
+  k-density is not among them -- each k-point grid is its own unit
+  with its own calc tag and run directory, 6.2.4, so the run-dir
+  path already keeps them distinct.
 - **Key files** -- declared by name in `key_fields`;
   compared by **byte-comparison against the copy already
   staged in the run directory**.  For the producer this
@@ -7589,6 +7633,52 @@ define identity for its calculations.  Kaleidoscope never
 guesses -- a too-broad key risks false hits and wrong
 science; a too-narrow key risks needless re-runs.  One cache
 serves every client: the producer keeps no cache of its own.
+
+**The key asks "is this the same calculation?", not "is this result
+still good?" (VISION 16).**  The engine build is deliberately outside
+it.  A rebuilt engine does not make a stored potential wrong -- that
+potential is a starting point every later SCF re-converges -- and the
+two ways of being wrong are not symmetric: a false *hit* has an escape
+valve in `--force` (6.2.3), a false *miss* has none, so the hours are
+simply spent again.  The build identity is the field that would make
+the key miss most often, since ordinary development changes it
+constantly and changes the physics almost never.
+
+*What this gives up, deliberately.*  A directory produced by an older
+engine is reused without comment, so a flight inherits that engine's
+SCF bug for every unit that hits.  Accepted knowingly: the artifact is
+a starting guess, not a published number, and a curator who knows a
+fix landed re-runs with `--force`.  A later reader should not read the
+absent comparison as an oversight and restore it -- least of all as a
+whole-repository commit stamp, which is what this design carried
+before and is wrong both ways at once: over-sensitive (a
+documentation-only commit invalidates every cached run in the
+workspace, measured in TODO C132) and under-protective (editing
+Fortran and rebuilding without committing leaves the stamp unchanged,
+so the stale-engine case it was meant to catch is the one it misses).
+
+*Recorded, not compared; and a printed plan in place of the guard.*
+The build identity is written into the `status.toml` the driver
+already keeps per unit (6.2.4) -- no new file -- and stays put on a
+hit, describing the run that produced the result rather than the
+flight that reused it.  The driver then states its plan before
+spending anything: how many units it will reuse and how many it will
+run.  That count is the decision a curator makes, so it always
+prints.  The per-unit lines behind it -- reuse or run for each, and on
+a reuse the build and finish time read from that file -- are the
+evidence for the count, and they follow the reporting rule of 5.7
+(closed as TODO C131): a run says what it achieved, not what it is
+doing, so per-item narration waits for `--verbose`.  The climb calls
+the driver once per round (3.12.5), which is exactly why: an
+unconditional line per unit would refill the screen C131 cleared, on
+the same code path.  The plan is also available as a preview that
+dispatches nothing, and there the per-unit lines print in full
+without asking -- reading them one by one *is* the whole purpose of
+a preview.  `--force` keeps its meaning --
+driver-side, all-or-nothing, every hit becomes a miss -- and becomes
+the ordinary way a re-run is requested.  TODO C84 makes the recorded
+identity trustworthy by having the engine stamp its own; that work is
+for the record, never for the cache.
 
 **Prepare before the hit-test.**  Because the producer's
 key file is makeinput's output, makeinput must run *before*
@@ -7767,12 +7857,13 @@ build_kpoint_convergence(
     options,                   # dict of non-swept RUN SETTINGS in
                                #   each tool's own coded vocabulary:
                                #   scf_basis, xccode, scfkpint,
-                               #   converg, kpshift, imago_commit,
-                               #   ... held fixed across the grid and
-                               #   copied verbatim into every
-                               #   CalcUnit.  Carries NO physics-name
-                               #   keys -- the wingbeat forwards it
-                               #   to the tools as-is (DESIGN 6.2.10).
+                               #   converg, kpshift, ... held fixed
+                               #   across the grid and copied
+                               #   verbatim into every CalcUnit.
+                               #   Carries NO physics-name keys and
+                               #   no bookkeeping -- every key is a
+                               #   real tool input, and the wingbeat
+                               #   forwards it as-is (DESIGN 6.2.10).
     dataspace,                 # Dataspace loaded by
                                #   guidance_db.load() from
                                #   share/historicalGuidanceDB/
@@ -8233,29 +8324,30 @@ because it is genuinely both a prediction input and an imago
 setting; `functional` and `kpoint_integration` carry a different
 value in each channel (`wigner` vs `100`) and so never collide.
 
-*The routing rule (three buckets).*  The wingbeat splits a
+*The routing rule (two buckets).*  The wingbeat splits a
 unit's options into:
 
 - **imago run options** -- the fixed, known imago key set
   `{job, edge, scf_basis, pscf_basis, serialxyz, valgrind}`
   (6.1), exported as `imago.OPTION_KEYS` so the wingbeat does not
   hard-code it -> handed to `from_options`.
-- **bookkeeping / cache-only** -- the keys in `CACHE_ONLY_KEYS`
-  (today just `imago_commit`, the build identity that busts the
-  run-reuse cache across imago versions, 6.2.5), exported from
-  `kaleidoscope.wingbeats` because this is kaleidoscope's own
-  bookkeeping, not an imago tool input.  Such a key is *dropped
-  before forwarding* and reaches neither tool.  This is safe
-  because the cache identity is captured
-  separately in `unit.key_fields` at build time
-  (`standard_key_fields` copies the scalars out of `options`), so
-  removing the key from the forwarded options does not change the
-  cache key.
 - **makeinput build options** -- everything else, handed to
   `build_run_dir`.  makeinput **keeps its strict unknown-key
   check**, which now serves as the typo backstop: a key that is
-  neither an imago key nor bookkeeping nor a real makeinput dest
-  still raises, so the safety that strictness buys is preserved.
+  neither an imago key nor a real makeinput dest still raises, so
+  the safety that strictness buys is preserved.
+
+*Bookkeeping is not an option.*  `options` is a dictionary of
+*tool inputs*, and a fact that reaches neither tool has no business
+in it.  The build identity is the standing example: it is recorded
+per run and never compared (6.2.5), so it is neither an imago
+setting nor a makeinput dest nor part of the key.  It therefore
+rides on the `CalcUnit` itself, in a small free-form `record`
+mapping the driver copies verbatim into `status.toml` at launch
+and never interprets.  That keeps a third "dropped before
+forwarding" bucket out of the routing rule entirely, and it keeps
+makeinput's strict check meaningful -- an unrecognised key in
+`options` is now always a typo, never a deliberate passenger.
 
 | Producer emits | Bucket | Tool dest / note |
 | --- | --- | --- |
@@ -8265,7 +8357,7 @@ unit's options into:
 | `scfkpint` | makeinput | k-point integration (LAT = 1) |
 | `kpshift` | makeinput | gamma-centred mesh offset |
 | `converg` | makeinput | SCF threshold (new dest; below) |
-| `imago_commit` | dropped | cache identity only (6.2.5) |
+| build identity | not an option | rides on `unit.record` (above) |
 
 *Designed for setting migration -- not rigid about today's
 split.*  The routing is by each tool's recognised-key set, not a
@@ -8291,9 +8383,9 @@ a makeinput option `-converg` (dest `converg`, `type=float`) that
 to it when absent -- structurally identical to `-xccode`
 defaulting to 100.  `make_producer_options` maps the manifest
 `scf_threshold` onto `converg`.  The value stays a cache-key
-scalar (6.2.5), so `standard_key_fields`' `_KEY_SCALAR_NAMES`
-becomes `("converg", "imago_commit")` -- the cache keys on the
-dest the run actually used.
+scalar (6.2.5), so `standard_key_fields`' `_KEY_SCALAR_NAMES` is
+`("converg",)` -- the cache keys on the dest the run actually
+used, and on nothing else scalar.
 
 *Related robustness fix (surfaced by the failed smoke run).*
 When every unit fails this way, no `result.toml` is written, and
@@ -8308,8 +8400,16 @@ missing `result.toml` is opened.
 
 *Follow-on code (for TODO).*  (a) add makeinput `-converg`;
 (b) rewrite `make_producer_options` to emit the dest-keyed, coded
-vocabulary above; (c) export `imago.OPTION_KEYS` plus a
-`CACHE_ONLY_KEYS` set from `kaleidoscope.wingbeats`; (d) move the
+vocabulary above; (c) export `imago.OPTION_KEYS` and retire the
+third routing bucket -- delete `kaleidoscope.wingbeats`'
+`CACHE_ONLY_KEYS` and the partition branch that reads it, and have
+the producer's unit builders set `unit.record` instead, which is
+where the build identity now travels.  Those two halves must land
+*together*: with the bucket gone, a key that reaches neither tool
+raises, so a `make_producer_options` still emitting `imago_commit`
+into `options` would abort every unit with `unknown makeinput
+option: 'imago_commit'` -- the very failure this seam was written
+to fix.  (d) move the
 partition into `ImagoWingbeat.run` and retire the single-shared-
 options call to `run_structure`; (e) update `_KEY_SCALAR_NAMES`;
 (f) the completion gate reads `status.toml` before any `result.toml`
@@ -11264,6 +11364,20 @@ measured value and falls back to `"unknown"` for an absent
 `imago_commit` (non-empty, so the schema's rule-11 check
 still passes and the curator can spot it on review).
 
+*Where `imago_commit` comes from.*  It is a recorded fact, not a
+measured one, and it reaches `result.toml` because the wingbeat
+echoes it there out of the unit's `record` mapping (6.2.2 /
+6.2.4).  Reading it beside the measured quantities is what keeps
+this harvest on three sources rather than four -- it never opens
+the dispatch core's `status.toml`.  The build is deliberately not
+part of the cache key (6.2.5) and not part of the claim key
+(below); recording it and partitioning on it are different acts,
+and only the first is wanted.  Until TODO C84 has the binary
+report its own build, the value is what the *producer believed*
+it launched, which is worth strictly more than `"unknown"` and
+strictly less than the engine's own word; C84 replaces it in
+place, in this same field.
+
 **Algorithm** (`guidance_harvest.py`):
 
 ```
@@ -11350,6 +11464,22 @@ still passes and the curator can spot it on review).
          structure.  Non-converged sweeps do not earn
          an entry.  The user must widen the grid and
          re-run.
+      d'. If the chosen run is gapless (`gap_ev` at or
+         below `metal_gap_threshold`, the same test the
+         climb's metal short-circuit applies, 3.12.3), log
+         the metal and SKIP this structure.  A metal stages
+         no guidance entry.  See below.  The threshold
+         rides on this structure's `prediction` record,
+         the same channel `kpoint_convergence_threshold`
+         uses and for the same reason: it is a manifest
+         knob (`[kpoint_climb]`, 5.7) and this harvest is
+         a standalone tool pointed at a finished
+         workspace, so it never sees a manifest.  The
+         producer stamps the resolved value onto the
+         record when it builds the flight.  An ABSENT
+         `gap_ev` is not metallic: a missing reading must
+         not silently suppress an entry a real insulator
+         earned (3.12.3 takes the same side).
       e. Compute the structure's signature: system_type
          from this structure's `prediction` record
          (which carries it from 7.7); composition_vector
@@ -11385,7 +11515,8 @@ still passes and the curator can spot it on review).
               manifest, so the producer stamps the
               resolved value onto the record when it
               builds the flight, exactly as it does
-              system_type and the sub-model,
+              system_type, the sub-model, and the
+              `metal_gap_threshold` step 3d' applies;
               predictor_confidence and
               predictor_neighbor_ids from this
               structure's `prediction` record.
@@ -11432,6 +11563,29 @@ grid) is still correctly left unharvested for the curator.
 Sharpening the detector to tell a false plateau from a true
 asymptote is a deferred refinement, not a v1 concern.
 
+**Metals stage no guidance entry (a held decision).**  A guidance
+entry's entire content is the claim "for a structure like this,
+this k-density is converged."  A metal cannot make that claim: its
+energy does not converge in k-points at any mesh worth paying for,
+which is the whole difficulty, and the climb acknowledges this by
+short-circuiting at the first gapless rung and settling there as a
+deliberately rough potential (3.12.3).  The rung it settles on is
+a stopping point, not a converged density, and an entry recording
+it as one would be read by the predictor as evidence -- worse,
+disproportionate evidence, since a metal is often the only member
+of its lattice family in a young collection and would then
+dominate every prediction for that family through the distance
+weighting of 7.6.  So the harvest skips it.  The producer's own
+potential harvest (5.7) is unaffected: the rough potential is
+still extracted, because a rough starting potential is exactly
+what that database is for.
+
+This is deliberately the small version of the fix.  The richer
+one -- record the metal's gap and its lack of a density claim, and
+let the predictor's first stage learn to expect a metal -- is the
+natural upgrade once metals are more than an occasional member of
+a seed collection, and is held until then (7.10).
+
 **Promotion** (`guidance_promote.py`):
 
 A curator helper.  Four modes of operation:
@@ -11443,7 +11597,9 @@ A curator helper.  Four modes of operation:
   SKIP, or DELETE.  Promoted files move to
   `entries/<system_type>/`.  Skipped files stay in
   staging for later review.  Deleted files are
-  removed.
+  removed.  On a claim the collection already holds,
+  REPLACE joins that list -- the one way an entry ever
+  leaves `entries/`, and only by hand (below).
 - *Auto-promote rule* (`--auto-promote`).  Promotes
   every staging file that satisfies an objective
   acceptance test:
@@ -11487,12 +11643,13 @@ Promotion is a `mv` operation -- the file's contents
 do not change.  This keeps provenance intact across
 the staging boundary.
 
-**Re-run dedup at promotion.**  Promotion is also where a
-re-run of an already-promoted solid is caught, because it
-is the only stage that sees both the incoming entry and
-the promoted corpus.  The harvest cannot: it writes one
-entry per converged solid and has no view of what a
-curator accepted months ago.  Nor does any existing guard
+**One record per structure per settings.**  This is the whole
+uniqueness rule the collection enforces, and promotion is where it
+is applied, because promotion is the only stage that sees both the
+incoming entry and the promoted corpus.  The harvest cannot: it
+writes one entry per converged non-metal solid (metals stage none,
+above) and has no view of what a curator accepted months ago.  Nor
+does any existing guard
 fire -- a re-run mints a fresh `entry_id` by construction,
 since the slug hashes the flight id, structure, and
 timestamp (7.5), so the collision refusal in `save_entry`
@@ -11527,80 +11684,74 @@ sit and that location has moved (ARCHITECTURE 8.1); the
 basename is `<reference_id>-<cell>.skl` (5.7), which is
 the identity actually wanted, since a `full` and a `prim`
 run of one COD entry are genuinely different structures.
-`imago_commit` is deliberately *not* in the key: it is
-what the comparison examines, not what partitions it.
+The engine build is deliberately *not* in the key.  It is a fact
+the report prints so a person can weigh it, not a dimension the
+collection is partitioned along -- the same stance the run-reuse
+cache takes (6.2.5): recorded, never compared.
 
-*What counts as agreement.*  The `converged_mesh` (7.2),
-not the k-density.  The mesh is what a later run would
-actually use, so two entries resolving to the same mesh
-make the same operational claim however their densities
-round.  It is also an exact integer comparison, which
-keeps a tolerance knob out of the rule entirely.
+*The check is an existence test, not a comparison.*  Either the
+collection already holds a record for that claim or it does not.
+That is the whole question, and it has two answers:
 
-`converged_mesh` is optional in the schema: a manual or
-curator-authored entry (7.9) carries no verification block
-and so no mesh.  When either side of a matched pair lacks
-one the meshes cannot be compared, and the pair is treated
-as a conflict rather than waved through.  The claim is
-duplicated and the answers cannot be shown to agree --
-which is exactly a curator's question, not a tool's.  The
-common shape is a hand-seeded entry meeting a later flight
-harvest of the same structure, and that deserves a human
-look on its own merits.
+- **Occupied.**  The promoted entry stands untouched, the staged
+  one is retired to `superseded/<system_type>/`, and both are
+  printed side by side with their converged meshes, their dates,
+  and the builds behind them.  Promotion therefore only ever
+  *adds* to `entries/` on its own initiative; an entry a curator
+  reviewed stays byte-identical for as long as it lives there.
+- **Free.**  The ordinary path; the acceptance rule above decides
+  it.
 
-*Three outcomes.*  For a staged entry whose key matches a
-promoted one:
+The `converged_mesh` (7.2) appears in that report and is never
+tested by a branch.  An earlier draft compared the two meshes and
+split the occupied case in three -- agreement retired the
+newcomer, disagreement refused to act in any mode, and an absent
+mesh (a manual entry, 7.9, carries no verification block and so no
+mesh) counted as disagreement.  The split bought nothing.  The
+tool's action was the same either way, because it has no verb for
+retracting a reviewed entry; all the comparison decided was
+whether the newcomer was archived or left in `staging/` to be
+re-examined and re-reported by every later pass.  Archiving it
+always is simpler and kinder to `staging/`, and the report still
+shows the person both meshes -- which is where a disagreement was
+going to be resolved in any case (VISION 16).
 
-- **Redundant** (same mesh).  The promoted entry stands
-  untouched and the staged one is retired to
-  `superseded/<system_type>/`.  Promotion therefore only
-  ever *adds* to `entries/`; an entry a curator reviewed
-  stays byte-identical for as long as it lives there.
-- **Conflict** (different mesh, or a mesh missing on
-  either side).  Never promoted automatically, in any
-  mode.  Both entries are reported with their meshes and
-  their `imago_commit` values, and the staged file stays
-  in staging for the curator.  It stays there rather than
-  being retired because resolving it may mean removing an
-  entry from `entries/`, and promotion has no verb for
-  that -- deliberately, since a tool that can retract a
-  reviewed entry is a tool that can do so by accident.
-- **New** (no key match).  The ordinary path; the
-  acceptance rule above decides it.
+*The curator gets a verb.*  Interactive review therefore offers
+**REPLACE** on an occupied claim, alongside PROMOTE / SKIP /
+DELETE: retire the promoted entry to `superseded/` and promote the
+newcomer in its place.  This is the only route by which anything
+leaves `entries/`, and it exists solely behind a per-record prompt
+a person answers by hand.  The standing objection -- a tool that
+can retract a reviewed entry can do so by accident -- is an
+argument against an *automatic* retraction and does not reach an
+explicit one.  Without the verb, the report names a situation the
+curator can act on only by moving files themselves, which is a
+worse place to leave them than a prompt.
 
-A conflict is the case that earns the whole rule, because
-it is the one a script must not resolve.  Two answers to
-one question means either the code changed between the
-runs -- in which case which answer is right is a physics
-judgment, not a timestamp comparison -- or the pipeline is
-not deterministic, which is a defect worth surfacing
-rather than averaging away.  Keeping "the newest" would
-silently discard the evidence that behaviour changed;
-keeping "the first" would silently keep a superseded
-number.  Reporting both is the only honest option, and it
-follows the same line drawn for the scratch prune (6.2.12):
-the mechanism working is quiet, an assumption breaking is
-loud.
+*Every mode applies the existence test, `--all` included.*
+Refusing to store one claim twice is a correctness guard, not a
+quality judgment, and `--all` waives only the latter -- it means
+"I have reviewed these," not "store them however many times they
+appear."  What the unattended modes do not offer is REPLACE:
+`--all` and `--auto-promote` never retract.
 
-*Within one staging batch.*  Two staged files can share a
-key before either is promoted -- the ordinary shape of a
-re-run harvested twice.  The batch is resolved first, by
-the same rule, and only the survivor is compared against
-`entries/`.  This is a change of contract: promotion
-currently judges each staged file in isolation, on the
-stated ground that staging is not the uniqueness namespace.
-Under this rule it is, and the isolation goes.
-
-*Every mode applies it, `--all` included.*  Refusing to
-store one claim twice is a correctness guard, not a
-quality judgment, and `--all` waives only the latter --
-it means "I have reviewed these," not "store them however
-many times they appear."
+*Within one staging batch nothing special happens*, which is the
+point.  Two staged files can share a claim before either is
+promoted -- the ordinary shape of a re-run harvested twice.
+Promotion adds each entry to its in-memory index of the promoted
+corpus as it promotes it, so the second file finds the claim
+occupied and takes the branch above.  There is no separate
+batch-resolution pass and no tie-break on `generated_at`; an
+earlier draft carried both, and both were machinery for saving one
+rule from having to apply twice in a row.  One consequence is
+worth stating because it reverses an older contract: promotion no
+longer judges each staged file in isolation, and `staging/` *is* a
+uniqueness namespace.
 
 *One documented property is amended.*  The acceptance rule
 is specified above as reading the staged file alone, which
-is why harvest records `grid_energies` at all.  The dedup
-check needs the promoted corpus as well.  The intent of
+is why harvest records `grid_energies` at all.  The existence
+test needs the promoted corpus as well.  The intent of
 the original rule survives: what it avoided was depending
 on the *flight workspace*, which is large, remote, and
 reclaimable (6.2.12).  `entries/` is small, local, and
@@ -11766,6 +11917,19 @@ the DESIGN 5.7 build discipline.
 
 ### 7.10 Open Design Questions
 
+- **Metals contribute nothing to the collection.**  The
+  harvest skips them outright (7.8), which is correct as far
+  as it goes -- a metal has no converged k-density to claim --
+  but it also means that running one teaches the predictor
+  nothing, and that a query for a metal draws its neighbors
+  entirely from insulators whose densities are not the right
+  answer for it.  The richer treatment records the metal's
+  gap and its *absence* of a density claim, so the
+  predictor's first stage learns to recognise the case and
+  the second stage declines to predict rather than
+  predicting badly.  That needs a v2 measured field and a
+  predictor branch, and is deferred until metals are more
+  than an occasional member of a seed collection.
 - **Antiferromagnets are invisible to the spin feature.**
   The predictor's second character feature is the intensive
   magnetization `|M| / N_atoms` (7.6), built from the cell's

@@ -1019,14 +1019,14 @@ the producer is a *what-to-compute* script, while
 kaleidoscope owns running, caching, and tracking the
 batch.
 
-The producer keeps no cache of its own.  Kaleidoscope's
-run-reuse cache (9.6) serves it, keyed on `structure.dat`
--- makeinput's resolved output, which bakes in the
-type/species assignment, basis, functional, and
-potential -- plus the build identity (the imago commit).
-Because an entry customization touches none of those, editing
-one re-triggers no SCF: only the cheap harvest step
-re-runs.
+The producer keeps no cache of its own.  Kaleidoscope's run-reuse cache
+(9.6) serves it, keyed on `structure.dat` -- makeinput's resolved
+output, which bakes in the type/species assignment, basis, functional,
+and potential -- plus the SCF convergence limit.  Because an entry
+customization touches none of those, editing one re-triggers no SCF:
+only the cheap harvest step re-runs.  The engine build is recorded
+alongside each run but is not part of the key (9.6, VISION 16), so
+rebuilding the engine costs nothing until a curator asks for the re-run.
 
 **Prepare runs in the driver, not the worker.**  Keying
 on `structure.dat` means makeinput must run before the
@@ -2029,21 +2029,35 @@ cost correctness:
   the run directory, compare it on the hit-test, skip a
   run whose snapshot still matches, and resume a
   flight over already-completed runs.
-- *Policy (client).*  The client supplies the *key
-  fields* -- only it knows which inputs define identity
-  for its calculations.  The database producer, for
-  instance, declares its key as `kpoint_spec` +
-  `scf_threshold` + `imago_commit` + the
-  structure bytes (DESIGN 5.7).
+- *Policy (client).*  The client supplies the *key fields* -- only it
+  knows which inputs define identity for its calculations.  The
+  database producer declares its key as the SCF convergence limit plus
+  the resolved `structure.dat` bytes (DESIGN 5.7): the inputs that
+  settle *which calculation this is*.  Each swept k-density is its own
+  unit with its own run directory, so the mesh never enters the key.
 
-This keeps kaleidoscope from guessing input identity (a
-too-broad key risks false hits and wrong results; a
-too-narrow key risks needless re-runs) while still
-giving every flight one cache implementation.  The
-boundary with `imago.py`'s existing checkpointing is
-clean: `imago.py` resumes *within* a run directory;
-kaleidoscope decides whether to *launch* the run
-directory at all.
+This keeps kaleidoscope from guessing input identity (a too-broad key
+risks false hits and wrong results; a too-narrow key risks needless
+re-runs) while still giving every flight one cache implementation.  The
+boundary with `imago.py`'s existing checkpointing is clean: `imago.py`
+resumes *within* a run directory; kaleidoscope decides whether to
+*launch* the run directory at all.
+
+**The key asks "the same calculation?", not "still good?" (VISION 16).**
+The engine build stays out of it.  A rebuilt engine does not make a
+stored potential wrong -- that potential is a starting point every later
+SCF re-converges -- while keying on the build would discard every stored
+result each time the code was touched, which is an expensive answer to a
+question nobody asked.  So the build identity is *recorded* -- a field
+in the `status.toml` each run directory already carries, where a curator
+can read later what produced a number -- and it is never *compared*.
+It is not a run option either: it reaches neither makeinput nor imago,
+so it rides on the unit rather than in the options dictionary those
+tools are handed (DESIGN 6.2.10).  What stands in for the automatic
+guard is a
+report: the driver prints its reuse plan before it spends anything --
+which units it will reuse, which it will run, and why -- and re-running
+is requested outright rather than inferred from a file that changed.
 
 **Two tiers, and reclaiming the larger one.**  A run
 directory spans two filesystems.  The *kept* tier is the
@@ -2307,6 +2321,20 @@ whose width is set by the uncertainty.  Each successful
 flight appends back into the dataspace, so the predictor
 gets better as it accumulates evidence.
 
+**What the dataspace deliberately does not hold: metals.**
+Every entry asserts that a k-density converged, and a metal
+cannot assert it -- its energy keeps moving as the mesh crosses
+the Fermi surface, which is why the climb stops at the first
+gapless mesh and settles there as a knowingly rough result
+(DESIGN 3.12.3).  Recording that stopping point as a converged
+density would feed the predictor a claim nobody made, and in a
+young collection a lone metal can be the only member of its
+lattice family and so dominate every prediction for it.  The
+harvest therefore skips metals (DESIGN 7.8).  The *initial
+potential* database is unaffected and still takes their
+potential, which is exactly the rough starting point it wants
+(section 8).
+
 This section covers on-disk layout, file format choice,
 the data-flow through kaleidoscope's flight builder, the
 harvest pipeline, and the module boundaries.
@@ -2338,8 +2366,9 @@ share/
                             entries/; the staging area is
                             not consumed by the predictor.
     superseded/             Entries retired at promotion
-                            because a promoted entry
-                            already makes the same claim
+                            because the collection already
+                            holds a record for that
+                            structure under those settings
                             (DESIGN 7.8).  Mirrors the
                             same system_type partition.
                             Retired, not deleted: the
@@ -2605,15 +2634,23 @@ src/scripts/
   The auto-promotion rule lets a 500-entry seed flight
   promote ~80% of entries unattended, with the curator
   reviewing only the ~20% outliers.
-  Promotion is also where a re-run of an already-promoted
-  solid is caught, because it is the only stage that sees
-  both the incoming entry and the promoted corpus (DESIGN
-  7.8).  The harvest cannot: it writes one entry per
-  converged solid and has no view of what a curator
-  accepted months ago.  Every mode applies the check,
-  `--all` included -- refusing to store the same claim
-  twice is a correctness guard, not a quality judgment,
-  and `--all` waives only the latter.
+  Promotion is also where a re-run of an already-promoted solid is
+  caught, because it is the only stage that sees both the incoming
+  entry and the promoted corpus (DESIGN 7.8).  The harvest cannot: it
+  writes one entry per converged non-metal solid and has no view of
+  what a curator accepted months ago.  The rule the check enforces is simply
+  that the collection holds **one record per structure per settings
+  combination** -- the duplicate-structure guard, and nothing more.
+  Every mode applies it, `--all` included, because keeping one
+  structure out of the predictor's neighbor set twice is a correctness
+  guard rather than a quality judgment, and `--all` waives only the
+  latter.  What the check does *not* do is adjudicate: an arriving
+  record for an occupied slot is reported with both meshes and both
+  build identities, the existing record is left exactly as the curator
+  accepted it, and the newcomer is retired to `superseded/`.  Interactive
+  review adds a REPLACE choice for the occupied case, and that is the
+  only way an entry ever leaves `entries/` -- a curator's verb, never an
+  unattended mode's (VISION 16).
 - Both databases grow incrementally and in place (the
   initial-potential DB does too, DESIGN 5.2.3); the
   difference is what gates the growth.  The

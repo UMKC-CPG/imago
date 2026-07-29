@@ -382,3 +382,26 @@ flight instead of an exhaustive grid search.
     the common failure mode. This is the same obligation that
     governs a methods section, and the source is where students
     first learn that it applies to software as well as to prose.
+16. **Where the answer is a judgment, report it and let the curator decide.**
+    A tool that cannot settle a question from the data in front of it prints
+    what it found, together with the facts a person needs in order to choose,
+    and leaves the choosing to them. It does not encode a policy that guesses
+    on their behalf. Principle 10 says a failed calculation is recorded and
+    surfaced rather than failing a whole flight; this says the same of an
+    ambiguity -- a stored result whose engine build has since moved on, a
+    harvested record claiming a structure the database already holds. Each of
+    those is a question with a human answer, and a branch that settles it
+    silently is a decision nobody reviewed. What makes the unhurried answer
+    affordable is what these databases actually hold. An initial potential is
+    a starting point that every downstream SCF re-converges; a predicted
+    k-point density is a starting point that the climb then verifies against
+    its own two-sided test. A stale or imperfect stored value therefore costs
+    iterations, not correctness -- which is exactly the condition under which
+    elaborate automatic safeguards stop paying for themselves (Principle 6).
+    Treating either database as though its numbers were final results buys
+    caution nobody needed and complexity every later reader must still read.
+    The implication for code: prefer a printed line to a branch; make the
+    expensive action explicit, so that a re-run is requested rather than
+    inferred; and record the facts a judgment would want -- which build
+    produced a number, which mesh a record claims -- even where nothing
+    compares them.
