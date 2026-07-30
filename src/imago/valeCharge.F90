@@ -46,7 +46,9 @@ subroutine makeValenceRho(inSCF)
    use O_Constants, only: smallThresh,eCharge
    use O_Potential, only: rel,spin,potDim,potCoeffs,&
          & numPlusUJAtoms, converged
-   use O_Populate, only: electronPopulation,cleanUpPopulation
+   use O_Populate, only: electronPopulation,cleanUpPopulation, &
+         & electronPopulation_LAT
+   use O_KPoints, only: kPointIntgCode
    use O_SCFIntegralsHDF5, only: atomOverlap_did,atomKEOverlap_did, &
          & atomMVOverlap_did,atomNPOverlap_did,atomPotOverlap_did,packedVVDims
    use O_PSCFIntegralsHDF5, only: atomOverlapPSCF_did,packedVVDimsPSCF
@@ -155,22 +157,42 @@ subroutine makeValenceRho(inSCF)
    potRho(:,:) = 0.0_double
 
 
-   ! Fill a matrix of electron populations from the electron population that
-   !   was computed in populateLevels.  Note that electronPopulation is a one
-   !   dimensional array that has some order, but is not sorted in the way
-   !   that the energy eigen values were sorted.  Please read the comments in
-   !   the populateLevels subroutine to understand the order.
-   !   (You can also probably get it from the loop order here ;)
-   energyLevelCounter=0
-   do i = 1, numKPoints
-      do j = 1, spin
-         do k = 1, numStates
-            energyLevelCounter = energyLevelCounter + 1
-            structuredElectronPopulation (k,i,j) = &
-                  & electronPopulation(energyLevelCounter)
+   ! Fill a matrix of electron populations from whichever integration
+   !   method produced them (DESIGN 1.6c).
+   !
+   ! Under LAT the occupations already have the (state, kpoint, spin)
+   !   shape this matrix wants, so the LAT branch is a straight copy and
+   !   the unpack below is skipped entirely rather than being fed a
+   !   differently-ordered array.  The one conversion needed is of
+   !   CONVENTION: electronPopulation carries the kPointWeight
+   !   convention, whose weights sum to 2.0 so that a non-polarized
+   !   calculation holds two electrons per state, while
+   !   electronPopulation_LAT holds pure Brillouin-zone volume fractions
+   !   summing to 1.0 per occupied band per spin.  The factor 2/spin
+   !   converts between them, the same conversion computeBond applies at
+   !   its own point of use (DESIGN 1.6d).
+   if (kPointIntgCode == 1) then
+      structuredElectronPopulation(:,:,:) = &
+            & electronPopulation_LAT(:,:,:) &
+            & * 2.0_double / real(spin, double)
+   else
+
+      ! Note that electronPopulation is a one dimensional array that has
+      !   some order, but is not sorted in the way that the energy eigen
+      !   values were sorted.  Please read the comments in the
+      !   populateLevels subroutine to understand the order.
+      !   (You can also probably get it from the loop order here ;)
+      energyLevelCounter=0
+      do i = 1, numKPoints
+         do j = 1, spin
+            do k = 1, numStates
+               energyLevelCounter = energyLevelCounter + 1
+               structuredElectronPopulation (k,i,j) = &
+                     & electronPopulation(energyLevelCounter)
+            enddo
          enddo
       enddo
-   enddo
+   endif
 
    do i = 1, numKPoints
 

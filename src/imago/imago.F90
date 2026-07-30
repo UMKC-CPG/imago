@@ -1034,7 +1034,12 @@ subroutine bond (inSCF, doBond)
    !   occupation weights before the bond/charge calculation. These
    !   replace the Gaussian-broadened electronPopulation weights.
    if (kPointIntgCode == 1) then
-      call computeElectronPopulation_LAT
+      ! Zero, because shiftEnergyEigenValues above has already moved
+      !   the Fermi level to exactly that in this spectrum.  The SCF
+      !   occupation path passes its own searched level instead, which
+      !   is why the energy is an argument rather than an assumption
+      !   (DESIGN 1.6).
+      call computeElectronPopulation_LAT (0.0_double)
    endif
 
    ! Call the bond subroutine to compute the bond order and effective charge.

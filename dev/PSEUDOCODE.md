@@ -680,6 +680,20 @@ here and are mirrored rather than reinvented:
   carries the same obligation or it counts the core hole's
   electron.
 
+  **v1 REFUSES this combination rather than guessing it.**  The
+  Gaussian correction addresses the flat, sorted occupation
+  array through `indexEnergyEigenValues`, and its band
+  arithmetic does not carry over to the `(band, kpoint, spin)`
+  array without a derivation this work has not done -- the
+  orbital-state counts are scaled by `spin` at initialization,
+  so the mapping is not the obvious one.  A wrong correction
+  misplaces exactly one electron, which is small enough to
+  read as a convergence problem and never be questioned.  So
+  `populateLAT` stops with a message naming Gaussian
+  integration as the supported path for an excited run.  The
+  ground-state path is unaffected, and that is the path the
+  metals work needs.
+
 ```
 function populateStates:
     # DESIGN 1.6. Unchanged through populateStandard, which
@@ -724,24 +738,25 @@ function populateLAT:
     E = (previousFermi if previousFermi is set
          else 0.5 * (minEnergy + maxEnergy))
 
-    for i = 1 to MAX_FERMI_ITER:
-        if excitedQN_n /= 0:
-            numElectrons = numElectrons + 1
+    # An excited run does not reach here (refused above).  When it
+    # is implemented, the target is a LOCAL variable rather than a
+    # mutation of the module's numElectrons: the Gaussian form
+    # increments and restores across two routines, which is correct
+    # but reads as unbalanced inside either one, and a search loop
+    # is the worst place to leave module state temporarily wrong.
+    targetCount = numElectrons
 
+    for i = 1 to MAX_FERMI_ITER:
         (N, dNdE) = latElectronCount(E)
 
-        if excitedQN_n /= 0:
-            call correctCorePopulation_LAT   # restores the
-            N = N - 1                        #   count too
-
-        if abs(N - numElectrons) < smallThresh:
+        if abs(N - targetCount) < smallThresh:
             break
 
         # Maintain the bracket from every evaluation, so the
         # safeguard below always has a valid one.  N(E) is
         # monotone non-decreasing, which is what makes this
         # sound.
-        if N < numElectrons: minEnergy = E
+        if N < targetCount: minEnergy = E
         else:               maxEnergy = E
 
         # Newton where the derivative is usable, bisection
@@ -751,7 +766,7 @@ function populateLAT:
         # diverge.  Fall back whenever the step leaves the
         # bracket or the slope is negligible (DESIGN 1.6a).
         if dNdE > slopeThresh:
-            E_next = E - (N - numElectrons) / dNdE
+            E_next = E - (N - targetCount) / dNdE
         else:
             E_next = 0.5 * (minEnergy + maxEnergy)
         if E_next <= minEnergy or E_next >= maxEnergy:
@@ -761,8 +776,6 @@ function populateLAT:
     occupiedEnergy = E
     previousFermi  = E
     call computeElectronPopulation_LAT(..., eFermi = E)  # 3
-    if excitedQN_n /= 0:
-        call correctCorePopulation_LAT
 ```
 
 ```
@@ -810,6 +823,14 @@ absorbs, so it will not announce itself.
 
 ```
 function correctCorePopulation_LAT:
+    # NOT IMPLEMENTED IN v1 -- populateLAT refuses an excited run
+    # instead (above).  Kept as the specification for when it is
+    # written, because the shape below is the part that is already
+    # settled; what is NOT settled is the band range, since
+    # numOrbitalStates is scaled by `spin` at initialization and the
+    # Gaussian routine's arithmetic over the flat sorted array does
+    # not transfer to this array's band index unexamined.
+    #
     # The LAT-shaped core-hole correction (DESIGN 1.6).  Same
     # physics as correctCorePopulation, but simpler: that
     # routine walks a flat array through indexEnergyEigenValues
@@ -843,8 +864,17 @@ function valeCharge (LAT branch only):
     # one mistake available here: it would scramble the
     # occupations silently, since both arrays hold plausible
     # numbers of the right size.
+    # The copy also CONVERTS CONVENTION, which an earlier draft of
+    # this section omitted.  electronPopulation carries the
+    # kPointWeight convention, whose weights sum to 2.0 so a
+    # non-polarized run holds two electrons per state;
+    # electronPopulation_LAT holds pure BZ volume fractions summing
+    # to 1.0 per occupied band per spin.  computeBond already applies
+    # exactly this factor at its own point of use, so the array keeps
+    # ONE convention and every consumer converts (DESIGN 1.6d).
     if kPointIntgCode == 1:
-        structuredElectronPopulation = electronPopulation_LAT
+        structuredElectronPopulation =
+            electronPopulation_LAT * 2 / numSpins
     else:
         energyLevelCounter = 0
         for i = 1 to numKPoints:

@@ -69,6 +69,16 @@ module O_Populate
    integer :: excitedCoreStateIndex ! The band index number of the core state
          ! that is to be excited if a ELNES/XANES type calculation is being
          ! done.
+   real (kind=double) :: previousFermi ! The Fermi level the LAT search
+         ! settled on during the previous SCF iteration, in a.u.  The level
+         ! moves very little from one iteration to the next, so re-using it
+         ! as the starting guess usually lets the Newton step converge in
+         ! two or three passes instead of restarting from the middle of the
+         ! bracket every time (DESIGN 1.6a).
+   integer :: previousFermiValid = 0 ! Whether previousFermi holds a level
+         ! from an earlier iteration (1) or is still unset (0).  A sentinel
+         ! energy would be indistinguishable from a real one, so the
+         ! validity is tracked separately rather than encoded in the value.
 
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    ! Begin list of module subroutines.!
@@ -158,6 +168,7 @@ subroutine populateStates
    use O_Constants, only: hartree
    use O_Input, only: thermalSigma
    use O_CommandLine, only: excitedQN_n
+   use O_KPoints, only: kPointIntgCode
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
@@ -171,12 +182,22 @@ subroutine populateStates
       call initCoreStateStructures
    endif
 
-   ! Always populate the states in the standard way.
+   ! Always populate the states in the standard way.  Every path below
+   !   still needs what it produces: the degeneracy-averaged starting
+   !   occupations, and occupiedEnergyIndex, which is what brackets both
+   !   of the searches that may follow.
    call populateStandard
 
-   ! If the thermal smearing parameter is non-zero, then we continue the
-   !   population using the thermal smearing scheme.
-   if (thermalSigma /= 0.0_double) then
+   ! LAT and thermal smearing are ALTERNATIVES, not layers (DESIGN 1.6e).
+   !   Tetrahedron integration determines the occupations geometrically
+   !   and needs no broadening, so a run that set both would be asking
+   !   for two different answers to one question.  When LAT is active it
+   !   owns the occupations and thermalSigma is ignored for the SCF; the
+   !   Gaussian path is untouched, so smearing behaves exactly as before
+   !   whenever LAT is not in use.
+   if (kPointIntgCode == 1) then
+      call populateLAT
+   else if (thermalSigma /= 0.0_double) then
       call populateSmearing
    endif
 
@@ -845,7 +866,267 @@ end subroutine initCoreStateStructures
 !   4. Accumulate each corner's weight into the output array, using
 !      the sort permutation to attribute weight to the correct
 !      k-point.
-subroutine computeElectronPopulation_LAT
+! Integrate the electron count at one trial energy, and the density of
+!   states there, in a single sweep of the tetrahedra (DESIGN 1.6a;
+!   PSEUDOCODE 3a).  This is the function whose root the Fermi search
+!   below finds: latElectronCount(E_Fermi) = the number of electrons.
+!
+! The derivative comes free.  bloechlCornerDOSWt is by construction the
+!   energy derivative of bloechlCornerWeights, so one corner sort yields
+!   both the count and its slope, which is what lets the search take
+!   Newton steps instead of bisecting to machine precision.
+!
+! Cost note (DESIGN 1.6b): the sweep is over the FULL mesh's tetrahedra,
+!   not the IBZ.  Most (tetrahedron, band) pairs lie wholly below or
+!   wholly above the trial energy and are settled without any corner
+!   work at all, so only the straddling pairs cost anything as the
+!   energy moves.
+subroutine latElectronCount (trialFermi, electronCount, dosAtFermi)
+
+   ! Import the necessary modules.
+   use O_Kinds
+   use O_Potential,       only: spin
+   use O_Input,           only: numStates
+   use O_MathSubs,        only: bloechlCornerWeights, &
+         & bloechlCornerDOSWt
+   use O_KPoints,         only: numTetrahedra, tetraVol, &
+         & tetrahedra, fullKPToIBZKPMap
+   use O_SecularEquation, only: energyEigenValues
+
+   ! Make sure that no variables are declared accidentally.
+   implicit none
+
+   ! Passed parameters.
+   real (kind=double), intent(in)  :: trialFermi
+   real (kind=double), intent(out) :: electronCount
+   real (kind=double), intent(out) :: dosAtFermi
+
+   ! Local variables.  h = spin, n = band, t = tetrahedron, i and j
+   !   index the four corners during the selection sort.
+   integer :: h, n, t, i, j
+   integer :: minIdx
+   real (kind=double) :: tempVal
+   real (kind=double), dimension(4) :: cornerEigenVals
+   real (kind=double), dimension(4) :: cornerWt
+   real (kind=double), dimension(4) :: cornerDOSWt
+
+   ! Converts the LAT weight convention into the one the electron count
+   !   is stated in.  electronPopulation carries the kPointWeight
+   !   convention, where the weights sum to 2.0 so that a non-polarized
+   !   calculation holds two electrons per state; the LAT weights are
+   !   pure Brillouin-zone volume fractions summing to 1.0 per occupied
+   !   band per spin channel.  The factor 2/spin converts between them,
+   !   exactly as computeBond already does at its own point of use
+   !   (DESIGN 1.6d).
+   real (kind=double) :: spinFactor
+
+   spinFactor    = 2.0_double / real(spin, double)
+   electronCount = 0.0_double
+   dosAtFermi    = 0.0_double
+
+   do h = 1, spin
+      do n = 1, numStates
+         do t = 1, numTetrahedra
+
+            ! Look up this band's eigenvalue at each of the four
+            !   corners, mapping every full-mesh corner to its IBZ
+            !   representative first.
+            do i = 1, 4
+               cornerEigenVals(i) = energyEigenValues( &
+                     & n, fullKPToIBZKPMap(tetrahedra(i,t)), h)
+            enddo
+
+            ! Sort the four ascending.  No permutation is tracked here,
+            !   unlike computeElectronPopulation_LAT: this routine sums
+            !   the corner weights rather than attributing them to
+            !   individual k-points, and a sum does not care which
+            !   corner each weight belongs to.
+            do i = 1, 3
+               minIdx = i
+               do j = i + 1, 4
+                  if (cornerEigenVals(j) < &
+                        & cornerEigenVals(minIdx)) then
+                     minIdx = j
+                  endif
+               enddo
+               if (minIdx /= i) then
+                  tempVal = cornerEigenVals(i)
+                  cornerEigenVals(i) = cornerEigenVals(minIdx)
+                  cornerEigenVals(minIdx) = tempVal
+               endif
+            enddo
+
+            ! Wholly occupied: the whole tetrahedron counts, and it
+            !   contributes no density of states because no iso-energy
+            !   surface passes through it.  Settled without evaluating
+            !   any Bloechl formula.
+            if (cornerEigenVals(4) <= trialFermi) then
+               electronCount = electronCount + tetraVol * spinFactor
+               cycle
+            endif
+
+            ! Wholly empty: contributes nothing at all.
+            if (cornerEigenVals(1) > trialFermi) then
+               cycle
+            endif
+
+            ! Straddling: the iso-energy surface cuts this tetrahedron,
+            !   so the analytic corner weights and their derivatives
+            !   both matter.
+            call bloechlCornerWeights (trialFermi, cornerEigenVals, &
+                  & cornerWt)
+            call bloechlCornerDOSWt (trialFermi, cornerEigenVals, &
+                  & cornerDOSWt)
+
+            electronCount = electronCount &
+                  & + sum(cornerWt) * tetraVol * spinFactor
+            dosAtFermi = dosAtFermi &
+                  & + sum(cornerDOSWt) * tetraVol * spinFactor
+
+         enddo
+      enddo
+   enddo
+
+end subroutine latElectronCount
+
+
+! Determine the Fermi level from the TETRAHEDRON integral and fill
+!   electronPopulation_LAT at it (DESIGN 1.6a; PSEUDOCODE 3a).
+!
+! Why the level cannot simply be borrowed from populateStandard: the two
+!   integration schemes place the Fermi level differently for the same
+!   spectrum, so using the Gaussian level with LAT weights would leave
+!   the occupations integrating to something other than numElectrons.
+!   The SCF would then absorb part of that error into the potential,
+!   where it reads as slow convergence rather than as a defect.  The
+!   determination and the weights have to come from one scheme.
+subroutine populateLAT
+
+   ! Import the necessary modules.
+   use O_Kinds
+   use O_Constants,   only: smallThresh
+   use O_Input,       only: numElectrons, fermiSearchLimit
+   use O_CommandLine, only: excitedQN_n
+
+   ! Make sure that no variables are declared accidentally.
+   implicit none
+
+   ! Local variables.
+   integer :: i
+   real (kind=double) :: minEnergy, maxEnergy
+   real (kind=double) :: trialFermi, nextFermi
+   real (kind=double) :: electronCount, dosAtFermi
+   real (kind=double) :: targetCount
+
+   ! The most passes the search may take.  Newton from a warm start
+   !   normally converges in two or three; this is the backstop for the
+   !   pathological case where every step falls back to bisection.
+   integer, parameter :: maxFermiIter = 200
+
+   ! Below this the density of states is too small to divide by, so the
+   !   Newton step is abandoned for a bisection step.  This is not a
+   !   corner case: dN/dE IS the density of states, so it vanishes
+   !   inside a gap, and an insulator's first guess lands there by
+   !   construction (populateStandard puts occupiedEnergy mid-gap).
+   real (kind=double), parameter :: slopeThresh = 1.0d-10
+
+   ! XANES/ELNES under LAT is deliberately refused rather than guessed
+   !   at.  The Gaussian core-hole correction walks the flat, sorted
+   !   occupation array through indexEnergyEigenValues, and its band
+   !   arithmetic does not carry over to the (band, kpoint, spin) array
+   !   without a derivation this work has not done.  A wrong core
+   !   correction would misplace exactly one electron -- small enough to
+   !   look like a convergence problem and never be questioned.  Stop
+   !   loudly instead; the ground-state path below is unaffected.
+   if (excitedQN_n /= 0) then
+      write (20,*) "LAT integration is not yet supported for ", &
+            & "XANES/ELNES calculations. The core-hole occupation ", &
+            & "correction has no LAT form yet (DESIGN 1.6). Use ", &
+            & "Gaussian integration (scfkpint = 0) for this run."
+      call flush (20)
+      stop
+   endif
+
+   ! Bracket the search exactly as populateSmearing does.
+   !   populateStandard has already placed occupiedEnergy between the
+   !   highest occupied and lowest unoccupied sorted eigenvalues, and
+   !   fermiSearchLimit widens that to a range no real Fermi level
+   !   escapes.  Sharing the bracket keeps one source for the initial
+   !   guess rather than inventing a second.
+   minEnergy = sortedEnergyEigenValues(occupiedEnergyIndex) &
+         & - fermiSearchLimit
+   maxEnergy = sortedEnergyEigenValues(occupiedEnergyIndex+1) &
+         & + fermiSearchLimit
+
+   ! The count the search is solving for.
+   targetCount = real(numElectrons, double)
+
+   ! Warm start from the previous SCF iteration when there is one.
+   if (previousFermiValid == 1) then
+      trialFermi = previousFermi
+      ! A warm start is only useful inside the current bracket; an
+      !   eigenvalue spectrum that moved a long way between iterations
+      !   can leave it outside, in which case fall back to the middle.
+      if ((trialFermi <= minEnergy) .or. &
+            & (trialFermi >= maxEnergy)) then
+         trialFermi = 0.5_double * (minEnergy + maxEnergy)
+      endif
+   else
+      trialFermi = 0.5_double * (minEnergy + maxEnergy)
+   endif
+
+   do i = 1, maxFermiIter
+
+      call latElectronCount (trialFermi, electronCount, dosAtFermi)
+
+      if (abs(electronCount - targetCount) < smallThresh) then
+         exit
+      endif
+
+      ! Maintain the bracket from every evaluation, so the bisection
+      !   fallback always has a valid one to fall back to.  This is
+      !   sound because the electron count is monotone non-decreasing
+      !   in energy.
+      if (electronCount < targetCount) then
+         minEnergy = trialFermi
+      else
+         maxEnergy = trialFermi
+      endif
+
+      ! Newton where the slope is usable, bisection where it is not,
+      !   and bisection also whenever a Newton step would leave the
+      !   bracket -- which is what keeps the search safe on the flat
+      !   regions either side of a gap.
+      if (dosAtFermi > slopeThresh) then
+         nextFermi = trialFermi &
+               & - (electronCount - targetCount) / dosAtFermi
+      else
+         nextFermi = 0.5_double * (minEnergy + maxEnergy)
+      endif
+      if ((nextFermi <= minEnergy) .or. &
+            & (nextFermi >= maxEnergy)) then
+         nextFermi = 0.5_double * (minEnergy + maxEnergy)
+      endif
+
+      trialFermi = nextFermi
+
+   enddo
+
+   ! Record the level for this iteration's occupations, for the next
+   !   iteration's warm start, and for everything downstream that reads
+   !   the highest occupied energy.
+   occupiedEnergy    = trialFermi
+   previousFermi     = trialFermi
+   previousFermiValid = 1
+
+   ! Fill the occupation weights at the level just found.  This is the
+   !   one expensive pass; the search above only counted.
+   call computeElectronPopulation_LAT (trialFermi)
+
+end subroutine populateLAT
+
+
+subroutine computeElectronPopulation_LAT (eFermi)
 
    ! Import the necessary modules.
    use O_Kinds
@@ -858,6 +1139,18 @@ subroutine computeElectronPopulation_LAT
 
    ! Make sure that no variables are declared accidentally.
    implicit none
+
+   ! Passed parameters.
+   !   The energy at which the Bloechl corner weights are evaluated,
+   !   in the SAME frame as energyEigenValues.  Two callers supply it
+   !   differently and both are correct.  The post-SCF property paths
+   !   (bond, effective charge) run after shiftEnergyEigenValues has
+   !   moved the Fermi level to exactly zero, so they pass 0.0.  The
+   !   SCF occupation path (populateLAT) works in the unshifted
+   !   spectrum and passes the level its own search just found
+   !   (DESIGN 1.6a).  Passing it rather than assuming zero is what
+   !   lets one routine serve both.
+   real (kind=double), intent(in) :: eFermi
 
    ! -------------------------------------------------
    ! Local variable declarations.
@@ -887,11 +1180,6 @@ subroutine computeElectronPopulation_LAT
    !   formulas fall below this threshold, the tetrahedron's
    !   contribution is treated as negligible and skipped.
    real (kind=double), parameter :: tol = 1.0d-12
-
-   ! After shiftEnergyEigenValues, the Fermi level sits at exactly
-   !   zero in the shifted spectrum. All Bloechl corner weights are
-   !   evaluated at this energy.
-   real (kind=double), parameter :: eFermi = 0.0_double
 
    ! The four sorted corner eigenvalues in ascending order. Named
    !   e1..e4 matching the notation in PSEUDOCODE.md sections 2
