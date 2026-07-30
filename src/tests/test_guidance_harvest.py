@@ -314,6 +314,33 @@ def test_is_gapless_reads_an_unknown_gap_as_non_metallic():
     assert gh.is_gapless(unknown, 0.05) is False
 
 
+def test_is_gapless_value_holds_the_rule_both_callers_share():
+    """The scalar core underneath.  The rung-shaped ``is_gapless``
+    knows how to find a gap ON A RUNG; this side holds what the gap
+    MEANS, so the climb's metal short-circuit and the harvest's metal
+    skip apply one rule and cannot drift apart (DESIGN 7.8).  Neither
+    caller has to build a shape it does not have -- the harvest reads
+    a parsed result dict, never a rung.
+
+    The cut is an absolute band gap in eV, not a per-atom energy, and
+    the boundary is inclusive: a reading exactly at the threshold is
+    already a metal."""
+    assert gh.is_gapless_value(0.0, 0.05) is True
+    assert gh.is_gapless_value(0.05, 0.05) is True      # at the edge
+    assert gh.is_gapless_value(0.051, 0.05) is False
+
+
+def test_is_gapless_value_reads_a_missing_gap_as_non_metallic():
+    """An ABSENT gap is not metallic, and both callers depend on that
+    side of the rule for the same reason from opposite ends: in the
+    climb a missing reading must not stop a search that was
+    converging, and in the harvest it must not suppress an entry a
+    genuine insulator earned.  Defaulting the other way would make an
+    unwired gap look like a collection holding no insulators at all --
+    the sort of failure nobody thinks to question."""
+    assert gh.is_gapless_value(None, 0.05) is False
+
+
 # --------------------------------------------------------------
 #  collapse_by_mesh -- the duplicate-rung guard (DESIGN 7.8 3c)
 # --------------------------------------------------------------
@@ -580,6 +607,110 @@ def test_missing_gap_raises(patched, tmp_path):
                            [0.5, 0.5, 0.5], write_gap=False)
     with pytest.raises(ValueError):
         gh.harvest_flight(root, str(tmp_path / "db"), _DATASPACE)
+
+
+# --------------------------------------------------------------
+#  Metals stage no guidance entry (DESIGN 7.8)
+#
+#  An entry's whole content is the claim "for a structure like this,
+#  this k-density is converged," and a metal cannot make it: its
+#  energy does not converge in k-points at any mesh worth paying
+#  for, and the climb acknowledges that by short-circuiting at the
+#  first gapless rung and settling there as a deliberately rough
+#  potential (DESIGN 3.12.3).  That settled rung is a stopping
+#  point, not a converged density.  The guard sits in the ONE entry
+#  builder both harvest paths share, so neither can grow its own
+#  version of the rule.
+# --------------------------------------------------------------
+
+def _prediction(**overrides):
+    """The ``[flight.predictions.<id>]`` block ``build_entry`` reads,
+    carrying the fields it requires.  ``_make_workspace`` writes this
+    same shape into flight.toml; this is the in-memory form, for the
+    tests that call the shared builder directly."""
+    record = {
+        "policy": "verify_around_prediction",
+        "system_type": "crystalline",
+        "confidence": 0.9,
+        "neighbor_entry_ids": ["mp-1"],
+        "predicted_kpoint_density": 100.0,
+        "is_under_trained": False,
+        "basis": "fb", "functional": "gga-pbe",
+        "kpoint_integration": "gaussian-0.1",
+        "kpoint_convergence_threshold": 5.0e-4,
+        "metal_gap_threshold": 0.05}
+    record.update(overrides)
+    return record
+
+
+def _chosen_result(**overrides):
+    """The converged run's parsed result.toml, as ``build_entry``
+    reads it: the measured quantities plus the recorded build the
+    wingbeat echoed there."""
+    result = {"total_energy": 0.5, "gap_ev": 1.5,
+              "gap_kind": "indirect", "total_magnetization": 0.0,
+              "scf_threshold": 1.0e-6, "imago_commit": "abc123"}
+    result.update(overrides)
+    return result
+
+
+def _build_entry(patched_structure, prediction, chosen_result):
+    """Call the shared builder with one ladder and one chosen rung --
+    the identical shape both harvest paths hand it."""
+    return gh.build_entry(
+        "/workspace", "si.skl", prediction, _DATASPACE,
+        patched_structure, 5.0e-4,
+        [50.0, 100.0, 200.0], [0.5, 0.5, 0.5], 100.0, chosen_result)
+
+
+def test_build_entry_returns_none_for_a_metal(patched):
+    """The builder both paths share returns None on a gapless run, and
+    the ladder handed in is otherwise perfectly harvestable -- only the
+    gap makes the difference."""
+    structure = gh.load_structure("si.skl")
+    assert _build_entry(structure, _prediction(),
+                        _chosen_result(gap_ev=0.0)) is None
+
+
+def test_build_entry_earns_an_entry_just_above_the_cut(patched):
+    """The other side of the same cut, on the same ladder: a gap just
+    above the threshold builds its entry normally.  Recording the two
+    together is what pins the threshold as the thing deciding, rather
+    than something else about a metallic sweep."""
+    structure = gh.load_structure("si.skl")
+    entry = _build_entry(structure, _prediction(),
+                         _chosen_result(gap_ev=0.06))
+    assert entry is not None
+    assert entry.measured.gap_ev == 0.06
+
+
+def test_build_entry_demands_the_cut_on_the_prediction_record(patched):
+    """The cut is a manifest knob (``[kpoint_climb]``) and this harvest
+    is a standalone tool pointed at a finished workspace, so it never
+    sees a manifest: the producer stamps the resolved value onto the
+    prediction record, the same channel the flatness tolerance uses
+    (DESIGN 7.8 step 3d').  A record carrying none cannot judge, and
+    saying so is the only safe answer -- defaulting would quietly treat
+    every run in the flight as an insulator."""
+    prediction = _prediction()
+    del prediction["metal_gap_threshold"]
+    with pytest.raises(ValueError, match="metal_gap_threshold"):
+        _build_entry(gh.load_structure("si.skl"), prediction,
+                     _chosen_result())
+
+
+def test_a_metal_sweep_stages_nothing_and_says_so(patched, tmp_path):
+    """End to end through the density harvest: a converged, flat sweep
+    whose runs are gapless stages no entry and reports the reason, so a
+    curator reading the summary is not left wondering where the entry
+    went."""
+    root = _make_workspace(tmp_path, [50, 100, 200], [0.5, 0.5, 0.5],
+                           gaps=[0.0, 0.0, 0.0],
+                           kinds=["none", "none", "none"])
+    summaries = gh.harvest_flight(root, str(tmp_path / "db"),
+                                  _DATASPACE)
+    assert patched["entries"] == []
+    assert "metal" in summaries[0]
 
 
 # --------------------------------------------------------------

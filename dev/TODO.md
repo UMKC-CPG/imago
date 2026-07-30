@@ -4835,7 +4835,7 @@ on the same data later with no schema change.  Built on P10.
   of accuracy.  Say so in DESIGN 8.8.
   DESIGN 8.6/8.7/8.8/8.9; PSEUDOCODE 16.9.
 
-- [ ] C134. Code the cache-key and guidance-uniqueness
+- [x] C134. Code the cache-key and guidance-uniqueness
   simplification.  Both mechanisms had grown to ask a question
   neither could answer: the cache asked whether a stored result was
   still *good*, and promotion asked whether two entries *agreed*.
@@ -4881,39 +4881,35 @@ on the same data later with no schema change.  Built on P10.
   `crystalline-214bb2` are si_cmce runs the new rule would never
   have produced, and want deleting by hand.
   CODE.
-  **Status 2026-07-29: (a), (b), and (c) are all written and the
-  suite is green at 1229 passed / 23 skipped.**  Seventeen existing
-  tests had been written against the retired behaviour and were
-  moved onto the new spec; two of them changed meaning rather than
-  shape and were renamed to say so
-  (`test_a_disagreeing_mesh_takes_the_same_branch`,
-  `test_a_mesh_that_cannot_be_compared_is_not_special`).
-  What remains, and the ONLY thing remaining, is test coverage for
-  the new behaviour itself -- the changed tests above prove nothing
-  regressed, not that the new paths work.  Wanted:
-    - `[record]` survives every lifecycle rewrite of `status.toml`
-      (the merge plus the sub-table emitter), and a cache HIT leaves
-      it describing the run that produced the result.
-    - The cache no longer keys on the build: a unit whose recorded
-      build differs still HITS.  This is the whole point of the
-      change and nothing currently pins it.
-    - `reuse_plan` / `print_reuse_plan`: counts always, per-unit
-      lines only under `set_verbose(True)`; `dispatch(preview=True)`
-      prints the lines regardless, dispatches nothing, and returns an
-      empty report.
-    - The wingbeat echoes `imago_commit` into `result.toml`, and
-      prefers a value the engine reported over the recorded one
-      (the C84 seam).
-    - `is_gapless_value`: `None` is NOT metallic; the boundary is at
-      or below the threshold.
-    - `build_entry` returns None for a metal; both harvest paths skip
-      and say so, and the producer still writes the potential.
-    - Promotion: a within-batch duplicate takes the ordinary occupied
-      branch with no pre-pass; REPLACE retires the promoted entry and
-      a SECOND replace against the same claim still works (the
-      path-carrying fix in `load_promoted_entries`); `--all` and
-      `--auto-promote` never offer REPLACE; `dry-run` models the
-      index so a second file is not reported free.
+  **Status 2026-07-30: complete.  (a), (b), and (c) are written and
+  the suite is green at 1252 passed / 23 skipped**, +23 tests over the
+  1229 the code alone reached.  Seventeen existing tests had been
+  written against the retired behaviour and were moved onto the new
+  spec; three changed meaning rather than shape and were renamed to
+  say so -- `test_a_disagreeing_mesh_takes_the_same_branch` and
+  `test_a_mesh_that_cannot_be_compared_is_not_special`, plus
+  `test_a_duplicate_within_one_batch_takes_the_ordinary_branch`, which
+  had claimed a `generated_at` tie-break that no longer exists.
+  The new behaviour itself is now pinned: the `[record]` table
+  surviving every lifecycle rewrite, and a HIT leaving it describing
+  the run that produced the result; a differing recorded build still
+  HITTING, which is the whole point of the change; the reuse plan's
+  counts-always / lines-when-asked, and a preview that spends nothing
+  and reports nothing; the wingbeat's echo and its preference for an
+  engine-reported build (the C84 seam); `is_gapless_value` on both
+  sides of the cut and on a missing gap; `build_entry` returning None
+  for a metal, both harvest paths skipping, and the producer still
+  writing the potential; and in promotion the within-batch duplicate
+  through the ordinary branch, REPLACE with a SECOND replace against
+  one claim still working, the unattended modes never prompting, and
+  `dry-run` modelling the index.
+  Two gaps the tests surfaced, both fixed.  `set_verbose` had NO
+  caller, so `--verbose` never reached the driver and the per-unit
+  reuse lines could not print at all -- PSEUDOCODE 13.5 already
+  specified the call, so `main` now makes it and the four driver
+  reporting names are exported from the package.  And
+  `wingbeats._stage_inputs` still documented dropping "the cache-only
+  build identity", which `CACHE_ONLY_KEYS`' deletion had retired.
   Not yet run live: the seed re-run is the first campaign whose
   staging the new promotion path will judge, and the reuse plan has
   never printed against a real workspace.

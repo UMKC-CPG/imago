@@ -254,15 +254,38 @@ def test_ask_choice_normalizes_and_defaults_to_skip():
     assert gp._ask_choice(lambda p: next(bad_then_good)) == "SKIP"
 
 
+def test_ask_occupied_choice_offers_replace_and_never_promote():
+    """On an OCCUPIED claim the verbs change: REPLACE joins SKIP and
+    DELETE, and PROMOTE is deliberately absent -- promoting beside the
+    existing record is the one outcome the uniqueness rule exists to
+    prevent.  An empty answer still defaults to the safe SKIP."""
+    assert gp._ask_occupied_choice(lambda p: "r") == "REPLACE"
+    assert gp._ask_occupied_choice(lambda p: "DELETE") == "DELETE"
+    assert gp._ask_occupied_choice(lambda p: "") == "SKIP"
+    # "p" is not a verb here, so it re-prompts rather than guessing.
+    bad_then_good = iter(["p", "s"])
+    assert gp._ask_occupied_choice(
+        lambda p: next(bad_then_good)) == "SKIP"
+
+
 # --------------------------------------------------------------
 #  Re-run dedup (DESIGN 7.8; PSEUDOCODE 15.7)
 # --------------------------------------------------------------
 # A re-run of an already-promoted solid is invisible to every
 # other guard: the harvest cannot see the promoted corpus, and the
 # entry_id slug hashes the timestamp, so a second run of one solid
-# never collides.  Promotion is the only stage that can catch it,
-# and these tests pin the three outcomes -- redundant, conflict,
-# and genuinely new -- plus the batch and dry-run behaviour.
+# never collides.  Promotion is the only stage that can catch it.
+#
+# The check is an EXISTENCE test, not a comparison: either the
+# collection holds a record for the claim or it does not, and that
+# has two answers, not three.  The converged meshes are printed and
+# never tested, because the action is the same whether they agree
+# or not -- promotion has no verb for retracting a reviewed entry
+# unasked, so all a comparison could decide is whether the newcomer
+# was archived or left in staging to be re-reported by every later
+# pass.  These tests pin both answers, the curator's REPLACE, and
+# the batch and dry-run behaviour that falls out of applying the
+# one rule uniformly.
 
 def _promote_one(db_root, **kwargs):
     """Stage an entry and promote it into entries/, returning the
@@ -271,6 +294,15 @@ def _promote_one(db_root, **kwargs):
     path = _stage(db_root, **kwargs)
     gp.move_to_entries(path, db_root, "crystalline")
     return path
+
+
+def _promoted_commits(db_root):
+    """The build recorded on every promoted entry, read back through
+    the promoter's own index so a test sees exactly what a later
+    promotion pass would find in ``entries/``."""
+
+    return sorted(entry.provenance.imago_commit for _, entry
+                  in gp.load_promoted_entries(db_root).values())
 
 
 def test_dedup_key_ignores_where_the_structure_cache_sits():
@@ -373,10 +405,19 @@ def test_all_mode_does_not_bypass_the_dedup(tmp_path):
     assert _count(db_root, "superseded") == 1
 
 
-def test_duplicates_within_one_batch_resolve_to_the_newest(tmp_path):
-    """Two staged files can share a claim before either is
-    promoted -- the ordinary shape of a solid harvested twice.
-    The later run wins and the earlier is retired."""
+def test_a_duplicate_within_one_batch_takes_the_ordinary_branch(
+        tmp_path):
+    """Two staged files can share a claim before either is promoted --
+    the ordinary shape of a solid harvested twice.  Nothing special
+    happens to them, and that is the point: the promoted index is
+    updated as each entry is promoted, so the second file finds the
+    claim occupied and takes the same branch any re-run takes.
+
+    There is no separate batch-resolution pass and no ``generated_at``
+    tie-break.  Both existed only to save one rule from having to apply
+    twice in a row, and one consequence is worth stating because it
+    reverses an older contract: promotion no longer judges each staged
+    file in isolation, so ``staging/`` IS a uniqueness namespace."""
     db_root = str(tmp_path / "db")
     _stage(db_root, converged_mesh=(6, 6, 6),
            generated_at="2026-01-01T00:00:00Z")
@@ -385,6 +426,9 @@ def test_duplicates_within_one_batch_resolve_to_the_newest(tmp_path):
 
     results = gp.promote(db_root, "all", output=lambda m: None)
 
+    # Which of the two is promoted is decided by the sorted file
+    #   order alone -- neither date nor mesh is consulted -- so the
+    #   claim under test is that exactly one lands and one is retired.
     actions = sorted(action for _, action in results)
     assert actions == ["promoted", "superseded"]
     assert _count(db_root, "entries") == 1
@@ -407,6 +451,109 @@ def test_dry_run_reports_the_dedup_but_moves_nothing(tmp_path):
     assert _count(db_root, "staging") == 1            # nothing moved
     assert _count(db_root, "superseded") == 0
     assert _count(db_root, "entries") == 1
+
+
+def test_replace_retires_the_promoted_entry_for_the_newcomer(tmp_path):
+    """REPLACE is the only route by which anything ever leaves
+    ``entries/``, and it exists solely behind a per-record prompt a
+    person answers by hand (DESIGN 7.8).  The standing objection --
+    that a tool able to retract a reviewed entry can do so by accident
+    -- is an argument against an AUTOMATIC retraction and does not
+    reach an explicit one.  Without the verb, the report names a
+    situation the curator could act on only by moving files
+    themselves, which is a worse place to leave them than a prompt."""
+    db_root = str(tmp_path / "db")
+    _promote_one(db_root, converged_mesh=(6, 6, 6), commit="old111",
+                 generated_at="2026-01-01T00:00:00Z")
+    _stage(db_root, converged_mesh=(4, 4, 4), commit="new222",
+           generated_at="2026-02-02T00:00:00Z")
+
+    results = gp.promote(db_root, "interactive",
+                         ask=lambda prompt: "r",
+                         output=lambda m: None)
+
+    assert [action for _, action in results] == ["replaced"]
+    assert _count(db_root, "entries") == 1
+    assert _count(db_root, "superseded") == 1     # the retired one
+    assert _count(db_root, "staging") == 0
+    # The collection now holds the newcomer, not what it displaced.
+    assert _promoted_commits(db_root) == ["new222"]
+
+
+def test_a_second_replace_against_one_claim_still_works(tmp_path):
+    """Why the promoted index carries a PATH beside each entry instead
+    of a bare entry.  After the first REPLACE the slot holds the
+    newcomer, and retiring THAT one requires the file it now occupies
+    -- the destination the move returned, not the path the entry it
+    displaced used to sit at.  Store bare entries and the second
+    replace has nothing to retire."""
+    db_root = str(tmp_path / "db")
+    _promote_one(db_root, converged_mesh=(6, 6, 6), commit="first",
+                 generated_at="2026-01-01T00:00:00Z")
+    _stage(db_root, converged_mesh=(4, 4, 4), commit="second",
+           generated_at="2026-02-02T00:00:00Z")
+    _stage(db_root, converged_mesh=(2, 2, 2), commit="third",
+           generated_at="2026-03-03T00:00:00Z")
+
+    results = gp.promote(db_root, "interactive",
+                         ask=lambda prompt: "r",
+                         output=lambda m: None)
+
+    assert [action for _, action in results] == ["replaced",
+                                                 "replaced"]
+    assert _count(db_root, "entries") == 1        # still exactly one
+    assert _count(db_root, "superseded") == 2     # both displaced
+    assert _count(db_root, "staging") == 0
+
+
+def test_the_unattended_modes_never_retract(tmp_path):
+    """``--all`` and ``--auto-promote`` apply the existence test --
+    refusing to store one claim twice is a correctness guard, not a
+    quality judgment -- but neither is ever offered REPLACE.  ``--all``
+    means "I have reviewed these," not "store them however many times
+    they appear," and least of all "retract what a curator already
+    accepted."  The prompt is not merely declined here but never
+    reached: ``ask`` raises if it is called at all."""
+    def never_asked(prompt):
+        raise AssertionError(
+            "an unattended mode must not prompt: " + prompt)
+
+    for mode in ("all", "auto-promote"):
+        db_root = str(tmp_path / mode)
+        _promote_one(db_root, converged_mesh=(6, 6, 6),
+                     commit="reviewed-and-promoted",
+                     generated_at="2026-01-01T00:00:00Z")
+        _stage(db_root, converged_mesh=(4, 4, 4), commit="newcomer",
+               generated_at="2026-02-02T00:00:00Z")
+
+        results = gp.promote(db_root, mode, ask=never_asked,
+                             output=lambda m: None)
+
+        assert [action for _, action in results] == ["superseded"]
+        # The reviewed entry stands, exactly as it was accepted.
+        assert _promoted_commits(db_root) == ["reviewed-and-promoted"]
+
+
+def test_dry_run_models_the_index_so_a_second_file_is_not_free(
+        tmp_path):
+    """A dry run moves nothing, so it has to record where each file
+    WOULD land.  Without that, a second staged file claiming the slot
+    the first just filled is reported free when a real run would find
+    it taken -- and a preview that disagrees with the run it previews
+    is worse than no preview at all."""
+    db_root = str(tmp_path / "db")
+    _stage(db_root, converged_mesh=(6, 6, 6),
+           generated_at="2026-01-01T00:00:00Z")
+    _stage(db_root, converged_mesh=(6, 6, 6),
+           generated_at="2026-03-03T00:00:00Z")
+
+    results = gp.promote(db_root, "dry-run", output=lambda m: None)
+
+    assert sorted(action for _, action in results) == [
+        "would-promote", "would-supersede"]
+    assert _count(db_root, "staging") == 2        # nothing moved
+    assert _count(db_root, "entries") == 0
+    assert _count(db_root, "superseded") == 0
 
 
 def test_distinct_structures_are_not_duplicates(tmp_path):

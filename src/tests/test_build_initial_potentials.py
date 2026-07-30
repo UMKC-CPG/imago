@@ -2424,6 +2424,64 @@ def test_build_initial_potentials_harvests_curated_entry(
     assert run_log["run"][0]["converged_kpoint_density"] == 100
 
 
+def test_a_metal_keeps_its_potential_and_stages_no_guidance_entry(
+        tmp_path, monkeypatch, capsys):
+    """The producer feeds TWO harvests, and a metal reaches only one of
+    them (DESIGN 7.8).  The shared ``build_entry`` returns None for a
+    gapless run -- the climb's settled rung is a stopping point, not a
+    converged density, and the predictor would read it as evidence -- so
+    no guidance entry is staged.  The POTENTIAL is harvested exactly as
+    for any other solid, because a rough starting potential is precisely
+    what the initial-potential database is for.
+
+    The run also says which of the two it withheld: an entry that
+    silently fails to appear is indistinguishable from one the harvest
+    lost (DESIGN 5.7)."""
+
+    data_root = str(tmp_path)
+    pdb_root = os.path.join(data_root, "atomicPDB")
+    _make_element(pdb_root, "au", [1.0, 2.0, 3.0],
+                  [0.15, 1.5, 1.0e8])
+    (tmp_path / "au.skel").write_text("dummy structure\n")
+    manifest_path = _write(tmp_path, _AU_LOCAL_MANIFEST)
+
+    monkeypatch.setattr(
+        bip.guidance_db, "load",
+        lambda root: types.SimpleNamespace(group_table={}))
+    workspace = bip.curation_workspace_root(pdb_root)
+    harvested = _install_climb_mocks(monkeypatch, workspace)
+    monkeypatch.setattr(
+        bip.guidance_harvest, "load_structure",
+        lambda path: types.SimpleNamespace(num_atoms=2))
+    # The one difference from the harvest test above: the shared
+    #   builder judges this run a metal.  Everything else -- the
+    #   converged climb, the scfV extraction, the site identity -- is
+    #   the ordinary successful path.
+    monkeypatch.setattr(bip.guidance_harvest, "build_entry",
+                        lambda *a, **k: None)
+
+    def fake_dispatch(flight, executor=None, force=False):
+        pass
+
+    build_initial_potentials(
+        manifest_path, pdb_root, data_root,
+        dispatch_fn=fake_dispatch,
+        prepare_fn=lambda flight, workspace: None,
+        extract_fn=lambda result, site: ([0.5, 0.3], [1.0, 2.0]),
+        identity_fn=lambda result: {1: ("au", 1, 1)},
+        fingerprint_fn=lambda *args, **kwargs: [])
+
+    # The potential landed, unchanged by the metal rule.
+    database = ipdb.load(element_path(pdb_root, "au"),
+                         known_methods=None)
+    entry = ipdb.lookup(database, "default_solid")
+    assert entry.coefficients == [0.5, 0.3]
+    assert entry.provenance["reference_id"] == "au_fcc"
+    # The guidance contribution did not, and the run said so.
+    assert harvested.get("called") is None
+    assert "metal" in capsys.readouterr().out
+
+
 # A label-less variant of the local manifest: the entry omits
 #   ``label`` so the producer must derive it at harvest (5.2.1).
 _AU_LOCAL_MANIFEST_NO_LABEL = _AU_LOCAL_MANIFEST.replace(
