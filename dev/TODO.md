@@ -4946,6 +4946,16 @@ on the same data later with no schema change.  Built on P10.
   has stayed harmless until now only because `kpoint_integration` has
   had one value in every run to date; the metals work is what turns it
   into a real axis.
+  **Latent today, and the reason says when it goes live.**  LAT is
+  implemented for the post-SCF properties only -- DOS/PDOS and bond
+  consume the tetrahedron weights, while `valeCharge` accumulates the
+  SCF valence charge from the gaussian/histogram `electronPopulation`
+  with no branch on `kPointIntgCode`.  So a ground-state SCF returns
+  bit-identical total energies under either code today, and a wrong
+  cache hit currently costs nothing.  It starts costing correctness
+  the moment LAT reaches the SCF occupation path, which is exactly
+  what the metals work needs -- so this must land WITH that change,
+  not after it.
   **Fix it with a second key FILE, not a key scalar.**  Adding
   `scfkpint` to `_KEY_SCALAR_NAMES` invalidates every existing
   `cache_key.toml` at once, since `cache_key_matches` compares the
@@ -4972,6 +4982,78 @@ on the same data later with no schema change.  Built on P10.
   concept exists.
   DESIGN 6.2.5 first (the corrected claim), then PSEUDOCODE 15.6
   `standard_key_fields` and 11.4's prepare step, then CODE.
+
+- [ ] C136. Let a run suppress the k-mesh reduction while keeping
+  its atomic symmetry.  **The invariant both this and C137 serve:**
+  the point group used to reduce the k-point mesh must be a symmetry
+  of the Hamiltonian ACTUALLY being solved -- the geometry, the type
+  assignment, AND the electronic configuration.  Today the reduction
+  group is a pure function of the declared space group:
+  `makeinput._extract_point_ops` reads it via
+  `symmetry.read_conv_abc_point_ops(space_db, space_group_name)` and
+  writes it into `kp-scf.dat`, and `kpoints.f90` reads it back
+  (line ~290) without ever consulting atom types, potential types, or
+  the electronic state.  So a Hamiltonian that has LESS symmetry than
+  its geometry is reduced by operations it does not possess.
+  The motivating case is XANES/ELNES.  A core hole on one atom leaves
+  the geometry's full space group intact while the true electronic
+  symmetry is only the subgroup fixing the excited site, so
+  eigenvalues at `k` and `R.k` genuinely differ.  The reduction is
+  then invalid at the EIGENVALUE level -- even a TDOS is wrong -- and
+  no permutation bookkeeping repairs it.  A full mesh is the fix.
+  **What the option does.**  The `.skl` still declares a crystal with
+  its space group, and the structure is produced exactly as now,
+  INCLUDING symmetry-based assignment of types to equivalent atoms.
+  Only the k-mesh side is changed: the writer emits the identity
+  alone into the `NUM_POINT_OPS` / `POINT_OPS` block, so the run
+  integrates a P1-effective full mesh.  This separates two uses of
+  the space group that are currently one act, and lets a calculation
+  say "this structure HAS symmetry that this calculation must not
+  use" -- a statement declaring `P1` cannot make, because that also
+  changes the structure and the types.
+  Note the cost is real (the full mesh is |G| times the IBZ) and
+  should be reported, not silent.  Note also that the option changes
+  `kp-scf.dat` and NOTHING else, so without C135 a symmetry-off run
+  is a cache HIT against a symmetry-on one -- the same fault, and a
+  second reason C135 must land first.
+  DESIGN 2 (the invariant) and 3.2 (mesh reduction); PSEUDOCODE 4b.1
+  (writer additions); then CODE (makeinput only -- imago simply reads
+  fewer operations).
+
+- [ ] C137. Refuse to run when the type assignment splits a symmetry
+  orbit the k-mesh reduction relies on.  The second way to violate
+  C136's invariant, and the silent one.  Giving two symmetry-
+  equivalent atoms different types gives them different potentials,
+  which IS a symmetry breaking of the Hamiltonian -- so a mesh
+  reduced by the operation exchanging them is invalid for exactly the
+  reason the core hole is.  Types COARSER than symmetry stay
+  perfectly safe: a type spanning a union of whole orbits leaves the
+  orbit sums invariant, which is what makes the SCF's `potRho`
+  accumulation (indexed by potential TYPE, not by atom) exact under
+  the IBZ reduction in the first place.  Only splitting an orbit
+  hurts.
+  **The check.**  `makeinput` holds both halves already -- the
+  operations and the type assignment -- so it belongs there, at build
+  time, before anything dispatches (the fail-fast shape of DESIGN
+  5.10.6).  For each operation `R` in the reduction set and each atom
+  `A`, if `type(A) != type(R.A)` the orbit is split: refuse, naming
+  the two atoms, the operation, and the two types.  The atom
+  permutation under each operation is already built (DESIGN 2.4 /
+  2.7).
+  **With an override**, because the size of the error is worth
+  measuring rather than assuming: a flag that downgrades the refusal
+  to a loud warning and runs anyway, so the same system can be run
+  split-and-reduced against split-and-full (C136) and the difference
+  read off.  The refusal message should name C136's option as the
+  correct fix, since suppressing the reduction is what actually makes
+  a split-orbit run sound.
+  **Not a complete implementation of the invariant.**  This catches
+  the type-assignment route only; the electronic route (a core hole
+  with types intact) is invisible to it and is C136's to handle by
+  hand.  Say so where the guard is documented, so a later reader does
+  not mistake a passing check for a guarantee.
+  DESIGN 2; PSEUDOCODE 4b.1 plus the section-4 permutation table;
+  then CODE.
 
 ---
 
