@@ -408,6 +408,160 @@ apply atom permutation to distribute each IBZ k-point's
 contribution correctly. See section 2.5 for the full
 analysis.
 
+### 1.6 LAT in the SCF Occupation Path
+
+Sections 1.3-1.5 place LAT entirely behind the *post-SCF*
+properties: TDOS reads eigenvalues, PDOS reads the
+energy-resolved corner weights, and `electronPopulation_LAT`
+serves bond order and effective charge. The SCF itself uses
+none of them. `valeCharge` accumulates the valence charge
+from `electronPopulation` -- the Gaussian-broadened,
+thermally-filled array `populateStates` builds -- with no
+branch on `kPointIntgCode`. A ground-state SCF therefore
+returns a bit-identical total energy under either
+integration code, which is confirmed empirically: the same
+solid run at ten meshes under code 0 and code 1 agreed to
+all printed digits.
+
+**Why this matters.** The quantity a k-point convergence
+study reads is the SCF total energy versus mesh. A metal's
+energy oscillates there rather than settling, because the
+occupation function has a step at the Fermi surface and a
+uniform quadrature over a discontinuous integrand converges
+slowly and non-monotonically. Tetrahedron integration is
+the standard remedy that introduces no smearing parameter
+-- the converged answer stays a single number rather than a
+surface over (sigma, N_k) -- but it cannot help while the
+SCF does not consume it. This section specifies that
+consumption.
+
+**What does NOT arise: the symmetry permutation.** Section
+2.5 requires atom permutation for bond order because that
+quantity is decomposed per site, which splits a symmetry
+orbit into its members. The SCF's `potRho` is not: its
+index runs over potential TYPES (`potDim` is the cumulative
+alpha sum over `numPotTypes`), so each component is already
+summed over a whole orbit of equivalent atoms. An orbit sum
+is invariant under the operations that reduce the mesh, so
+the weighted IBZ accumulation equals the full-BZ value
+exactly, with no permutation applied or needed. LAT changes
+only the scalar occupation `f(n,k)` multiplying the density
+matrix and so cannot disturb this argument. The precondition
+is that the reduction group is a genuine symmetry of the
+Hamiltonian, which is section 2's invariant and is enforced
+elsewhere.
+
+**(a) The Fermi level is the substantive decision.** DESIGN
+1.5 evaluates the corner weights "once at the Fermi energy",
+which suffices for a property computed after the SCF has
+finished. Inside the SCF the Fermi level is re-determined
+each iteration from the current eigenvalues. Two choices:
+
+  1. Keep `populateStates`' existing Gaussian/thermal search
+     for `occupiedEnergy` and use LAT only to compute the
+     weights at that energy.
+  2. Determine the Fermi level from the tetrahedron
+     integral itself, by requiring the LAT-integrated
+     electron count to equal `numElectrons`.
+
+**Choice 2 is required, not preferred.** Under choice 1 the
+electron count implied by the LAT weights does not equal
+`numElectrons`, because the two integration schemes place
+the Fermi level differently for the same spectrum. The
+resulting charge is wrong by a factor the SCF will partly
+absorb into the potential, which makes the error hard to
+see and easy to mistake for slow convergence. The
+determination and the weights must come from one scheme.
+
+The root find is cheap if it exploits what the LAT
+machinery already provides. `N(E)` is monotone
+non-decreasing, so bracketing is safe; `dN/dE` is the
+density of states, which is exactly `cornerDOSWt_LAT`
+(section 1.3 notes it is the energy derivative of
+`cornerIntgWt_LAT`), so Newton converges in a few steps
+rather than the thirty-odd a bisection to machine
+precision would take; most (tetrahedron, band) pairs are
+fully occupied or fully empty at a trial energy and
+contribute a constant, so the working set after the first
+pass is only the straddling pairs; and the previous
+iteration's Fermi level is a good starting guess. The
+existing Gaussian search bounded by `fermiSearchLimit` is
+the structural model to follow.
+
+**(b) Lifecycle: per iteration, not once.** The weights
+depend on the Fermi level, which moves every cycle, so
+`computeElectronPopulation_LAT` runs once per SCF
+iteration rather than once per run. The cost is
+`numTetrahedra x numStates` = `6 x numFullMeshKP x bands`
+per evaluation, each item a four-corner sort and a few
+polynomial evaluations -- well under one percent of the
+iteration's diagonalizations. Note it scales with the FULL
+mesh while the diagonalizations scale with the IBZ, so the
+margin narrows for a low-symmetry cell where the IBZ saves
+little.
+
+**(c) The substitution point is the unpack, not the
+accumulation.** `valeCharge` reads `electronPopulation` as
+a flat one-dimensional array walked in (kpoint, spin,
+state) order -- explicitly documented there as not matching
+the eigenvalue sort -- and unpacks it into
+`structuredElectronPopulation(numStates, numKPoints, spin)`.
+`electronPopulation_LAT` is already in that target shape,
+so the LAT path replaces the unpack loop rather than
+adding a reordering step. The accumulation below it is
+unchanged. Routing the LAT array through the flat-index
+loop is the one mistake available here and would scramble
+the occupations silently.
+
+**(d) The normalization convention must be stated, not
+assumed.** `electronPopulation` has the k-point weight
+folded in: `populateStates` multiplies by `kPointWeight`
+when filling it. The LAT expression of section 1.5 carries
+its own Brillouin-zone fraction, `(V_T / V_BZ) * w_c(E_F)`.
+Both are therefore weight-inclusive, but by different
+routes, and the two must be shown to agree in convention
+before the substitution is trusted. A mismatch is a
+constant factor on the valence charge, which an SCF partly
+absorbs -- the same failure mode as (a), and as hard to
+attribute.
+
+**(e) Thermal smearing and LAT are alternatives, not
+layers.** `thermalSigma` broadens the occupations in the
+Gaussian path. Tetrahedron integration determines
+occupations geometrically and needs no broadening, so a run
+that sets both is asking for two different answers. The
+LAT path ignores `thermalSigma` for the SCF occupation and
+says so where the option is documented, rather than
+silently applying one and discarding the other. (Note
+`subroutine bond` already zeroes `thermalSigma` around its
+own populate call for a related reason.)
+
+**Spin.** `potRho` carries a spin index and
+`electronPopulation_LAT` is dimensioned `(n, k, spin)`, so
+the substitution is per channel. Whether a spin-polarized
+metal needs one Fermi level or two is deferred: this
+section specifies the unpolarized and collinear cases, and
+a spin-split Fermi determination is left open below.
+
+**Open questions.**
+
+  1. Spin-polarized metals: one Fermi level constrained by
+     the total electron count, or two constrained per
+     channel. The Gaussian path's present behaviour should
+     be read before choosing, so LAT does not silently
+     differ from it.
+  2. Whether a run may switch integration scheme between
+     the SCF and the post-SCF properties -- makeinput
+     already exposes `-scfkpint` and `-pscfkpint`
+     separately, so the input format permits it, but
+     whether it is meaningful is not settled.
+  3. The convergence-tolerance interaction: a tetrahedron
+     Fermi level found to a loose tolerance introduces
+     noise into the total energy that could masquerade as
+     unconverged k-sampling. The root-find tolerance
+     should be tied to the SCF convergence criterion
+     rather than fixed.
+
 ---
 
 ## 2. IBZ Correctness for Eigenvector-Dependent Quantities
