@@ -4923,7 +4923,7 @@ on the same data later with no schema change.  Built on P10.
   filename picked the LATER entry for one solid and the EARLIER for
   another.
 
-- [ ] C135. The run-reuse cache cannot tell two k-point integration
+- [x] C135. The run-reuse cache cannot tell two k-point integration
   schemes apart.  The producer's key is `_KEY_SCALAR_NAMES =
   ("converg",)` plus one key file, `structure.dat`.  The integration
   scheme travels as makeinput's `scfkpint` -> `kp_intg_code` and is
@@ -4980,8 +4980,13 @@ on the same data later with no schema change.  Built on P10.
   which scheme produced what is stored.  The guidance dataspace treats
   the sub-model as identity; the potential database does not know the
   concept exists.
-  DESIGN 6.2.5 first (the corrected claim), then PSEUDOCODE 15.6
-  `standard_key_fields` and 11.4's prepare step, then CODE.
+  DESIGN 6.2.5 (the corrected claim) and PSEUDOCODE 15.6
+  (`KEY_FILE_NAMES`); PSEUDOCODE 11.4 needed NO change -- it already
+  re-pointed every key file, and only the code had narrowed that to
+  `structure.dat`, so the code was what disagreed with the spec.
+  CODE.  DONE 2026-07-30.  +6 tests, 1257 pass.  Not yet exercised
+  live: the si_cmce workspace is being cleared, so the LAT trial is
+  the first run whose scheme change this will distinguish.
 
 - [ ] C136. Let a run suppress the k-mesh reduction while keeping
   its atomic symmetry.  **The invariant both this and C137 serve:**

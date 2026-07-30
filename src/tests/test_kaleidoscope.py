@@ -458,6 +458,60 @@ def test_cache_misses_when_the_source_is_gone(tmp_path):
     assert cache_key_matches(unit, wingbeat_dir) is False
 
 
+def _two_file_unit(tmp_path, structure_text, kpoint_text,
+                   staged_kpoint_text):
+    """A unit keyed on TWO files, the shape the producer declares
+    (DESIGN 6.2.5): the resolved structure and the resolved k-point
+    file.  ``staged_kpoint_text`` may differ from ``kpoint_text`` to
+    model a prior run made under a different integration scheme."""
+    wingbeat_dir = tmp_path / "run"
+    wingbeat_dir.mkdir()
+    sources = tmp_path / "src"
+    sources.mkdir()
+    files = []
+    for name, current, staged in (
+            ("structure.dat", structure_text, structure_text),
+            ("kp-scf.dat", kpoint_text, staged_kpoint_text)):
+        (sources / name).write_text(current)
+        (wingbeat_dir / name).write_text(staged)
+        files.append(KeyFile(name=name, source=str(sources / name)))
+    unit = CalcUnit(id="s1", structure=str(sources),
+                    key_fields=KeyFields(scalars={}, files=files))
+    write_cache_key(str(wingbeat_dir), unit)
+    write_status(str(wingbeat_dir), status="done")
+    return str(wingbeat_dir), unit
+
+
+def test_a_changed_integration_scheme_misses(tmp_path):
+    """The fault C135 closes.  The k-point integration scheme lives
+    in ``kp-scf.dat`` as KPOINT_INTG_CODE and appears nowhere in
+    ``structure.dat``, so a key naming only the structure would call
+    these the same calculation and return the stored answer.
+
+    That is a different failure from a stale hit: it reports the
+    physics of one integration scheme under the name of another, and
+    prints nothing.  Declaring the k-point file as a second key file
+    is what makes the two distinguishable."""
+    wingbeat_dir, unit = _two_file_unit(
+        tmp_path, "cell 1 2 3\n",
+        "KPOINT_INTG_CODE\n1\n",          # tetrahedron now
+        "KPOINT_INTG_CODE\n0\n")          # histogram before
+    assert is_cache_hit(unit, wingbeat_dir) is False
+
+
+def test_the_same_scheme_still_hits(tmp_path):
+    """The property that decided key FILE over key scalar.  Adding a
+    name to the scalar table would mismatch every stored
+    ``cache_key.toml`` at once, since the scalars are compared whole
+    -- a mass false miss, the failure with no escape valve.  A key
+    file costs nothing, because every run directory already stages
+    it, so an unchanged scheme reuses its result exactly as before."""
+    wingbeat_dir, unit = _two_file_unit(
+        tmp_path, "cell 1 2 3\n",
+        "KPOINT_INTG_CODE\n0\n", "KPOINT_INTG_CODE\n0\n")
+    assert is_cache_hit(unit, wingbeat_dir) is True
+
+
 def test_is_cache_hit_requires_done_status(tmp_path):
     """A matching key is necessary but not sufficient: the run
     must also have reached the ``done`` status.  A still-running

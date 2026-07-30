@@ -7780,18 +7780,63 @@ existing `is_cached_v2` (DESIGN 5.7) and generalizing it:
   path already keeps them distinct.
 - **Key files** -- declared by name in `key_fields`;
   compared by **byte-comparison against the copy already
-  staged in the run directory**.  For the producer this
-  file is `structure.dat`: the *resolved* structure
-  makeinput writes, not the raw skeleton.  Keying on
-  makeinput's output is deliberate -- `structure.dat`
-  bakes in every input that changes the result (the
-  type/species assignment, the basis, the functional, the
-  potential choice), so changing any of them misses the
-  cache on its own, with no hand-maintained list of
-  "options that matter" to fall out of date.  This keeps
-  DESIGN 5.7's "byte-compared file copies, no hashing, for
-  debuggability" property: a developer can diff the files
-  to see *why* a cache missed, which a hash would hide.
+  staged in the run directory**.  For the producer these
+  are `structure.dat` and `kp-scf.dat`, both the *resolved*
+  files makeinput writes rather than the raw skeleton.
+  Keying on makeinput's output is deliberate: those files
+  bake in the inputs that change the result, so changing
+  one misses the cache on its own, with no hand-maintained
+  list of "options that matter" to fall out of date.  This
+  keeps DESIGN 5.7's "byte-compared file copies, no
+  hashing, for debuggability" property: a developer can
+  diff the files to see *why* a cache missed, which a hash
+  would hide.
+
+  *Why two files, and the claim this corrects.*  This
+  design previously named `structure.dat` alone and
+  justified it by saying that file bakes in **every** input
+  that changes the result.  That claim is false, and the
+  exception is not obscure: the k-point integration scheme
+  reaches `kp-scf.dat` as `KPOINT_INTG_CODE` (makeinput's
+  `scfkpint` -> `kp_intg_code`) and appears nowhere in
+  `structure.dat`.  One solid at one mesh under two
+  different schemes therefore resolved to the same run
+  directory with a matching key and a `done` status -- a
+  hit that returns the other scheme's answer.  The same
+  file also carries the point operations, so a run that
+  suppresses the mesh reduction while keeping its atomic
+  symmetry (TODO C136) is likewise indistinguishable from
+  one that does not.
+  This is a different class of fault from a stale hit and
+  is worth separating.  The argument for keeping the engine
+  build out of the key (below) rests on a false hit meaning
+  *the same physics computed by an older binary*, with
+  `--force` as the escape valve.  A false hit across
+  integration schemes returns *different physics* under the
+  name of the physics that was asked for, and prints
+  nothing.  A later reader should not "simplify" this back
+  to one key file.
+  It has been harmless only because `kpoint_integration`
+  has held one value in every run to date, and because LAT
+  currently reaches the post-SCF properties but not the SCF
+  occupation path (1.6), so the two schemes happen to give
+  identical SCF energies.  Both of those are about to stop
+  being true.
+
+  *Why a second key FILE rather than a key scalar.*  The
+  scheme could equally be added to the scalar list, and
+  that is the worse choice.  Scalars are compared as a
+  whole table, so introducing a name no stored
+  `cache_key.toml` carries invalidates every cached unit in
+  every surviving workspace at once -- a mass false miss,
+  the failure this section otherwise works to avoid.  A key
+  *file* costs nothing: the comparison walks the files the
+  unit declares and byte-compares each against its staged
+  copy, and every run directory already stages `kp-scf.dat`,
+  so a same-scheme re-run still hits and only a genuine
+  scheme change misses.  It also keeps the diagnosis
+  legible -- two `kp-scf.dat` files diff to the single
+  `KPOINT_INTG_CODE` line that differs.
 
 **Policy (client).**  The client supplies the key fields
 in `CalcUnit.key_fields`; only it knows which inputs

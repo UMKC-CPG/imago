@@ -170,6 +170,45 @@ def test_build_mesh_unit_tags_an_anisotropic_mesh():
     assert unit.options["scfkp"] == [5, 5, 2]
 
 
+def test_key_fields_distinguish_the_integration_scheme():
+    """The cache identity byte-compares TWO makeinput outputs, and
+    the second is not optional polish (DESIGN 6.2.5).
+
+    ``structure.dat`` bakes in the type/species assignment, basis,
+    functional, and potential -- but NOT the k-point integration
+    scheme, which reaches ``kp-scf.dat`` as KPOINT_INTG_CODE.  Keyed
+    on ``structure.dat`` alone, one solid at one mesh under two
+    schemes shares a run directory and HITS, returning the other
+    scheme's answer under the name of the one asked for.  That is
+    wrong physics reported silently, not merely a stale result."""
+    fields = kc.standard_key_fields(_STRUCTURE, _OPTIONS)
+    assert [key_file.name for key_file in fields.files] == [
+        "structure.dat", "kp-scf.dat"]
+
+
+def test_key_scalars_stay_the_convergence_limit_alone():
+    """The scheme is a key FILE, deliberately not a key scalar.  The
+    scalars are compared as a whole table, so a name no stored
+    ``cache_key.toml`` carries would invalidate every cached unit in
+    every surviving workspace at once -- a mass false miss, which is
+    the failure the cache design works hardest to avoid.  A key file
+    costs nothing, because every run directory already stages it."""
+    fields = kc.standard_key_fields(
+        _STRUCTURE, dict(_OPTIONS, converg=1.0e-6, scfkpint=1))
+    assert fields.scalars == {"converg": 1.0e-6}
+
+
+def test_key_file_sources_start_provisional():
+    """Every key file's source starts at the skeleton and is
+    re-pointed by the driver's prepare step once makeinput has
+    actually written the files (DESIGN 6.2.5, Model A).  Pinned for
+    both files, since a second file added without the matching
+    re-point would name a path that never exists."""
+    fields = kc.standard_key_fields("/cache/si-prim.skl", _OPTIONS)
+    assert {key_file.source for key_file in fields.files} == {
+        "/cache/si-prim.skl"}
+
+
 def test_predict_kpoint_density_returns_prediction(patched):
     """The predict-only builder returns the predicted density,
     confidence, under-trained flag, and a `predict_then_climb`

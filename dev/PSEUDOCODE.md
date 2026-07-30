@@ -11309,24 +11309,41 @@ function build_calc_tag(calc_axes):
 KEY_SCALAR_NAMES = ("converg",)
 
 
+# The makeinput outputs byte-compared as the producer's key
+#   (DESIGN 6.2.5).  BOTH are needed, and the second is not
+#   optional polish: `structure.dat` bakes in the type/species
+#   assignment, the basis, the functional, and the potential, but
+#   NOT the k-point integration scheme, which reaches `kp-scf.dat`
+#   as KPOINT_INTG_CODE.  With `structure.dat` alone, one solid at
+#   one mesh under two different integration schemes shares a run
+#   directory and hits -- returning the other scheme's answer under
+#   the name of the one asked for.  `kp-scf.dat` also carries the
+#   point operations, so a run that suppresses the mesh reduction
+#   while keeping its atomic symmetry is likewise distinguished.
+#
+#   Adding the scheme to KEY_SCALAR_NAMES instead would invalidate
+#   every stored cache_key.toml at once (the scalars are compared
+#   as a whole table), which is a mass false miss.  A key FILE
+#   costs nothing: every run directory already stages this file.
+KEY_FILE_NAMES = ("structure.dat", "kp-scf.dat")
+
+
 function standard_key_fields(structure, options):
     # DESIGN 6.2.5: the producer's cache identity -- the scalars
     # taken from `options` (the SCF threshold, and nothing else)
-    # plus one key file, `structure.dat`, byte-compared.  The key
-    # file is makeinput's OUTPUT, not the raw skeleton: it bakes
-    # in every input that changes the result (the type/species
-    # assignment, basis, functional, potential), so any of those
-    # changing misses the cache on its own, with no hand-listed
-    # "options that matter" to fall stale.  The KeyFile `source`
-    # is provisional here (the skeleton `structure`); the driver's
-    # prepare step (11.4, Phase 1b) re-points it at the built
-    # structure.dat once that file exists.
+    # plus the key files above, byte-compared.  The key files are
+    # makeinput's OUTPUTS, not the raw skeleton, so an input that
+    # changes the result misses the cache on its own, with no
+    # hand-listed "options that matter" to fall stale.  Each
+    # KeyFile `source` is provisional here (the skeleton
+    # `structure`); the driver's prepare step (11.4) re-points
+    # EVERY key file at its built copy once those files exist.
     return KeyFields(
         scalars = { name : options[name]
                     for name in KEY_SCALAR_NAMES
                     if name in options },
-        files   = [KeyFile(name = "structure.dat",
-                           source = structure)])
+        files   = [KeyFile(name = name, source = structure)
+                   for name in KEY_FILE_NAMES])
 ```
 
 

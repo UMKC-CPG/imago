@@ -3988,8 +3988,14 @@ class TestPrepareUnitsKeyFileSource:
             key_fields=KeyFields(
                 scalars={},
                 # Provisional, exactly as standard_key_fields
-                #   leaves it: the prepare pass re-points it.
+                #   leaves them: the prepare pass re-points each.
+                #   BOTH makeinput outputs are key files (DESIGN
+                #   6.2.5) -- kp-scf.dat is what distinguishes two
+                #   k-point integration schemes, which structure.dat
+                #   does not record.
                 files=[KeyFile(name="structure.dat",
+                               source="PROVISIONAL"),
+                       KeyFile(name="kp-scf.dat",
                                source="PROVISIONAL")]))
         return Flight(root=str(tmp_path / "ws"), units=[unit]), unit
 
@@ -4002,9 +4008,11 @@ class TestPrepareUnitsKeyFileSource:
                           settings=None):
             inputs = os.path.join(run_dir, makeinput.INPUTS_DIR)
             os.makedirs(inputs, exist_ok=True)
-            with open(os.path.join(inputs, "structure.dat"),
-                      "w") as handle:
-                handle.write("cell 1 2 3\n")
+            for name, body in (("structure.dat", "cell 1 2 3\n"),
+                               ("kp-scf.dat",
+                                "KPOINT_INTG_CODE\n0\n")):
+                with open(os.path.join(inputs, name), "w") as handle:
+                    handle.write(body)
             return run_dir
 
         monkeypatch.setattr(makeinput, "build_run_dir",
@@ -4017,15 +4025,21 @@ class TestPrepareUnitsKeyFileSource:
         #   comparison that stats it, so a path naming a file
         #   that was never written is not a subtle wrongness --
         #   it raises, and takes the campaign with it.
+        #
+        #   Checked for EVERY key file, not just the first: the
+        #   pass re-points them uniformly because they are all
+        #   makeinput outputs landing in one place, and a second
+        #   file added without that uniformity would name a path
+        #   that never exists (DESIGN 6.2.5).
         self._fake_makeinput(monkeypatch)
         flight, unit = self._flight_of_one(tmp_path)
 
         bip.prepare_units(flight, str(tmp_path / "ws"))
 
-        source = unit.key_fields.files[0].source
-        assert os.path.exists(source), (
-            f"prepare pointed the cache key at {source}, which "
-            "does not exist")
+        for key_file in unit.key_fields.files:
+            assert os.path.exists(key_file.source), (
+                f"prepare pointed the {key_file.name} cache key at "
+                f"{key_file.source}, which does not exist")
 
     def test_source_sits_under_the_inputs_directory(
             self, tmp_path, monkeypatch):
@@ -4038,10 +4052,11 @@ class TestPrepareUnitsKeyFileSource:
 
         bip.prepare_units(flight, str(tmp_path / "ws"))
 
-        expected = os.path.join(
-            unit.prepared_dir, makeinput.INPUTS_DIR,
-            "structure.dat")
-        assert unit.key_fields.files[0].source == expected
+        assert [key_file.source for key_file
+                in unit.key_fields.files] == [
+            os.path.join(unit.prepared_dir, makeinput.INPUTS_DIR,
+                         name)
+            for name in ("structure.dat", "kp-scf.dat")]
 
 
 # ============================================================

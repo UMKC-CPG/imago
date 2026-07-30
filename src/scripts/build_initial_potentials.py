@@ -1866,8 +1866,12 @@ def prepare_units(flight: Flight, workspace: str, units=None) -> None:
         makeinput.build_run_dir(
             unit.structure, makeinput_options, staging)
         unit.prepared_dir = staging
-        # Re-point the structure.dat KeyFile source at the freshly
-        #   built copy (standard_key_fields left it provisional).
+        # Re-point EVERY KeyFile source at the freshly built copy
+        #   (standard_key_fields left them provisional).  Every key
+        #   file is a makeinput output and so lands in the same
+        #   place, which is why this needs no per-name special
+        #   casing -- and why adding a second key file (DESIGN
+        #   6.2.5's `kp-scf.dat`) costs nothing here.
         #
         # Note the makeinput.INPUTS_DIR level.  makeinput writes
         #   its outputs under `inputs/` in whatever directory it
@@ -1884,10 +1888,8 @@ def prepare_units(flight: Flight, workspace: str, units=None) -> None:
         #   reached until a prior cache_key.toml exists, and then
         #   breaks every re-run over a surviving workspace.
         for key_file in unit.key_fields.files:
-            if key_file.name == "structure.dat":
-                key_file.source = os.path.join(
-                    staging, makeinput.INPUTS_DIR,
-                    "structure.dat")
+            key_file.source = os.path.join(
+                staging, makeinput.INPUTS_DIR, key_file.name)
 
 
 # ==================================================================

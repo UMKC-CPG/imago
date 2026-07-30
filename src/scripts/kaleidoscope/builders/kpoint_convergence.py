@@ -253,10 +253,33 @@ def decode_mesh_value(token):
 _KEY_SCALAR_NAMES = ("converg",)
 
 
+# The makeinput outputs byte-compared as the producer's cache
+#   identity (DESIGN 6.2.5).  BOTH are required, and the second is
+#   not optional polish.  ``structure.dat`` bakes in the
+#   type/species assignment, the basis, the functional, and the
+#   potential -- but NOT the k-point integration scheme, which
+#   reaches ``kp-scf.dat`` as the KPOINT_INTG_CODE field (makeinput's
+#   ``scfkpint``).  Keyed on ``structure.dat`` alone, one solid at
+#   one mesh under two different integration schemes shares a run
+#   directory and HITS, returning the other scheme's answer under the
+#   name of the one that was asked for.  That is a different failure
+#   from a merely stale hit: it is wrong physics, reported silently.
+#   ``kp-scf.dat`` also carries the point operations, so a run that
+#   suppresses the mesh reduction while keeping its atomic symmetry
+#   is distinguished by the same file.
+#
+#   Adding the scheme to ``_KEY_SCALAR_NAMES`` instead would compare
+#   a scalar table no stored ``cache_key.toml`` carries, invalidating
+#   every cached unit in every surviving workspace at once.  A key
+#   FILE costs nothing, because every run directory already stages
+#   this one.
+_KEY_FILE_NAMES = ("structure.dat", "kp-scf.dat")
+
+
 def standard_key_fields(structure, options):
     """Build the ``KeyFields`` cache identity for a unit
-    (DESIGN 6.2.1/6.2.5): the structure file byte-compared, plus
-    the scalar settings that define run identity.
+    (DESIGN 6.2.1/6.2.5): the key files byte-compared, plus the
+    scalar settings that define run identity.
 
     The scalar names are taken from ``options`` when present, and in
     v1 that is the single ``converg`` -- the SCF convergence limit,
@@ -264,22 +287,22 @@ def standard_key_fields(structure, options):
     engine build appears here; see ``_KEY_SCALAR_NAMES`` above for
     why, and ``CalcUnit.record`` for where it goes instead.
 
-    The single key file ``"structure.dat"`` is byte-compared
-    against the staged copy under the run directory.  It is
-    makeinput's RESOLVED output, not the raw skeleton, so it
-    bakes in every input that changes the result (the type/species
-    assignment, basis, functional, potential); any of those
-    changing misses the cache on its own.  The ``source`` set here
-    is provisional (the skeleton path); the producer's prepare
-    step re-points it at the built ``structure.dat`` before the
-    hit-test (DESIGN 6.2.5, Model A)."""
+    The key files are makeinput's RESOLVED outputs, not the raw
+    skeleton, so an input that changes the result misses the cache on
+    its own -- there is no hand-maintained list of "options that
+    matter" to fall out of date.  See ``_KEY_FILE_NAMES`` for why
+    both files are needed.  Each ``source`` set here is provisional
+    (the skeleton path); the producer's prepare step re-points every
+    key file at its built copy before the hit-test (DESIGN 6.2.5,
+    Model A)."""
     source = (structure if isinstance(structure, str)
               else getattr(structure, "imago_skl", "imago.skl"))
     scalars = {name: options[name]
                for name in _KEY_SCALAR_NAMES if name in options}
     return KeyFields(
         scalars=scalars,
-        files=[KeyFile(name="structure.dat", source=source)])
+        files=[KeyFile(name=name, source=source)
+               for name in _KEY_FILE_NAMES])
 
 
 def _load_structure(structure):
