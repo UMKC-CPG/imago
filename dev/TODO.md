@@ -4988,6 +4988,59 @@ on the same data later with no schema change.  Built on P10.
   live: the si_cmce workspace is being cleared, so the LAT trial is
   the first run whose scheme change this will distinguish.
 
+- [ ] C138. Finish and validate LAT in the SCF occupation path.
+  The path itself is CODED and building (DESIGN 1.6, PSEUDOCODE 3a,
+  commit `9da3000`): `populateStates` dispatches to `populateLAT`
+  when the integration code selects it, `populateLAT` finds the
+  Fermi level from the tetrahedron integral by safeguarded Newton,
+  `latElectronCount` returns the count and its derivative from one
+  corner sort, and `valeCharge` branches at the unpack applying the
+  same `2/spin` conversion `computeBond` uses.  The Bloechl corner
+  routines moved from `O_DOS` to `O_MathSubs` unchanged, because
+  `O_DOS` already uses `O_Populate` and the reverse import would
+  have been a module cycle.
+  **Verified so far (insulator only).**  `si_fd-3m_227_2001` at
+  mesh 6-6-6 under `scfkpint = 1`: the LAT electron count comes out
+  at exactly `NUM_ELECTRONS` (8.0 -- the calibration DESIGN 1.6d
+  asks for, and the one a wrong `spinFactor` would have failed),
+  the run converges in 5 iterations, and the total energy is
+  UNCHANGED from the Gaussian run at the same mesh.  That last is
+  the correct result, not a null one: in a gapped system every
+  tetrahedron is wholly occupied or wholly empty, so LAT must be
+  neutral there.  It is evidence the substitution is sound where it
+  should change nothing.
+  **What remains:**
+  (a) **The metal comparison, which is the whole point.**  An
+  attempt on `si_cmce_64_1999` at mesh 10-10-9 failed before
+  reaching any occupation code, dying right after "Initialize SCF
+  HDF5 File".  A Gaussian control from the SAME hand-staged
+  directory failed identically, so the fault is in that staging
+  (a run directory copied out of the workspace with `scfV.dat` and
+  the intermediates removed), NOT in the LAT change.  Re-run it
+  properly through the producer instead of by hand, and compare the
+  energy ladder against the Gaussian one recorded in the metals
+  notes.  Until that is done, nothing shows LAT changing an answer
+  it ought to change.
+  (b) **XANES/ELNES under LAT is refused, deliberately.**
+  `populateLAT` stops with a message naming Gaussian integration as
+  the supported path.  The Gaussian core-hole correction addresses
+  the flat sorted occupation array through
+  `indexEnergyEigenValues`, and its band arithmetic does not
+  transfer to the `(band, kpoint, spin)` array unexamined --
+  `numOrbitalStates` is scaled by `spin` at initialization, so the
+  mapping is not the obvious one.  A wrong correction misplaces
+  exactly one electron, which reads as a convergence problem and
+  never gets questioned.  PSEUDOCODE 3a keeps the shape as the
+  spec and marks the band range as the unsettled part.
+  (c) DESIGN 1.6's two remaining open questions: whether SCF and
+  post-SCF integration schemes may legitimately differ, and tying
+  the Fermi root-find tolerance to the SCF convergence criterion
+  rather than leaving it fixed at `smallThresh`.
+  (d) No automated coverage exists for any of this -- the test
+  suite is Python and this is Fortran.  The insulator electron-count
+  check is currently a thing a person reads out of `gs_scf-fb.out`.
+  CODE (Fortran); DESIGN 1.6; PSEUDOCODE 3a.
+
 - [ ] C136. Let a run suppress the k-mesh reduction while keeping
   its atomic symmetry.  **The invariant both this and C137 serve:**
   the point group used to reduce the k-point mesh must be a symmetry
