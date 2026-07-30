@@ -648,6 +648,225 @@ function bloechlCornerWeights(E, eps):
 
 ---
 
+## 3a. LAT in the SCF Occupation Path (DESIGN 1.6)
+
+Section 3 builds `electronPopulation_LAT` at a Fermi level
+someone else determined, which suits a property computed
+after the SCF has finished.  Inside the SCF the Fermi level
+moves every iteration and must be determined by the SAME
+integration scheme that supplies the weights, or the two
+disagree about how many electrons are present (DESIGN 1.6a).
+This section adds that determination, its call site, and the
+one substitution it needs in the charge accumulation.
+
+Three facts about the existing Gaussian path are load-bearing
+here and are mirrored rather than reinvented:
+
+- ONE Fermi level serves both spin channels, constrained by
+  the total `numElectrons`.  The Gaussian path merges every
+  (state, spin, kpoint) triplet into one sorted list and
+  fills it in ascending energy, so the magnetic moment is an
+  OUTCOME of which channel sorts lower, never an input.  LAT
+  keeps that; two per-channel levels would be a physics
+  change wearing an integration-scheme costume.
+- `populateStandard` runs unconditionally and produces
+  `occupiedEnergyIndex`, which is what brackets the
+  smearing search.  The LAT search seeds its bracket the same
+  way, so the initial guess has one source.
+- The excited-state (XANES) correction is NOT automatic.
+  `populateSmearing` raises `numElectrons` by one, populates,
+  then calls `correctCorePopulation`, which removes the core
+  electron's occupancy AND restores the count.  A LAT search
+  carries the same obligation or it counts the core hole's
+  electron.
+
+```
+function populateStates:
+    # DESIGN 1.6. Unchanged through populateStandard, which
+    # every path still needs for its bracket and for the
+    # degeneracy-averaged starting occupations.
+    if excitedQN_n /= 0 and coreStructInit == 0:
+        call initCoreStateStructures
+    call populateStandard
+
+    # LAT and thermal smearing are ALTERNATIVES, not layers
+    # (DESIGN 1.6e): tetrahedron integration determines
+    # occupations geometrically and needs no broadening, so a
+    # run that set both would be asking for two answers.  LAT
+    # wins and thermalSigma is ignored for the SCF occupation;
+    # say so rather than applying one and discarding the other.
+    if kPointIntgCode == 1:
+        call populateLAT
+    else if thermalSigma /= 0:
+        call populateSmearing
+
+    write occupiedEnergy
+```
+
+```
+function populateLAT:
+    # Find the Fermi level from the TETRAHEDRON integral and
+    # fill electronPopulation_LAT at it (DESIGN 1.6a).
+    #
+    # Bracket exactly as populateSmearing does: populateStandard
+    # has already put occupiedEnergy between the highest
+    # occupied and lowest unoccupied sorted eigenvalues, and
+    # fermiSearchLimit widens that to a range no real Fermi
+    # level escapes.
+    minEnergy = sortedEnergyEigenValues(occupiedEnergyIndex)
+                - fermiSearchLimit
+    maxEnergy = sortedEnergyEigenValues(occupiedEnergyIndex+1)
+                + fermiSearchLimit
+
+    # Seed from the previous SCF iteration when there is one:
+    # the level moves little between iterations, so Newton
+    # usually converges in two or three passes.
+    E = (previousFermi if previousFermi is set
+         else 0.5 * (minEnergy + maxEnergy))
+
+    for i = 1 to MAX_FERMI_ITER:
+        if excitedQN_n /= 0:
+            numElectrons = numElectrons + 1
+
+        (N, dNdE) = latElectronCount(E)
+
+        if excitedQN_n /= 0:
+            call correctCorePopulation_LAT   # restores the
+            N = N - 1                        #   count too
+
+        if abs(N - numElectrons) < smallThresh:
+            break
+
+        # Maintain the bracket from every evaluation, so the
+        # safeguard below always has a valid one.  N(E) is
+        # monotone non-decreasing, which is what makes this
+        # sound.
+        if N < numElectrons: minEnergy = E
+        else:               maxEnergy = E
+
+        # Newton where the derivative is usable, bisection
+        # where it is not.  dN/dE is the density of states, so
+        # it VANISHES inside a gap -- an insulator's first
+        # guess lands there and a bare Newton step would
+        # diverge.  Fall back whenever the step leaves the
+        # bracket or the slope is negligible (DESIGN 1.6a).
+        if dNdE > slopeThresh:
+            E_next = E - (N - numElectrons) / dNdE
+        else:
+            E_next = 0.5 * (minEnergy + maxEnergy)
+        if E_next <= minEnergy or E_next >= maxEnergy:
+            E_next = 0.5 * (minEnergy + maxEnergy)
+        E = E_next
+
+    occupiedEnergy = E
+    previousFermi  = E
+    call computeElectronPopulation_LAT(..., eFermi = E)  # 3
+    if excitedQN_n /= 0:
+        call correctCorePopulation_LAT
+```
+
+```
+function latElectronCount(E):
+    # The integrated electron count at trial energy E and its
+    # derivative, in ONE pass (DESIGN 1.6a).  The derivative is
+    # free: cornerDOSWt_LAT is by construction d/dE of
+    # cornerIntgWt_LAT (section 2), so the same corner sort
+    # yields both.
+    #
+    # Cost note (DESIGN 1.6b): the loop is over the FULL mesh's
+    # tetrahedra, not the IBZ.  Most (T, n) pairs are wholly
+    # below or wholly above E and contribute a constant with no
+    # corner work, so only the straddling pairs are re-evaluated
+    # as E moves.
+    N = 0 ; dNdE = 0
+    for spin = 1 to numSpins:
+        for n = 1 to numStates:
+            for T = 1 to numTetrahedra:
+                eps(1:4) = sorted eigenValues(n, corners(T), spin)
+                if eps(4) <= E:            # wholly occupied
+                    N = N + tetraVol * spinFactor
+                    continue
+                if eps(1) > E:  continue   # wholly empty
+                w  = cornerIntgWt_LAT(eps, E)   # section 3
+                dw = cornerDOSWt_LAT(eps, E)    # section 2
+                N    = N    + tetraVol * spinFactor * sum(w)
+                dNdE = dNdE + tetraVol * spinFactor * sum(dw)
+    return (N, dNdE)
+```
+
+**The normalization must be checked, not assumed (DESIGN
+1.6d).**  `electronPopulation` carries the k-point weight
+folded in and divides by `spin`, so each state holds one
+electron when spin-polarized and two when not.  The LAT sum
+carries its own Brillouin-zone fraction instead: a fully
+occupied band gives `sum over T of tetraVol = 1` per channel,
+so `spinFactor = 2 / numSpins` reproduces the same
+convention.  That equality is stated here as the thing to
+verify, not as a derivation to trust: the calibration test is
+an INSULATOR, where `latElectronCount(E)` for any E inside
+the gap must return exactly `numElectrons`.  A wrong factor
+is a constant error on the valence charge that an SCF partly
+absorbs, so it will not announce itself.
+
+```
+function correctCorePopulation_LAT:
+    # The LAT-shaped core-hole correction (DESIGN 1.6).  Same
+    # physics as correctCorePopulation, but simpler: that
+    # routine walks a flat array through indexEnergyEigenValues
+    # because its occupations are stored sorted, while
+    # electronPopulation_LAT is already (n, k, spin) and the
+    # excited band index addresses it directly.
+    #
+    # It also restores numElectrons, exactly as the Gaussian
+    # form does -- the increment in the search above and this
+    # decrement are ONE pair split across two routines.
+    for each core band n in the excited (QN_n, QN_l) orbital:
+        for k, spin:
+            electronPopulation_LAT(n, k, spin) -=
+                electronPopulation_LAT(n, k, spin)
+                * numSpins / 2 / numOrbitalStates(...)
+    numElectrons = numElectrons - 1
+```
+
+```
+function valeCharge (LAT branch only):
+    # DESIGN 1.6c.  The substitution point is the UNPACK, not
+    # the accumulation below it.  The Gaussian path reads a
+    # flat electronPopulation walked in (kpoint, spin, state)
+    # order -- deliberately NOT the eigenvalue sort order --
+    # and unpacks it into structuredElectronPopulation.
+    # electronPopulation_LAT is already in that target shape,
+    # so the LAT path REPLACES the unpack rather than adding a
+    # reordering step.
+    #
+    # Routing the LAT array through the flat-index loop is the
+    # one mistake available here: it would scramble the
+    # occupations silently, since both arrays hold plausible
+    # numbers of the right size.
+    if kPointIntgCode == 1:
+        structuredElectronPopulation = electronPopulation_LAT
+    else:
+        energyLevelCounter = 0
+        for i = 1 to numKPoints:
+          for j = 1 to numSpins:
+            for k = 1 to numStates:
+              energyLevelCounter += 1
+              structuredElectronPopulation(k,i,j) =
+                  electronPopulation(energyLevelCounter)
+    # ... accumulation into potRho unchanged ...
+```
+
+**Lifecycle.**  `computeElectronPopulation_LAT` runs once per
+SCF iteration, not once per run, because the weights depend on
+a Fermi level that moves.  Its array has the same lifecycle as
+`electronPopulation`: allocated on first use, freed by
+`cleanUpPopulation`.  No permutation table is involved --
+`potRho` is indexed by potential TYPE, so every component is
+already an orbit sum and invariant under the IBZ reduction
+(DESIGN 1.6), and LAT changes only a scalar occupation.
+
+---
+
 ## 4. Build Atom Permutation Table (DESIGN 2.4, 2.7)
 
 The atom permutation table records, for each point group

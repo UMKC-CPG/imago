@@ -536,26 +536,38 @@ silently applying one and discarding the other. (Note
 `subroutine bond` already zeroes `thermalSigma` around its
 own populate call for a related reason.)
 
-**Spin.** `potRho` carries a spin index and
-`electronPopulation_LAT` is dimensioned `(n, k, spin)`, so
-the substitution is per channel. Whether a spin-polarized
-metal needs one Fermi level or two is deferred: this
-section specifies the unpolarized and collinear cases, and
-a spin-split Fermi determination is left open below.
+**Spin: one Fermi level, matching the Gaussian path.** That
+path merges every (state, spin, kpoint) triplet into a
+single sorted list and fills it in ascending energy until
+the cumulative charge reaches `numElectrons`, with each
+state receiving `kPointWeight / spin`. There is no
+per-channel constraint anywhere, so the magnetic moment is
+an OUTCOME of which channel's states sort lower rather than
+an imposed input -- which is the physically right choice,
+since both channels of a collinear system in equilibrium
+share one chemical potential. LAT adopts it unchanged. Two
+per-channel Fermi levels would be a physics change wearing
+an integration-scheme costume, and would make LAT and
+Gaussian runs of one system differ for a reason having
+nothing to do with integration.
+
+Non-collinear magnetism, when it comes, generalizes this
+reasonably: spinor states replace the two-channel index but
+one chemical potential and one sorted fill survive. What
+does not survive is `spin` as a simple divisor and
+`potRho`'s total/difference decomposition. That is a larger
+change than the Fermi level and argues for building LAT
+inside the present collinear structure rather than
+anticipating it.
 
 **Open questions.**
 
-  1. Spin-polarized metals: one Fermi level constrained by
-     the total electron count, or two constrained per
-     channel. The Gaussian path's present behaviour should
-     be read before choosing, so LAT does not silently
-     differ from it.
-  2. Whether a run may switch integration scheme between
+  1. Whether a run may switch integration scheme between
      the SCF and the post-SCF properties -- makeinput
      already exposes `-scfkpint` and `-pscfkpint`
      separately, so the input format permits it, but
      whether it is meaningful is not settled.
-  3. The convergence-tolerance interaction: a tetrahedron
+  2. The convergence-tolerance interaction: a tetrahedron
      Fermi level found to a loose tolerance introduces
      noise into the total energy that could masquerade as
      unconverged k-sampling. The root-find tolerance
