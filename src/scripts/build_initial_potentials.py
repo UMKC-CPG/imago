@@ -126,7 +126,7 @@ from curation_manifest import (
     load_manifest_v2, load_structure_sources, resolve_settings)
 from kaleidoscope import (
     CalcUnit, Flight, SweepRecord, dispatch, send_off, collect_next,
-    make_executor)
+    make_executor, set_verbose)
 from kaleidoscope.builders.kpoint_convergence import (
     build_mesh_unit, predict_kpoint_density, standard_key_fields)
 from kaleidoscope.cluster_config import (
@@ -3622,7 +3622,14 @@ def main(argv=None) -> int:
     # First, before the manifest is read or a structure fetched, so
     #   that every later report -- including one describing a
     #   failure during start-up -- already obeys what was asked for.
+    #   The driver keeps its own switch for the same reason we keep
+    #   ours (verbosity describes how a process talks to its user, not
+    #   how a flight dispatches), so the one client driving it sets
+    #   both here rather than threading a flag through every call
+    #   between here and the printer (DESIGN 5.7 / 6.2.5).  Without
+    #   this the reuse plan's per-unit lines could never print.
     set_verbosity(args.verbose)
+    set_verbose(args.verbose)
 
     if not args.pdb_root:
         parser.error("--pdb-root not given and $IMAGO_DATA is unset")

@@ -164,11 +164,13 @@ class ImagoWingbeat(Wingbeat):
           from the unit's structure and its makeinput-side options.
 
         The wingbeat owns the makeinput/imago option split (DESIGN
-        6.2.10) only on the build path: a unit carries ONE options
-        dict, but makeinput (strict) and imago (lenient) have
-        disjoint key vocabularies, so the wingbeat routes each key
-        to the tool that recognises it and drops the cache-only
-        build identity.
+        6.2.10) only on the build path: a unit carries ONE options dict,
+        but makeinput (strict) and imago (lenient) have disjoint key
+        vocabularies, so the wingbeat routes each key to the tool that
+        recognises it.  Two buckets and no third -- bookkeeping that
+        reaches neither tool rides on ``unit.record`` instead (DESIGN
+        6.2.4), which is what keeps makeinput's strict unknown-key
+        check a pure typo backstop.
         """
         if unit.prepared_dir is not None:
             ImagoWingbeat._commit_prepared_inputs(

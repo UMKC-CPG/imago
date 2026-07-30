@@ -349,6 +349,30 @@ def test_read_status_absent_is_none(tmp_path):
     assert read_status(str(tmp_path)) is None
 
 
+def test_record_table_survives_every_lifecycle_rewrite(tmp_path):
+    """The ``[record]`` table is stamped once, at launch, and describes
+    the run rather than the lifecycle (DESIGN 6.2.4).  status.toml is
+    rewritten several times after that -- running, then terminal -- and
+    every rewrite must carry the table forward, or the one fact written
+    to be read months later would be erased at the first transition
+    after the write that put it there.
+
+    It round-trips as a TOML sub-table, which is why ``write_status``
+    holds dict-valued fields back until every scalar line is out: a
+    sub-table header must follow the bare keys of the table that
+    contains it, so emitting them in dict order would produce a file
+    that no longer parses."""
+    write_status(str(tmp_path), status="queued", submitted_at="t0",
+                 record={"imago_commit": "abc123"})
+    write_status(str(tmp_path), status="running", started_at="t1")
+    write_status(str(tmp_path), status="done", detail="converged",
+                 finished_at="t2", runtime_seconds=1.5)
+    status = read_status(str(tmp_path))
+    assert status["record"] == {"imago_commit": "abc123"}
+    assert status["status"] == "done"
+    assert status["submitted_at"] == "t0"
+
+
 # ==============================================================
 #  13.4 -- cache hit-test (scalars verbatim, files byte-compare)
 # ==============================================================
@@ -563,6 +587,178 @@ def test_force_bypasses_cache_and_reruns(tmp_path):
     second = dispatch(flight, force=True)
     assert second.entries[0].status == "done"
     assert wingbeat.calls == 2               # forced: re-run
+
+
+# ==============================================================
+#  13.5 -- the recorded build, and the key that no longer holds
+#  it (DESIGN 6.2.5).  The cache asks whether this is the same
+#  CALCULATION, not whether its result is still good, so the
+#  engine build rides on the unit's ``record``: written down at
+#  launch, printed in the reuse plan, never compared.
+# ==============================================================
+
+def _recorded_build_flight(root, wingbeat_name, build):
+    """A one-unit flight whose recorded build is ``build``.  The cache
+    identity is identical in every call, so two flights differing only
+    in what they record are the same calculation as far as the key is
+    concerned -- which is precisely what the tests below check."""
+    unit = CalcUnit(id="u1", structure="s.skl",
+                    wingbeat=wingbeat_name,
+                    key_fields=KeyFields(scalars={"v": 1}),
+                    record={"imago_commit": build})
+    return Flight(root=str(root), units=[unit])
+
+
+def test_a_rebuilt_engine_is_still_a_cache_hit(tmp_path):
+    """The whole point of the change (DESIGN 6.2.5; VISION 16).  A
+    second run whose recorded build differs -- an ordinary development
+    commit, which happens constantly and changes the physics almost
+    never -- must still HIT.  A rebuilt engine does not make a stored
+    potential wrong: that potential is a starting point every later SCF
+    re-converges.
+
+    The two ways of being wrong are not symmetric, which is why the old
+    guard was dropped rather than tightened.  A false hit has an escape
+    valve in ``force``; a false miss has none, and the hours are simply
+    spent again."""
+    wingbeat = CountingRunner()
+    register_wingbeat("fake_build", wingbeat)
+    dispatch(_recorded_build_flight(tmp_path, "fake_build", "old111"))
+    assert wingbeat.calls == 1
+
+    report = dispatch(
+        _recorded_build_flight(tmp_path, "fake_build", "new222"))
+    assert report.entries[0].status == "done"
+    assert wingbeat.calls == 1                # hit: not re-run
+
+
+def test_a_hit_keeps_the_record_of_the_run_that_produced_it(tmp_path):
+    """``record`` is written on the MISS only, so a later hit leaves it
+    describing the run that produced the stored result rather than the
+    flight that reused it (DESIGN 6.2.4).  That is what makes it worth
+    printing: the build named beside a reused result is the build that
+    result actually came out of."""
+    register_wingbeat("fake_keep", CountingRunner())
+    dispatch(_recorded_build_flight(tmp_path, "fake_keep", "old111"))
+    dispatch(_recorded_build_flight(tmp_path, "fake_keep", "new222"))
+    status = read_status(str(tmp_path / "wingbeats" / "u1"))
+    assert status["record"] == {"imago_commit": "old111"}
+
+
+def test_a_unit_that_records_nothing_writes_no_record_table(tmp_path):
+    """The mapping is free-form and optional: a client that hangs
+    nothing on its units gets no bare ``[record]`` header at all
+    (DESIGN 6.2.4)."""
+    register_wingbeat("fake_bare", CountingRunner())
+    unit = CalcUnit(id="u1", structure="s.skl", wingbeat="fake_bare",
+                    key_fields=KeyFields(scalars={"v": 1}))
+    dispatch(Flight(root=str(tmp_path), units=[unit]))
+    status = read_status(str(tmp_path / "wingbeats" / "u1"))
+    assert "record" not in status
+
+
+# ==============================================================
+#  13.5 -- the reuse plan and the preview (DESIGN 6.2.5).  This
+#  is what stands in for the automatic staleness guard: the
+#  build behind a reused result is REPORTED to a person who can
+#  act on it, instead of being silently compared.
+# ==============================================================
+
+def test_reuse_plan_names_the_hits_the_misses_and_the_reason(tmp_path):
+    """The plan is decided from local files and touches nothing.  A
+    unit with a completed run directory reuses, and carries the facts a
+    judgment would want -- when the result finished and the build
+    recorded behind it.  Under ``force`` the same unit runs, and the
+    plan says *why* rather than leaving a reader to guess."""
+    from kaleidoscope import reuse_plan
+    register_wingbeat("fake_plan", CountingRunner())
+    flight = _recorded_build_flight(tmp_path, "fake_plan", "old111")
+    dispatch(flight)
+
+    (_, action, detail), = reuse_plan(flight, flight.units)
+    assert action == "reuse"
+    assert detail["record"] == {"imago_commit": "old111"}
+    assert detail["finished_at"]
+
+    (_, forced, why), = reuse_plan(flight, flight.units, force=True)
+    assert forced == "run"
+    assert why["reason"] == "forced"
+
+
+def test_the_counts_always_print_and_the_lines_wait_to_be_asked(
+        tmp_path, capsys):
+    """The counts are the decision being announced, so they always
+    print.  The per-unit lines are that decision's evidence and are
+    held back until asked for (DESIGN 5.7 / 6.2.5): the climb calls
+    ``send_off`` once per round, so an unconditional line per unit
+    would refill the screen the reporting rule cleared, on the very
+    path it cleared."""
+    from kaleidoscope import print_reuse_plan, reuse_plan
+    register_wingbeat("fake_quiet", CountingRunner())
+    flight = _recorded_build_flight(tmp_path, "fake_quiet", "old111")
+    dispatch(flight)
+    capsys.readouterr()                  # discard the first run's own
+
+    plan = reuse_plan(flight, flight.units)
+    print_reuse_plan(plan)
+    quiet = capsys.readouterr().out
+    assert "1 to reuse, 0 to run" in quiet
+    assert "u1" not in quiet
+
+    print_reuse_plan(plan, per_unit=True)
+    loud = capsys.readouterr().out
+    assert "1 to reuse, 0 to run" in loud
+    assert "u1" in loud and "old111" in loud
+
+
+def test_send_off_takes_its_per_unit_lines_from_the_switch(
+        tmp_path, capsys):
+    """Verbosity is a module-level switch a client sets once from its
+    entry point, NOT an argument threaded through ``send_off``: it
+    describes how the process talks to its user, not how a flight
+    dispatches, so threading it would put a reporting concern into the
+    signature of every function between a client's main and the printer
+    (PSEUDOCODE 13.5)."""
+    from kaleidoscope import set_verbose
+    register_wingbeat("fake_switch", CountingRunner())
+    flight = _recorded_build_flight(tmp_path, "fake_switch", "old111")
+    executor = make_executor(None)
+    try:
+        set_verbose(True)
+        send_off(flight, flight.units, executor)
+        assert "u1" in capsys.readouterr().out
+
+        set_verbose(False)
+        send_off(flight, flight.units, executor)
+        assert "u1" not in capsys.readouterr().out
+    finally:
+        set_verbose(False)               # never leak the switch
+        executor.close()
+
+
+def test_preview_prints_the_lines_spends_nothing_and_reports_nothing(
+        tmp_path, capsys):
+    """A preview answers "what will this cost?" BEFORE a flight starts
+    rather than while it goes past (DESIGN 6.2.5).  No executor is
+    built and no unit runs; the per-unit lines print whether or not
+    verbosity is on, since reading them one by one is the whole purpose
+    of a preview; and the report comes back EMPTY rather than partial,
+    because nothing ran to report on."""
+    from kaleidoscope import set_verbose
+    wingbeat = CountingRunner()
+    register_wingbeat("fake_preview", wingbeat)
+    flight = _recorded_build_flight(tmp_path, "fake_preview", "old111")
+    set_verbose(False)
+
+    report = dispatch(flight, preview=True)
+
+    printed = capsys.readouterr().out
+    assert "u1" in printed                    # the lines, not just
+    assert "0 to reuse, 1 to run" in printed  #   the counts
+    assert wingbeat.calls == 0                # nothing dispatched
+    assert report.entries == []
+    # Nothing was touched either: a preview builds no run directory.
+    assert not os.path.exists(str(tmp_path / "wingbeats"))
 
 
 def test_shared_executor_serves_repeated_dispatches(tmp_path,
@@ -824,6 +1020,58 @@ def test_persist_result_omits_absent_mesh(tmp_path):
         loaded = tomllib.load(handle)
     assert "kpoint_mesh" not in loaded
     assert "kpoint_count" not in loaded
+
+
+def test_the_wingbeat_echoes_the_recorded_build(tmp_path, monkeypatch):
+    """One RECORDED fact rides into result.toml beside the measured
+    ones: the build identity out of the unit's ``record`` mapping
+    (DESIGN 6.2.2 / 6.2.4).  A guidance entry's provenance reads it
+    there, which is what keeps that harvest on the three per-run
+    sources it already has instead of opening the dispatch core's
+    status.toml.  The fact lands in two files that cannot disagree,
+    because both are copied from the same mapping at launch."""
+    import imago
+    (tmp_path / "imago.dat").write_text("X\n")
+    monkeypatch.setattr(
+        imago, "run_prepared",
+        lambda wingbeat_dir, **kwargs: _imago_result(
+            imago.RunStatus.CONVERGED))
+    unit = CalcUnit(id="x", structure="s.skl",
+                    record={"imago_commit": "abc123"})
+    ImagoWingbeat().run(unit, str(tmp_path))
+    with open(tmp_path / "result.toml", "rb") as handle:
+        loaded = tomllib.load(handle)
+    assert loaded["imago_commit"] == "abc123"
+
+
+def test_persist_result_prefers_the_build_the_engine_reported(tmp_path):
+    """The seam TODO C84 lands in.  The recorded value is what the
+    *producer believed* it launched, which can drift from the binary
+    that actually ran; the engine's own word is worth strictly more.
+    imago does not report its build yet, so the echo is written as a
+    FALLBACK -- once it does, preferring it is the whole change, one
+    substitution in one field of one file rather than new plumbing."""
+    import imago
+    result = _imago_result(imago.RunStatus.CONVERGED)
+    result.imago_commit = "from-the-binary"
+    ImagoWingbeat._persist_result(str(tmp_path), result,
+                                  {"imago_commit": "what-we-thought"})
+    with open(tmp_path / "result.toml", "rb") as handle:
+        loaded = tomllib.load(handle)
+    assert loaded["imago_commit"] == "from-the-binary"
+
+
+def test_persist_result_omits_an_unrecorded_build(tmp_path):
+    """A client that hangs nothing on its units writes no
+    ``imago_commit`` line at all; the harvest's ``"unknown"`` floor
+    covers that case, and it stays non-empty so the schema's rule-11
+    check passes and a curator can spot it on review (DESIGN 7.8)."""
+    import imago
+    ImagoWingbeat._persist_result(
+        str(tmp_path), _imago_result(imago.RunStatus.CONVERGED))
+    with open(tmp_path / "result.toml", "rb") as handle:
+        loaded = tomllib.load(handle)
+    assert "imago_commit" not in loaded
 
 
 def test_imago_runner_prepared_detection_under_inputs(tmp_path,
