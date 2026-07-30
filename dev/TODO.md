@@ -4910,9 +4910,68 @@ on the same data later with no schema change.  Built on P10.
   reporting names are exported from the package.  And
   `wingbeats._stage_inputs` still documented dropping "the cache-only
   build identity", which `CACHE_ONLY_KEYS`' deletion had retired.
-  Not yet run live: the seed re-run is the first campaign whose
-  staging the new promotion path will judge, and the reuse plan has
-  never printed against a real workspace.
+  **Validated live 2026-07-30.**  A seed run from scratch, a re-run at
+  the same commit (87/87 hits), then an empty commit `82e178b` and a
+  third run that still hit all 87 -- its only misses seven genuinely
+  new meshes the now-guided climb chose.  `cache_key.toml` is written
+  on a MISS only, so its mtimes are the evidence.  `imago_commit`
+  reached entry provenance as a real sha for the first time, and
+  `[record]` survived the full lifecycle.  Promotion then met its
+  motivating case unaided: two runs had staged 14 files, one claim
+  each twice, and it promoted 7 and superseded 7.  The output also
+  showed the `generated_at` tie-break really is gone -- sorted
+  filename picked the LATER entry for one solid and the EARLIER for
+  another.
+
+- [ ] C135. The run-reuse cache cannot tell two k-point integration
+  schemes apart.  The producer's key is `_KEY_SCALAR_NAMES =
+  ("converg",)` plus one key file, `structure.dat`.  The integration
+  scheme travels as makeinput's `scfkpint` -> `kp_intg_code` and is
+  written into `kp-scf.dat` as `KPOINT_INTG_CODE`, a file the key
+  never reads, and it does NOT appear in `structure.dat`.  So one
+  solid at one mesh under two different schemes resolves to the same
+  run directory with a matching key and a `done` status -- a HIT that
+  returns the other scheme's energy.
+  **This is a different class of fault from the one C134 weighed.**
+  That argument rested on a false hit being recoverable: an older
+  engine computing the same physics, with `--force` as the escape
+  valve.  Here a false hit returns *different physics* under the name
+  of the physics that was asked for, and nothing in the output says
+  so.  DESIGN 6.2.5 currently justifies keying on `structure.dat`
+  because it "bakes in every input that changes the result"; that
+  claim is false for the integration scheme, so it must be CORRECTED
+  rather than merely supplemented.
+  Found live 2026-07-30 setting up the si_cmce tetrahedral trial: the
+  trial reused ten cached `gaussian` rungs and computed only two.  It
+  has stayed harmless until now only because `kpoint_integration` has
+  had one value in every run to date; the metals work is what turns it
+  into a real axis.
+  **Fix it with a second key FILE, not a key scalar.**  Adding
+  `scfkpint` to `_KEY_SCALAR_NAMES` invalidates every existing
+  `cache_key.toml` at once, since `cache_key_matches` compares the
+  saved `scalars` table verbatim and no stored file carries the new
+  name.  Adding `kp-scf.dat` to `key_fields` costs nothing: that
+  function does NOT compare the saved `files` list -- it byte-compares
+  each DECLARED file against its staged copy, and every existing run
+  directory already stages one -- so a same-scheme re-run still hits
+  and only a scheme change misses.  It also keeps 6.2.5's stated
+  preference for byte-compared files over hashing: two `kp-scf.dat`
+  files diff to the one `KPOINT_INTG_CODE` line that differs.
+  Wiring: the driver's prepare step re-points the new KeyFile's
+  `source` at `<prepare_dir>/inputs/kp-scf.dat`, the same move it
+  already makes for `structure.dat`.
+  A sibling gap, deliberately NOT folded in here because it wants its
+  own decision: the initial-potential database has no notion of the
+  sub-model at all.  `insert_or_skip` matches on LABEL
+  (`<reference_id>-<element><species>-t<type>-a<site>`, no scheme in
+  it), so a second-scheme run REPLACES the stored potential rather
+  than sitting beside it, and `make_imago_provenance` records no
+  basis, functional, or kpoint_integration -- so nothing on disk says
+  which scheme produced what is stored.  The guidance dataspace treats
+  the sub-model as identity; the potential database does not know the
+  concept exists.
+  DESIGN 6.2.5 first (the corrected claim), then PSEUDOCODE 15.6
+  `standard_key_fields` and 11.4's prepare step, then CODE.
 
 ---
 
