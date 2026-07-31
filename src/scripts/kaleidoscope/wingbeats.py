@@ -183,12 +183,25 @@ class ImagoWingbeat(Wingbeat):
 
     @staticmethod
     def _commit_prepared_inputs(prepared_dir, wingbeat_dir):
-        """Copy the driver-staged inputs (structure.dat, imago.dat,
-        scfV, kp files -- DESIGN 6.2.5) from ``prepared_dir`` into
-        the run directory so ``run_prepared`` finds them.  The
-        staging area is transient (the producer's prepare pass
-        rebuilds it each run), so the commit simply copies from it,
-        merging into any existing run-directory contents."""
+        """Hand the driver-staged inputs (structure.dat, imago.dat,
+        scfV, kp files -- DESIGN 6.2.5) from ``prepared_dir`` to the
+        run directory so ``run_prepared`` finds them.  The staging
+        area is transient (the producer's prepare pass rebuilds it
+        each run), so the commit reads from it and never writes back.
+
+        Two steps, and the first is the one that is easy to omit.  A
+        commit lands on a run directory that MAY ALREADY HOLD a prior
+        calculation's files, and copying the new ones in is not by
+        itself enough to make the old ones stop being read -- see
+        :func:`_clear_superseded_root_copies` for what does.  Clear
+        first, then copy.
+
+        The copy merges into whatever the run directory already
+        holds, and merges directories rather than replacing them, so
+        the staged ``inputs/`` refreshes the run directory's
+        ``inputs/`` without discarding anything else parked there."""
+        ImagoWingbeat._clear_superseded_root_copies(
+            prepared_dir, wingbeat_dir)
         os.makedirs(wingbeat_dir, exist_ok=True)
         for name in os.listdir(prepared_dir):
             source = os.path.join(prepared_dir, name)
@@ -197,6 +210,59 @@ class ImagoWingbeat(Wingbeat):
                 shutil.copytree(source, target, dirs_exist_ok=True)
             else:
                 shutil.copy2(source, target)
+
+    @staticmethod
+    def _clear_superseded_root_copies(prepared_dir, wingbeat_dir):
+        """Remove the run directory's ROOT copy of every name this
+        commit is about to stage under ``inputs/`` (DESIGN 6.2.5,
+        "What a commit owes a surviving run directory").
+
+        Why this exists.  makeinput writes only ``inputs/``; it is
+        ``imago.py`` that copies each file up to the run-directory
+        root, on the first run and only when the root copy is absent,
+        and that thereafter reads the ROOT copy in preference to the
+        staged one.  The root copy is a cache of ``inputs/`` that
+        nothing invalidates.  Without this step a commit refreshes
+        ``inputs/``, the root copies keep the previous calculation's
+        contents, and the engine runs the OLD physics while the key
+        file, the run's ``summary``, and the flight report all
+        describe the new one -- silently, and on a cache MISS, so the
+        compute is paid for in full to get the wrong answer back.
+
+        DELETE, do not overwrite.  Overwriting would require this
+        step to know which staged names get flattened to the root and
+        under what names, and that knowledge already lives in
+        ``imago.py`` -- a second copy of it would drift.  An absent
+        root copy is unambiguous: imago.py's own copy-up refills it
+        from the staged file, leaving exactly one writer of the root
+        copy and one source for its contents.
+
+        The removal list is exactly the staged ``inputs/`` names,
+        which is what keeps a prior run's OUTPUTS untouched.  A
+        converged potential (``gs_scfV-*.dat``) is an output name,
+        absent from ``inputs/``, so it survives by construction
+        rather than by a carve-out -- and it should survive, being a
+        starting point every later SCF re-converges.  The ``fort.*``
+        units, the ``intermediate`` link and the logs are likewise
+        not staged names and are likewise left alone.  This is NOT
+        "wipe the run directory": DESIGN 6.1's within-directory
+        checkpointing and the stored potential both depend on it
+        surviving a commit."""
+        import makeinput
+
+        staged_inputs = os.path.join(
+            prepared_dir, makeinput.INPUTS_DIR)
+        if not os.path.isdir(staged_inputs):
+            # A staging directory with no ``inputs/`` stages no name
+            #   whose root copy could be stale.
+            return
+        # Removing nothing is the ordinary first-run case -- a clean
+        #   run directory has no root copies yet -- so an empty pass
+        #   is silent and a name with no root copy is never an error.
+        for name in os.listdir(staged_inputs):
+            root_copy = os.path.join(wingbeat_dir, name)
+            if os.path.isfile(root_copy):
+                os.remove(root_copy)
 
     @staticmethod
     def _is_prepared(wingbeat_dir):

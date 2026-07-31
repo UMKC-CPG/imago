@@ -1232,6 +1232,136 @@ def test_imago_runner_commits_prepared_inputs(tmp_path, monkeypatch):
     assert used["settings"] is not None
 
 
+def _staged_dir_with_inputs(root, **files):
+    """Build a prepare-style staging directory: makeinput's outputs
+    under ``inputs/`` and nothing flattened at the root, which is the
+    shape ``prepare_units`` produces (DESIGN 6.2.5)."""
+    root.mkdir(parents=True, exist_ok=True)
+    inputs = root / "inputs"
+    inputs.mkdir()
+    for name, text in files.items():
+        (inputs / name).write_text(text)
+    return root
+
+
+def test_commit_clears_superseded_root_copies(tmp_path, monkeypatch):
+    """A commit onto a SURVIVING run directory must not leave the
+    previous calculation's flattened root copies in place (DESIGN
+    6.2.5, "What a commit owes a surviving run directory").
+
+    imago.py reads the root copy and only ever creates one when it is
+    absent, so a root ``kp-scf.dat`` left behind means the engine runs
+    the OLD physics on a cache MISS -- the compute paid in full for
+    the previous answer, with nothing printed.  The commit therefore
+    REMOVES each root copy it supersedes and lets imago.py refill it
+    from the staged file."""
+    import imago
+    import makeinput
+
+    staging = _staged_dir_with_inputs(
+        tmp_path / "staging",
+        **{"kp-scf.dat": "KPOINT_INTG_CODE\n0\n",     # gaussian now
+           "structure.dat": "STRUCT-NEW\n"})
+    wingbeat_dir = tmp_path / "run"
+    (wingbeat_dir / "inputs").mkdir(parents=True)
+    # The prior calculation's flattened copies, tetrahedral.
+    (wingbeat_dir / "kp-scf.dat").write_text(
+        "KPOINT_INTG_CODE\n1\n")
+    (wingbeat_dir / "structure.dat").write_text("STRUCT-OLD\n")
+
+    monkeypatch.setattr(
+        imago, "run_prepared",
+        lambda wb_dir, settings=None, **kw: _imago_result(
+            imago.RunStatus.CONVERGED))
+    monkeypatch.setattr(makeinput, "build_run_dir",
+                        lambda *a, **k: None)
+
+    unit = CalcUnit(id="x", structure="s.skl", options={},
+                    prepared_dir=str(staging))
+    ImagoWingbeat().run(unit, str(wingbeat_dir))
+
+    # The stale root copies are GONE, not merely still stale, so
+    #   imago.py's copy-up refills them from the staged files.
+    assert not (wingbeat_dir / "kp-scf.dat").exists()
+    assert not (wingbeat_dir / "structure.dat").exists()
+    # And the authoritative staged copies did land under inputs/.
+    assert (wingbeat_dir / "inputs" / "kp-scf.dat").read_text() == (
+        "KPOINT_INTG_CODE\n0\n")
+    assert (wingbeat_dir / "inputs"
+            / "structure.dat").read_text() == "STRUCT-NEW\n"
+
+
+def test_commit_keeps_a_prior_runs_outputs(tmp_path, monkeypatch):
+    """The clearing is scoped to the staged INPUT names, so a prior
+    run's outputs survive -- above all the converged potential, which
+    is a starting point every later SCF re-converges (DESIGN 6.2.5).
+
+    It survives by construction rather than by a carve-out: an output
+    name is simply absent from the staged ``inputs/`` listing.  This
+    is what separates the rule from "wipe the run directory", which
+    would also destroy DESIGN 6.1's within-directory checkpointing."""
+    import imago
+    import makeinput
+
+    staging = _staged_dir_with_inputs(
+        tmp_path / "staging",
+        **{"kp-scf.dat": "KPOINT_INTG_CODE\n0\n",
+           "scfV.dat": "DATABASE-POTENTIAL\n"})
+    wingbeat_dir = tmp_path / "run"
+    wingbeat_dir.mkdir()
+    (wingbeat_dir / "kp-scf.dat").write_text(
+        "KPOINT_INTG_CODE\n1\n")            # a staged name: cleared
+    (wingbeat_dir / "gs_scfV-fb.dat").write_text(
+        "CONVERGED-POTENTIAL\n")            # an output name: kept
+    (wingbeat_dir / "gs_scf-fb.out").write_text("LOG\n")
+    (wingbeat_dir / "fort.15").write_text("UNIT\n")
+
+    monkeypatch.setattr(
+        imago, "run_prepared",
+        lambda wb_dir, settings=None, **kw: _imago_result(
+            imago.RunStatus.CONVERGED))
+    monkeypatch.setattr(makeinput, "build_run_dir",
+                        lambda *a, **k: None)
+
+    unit = CalcUnit(id="x", structure="s.skl", options={},
+                    prepared_dir=str(staging))
+    ImagoWingbeat().run(unit, str(wingbeat_dir))
+
+    assert not (wingbeat_dir / "kp-scf.dat").exists()
+    assert (wingbeat_dir / "gs_scfV-fb.dat").read_text() == (
+        "CONVERGED-POTENTIAL\n")
+    assert (wingbeat_dir / "gs_scf-fb.out").exists()
+    assert (wingbeat_dir / "fort.15").exists()
+
+
+def test_commit_onto_a_clean_run_dir_removes_nothing(
+        tmp_path, monkeypatch):
+    """The first run over a clean workspace has no root copies to
+    clear, so the pass removes nothing and raises nothing.  A staged
+    name with no root copy is the ordinary case, not an error."""
+    import imago
+    import makeinput
+
+    staging = _staged_dir_with_inputs(
+        tmp_path / "staging",
+        **{"kp-scf.dat": "KPOINT_INTG_CODE\n0\n"})
+    wingbeat_dir = tmp_path / "run"
+
+    monkeypatch.setattr(
+        imago, "run_prepared",
+        lambda wb_dir, settings=None, **kw: _imago_result(
+            imago.RunStatus.CONVERGED))
+    monkeypatch.setattr(makeinput, "build_run_dir",
+                        lambda *a, **k: None)
+
+    unit = CalcUnit(id="x", structure="s.skl", options={},
+                    prepared_dir=str(staging))
+    ImagoWingbeat().run(unit, str(wingbeat_dir))
+
+    assert (wingbeat_dir / "inputs" / "kp-scf.dat").read_text() == (
+        "KPOINT_INTG_CODE\n0\n")
+
+
 def test_partition_options_routes_by_recognised_key_set():
     """The wingbeat splits a unit's options TWO ways and no more
     (DESIGN 6.2.10): imago run-time selections go to imago, and

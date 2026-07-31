@@ -8418,21 +8418,89 @@ function is_prepared(wingbeat_dir):
 
 ```
 function commit_prepared_inputs(prepared_dir, wingbeat_dir):
-    # Copy the driver-staged inputs (structure.dat, imago.dat,
-    # scfV, kp files -- DESIGN 6.2.5) into the run dir so
+    # Hand the driver-staged inputs (structure.dat, imago.dat,
+    # scfV, kp files -- DESIGN 6.2.5) to the run dir so
     # run_prepared finds them.  The staging area is transient
     # (the prepare pass, 11.4, rebuilds it each producer run),
-    # so the commit simply copies from it.
-    for name in list_files(prepared_dir):
-        copy_file(join(prepared_dir, name),
-                  join(wingbeat_dir, name))
+    # so the commit reads from it and never writes back.
+    #
+    # TWO steps, and the first is the one that is easy to omit.
+    # A commit lands on a run dir that MAY ALREADY HOLD a prior
+    # calculation's files, and copying the new ones in is not by
+    # itself enough to make the old ones stop being read.  Clear
+    # first, then copy (DESIGN 6.2.5, "What a commit owes a
+    # surviving run directory").
+    clear_superseded_root_copies(prepared_dir, wingbeat_dir)
+
+    # Copy every staged entry across, merging into whatever the
+    # run dir already holds.  Directories are merged rather than
+    # replaced, so the staged inputs/ refreshes the run dir's
+    # inputs/ without discarding anything else parked there.
+    make_dirs(wingbeat_dir, exist_ok = True)
+    for name in list_entries(prepared_dir):
+        source = join(prepared_dir, name)
+        target = join(wingbeat_dir, name)
+        if is_dir(source):
+            copy_tree(source, target, merge = True)
+        else:
+            copy_file(source, target)
+
+
+function clear_superseded_root_copies(prepared_dir, wingbeat_dir):
+    # Remove the run dir's ROOT copy of every name this commit is
+    # about to stage under inputs/.
+    #
+    # Why this exists.  makeinput writes only inputs/; it is
+    # imago.py that copies each file up to the run-dir root, on
+    # the first run and only when the root copy is absent, and
+    # that thereafter reads the ROOT copy in preference to the
+    # staged one (DESIGN 6.2.5).  The root copy is a cache of
+    # inputs/ that nothing invalidates.  Without this step a
+    # commit refreshes inputs/, the root copies keep the previous
+    # calculation's contents, and the engine runs the OLD physics
+    # while the key file, the run's summary, and the flight
+    # report all describe the new.
+    #
+    # DELETE, do not overwrite.  Overwriting would require this
+    # step to know which staged names get flattened to the root
+    # and under what names -- knowledge that already lives in
+    # imago.py, and that would drift the moment it lived twice.
+    # An absent root copy is unambiguous: imago.py's own copy-up
+    # refills it from the staged file, leaving exactly one writer
+    # of the root copy and one source for its contents.
+    #
+    # The removal list is exactly the staged inputs/ names, which
+    # is what keeps a prior run's OUTPUTS untouched.  A converged
+    # potential (gs_scfV-*.dat) is an output name, absent from
+    # inputs/, so it survives by construction rather than by a
+    # carve-out -- and it should survive, being a starting point
+    # every later SCF re-converges (DESIGN 6.2.5).  fort.* units,
+    # the intermediate/ link and the logs are likewise not staged
+    # names and are likewise left alone.  This is NOT "wipe the
+    # run directory": 6.1's within-directory checkpointing and
+    # the stored potential both depend on it surviving a commit.
+    staged_inputs = join(prepared_dir, makeinput.INPUTS_DIR)
+    if not is_dir(staged_inputs):
+        return          # a staging dir with no inputs/ stages
+                        #   no name whose root copy could be stale
+    for name in list_files(staged_inputs):
+        root_copy = join(wingbeat_dir, name)
+        if is_file(root_copy):
+            remove_file(root_copy)
+    # Removing nothing is the normal first-run case (a clean run
+    # dir has no root copies yet), so an empty pass is silent and
+    # a missing file is never an error.
 ```
 
 An ASE wingbeat (D12) and future adapters implement the
 same protocol; the dispatch core (13.5) never changes
 when one is added.  `commit_prepared_inputs` is
 ImagoWingbeat's own step; another wingbeat stages its
-inputs however its toolchain requires.
+inputs however its toolchain requires.  So is the clearing
+it now does first: the root-copy precedence being undone
+there is `imago.py`'s, so a wingbeat driving some other
+toolchain has no such copies to clear and needs no
+equivalent.
 
 ### 13.3 Workspace paths, ids, status.toml (DESIGN 6.2.4)
 

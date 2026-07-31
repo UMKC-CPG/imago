@@ -7940,6 +7940,77 @@ unit skip the scheduler entirely; where the driver itself
 runs (a login node or its own batch job) is settled in
 6.2.11.
 
+**What a commit owes a surviving run directory.**  The asymmetry above
+has a mirror on the write side, and it is load-bearing.  The flattened
+root copies are not makeinput's doing: makeinput writes `inputs/` and
+nothing else.  It is `imago.py` that copies each file up to the
+run-directory root on the first run, when the root copy is absent, and
+that thereafter reads the root copy in preference to the staged one.
+The root copy is a cache of `inputs/` -- populated once, invalidated
+never.
+
+That precedence is right for a directory a person runs by hand: build
+the deck once, edit `kp-scf.dat` in place, re-run, and the edit
+survives.  It is wrong the moment a driver commits authoritative staged
+inputs into a directory that already holds root copies.  The commit
+refreshes `inputs/`, the root copies keep the previous calculation's
+contents, and the engine reads the root copies -- so the run executes
+the OLD physics while the key file, the run's own `summary`, and the
+flight report all describe the new.
+
+This is not the false hit of the two-key-file correction above, and in
+one respect it is worse.  The hit-test byte-compares the *root* copy,
+which is the same file the engine reads, so the directory misses
+correctly, every time, forever: it pays the full price of a calculation
+on every re-run and returns the old answer on every one.  There is no
+`--force` escape, because `--force` only turns hits into misses and
+this is already a miss.  The only recovery is deleting the run
+directory -- which means the cache's whole purpose, deciding reuse from
+local files, is what a curator must give up to get a correct answer.
+
+**The rule: a commit removes the run directory's root copy of every
+name it stages, and lets `imago.py` repopulate it.**  Delete, do not
+overwrite.  Overwriting would require the commit step to know which
+staged names get flattened and where; that knowledge already lives in
+`imago.py`, and a second copy of it would drift.  Deleting needs no
+such list: an absent root copy is unambiguous, `imago.py`'s existing
+copy-up refills it from the staged file, and there stays exactly one
+writer of the root copy and one source for its contents.
+
+Inverting the precedence in `imago.py` -- reading `inputs/` first --
+would fix the driver's case by silently discarding a hand edit in every
+other case.  The precedence is not the defect.  What was missing is
+anyone whose job it is to declare a root copy stale, and the commit is
+the only step in a position to know.
+
+The obligation belongs to the commit, not to makeinput.  makeinput
+builds into `inputs/` and never owns the root, and on the producer path
+it builds a *prepare* directory and never sees the run directory at
+all, so no amount of cleaning on its side can reach these files.  A
+`--reset` guaranteeing a clean build directory is a reasonable
+convenience for a hand-run rebuild and for the wingbeat's
+build-in-place branch (6.2.2), but it is a separate matter and must not
+be mistaken for this fix.
+
+*What a commit deliberately does not remove.*  The stored potential
+(`gs_scfV-*.dat`) is an output of the previous run that the next run
+picks up as a starting guess, and it stays.  That follows the position
+this section already takes: the key asks whether this is the same
+calculation, not whether the result is still good, and a potential is a
+starting point every SCF re-converges.  Only the inputs decide what
+physics runs.
+
+*The case that established this.*  On 2026-07-31 the si_cmce metal was
+re-run with `kpoint_integration` changed from `linear-tetrahedral` to
+`gaussian`.  The cache behaved exactly as the two-key-file correction
+intends -- all 27 rungs missed on `kp-scf.dat` and re-ran -- and every
+root `kp-scf.dat` still read `KPOINT_INTG_CODE 1`.  All 27 energies
+reproduced the tetrahedral ladder to the eighth decimal, the SCF output
+still printed its tetrahedron population line, and the run's own
+`summary` reported `SCF KP Integration = Gaussian`.  Eight minutes of
+compute bought a verbatim copy of the answer it was meant to be
+compared against.
+
 The boundary with 6.1's checkpointing is clean and worth
 restating: `imago.py` resumes *within* a run directory
 (skip completed integrals, skip an already-done basis

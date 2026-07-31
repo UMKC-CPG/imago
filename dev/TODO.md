@@ -853,9 +853,40 @@
   fullKPToIBZKPMap for eigenvalue unfolding (PSEUDOCODE 2)
 - [x] C4. Validate LAT TDOS against Gaussian broadening at
   high k-point density
-- [ ] C4a. Add Bloechl correction terms (eqs. 22-24) to
-  computeTDOS_LAT for improved accuracy at lower
-  k-point densities (DESIGN 1.3)
+- [ ] C4a. Add Bloechl correction terms (eqs. 22-24) to the
+  corner weights, for accuracy at lower k-point densities
+  (DESIGN 1.3).  **Scope, widened.**  This entry named
+  `computeTDOS_LAT` because the DOS was the only consumer when
+  it was written.  There are now three -- the DOS path
+  (`computeTDOS_LAT`), the bond/effective-charge path
+  (`electronPopulation_LAT`), and the SCF occupation path added
+  by C138 -- and all three draw from the SAME
+  `bloechlCornerWeights` in `mathSubs.f90`, which is deliberate
+  (DESIGN 1.6: one copy of the formulas so they cannot drift).
+  The correction therefore belongs THERE, as one edit reaching
+  all three, not as a DOS-local change.  Written narrowly it
+  would leave the three consumers disagreeing about what the
+  weights mean, which is the outcome the shared module exists to
+  prevent.
+  **What is in the code today.**  The plain linear scheme, end
+  to end.  `bloechlCornerWeights` returns exactly `0.25` per
+  corner for a fully occupied tetrahedron and `f*t/4` terms in
+  the partial cases, each branch returning with nothing added
+  afterward; there is no `D_T(E_F)` factor and no
+  `sum_j (eps_j - eps_i)` anywhere in `src/imago/`.  The only
+  `dosAtFermi` in the LAT path is `latElectronCount`'s
+  derivative for the Newton root-find -- a different quantity
+  for a different purpose, not this term.
+  **Why it now matters more than "improved accuracy" suggests.**
+  The correction is proportional to a tetrahedron's DOS at the
+  Fermi level, so it vanishes identically where every
+  tetrahedron is full or empty.  It cannot disturb the
+  si_fd-3m insulator agreement that validated the
+  implementation, and it moves metals only -- which is exactly
+  where the si_cmce ladder (C138(a)) shows LAT still descending
+  at 720 k-points while the Gaussian ladder has long plateaued.
+  A plausible contributor to that, though not demonstrated, and
+  it does not explain the gapped-mesh discrepancy in C138(e).
 
 ### Phase B -- electronPopulation_LAT (integrated properties)
 
@@ -4988,6 +5019,58 @@ on the same data later with no schema change.  Built on P10.
   live: the si_cmce workspace is being cleared, so the LAT trial is
   the first run whose scheme change this will distinguish.
 
+- [ ] C139. Make a commit clear the run-directory root copies it
+  supersedes.  A cache MISS over a surviving run directory currently
+  re-runs the unit against the PREVIOUS calculation's inputs.
+  `commit_prepared_inputs` refreshes the staged `inputs/`, but the
+  flattened copies at the run-directory root are what `imago.py`
+  actually reads, and it only ever populates those when they are
+  absent -- so they keep the old contents and the engine runs the old
+  physics while the key file, the run's own `summary`, and the flight
+  report all describe the new one.  Nothing prints.
+  **Why this is not a stale hit.**  The hit-test byte-compares the
+  ROOT copy, the same file the engine reads, so the directory misses
+  CORRECTLY and forever: full price paid on every re-run, old answer
+  returned every time.  `--force` cannot help -- it only turns hits
+  into misses, and this is already a miss.  Deleting the run directory
+  is the only recovery, which is exactly the local-file reuse the
+  cache exists to provide.
+  **How it surfaced.**  2026-07-31, si_cmce_64_1999 re-run with
+  `kpoint_integration` changed from `linear-tetrahedral` to
+  `gaussian` for C138(a)'s baseline.  All 27 rungs missed on
+  `kp-scf.dat` exactly as C135 intends, re-ran, and every root
+  `kp-scf.dat` still read `KPOINT_INTG_CODE 1`.  All 27 energies
+  reproduced the tetrahedral ladder to the eighth decimal, the SCF
+  output still printed its tetrahedron population line, and the
+  `summary` beside it said `SCF KP Integration = Gaussian`.  Eight
+  minutes of compute returned a verbatim copy of the ladder it was
+  meant to be compared against.
+  **Note what C135 did and did not buy.**  The cache key was right --
+  it distinguished the schemes and refused the hit.  It bought a
+  correct DECISION and no correct result, because nothing between
+  that decision and the engine acted on it.  A key that misses into
+  the wrong inputs is not a smaller version of a key that hits
+  wrongly; it is the same wrong answer with the compute paid for.
+  **Scope.**  Only the staged input names are cleared.  A prior run's
+  outputs stay -- including the converged potential, which is a
+  starting point every later SCF re-converges (DESIGN 6.2.5), and
+  which is absent from `inputs/` so it survives without a carve-out.
+  This is not "wipe the run directory": 6.1's within-directory
+  checkpointing depends on it surviving.  Nor is it makeinput's job;
+  makeinput never owns the root, and on the producer path it builds a
+  prepare directory and never sees the run directory at all.
+  A `--reset` for makeinput that guarantees a clean build directory
+  is a fair convenience for hand-run rebuilds and for the wingbeat's
+  build-in-place branch, but it does not reach these files and must
+  not be logged as this fix.
+  CODE (`src/scripts/kaleidoscope/wingbeats.py`);
+  DESIGN 6.2.5 ("What a commit owes a surviving run directory");
+  PSEUDOCODE 13.2 (`clear_superseded_root_copies`).
+  **Acceptance:** run one solid at one mesh, change only
+  `kpoint_integration`, re-run over the surviving workspace, and
+  confirm the root `kp-scf.dat` carries the new `KPOINT_INTG_CODE`
+  and the energy moves.
+
 - [ ] C138. Finish and validate LAT in the SCF occupation path.
   The path itself is CODED and building (DESIGN 1.6, PSEUDOCODE 3a,
   commit `9da3000`): `populateStates` dispatches to `populateLAT`
@@ -5010,17 +5093,32 @@ on the same data later with no schema change.  Built on P10.
   neutral there.  It is evidence the substitution is sound where it
   should change nothing.
   **What remains:**
-  (a) **The metal comparison, which is the whole point.**  An
-  attempt on `si_cmce_64_1999` at mesh 10-10-9 failed before
-  reaching any occupation code, dying right after "Initialize SCF
-  HDF5 File".  A Gaussian control from the SAME hand-staged
-  directory failed identically, so the fault is in that staging
-  (a run directory copied out of the workspace with `scfV.dat` and
-  the intermediates removed), NOT in the LAT change.  Re-run it
-  properly through the producer instead of by hand, and compare the
-  energy ladder against the Gaussian one recorded in the metals
-  notes.  Until that is done, nothing shows LAT changing an answer
-  it ought to change.
+  (a) **The metal comparison -- DONE 2026-07-31, and it answers
+  the question.**  Both ladders for `si_cmce_64_1999` are kept in
+  `jobs/si_fingerprint/seed/ladders/{gaussian,linear-tetrahedral}/`
+  with the analysis in the README beside them.  Same binary
+  (`55f4be4`), same manifest, one variable.  **The two schemes
+  return different verdicts on the same solid:** Gaussian
+  converges at [15,15,13] (448 k-points), LAT runs three rungs
+  further to the `max_count = 18` ceiling at [18,18,15] and does
+  not converge.  From [10,10,8] up the Gaussian ladder moves
+  +0.0005 eV/atom in total across thirteen strides while
+  individual strides reach +/-0.0028 -- it hit its own noise floor
+  near 120 k-points and has been oscillating in a +/-0.0015 band
+  since, so its convergence was declared on scatter rather than on
+  a settled energy.  LAT falls 0.0064 eV/atom over the same range
+  and is still falling at the top.  The [12,12,11] false positive
+  reproduces EXACTLY on the same binary (-0.00042 down, -0.00012
+  up, flat on both sides at 252 k-points, which a confident search
+  with `flat_needed = 1` would have taken); under LAT that rung is
+  flat on neither side.  The electron count reads 16.000000 at
+  every mesh and every iteration.  Caveat on the baseline: the
+  Gaussian ladder is unsmeared, and smearing is a Gaussian-path
+  setting only (DESIGN 1.6e -- `populate` takes the LAT branch
+  before it tests `thermalSigma`), so a smeared-versus-LAT run is
+  a DIFFERENT comparison and not a refinement of this one.
+  A first attempt at this comparison returned the tetrahedral
+  ladder verbatim while reporting Gaussian; that defect is C139.
   (b) **XANES/ELNES under LAT is refused, deliberately.**
   `populateLAT` stops with a message naming Gaussian integration as
   the supported path.  The Gaussian core-hole correction addresses
@@ -5039,6 +5137,35 @@ on the same data later with no schema change.  Built on P10.
   (d) No automated coverage exists for any of this -- the test
   suite is Python and this is Fortran.  The insulator electron-count
   check is currently a thing a person reads out of `gs_scf-fb.out`.
+  (e) **The gapped-mesh discrepancy, unexplained.**  At
+  `si_cmce_64_1999` mesh [4,4,3] both schemes report the SAME gap
+  (0.0588 eV) and yet differ by 0.031 eV/atom, already in the
+  FIRST SCF iteration (-30.581 vs -30.448 hartree) from the same
+  starting potential -- so this is the occupation machinery, not a
+  difference in the converged density.  The two also place the
+  Fermi level 0.099 eV apart (-7.8257 vs -7.7270 eV), which is
+  MORE than the reported gap, so both cannot be sitting inside one
+  gap at the Fermi level.
+  Why this should not happen: with a true gap at E_F every
+  tetrahedron is wholly occupied or wholly empty, the Blochl
+  weights reduce to 1/4 per corner (Case 0b), summing over the
+  tetrahedra sharing each k-point gives the uniform mesh weight,
+  and LAT must return the Gaussian answer.  That is exactly what
+  the si_fd-3m insulator at 6-6-6 showed.  Here it does not hold.
+  The missing correction terms of C4a are NOT a candidate
+  explanation -- that term is proportional to a tetrahedron's DOS
+  at the Fermi level and vanishes wherever this argument applies.
+  Candidates worth separating: whether `gap_ev` measures a gap at
+  E_F at all or merely a spacing between sorted level indices;
+  whether the tetrahedron construction is consistent with the
+  symmetry-reduced mesh (the corner lookup goes through
+  `fullKPToIBZKPMap`, so a mismatch there would misweight filled
+  bands without disturbing the electron COUNT, which stays exact);
+  and whether the two Fermi levels bracket different state sets.
+  Diagnostic that costs nothing: the insulator already passes, so
+  run a solid with a large true gap at a COARSE mesh -- if the
+  neutrality survives there and fails here, the gap report is
+  implicated rather than the weights.
   CODE (Fortran); DESIGN 1.6; PSEUDOCODE 3a.
 
 - [ ] C136. Let a run suppress the k-mesh reduction while keeping
