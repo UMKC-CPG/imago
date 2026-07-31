@@ -560,54 +560,12 @@
   flatness alone is not the signal; converged ladders show it too,
   which is unsurprising since they settle near the top.  Cheap to
   detect, and it converts near-misses into results.
-  (d) **Metals are being mis-classified as insulators, and the
-  threshold change makes it worse.**  Surfaced by the 2e-3
-  confirmation: Al and Cu were NOT gated as metals and staged
-  guidance entries as ordinary gapped materials --
-
-        al_fm-3m_225       converged_mesh=[16,16,16]  gap_ev=0.124
-        cu_fm-3m_225_2011  converged_mesh=[10,10,10]  gap_ev=0.185
-
-  against `metal_gap_threshold = 0.05`.  Aluminium is the textbook
-  free-electron metal; the 0.124 eV is the finite-mesh artifact of
-  C138(e), a level SPACING in the sorted spectrum rather than a
-  gap at E_F.  The metal test reads the gap of ONE rung -- the one
-  the climb stops on -- so which rung that is decides the
-  classification, and the threshold now decides which rung that
-  is.  Consequences beyond a mislabel: the predictor keys on
-  `gap_ev` (DESIGN 7.6), so these entries teach the dataspace that
-  aluminium has a 0.12 eV gap.  Ni, Co and Fe WERE gated
-  correctly, so this is not a blanket failure -- which is worse,
-  since it is silent and material-dependent.
-  **The same root also degrades INSULATOR entries, silently and
-  without any misclassification to notice it by.**  si_ia-3 staged
-  twice, same material and same scheme, differing only in the
-  convergence bar:
-
-        thr=5e-4   mesh=[11,11,11]   gap_ev=0.193
-        thr=2e-3   mesh=[7,7,7]      gap_ev=0.370
-
-  The recorded gap nearly doubled because the climb settled on a
-  coarser mesh.  That entry is not WRONG the way aluminium's was
-  -- si_ia-3 really is an insulator -- but the gap it teaches the
-  dataspace moved 0.18 eV for no reason but the threshold.
-  **The general statement, which is bigger than the metal gate.**
-  A gap read at the energy-converged mesh is not a converged gap.
-  The argument for relaxing the threshold was made about the
-  ENERGY, and it holds there: the deliverable is a rough starting
-  potential and a rough guide.  `gap_ev` was never subject to that
-  argument; it rides along on a mesh chosen to converge a
-  different quantity, and it is a predictor key (DESIGN 7.6).  So
-  raising the threshold trades energy roughness we accept for gap
-  roughness nobody has agreed to.
-  Candidates: read the gap over several rungs rather than one, or
-  require it to persist as the mesh densifies -- the same shape as
-  the flatness test's own persistence rule; or converge the gap on
-  its own terms rather than inheriting the energy's mesh; or, at
-  minimum, record in the entry which mesh the gap came from so a
-  consumer can discount it.  May deserve its own entry: it
-  concerns what a guidance entry MEASURES, not how the climb
-  stops.
+  (d) `gap_ev` is measured on a mesh chosen to converge the
+  ENERGY, which mis-classifies metals and degrades insulator
+  entries.  Split out as **D22** -- it concerns what a guidance
+  entry measures, not how the climb stops.  It belongs here only
+  in that raising the threshold makes it worse, by moving the rung
+  the gap is read from.
   (c) Exclude rungs whose SCF did not converge from the flatness
   test.  NOT secondary -- this one is a plain defect and survives
   every threshold.  Today such rungs are read as ordinary energies
@@ -617,6 +575,59 @@
   inside their ladders too.  Do this regardless of what happens to
   the threshold.
   DESIGN 3.12.1 / 3.12.2 / 3.12.3.
+
+- [ ] D22. A gap read at the energy-converged mesh is not a
+  converged gap.  `gap_ev` is recorded from whichever rung the
+  climb happens to stop on -- a mesh chosen to converge the
+  ENERGY -- and it is then used as a predictor key (DESIGN 7.6)
+  and as the metal test's sole input (3.12.3).  Neither use was
+  ever argued for.  Split out of D21(d) on 2026-07-31.
+  **Failure 1: metals recorded as gapped insulators.**  The 2e-3
+  confirmation staged these:
+
+        al_fm-3m_225       converged_mesh=[16,16,16]  gap_ev=0.124
+        cu_fm-3m_225_2011  converged_mesh=[10,10,10]  gap_ev=0.185
+
+  both with `gap_kind = "indirect"`, against
+  `metal_gap_threshold = 0.05`.  Aluminium is the textbook
+  free-electron metal.  The 0.124 eV is the finite-mesh artifact
+  of C138(e) -- a level SPACING in the globally sorted spectrum,
+  not a gap at E_F -- and at the rung this climb stopped on it
+  cleared the metal cutoff by 2.5x.  Ni, Co and Fe were gated
+  correctly on the same run, so this is not a blanket failure but
+  a silent, material-dependent one, which is worse.  Both entries
+  were deleted from staging before promotion could fix them in
+  place; the underlying defect is untouched.
+  **Failure 2: insulator gaps degraded, with nothing to notice it
+  by.**  si_ia-3, same material and same scheme, differing only in
+  the convergence bar:
+
+        thr=5e-4   mesh=[11,11,11]   gap_ev=0.193
+        thr=2e-3   mesh=[7,7,7]      gap_ev=0.370
+
+  Not WRONG the way aluminium's was -- si_ia-3 really is an
+  insulator -- so no classification error flags it.  The gap it
+  teaches the dataspace simply moved 0.18 eV for no reason but the
+  threshold.
+  **Why this is not just a D21 side-effect.**  The case for a
+  looser threshold (D21) was argued about the ENERGY, and holds
+  there: the deliverable is a rough starting potential and a rough
+  guide, and the SCF that consumes the potential re-converges it.
+  Nothing re-converges `gap_ev`.  It is stored, predicted from,
+  and compared across materials.  So the trade D21 makes is energy
+  roughness we accept in exchange for gap roughness nobody agreed
+  to -- and the defect predates D21, which only widened it.
+  **Candidates,** roughly in increasing cost: record in the entry
+  WHICH mesh the gap came from, so a consumer can discount it;
+  require the gap to persist as the mesh densifies, the same shape
+  as the flatness test's own persistence rule; converge the gap on
+  its own terms rather than inheriting the energy's mesh.
+  The metal test needs the same treatment either way -- reading
+  one rung's gap is what let a free-electron metal past it.
+  Relates to C138(e) (what `gap_ev` measures, and why a coarse
+  mesh reports a spacing as a gap) and to D21 (which rung the
+  climb stops on).
+  DESIGN 3.12.3 / 7.6; guidance schema in DESIGN 7.2.
 
 - [x] D16. Design the historical-guidance dataspace
   (VISION Goal 5, ARCHITECTURE §10).  Done 2026-05-28
