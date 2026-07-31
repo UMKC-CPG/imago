@@ -578,11 +578,36 @@
   `gap_ev` (DESIGN 7.6), so these entries teach the dataspace that
   aluminium has a 0.12 eV gap.  Ni, Co and Fe WERE gated
   correctly, so this is not a blanket failure -- which is worse,
-  since it is silent and material-dependent.  Candidates: read the
-  gap over several rungs rather than one, or require it to persist
-  as the mesh densifies, which is the same shape of fix as the
-  flatness test's own persistence rule.  May deserve its own
-  entry; it concerns the metal gate, not the convergence test.
+  since it is silent and material-dependent.
+  **The same root also degrades INSULATOR entries, silently and
+  without any misclassification to notice it by.**  si_ia-3 staged
+  twice, same material and same scheme, differing only in the
+  convergence bar:
+
+        thr=5e-4   mesh=[11,11,11]   gap_ev=0.193
+        thr=2e-3   mesh=[7,7,7]      gap_ev=0.370
+
+  The recorded gap nearly doubled because the climb settled on a
+  coarser mesh.  That entry is not WRONG the way aluminium's was
+  -- si_ia-3 really is an insulator -- but the gap it teaches the
+  dataspace moved 0.18 eV for no reason but the threshold.
+  **The general statement, which is bigger than the metal gate.**
+  A gap read at the energy-converged mesh is not a converged gap.
+  The argument for relaxing the threshold was made about the
+  ENERGY, and it holds there: the deliverable is a rough starting
+  potential and a rough guide.  `gap_ev` was never subject to that
+  argument; it rides along on a mesh chosen to converge a
+  different quantity, and it is a predictor key (DESIGN 7.6).  So
+  raising the threshold trades energy roughness we accept for gap
+  roughness nobody has agreed to.
+  Candidates: read the gap over several rungs rather than one, or
+  require it to persist as the mesh densifies -- the same shape as
+  the flatness test's own persistence rule; or converge the gap on
+  its own terms rather than inheriting the energy's mesh; or, at
+  minimum, record in the entry which mesh the gap came from so a
+  consumer can discount it.  May deserve its own entry: it
+  concerns what a guidance entry MEASURES, not how the climb
+  stops.
   (c) Exclude rungs whose SCF did not converge from the flatness
   test.  NOT secondary -- this one is a plain defect and survives
   every threshold.  Today such rungs are read as ordinary energies
