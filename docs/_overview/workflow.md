@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Imago Workflow
-order: 3
+nav_order: 3
 ---
 
 # Imago Workflow
@@ -64,7 +64,7 @@ Either edit the slurm to inlcude, line by line, all the calculations you wish to
 
 ## Post-processing
 
-While some files are intended to be human readable, many require some amount of post-processing to make any useful products. There are several scripts that come with Imago to help you do this and quickly produce usable items. Covering them all is out of the scope of this page, thus if you are interested, direct yourself to the [post-processing page](link to post-processing page) to find a list of scripts and example use cases. Additionally, some information about the post-processing nature of some of the calculations can be found on the imago.py documentation page.
+While some files are intended to be human readable, many require some amount of post-processing to make any useful products. There are several scripts that come with Imago to help you do this and quickly produce usable items. Covering them all is out of the scope of this page, thus if you are interested, direct yourself to the [post-processing page](../reference_manual/post_processing.html) to find a list of scripts and example use cases. Additionally, some information about the post-processing nature of some of the calculations can be found on the imago.py documentation page.
 
 After this, Imago's role in your current analysis is over. Take what you get and do good science.
 

@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Contributing
-order: 4
+nav_order: 4
 ---
 
 # Contributing to Imago

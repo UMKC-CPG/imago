@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Setup
-order: 2
+nav_order: 2
 ---
 # Setting up Imago
 

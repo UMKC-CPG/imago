@@ -6,26 +6,13 @@
 # active theme's layout.
 title: Home
 nav_order: 1
+nav_exclude: true
 ---
 
-Imago is the successor to the long-running OLCAO codebase. The method
-keeps its established name; only the code has been rebranded. It applies
-to a broad range of material systems -- crystals, amorphous solids,
-nanoparticles, molecules, interfaces, and grain boundaries.
+Welcome to the Imago Documentation website! This documentation is **incomplete** and will grow overtime.
+Because of this many links may be malformed or broken, if you find such links they are there as a reminder for maintainers to link to certain pages once they exist.
+If you cannot find the information you need you can either:
+* Contact Dr. Paul Rulis 
+* For individual script help, open the python source code and read to comments. Most scripts are commented very well and provide an overview of their function (preferred).
 
-Key characteristics:
-
-- **All-electron** -- no pseudopotentials; core electrons are treated
-  explicitly.
-- **Periodic boundary conditions** -- used throughout, even for
-  non-periodic systems.
-- **LCAO basis** -- wavefunctions expressed as linear combinations of
-  atomic orbitals.
-- **Orthogonalization** -- valence orbitals are orthogonalized to the
-  core, shrinking the secular (eigenvalue) equation.
-
-Source and development happen on
-[GitHub](https://github.com/umkc-cpg/imago). This page is a placeholder;
-project documentation will grow here over time.
-
-*Computational Physics Group, University of Missouri--Kansas City.*
+Thank you for your understanding, to orient yourself to the process please visit the [Introduction page](overview/introduction.html)
