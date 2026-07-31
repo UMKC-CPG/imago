@@ -5283,6 +5283,33 @@ on the same data later with no schema change.  Built on P10.
   live: the si_cmce workspace is being cleared, so the LAT trial is
   the first run whose scheme change this will distinguish.
 
+- [ ] C140. Raise `DEFAULT_KPOINT_CONVERGENCE_THRESHOLD` from
+  5.0e-4 to 2e-3 (`curation_manifest.py:278`), per DESIGN 3.12.3.
+  The design now states the bar as a FLOOR set by the ladder's own
+  rung-to-rung scatter rather than as a preference: measured
+  scatter is 0.0008 to 0.0047 eV/atom depending on solid and
+  scheme, so 5.0e-4 sat beneath the noise and could be cleared
+  only by coincidence.  Evidence and the confirmation run are in
+  D21; the design change is committed, this is the code catching
+  up.
+  Small change, three things to get right.  The docstrings at
+  lines 173 and 381 quote the value's role and should say WHY the
+  number is what it is, so the next reader does not tune it back
+  down as a taste.  Manifests that pin
+  `kpoint_convergence_threshold` explicitly are unaffected, which
+  includes the two seed manifests already pinned at 2e-3 -- so
+  this changes behaviour only for manifests that say nothing.
+  And nothing needs regenerating: entries already staged at 5e-4
+  carry their own `metric_threshold` (DESIGN 7.2), so the
+  dataspace stays self-describing across the change rather than
+  silently mixing bars.
+  Does NOT close D21.  Raising the threshold makes the ladder's
+  non-monotonicity stop mattering; D21(a) (order rungs by
+  irreducible count), D21(b) (extend by one rung at the ceiling)
+  and D21(c) (exclude failed-SCF rungs) all survive it, and (c)
+  is a plain defect at any threshold.
+  CODE; DESIGN 3.12.3.
+
 - [ ] C139. Make a commit clear the run-directory root copies it
   supersedes.  A cache MISS over a surviving run directory currently
   re-runs the unit against the PREVIOUS calculation's inputs.

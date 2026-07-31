@@ -1954,6 +1954,33 @@ search climbs meshes until the energy is flat, and the converged
 result is recorded back as the density that reaches that mesh.
 Each half uses the unit it is good at.
 
+**There is a third role, and neither of the two above fills it:
+the order rungs are COMPARED in.** The two-sided test asks
+whether a rung's energy sits between its neighbours', which
+presumes each later rung is a *better sampling* than the one
+before. Neither unit delivers that. Density is monotone in the
+mesh and still fails to order the energies; the mesh is monotone
+and fails too. Measured on fcc at the standard shift, the
+irreducible point count -- what the calculation actually
+evaluates -- swings by a factor of two to three between
+consecutive rungs:
+
+```
+odd  n:  19  44  85 146 231 344 489 670
+even n:   8  16  29  47  72 104 145 195 256
+```
+
+so `[20,20,20]` (256 points) is a step *backwards* from
+`[19,19,19]` (670). Both schemes show it, Gaussian worse than
+LAT, so it is a property of the mesh sequence and not of the
+integration (TODO D21). The comparison order therefore wants the
+irreducible count, which is neither the currency nor the step:
+the count is not comparable across materials, so it cannot serve
+as the predictor key, but it is what orders a single climb's
+rungs by the information each actually adds. Reading the parity
+split as an fcc quirk misses the general point -- a low-symmetry
+cell has no parity, and bcc's counts are already monotone.
+
 #### 3.12.2 The rung rule and the stride
 
 The climb reuses machinery 3.7 already defines. Selecting axial
@@ -1978,7 +2005,16 @@ ortho  Si:  [2,2,2] -> [2,2,3] -> [2,3,3] -> [2,3,4] -> [2,4,4]
 
 A cubic cell moves in lockstep -- one degree of freedom, so the
 steps are coarse, but each is the *finest* mesh the symmetry
-permits (nothing exists between `[4,4,4]` and `[5,5,5]`). A
+permits (nothing exists between `[4,4,4]` and `[5,5,5]`).
+
+*Finest is not the same as monotone, and only the first was ever
+established.* The rule guarantees no mesh is skipped; it does not
+guarantee that rung k+1 samples better than rung k, and for fcc
+it does not (3.12.1). Every consumer of this ladder that treats
+adjacency as refinement inherits that gap -- the two-sided test
+above all. A
+
+
 hexagonal cell climbs its in-plane pair several steps for each
 principal-axis bump, holding the spacing even while the counts
 stay anisotropic (`na == nb` is preserved because they are one
@@ -2017,7 +2053,46 @@ the k-point threshold of BOTH its neighbours on the ladder --
 the same two-sided test as 7.8 step 3c, over consecutive
 *distinct* meshes. This is the *authoritative* convergence
 call; everything below only decides which rungs to compute so
-the call can be made cheaply. The test needs the candidate rung
+the call can be made cheaply.
+
+**The threshold MUST sit above the ladder's own rung-to-rung
+scatter.** A bar beneath the noise cannot be cleared by
+convergence, only by two coincidences in a row -- and a search
+that demands persistence will therefore reject correct answers
+and occasionally accept lucky ones. Measured scatter at the top
+of these ladders, eV per atom: fcc Al 0.0008 under LAT and 0.0047
+under unsmeared Gaussian, bcc Fe ~0.0015, the transition metals
+~0.001. The threshold this design carried was 5e-4 -- below all
+of them. That single mismatch produced every symptom the seed
+runs showed: a Gaussian ladder declaring convergence on scatter,
+ladders stopping one rung short of confirming what they had
+found, and four of five elemental metals climbing to the ceiling.
+The bar is therefore **2e-3 eV per atom**, which converged all
+thirteen seed solids where 5e-4 converged two, while moving the
+insulators only from `[12,12,12]` to `[10,10,10]`. A later reader
+must not tighten it back without re-measuring the scatter first:
+the number is not a taste, it is a floor set by the ladder.
+
+This suits the deliverable rather than merely rescuing it. The
+initial-potential database wants a rough good starting point for
+a later self-consistent calculation, and that calculation
+re-converges what it is given; the guidance dataspace is advice a
+curator weighs, not an answer. 5e-4 eV per atom is 0.5 meV per
+atom -- a publication-grade bar applied to a starting guess. The
+same reasoning already justifies the metal short-circuit below;
+it was simply never applied to the threshold.
+
+Two cautions the seed runs earned. The threshold is a *harvest*
+setting and is not part of the run-reuse cache key (6.2.5), so
+re-judging a workspace at a new threshold costs nothing -- but it
+also means a stored result carries no memory of the bar it was
+judged against, which is why an entry records its
+`metric_threshold` (7.2). And relaxing the threshold also loosens
+the bracket, since that phase reads
+`threshold * stride_flatness_multiple`: a looser bar changes
+which rungs get *computed*, not merely how they are judged. Two
+climbs at different thresholds are not the same ladder scored
+twice. The test needs the candidate rung
 plus one below and one above, so the search must place three
 computed points around a candidate before it can declare
 convergence there -- and one further point above for each extra
@@ -2219,10 +2294,29 @@ Like the bracket phase's looser flatness threshold, the metal
 test is a heuristic with a deliberately cheap failure mode. Its
 one dial is the gap threshold (3.12.6), set low enough that no
 real insulator crosses it yet high enough to catch a true metal's
-essentially-zero reading. Were it ever to fire wrongly, the cost
-is a curator's re-run of a single material, never a wrong
-recorded energy: it would record a rough potential where a finer
-search might have been possible, not an incorrect number. And it
+essentially-zero reading.
+
+*The cheap-failure claim was one-sided, and the seed runs found
+the other side.* This design argued that a wrong firing costs at
+worst a re-run, "never a wrong recorded energy". That covers the
+test firing when it should not. It does not cover the test
+FAILING to fire, which is what happened: fcc Al and fcc Cu were
+recorded as gapped insulators, with `gap_ev` of 0.124 and 0.185
+eV against a 0.05 eV cutoff and `gap_kind` of "indirect".
+Aluminium is the textbook free-electron metal. The readings are
+the finite-mesh artifact of 1.6 -- a level spacing in the
+globally sorted spectrum rather than a gap at the Fermi level --
+and the cost is not a re-run: `gap_ev` is a predictor key (7.6),
+so such an entry teaches the dataspace a gap that does not exist.
+The root is that the test reads the gap of ONE rung, the rung the
+climb stopped on, which makes the classification depend on the
+convergence threshold. That is a defect in what an entry
+*measures* rather than in when the climb stops, and it is carried
+as TODO D22 together with the matching degradation of insulator
+gaps. Until it is resolved, a metal reaching the dataspace as an
+insulator is a live possibility, not a hypothetical.
+
+And it
 *retires* machinery rather than adding it -- with metallicity
 read straight from the gap, the rising-stride proxy and the
 coarse-mesh guard it needed are both gone, and the search wants
