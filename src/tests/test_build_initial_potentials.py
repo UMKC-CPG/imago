@@ -27,6 +27,7 @@ import pytest
 
 from curation_manifest import (
     DEFAULT_CELL,
+    DEFAULT_KPOINT_CONVERGENCE_THRESHOLD,
     load_manifest_v2,
     CurationManifest,
     ReferenceSolid,
@@ -2316,7 +2317,8 @@ def _install_climb_mocks(monkeypatch, workspace, *,
             functional=submodel["functional"],
             kpoint_integration=submodel["kpoint_integration"],
             kpoint_convergence_threshold=thresholds.get(
-                "kpoint_convergence_threshold", 5.0e-4),
+                "kpoint_convergence_threshold",
+                DEFAULT_KPOINT_CONVERGENCE_THRESHOLD),
             metal_gap_threshold=thresholds.get(
                 "metal_gap_threshold", 0.05))
         return seed, 0.9, False, record
@@ -2660,8 +2662,12 @@ def test_build_initial_potentials_resolves_defaults(
         # The resolved harvest knobs must arrive here too -- this is
         #   the only channel by which they reach the harvest, which
         #   never sees a manifest (DESIGN 7.8).
+        # Asserted against the constant, not a literal: what this
+        #   test cares about is that the RESOLVED value arrives,
+        #   and the default itself is a floor set by the ladder's
+        #   scatter that DESIGN 3.12.3 may move again.
         assert harvest_thresholds["kpoint_convergence_threshold"] \
-            == pytest.approx(5.0e-4)
+            == pytest.approx(DEFAULT_KPOINT_CONVERGENCE_THRESHOLD)
         assert harvest_thresholds["metal_gap_threshold"] > 0.0
         record = PredictionRecord(
             policy="curator_override",

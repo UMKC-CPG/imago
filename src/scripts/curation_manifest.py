@@ -173,6 +173,11 @@ class ReferenceSolid:
     built-in default (:data:`DEFAULT_KPOINT_CONVERGENCE_THRESHOLD`),
     so it resolves solid -> ``[harvest]`` -> built-in and the
     manifest may omit it entirely.  ``None`` here until resolved.
+
+    A solid sets this when its own ladder is noisier than the
+    default assumes, or quieter and worth judging more tightly.  The
+    value is bounded from below by the ladder's own rung-to-rung
+    scatter, not chosen freely -- see the constant for why.
     """
 
     reference_id: str
@@ -272,10 +277,26 @@ DEFAULT_BISPECTRUM_SUB_SPEC = {
 # The producer's built-in k-point flatness tolerance, used when a
 #   solid names neither its own kpoint_convergence_threshold nor a
 #   [harvest] block (DESIGN 5.7 / 7.8).  Per atom, in eV
-#   (5e-4 = 0.5 meV/atom).  Unlike the run settings this has a
+#   (2e-3 = 2 meV/atom).  Unlike the run settings this has a
 #   resolve-time fallback, so the [harvest] block -- and the key --
 #   may be omitted entirely.
-DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 5.0e-4
+#
+# This number is a FLOOR set by the ladder rather than a taste
+#   (DESIGN 3.12.3).  It must sit ABOVE the rung-to-rung scatter of
+#   the energies it judges: a bar beneath the noise cannot be
+#   cleared by convergence, only by two coincidences in a row, so a
+#   search that demands persistence will reject correct answers and
+#   occasionally accept lucky ones.  Measured scatter across the
+#   seed solids runs 0.0008 to 0.0047 eV/atom depending on the solid
+#   and the integration scheme.  The former 5.0e-4 sat beneath all
+#   of it and converged two of thirteen seed solids; 2e-3 converged
+#   all thirteen while moving the insulators only from [12,12,12] to
+#   [10,10,10].  Anyone tempted to tighten this back should
+#   re-measure the scatter first -- and note that a looser value
+#   also loosens the bracket phase, which reads this multiplied by
+#   `stride_flatness_multiple`, so two climbs at different
+#   thresholds are not one ladder scored twice.
+DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 2.0e-3
 
 # The six run settings that may live in the top-level [defaults]
 #   block and be inherited per solid (DESIGN 5.7).  system_type is

@@ -5283,8 +5283,17 @@ on the same data later with no schema change.  Built on P10.
   live: the si_cmce workspace is being cleared, so the LAT trial is
   the first run whose scheme change this will distinguish.
 
-- [ ] C140. Raise `DEFAULT_KPOINT_CONVERGENCE_THRESHOLD` from
-  5.0e-4 to 2e-3 (`curation_manifest.py:278`), per DESIGN 3.12.3.
+- [x] C140. Raise `DEFAULT_KPOINT_CONVERGENCE_THRESHOLD` from
+  5.0e-4 to 2e-3 (`curation_manifest.py`), per DESIGN 3.12.3.
+  DONE 2026-07-31.  PSEUDOCODE led the code, as the chain requires:
+  it pinned 5e-4 in three places (the constant, the
+  resolvability-exemption comment, and the ClimbConfig field note)
+  and all three were amended first.  One test failed on the
+  change, `test_build_initial_potentials_resolves_defaults`,
+  asserting the literal 5.0e-4; it now asserts against the
+  CONSTANT, since what it cares about is that the resolved value
+  reaches the predictor and the default itself is a floor DESIGN
+  may move again.  Suite green at 1260.
   The design now states the bar as a FLOOR set by the ladder's own
   rung-to-rung scatter rather than as a preference: measured
   scatter is 0.0008 to 0.0047 eV/atom depending on solid and

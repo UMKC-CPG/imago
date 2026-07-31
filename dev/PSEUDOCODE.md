@@ -6740,9 +6740,10 @@ function load_manifest_v2(path):
         # rule (DESIGN 5.7).
         # The harvest setting kpoint_convergence_threshold is
         # EXEMPT from this resolvability rule: it carries a
-        # built-in default (5e-4 eV/atom; DESIGN 5.7 / 7.8), so a
-        # solid naming neither it nor a [harvest] block is
-        # accepted -- apply_manifest_defaults supplies the default.
+        # built-in default (2e-3 eV/atom; DESIGN 5.7 / 7.8 and the
+        # noise-floor rule of 3.12.3), so a solid naming neither it
+        # nor a [harvest] block is accepted --
+        # apply_manifest_defaults supplies the default.
 
         rid = ref["reference_id"]
 
@@ -6915,7 +6916,18 @@ EXEMPT_RUN_SETTING_KEYS = ("cell",)
 # The producer's built-in k-point flatness tolerance, used when a
 #   solid names neither its own kpoint_convergence_threshold nor a
 #   [harvest] block (DESIGN 5.7 / 7.8).  Per atom, in eV.
-DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 5.0e-4    # 0.5 meV/atom
+#
+# The value is a FLOOR set by the ladder, not a taste (DESIGN
+#   3.12.3).  It must sit ABOVE the rung-to-rung scatter of the
+#   energies it judges, because a bar beneath the noise can be
+#   cleared only by two coincidences in a row.  Measured scatter
+#   across the seed solids runs 0.0008 to 0.0047 eV/atom depending
+#   on solid and integration scheme.  The former 5.0e-4 sat below
+#   all of it and converged two of thirteen seed solids; 2e-3
+#   converged all thirteen while moving the insulators only from
+#   [12,12,12] to [10,10,10].  Do not tighten this without
+#   re-measuring the scatter first.
+DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 2.0e-3    # 2 meV/atom
 
 # The adaptive-climb tuning knobs that may live in the optional
 #   [harvest.kpoint_climb] sub-table (DESIGN 5.7 / 3.12.6).  All but
@@ -11434,7 +11446,7 @@ dataclass PredictionRecord:    # 7.7-derived; serialized as
                                     #   first is the grid-flatness
                                     #   tolerance, eV per atom, from
                                     #   the solid's own value else
-                                    #   [harvest] else 5e-4 (5.7);
+                                    #   [harvest] else 2e-3 (5.7);
                                     #   the second is the absolute
                                     #   band gap in eV below which a
                                     #   run counts as metallic, the
