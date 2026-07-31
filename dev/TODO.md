@@ -387,6 +387,95 @@
   the dispatcher, never inside it).  Pairs later with a C-level
   implementation task once the surface is fixed.  Relates to D14
   (structure intake) and the C92 single-structure guidance path.
+- [ ] D21. The mesh ladder is not a monotone refinement, and the
+  flatness test assumes it is.  DESIGN 3.12.1 separates the roles
+  cleanly -- density is the currency, the mesh is the step -- and
+  3.12.2 justifies the step as "each is the *finest* mesh the
+  symmetry permits".  Both hold.  Neither establishes the property
+  the two-sided flatness test actually needs: that a later rung is
+  a BETTER sampling than the one before it.  For fcc at the
+  standard shift it is not.  Irreducible point counts by parity:
+
+        odd  n:  19  44  85 146 231 344 489 670
+        even n:   8  16  29  47  72 104 145 195 256
+
+  At comparable n the odd meshes carry 2-3x the sampling, so
+  [20,20,20] (256 points) is a step BACKWARDS from [19,19,19]
+  (670).  The ladder alternates between a good sampling and a poor
+  one and the energy zigzags accordingly.
+  How much of the metals' non-convergence this explains is
+  PARTIAL, and the distinction matters: Cu converges once the
+  rungs are ordered by sampling, so for Cu the ladder was the
+  whole problem.  Al and Fe converge under NEITHER ordering, so
+  something further is at work for them -- Fe especially, which is
+  bcc and has no parity split to begin with (counts 6, 10, 14 ...
+  250, already monotone) yet still scatters at ~1.5e-3.  Do not
+  close this expecting the ladder fix to convert every metal.
+  **Not a LAT defect -- measured, not assumed.**  fcc Al, same
+  manifest, one token changed, run directories/prepare/scratch
+  cleared before each arm, `atomicPDB` verified to hold only
+  "isolated" both times so neither arm warm-started from the
+  other's potential, both arms opening on [4,4,4] and agreeing on
+  the irreducible count at every rung.  Top-four rung-to-rung
+  scatter (eV/atom):
+
+        family      LAT       gaussian
+        full      0.00082     0.00469
+        odd-only  0.00120     0.00127
+        even-only 0.00943     0.01803
+
+  BOTH schemes zigzag and Gaussian zigzags worse, so the
+  alternation belongs to the k-mesh sequence.  `generateTetrahedra`
+  and the `fullKPToIBZKPMap` unfolding are exonerated; no code bug
+  is in play.  A by-product worth keeping: on a parity-consistent
+  ladder LAT reaches 1e-4 flatness at [17,17,17] while unsmeared
+  Gaussian is still scattering at 1.3e-3 -- LAT converges Al and
+  Gaussian does not.  Ladders kept at
+  `jobs/al_parity/ladders/{linear-tetrahedral,gaussian}/`.
+  **Three independent fixes, and they should be weighed together
+  because they all concern what the flatness test may assume:**
+  (a) Walk a sampling-consistent ladder.  Two candidates: fix a
+  parity and step cubic n by 2, or order rungs by IRREDUCIBLE
+  COUNT.  Re-scoring the existing metal ladders both ways favours
+  the second, and not marginally:
+
+        solid  mesh order      irreducible-count order
+        Al     NOT converged   NOT converged
+        Cu     NOT converged   converges at n=16
+        Ni     converges n=18  converges at n=13
+        Co     converges n=16  converges at n=13
+        Fe     NOT converged   NOT converged
+
+  Three of five against two, and Ni and Co settle at n=13 rather
+  than 18 and 16 -- cheaper meshes, not merely more passes.
+  Ordering also generalises: Fe is bcc and its counts are already
+  monotone (6, 10, 14, ... 250) with no parity split at all, and a
+  low-symmetry cell increments one axis class at a time so
+  "parity" is not even defined for it.  Fixing a parity would also
+  commit every rung to the EXPENSIVE family, since for fcc the odd
+  meshes are the well-sampled ones.  Read the parity split as the
+  symptom that exposed the problem in fcc, not as the thing to
+  fix.
+  (b) Extend by one rung when the ceiling is reached with the
+  PENULTIMATE rung two-sided flat.  Endpoints are never eligible
+  (3.12.3), so a ladder can stop exactly one rung short of being
+  able to confirm what it has already found.  Observed three
+  times and re-verified against `pick_converged_climb`: si_cmce
+  uncorrected LAT at `max_count = 18` (penultimate [17,17,15]), Al
+  re-sorted by irreducible count, and Al's odd-only family here.
+  The trigger is the CONJUNCTION -- ceiling reached, verdict not
+  converged, penultimate rung two-sided flat.  Penultimate
+  flatness alone is not the signal; converged ladders show it too,
+  which is unsurprising since they settle near the top.  Cheap to
+  detect, and it converts near-misses into results.
+  (c) Exclude rungs whose SCF did not converge from the flatness
+  test.  Today they are read as ordinary energies and can be
+  SELECTED: ni_fm-3m_225_2006 reported `converged_mesh =
+  [18,18,18]`, a rung whose own `result.toml` says
+  `status = "not_converged"`.  Cu and Fe carry failed rungs inside
+  their ladders too.  Wrong independently of (a) and (b).
+  DESIGN 3.12.1 / 3.12.2 / 3.12.3.
+
 - [x] D16. Design the historical-guidance dataspace
   (VISION Goal 5, ARCHITECTURE §10).  Done 2026-05-28
   (categorical signature shape, Jaccard lookup); rewritten
