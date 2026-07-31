@@ -402,7 +402,7 @@
   order, failed rungs excluded throughout:
 
         solid              5e-4        1e-3        2e-3        5e-3
-        Al                 --          --          --          [18,18,18]
+        Al                 --          [16,16,16]  [16,16,16]  [16,16,16]
         Co                 [16,16,16]  [16,16,16]  [16,16,16]  [12,12,12]
         Cu                 --          [12,12,12]  [10,10,10]  [8,8,8]
         Fe                 --          --          [13,13,13]  [12,12,12]
@@ -411,10 +411,23 @@
         si_fd-3m (six)     [12,12,12]  [10,10,10]  [10,10,10]  [8,8,8]
         si_ia-3            --          --          [11,11,11]  [9,9,9]
 
-  At 2e-3, twelve of thirteen converge.  The insulators degrade
+  At 2e-3, ALL THIRTEEN converge.  The insulators degrade
   gracefully -- [12,12,12] to [10,10,10] -- while si_cmce, a
   metal, pays most ([14,14,13] to [8,8,7]), which is precisely the
   case DESIGN 3.12.3 already concedes should be rough.
+  The Al row was first recorded as failing at every threshold
+  below 5e-3.  That row had been read off the GAUSSIAN ladder --
+  the al_parity comparison ran its two arms into the same run
+  directory and Gaussian went second, so one row of an otherwise
+  all-LAT table was a different scheme.  For the record, the two
+  differ sharply and the difference is the point:
+
+        Al LAT       --   [16,16,16]  [16,16,16]  [16,16,16]
+        Al GAUSSIAN  --   --          --          [18,18,18]
+
+  Under LAT Al converges at 1e-3; under unsmeared Gaussian it
+  needs 5e-3.  "Al resists relaxation" was an artifact of the
+  mislabelled row, not a property of aluminium.
   **Why this suits the deliverable.**  3.12.3 justifies the metal
   short-circuit by observing that "the initial-potential database
   wants a *rough* good starting point for a later self-consistent
@@ -435,13 +448,31 @@
   threshold MUST sit above it, with these numbers as the reason.
   A later reader should not tighten it back without re-measuring
   the floor.
+  **Confirmed live, 2026-07-31.**  Both campaigns re-run with
+  `kpoint_convergence_threshold = 2e-3` in the top-level
+  `[harvest]` block.  Every rung hit the cache -- the threshold is
+  a harvest setting and is not part of the cache key -- so this
+  cost minutes and tested the rule as the climb GROWS a ladder
+  rather than as a re-score of a finished one.  Al [16,16,16], Cu
+  [10,10,10] and all six si_fd-3m [10,10,10] matched the table
+  exactly, and staged entries carry
+  `metric_threshold = 2.0e-03` as intended.
+  Two rows did not match, both for understood reasons.  si_cmce
+  settled at [5,5,5] because the Si manifest carries no
+  `climb_shape`, so the automatic climb's metal short-circuit
+  fired -- a different question, not a different answer.  si_ia-3
+  gave [7,7,7] against a predicted [11,11,11] because it computed
+  a NEW rung at [3,3,3]: `stride_threshold` is
+  `threshold * stride_flatness_multiple`, so relaxing the
+  threshold also loosens the bracket and the climb takes a
+  different PATH, not merely a different verdict on fixed rungs.
+  Offline re-scoring is therefore exact for `unit_step` solids
+  (all five metals matched) and only indicative for bracket-refine
+  ones.  Worth remembering before trusting any future re-score.
   **What this does NOT resolve.**  It makes the ladder's
   non-monotonicity stop mattering; it does not remove it.  That
   property is real, measured, and recorded below, and this entry
-  should not be closed as though the ladder were fixed.  Al also
-  survives relaxation -- it fails at 5e-4, 1e-3 and 2e-3 under
-  both orderings and converges only at 5e-3 -- so something
-  further is at work there.
+  should not be closed as though the ladder were fixed.
 
   ---
 
@@ -529,6 +560,29 @@
   flatness alone is not the signal; converged ladders show it too,
   which is unsurprising since they settle near the top.  Cheap to
   detect, and it converts near-misses into results.
+  (d) **Metals are being mis-classified as insulators, and the
+  threshold change makes it worse.**  Surfaced by the 2e-3
+  confirmation: Al and Cu were NOT gated as metals and staged
+  guidance entries as ordinary gapped materials --
+
+        al_fm-3m_225       converged_mesh=[16,16,16]  gap_ev=0.124
+        cu_fm-3m_225_2011  converged_mesh=[10,10,10]  gap_ev=0.185
+
+  against `metal_gap_threshold = 0.05`.  Aluminium is the textbook
+  free-electron metal; the 0.124 eV is the finite-mesh artifact of
+  C138(e), a level SPACING in the sorted spectrum rather than a
+  gap at E_F.  The metal test reads the gap of ONE rung -- the one
+  the climb stops on -- so which rung that is decides the
+  classification, and the threshold now decides which rung that
+  is.  Consequences beyond a mislabel: the predictor keys on
+  `gap_ev` (DESIGN 7.6), so these entries teach the dataspace that
+  aluminium has a 0.12 eV gap.  Ni, Co and Fe WERE gated
+  correctly, so this is not a blanket failure -- which is worse,
+  since it is silent and material-dependent.  Candidates: read the
+  gap over several rungs rather than one, or require it to persist
+  as the mesh densifies, which is the same shape of fix as the
+  flatness test's own persistence rule.  May deserve its own
+  entry; it concerns the metal gate, not the convergence test.
   (c) Exclude rungs whose SCF did not converge from the flatness
   test.  NOT secondary -- this one is a plain defect and survives
   every threshold.  Today such rungs are read as ordinary energies
