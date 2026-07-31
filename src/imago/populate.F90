@@ -1136,6 +1136,7 @@ subroutine computeElectronPopulation_LAT (eFermi)
          & numTetrahedra, tetraVol, tetrahedra, &
          & fullKPToIBZKPMap
    use O_SecularEquation, only: energyEigenValues
+   use O_MathSubs,        only: bloechlCornerCorrection
 
    ! Make sure that no variables are declared accidentally.
    implicit none
@@ -1247,6 +1248,14 @@ subroutine computeElectronPopulation_LAT (eFermi)
    !   corner. These four values sum to f(E_Fermi), the total
    !   occupied fraction of the tetrahedron for this band.
    real (kind=double), dimension(4) :: cornerWeights
+
+   ! The four Bloechl curvature correction terms for the same
+   !   tetrahedron (DESIGN 1.3.1). These are ADDED to cornerWeights
+   !   at the accumulation step rather than folded into them, and
+   !   they sum to zero, so they redistribute occupation between the
+   !   four corner k-points without changing how much this
+   !   tetrahedron holds in total.
+   real (kind=double), dimension(4) :: cornerCorrWt
 
    ! -------------------------------------------------
    ! Allocate and initialize the output array.
@@ -1467,6 +1476,21 @@ subroutine computeElectronPopulation_LAT (eFermi)
             endif
 
             ! ----------------------------------------
+            ! Step 3b: Bloechl curvature correction.
+            ! ----------------------------------------
+            ! Linear interpolation of the band across the
+            !   tetrahedron misplaces the iso-energy surface, and the
+            !   correction above compensates by shifting weight
+            !   between the four corners (DESIGN 1.3.1). It is kept
+            !   separate from cornerWeights so that the case logic
+            !   above stays a transcription of the uncorrected
+            !   formulas. The routine returns zeros for any
+            !   tetrahedron the Fermi level does not pass through, so
+            !   it is called unconditionally here.
+            call bloechlCornerCorrection (eFermi, &
+                  & cornerEigenVals, cornerCorrWt)
+
+            ! ----------------------------------------
             ! Step 4: Accumulate into the output.
             ! ----------------------------------------
             ! The sort permutation maps each sorted position i back
@@ -1475,12 +1499,16 @@ subroutine computeElectronPopulation_LAT (eFermi)
             !   Multiple tetrahedra sharing a k-point accumulate
             !   their contributions additively, building the total
             !   occupation weight for each (band, kpoint, spin).
+            !   Because the correction terms sum to zero, they change
+            !   the share each corner receives but not the total this
+            !   tetrahedron contributes.
             do i = 1, 4
                ibzKP = ibzCorner(sortPerm(i))
                electronPopulation_LAT(n,ibzKP,h) &
                      & = electronPopulation_LAT( &
                      & n, ibzKP, h) &
-                     & + cornerWeights(i) * tetraVol
+                     & + (cornerWeights(i) &
+                     & + cornerCorrWt(i)) * tetraVol
             enddo
 
          enddo ! t (tetrahedra)

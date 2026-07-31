@@ -109,9 +109,14 @@ per tetrahedron (Lehmann-Taut / Bloechl):
 
 The middle range (e2 <= E < e3) has a more complex formula
 involving cross-terms between all four eigenvalues. The exact
-expressions are in Bloechl 1994, equations 14-16. The Bloechl
-correction terms (eqs. 22-24) substantially improve accuracy at
-lower k-point densities and should be included.
+expressions are in Bloechl 1994, equations 14-16.
+
+The Bloechl correction terms improve accuracy at lower k-point
+densities, and an earlier draft of this section asked for them
+here. They do not belong here: the correction applies to the
+cumulative INTEGRATION weights, not to the DOS curve these
+formulas produce. It is specified in 1.3.1 and consumed by 1.5
+and 1.6.
 
 **Degenerate-corner guards:** When two or more corner energies
 coincide, denominators in the analytic formulas go to zero. All
@@ -191,6 +196,104 @@ multiplicative factor alongside `tetraVol`. Both
 factor. For spin-polarized calculations (spin=2), the
 factor becomes 2/2 = 1 spin state per band, which is
 also correct.
+
+#### 1.3.1 The Bloechl correction terms
+
+Linear interpolation of eps(k) inside a tetrahedron misplaces
+the iso-energy surface, and the resulting error falls off slowly
+with mesh density. Bloechl's correction (PRB 49, 16223 (1994),
+eq. 22) compensates it by adjusting each corner's cumulative
+integration weight:
+
+!! dw_i = (1/40) * D_T(E_F) * sum_{j=1..4} (eps_j - eps_i)
+!!      = (1/10) * D_T(E_F) * (epsBar - eps_i)
+
+where `D_T(E_F)` is THIS tetrahedron's density of states at the
+Fermi level and `epsBar` is the mean of its four corner
+eigenvalues. The second form follows from
+`sum_j (eps_j - eps_i) = 4*(epsBar - eps_i)` and is the one to
+implement: it makes the three properties below visible instead
+of leaving them to be derived.
+
+**It sums to zero over the four corners.**
+`sum_i (epsBar - eps_i) = 0` identically, so the correction
+moves weight BETWEEN corners and never changes a tetrahedron's
+total. Three things follow, and they are what make this
+correction safe to add to a working SCF path: the electron count
+is unchanged, therefore the Fermi search is unchanged, therefore
+the `numElectrons * spin/2` calibration of 1.6d cannot be broken
+by adding it. What changes is WHICH k-points hold the
+occupation -- hence the charge density and the band energy, and
+nothing else.
+
+**It vanishes wherever `D_T(E_F) = 0`.** Every wholly occupied
+and wholly empty tetrahedron contributes nothing, so insulators
+are untouched and only straddling tetrahedra move. The si_fd-3m
+agreement that validated the uncorrected implementation
+therefore survives unchanged, and is not evidence about the
+correction either way.
+
+**Its sign is predictable, which makes it testable.** `dw_i` is
+positive for corners below the tetrahedron mean, so weight
+shifts toward lower-energy corners and the band energy falls.
+The uncorrected si_cmce ladder sits ABOVE its Gaussian
+counterpart at every mesh and is still descending at 720
+k-points (TODO C138(a)), so the correction pushes LAT in exactly
+the direction that would close that gap. Whether it closes
+enough of it is the measurement.
+
+**Which consumers.** The two that evaluate cumulative
+integration weights: `electronPopulation_LAT` for the
+bond/effective-charge path (1.5) and the SCF occupation path
+(1.6). NOT the DOS path (1.3): that uses `cornerDOSWt_LAT`, the
+energy derivative dw/dE, and eq. 22 corrects w rather than
+dw/dE. A DOS correction is a separate question this section does
+not answer.
+
+**A separate routine, not a change to `bloechlCornerWeights`.**
+`bloechlCornerCorrection(energy, sortedEps, cornerCorrWt)`
+returns the four `dw_i`; the two consumers above add them to the
+weights they already fetch. Three reasons, in order of weight:
+`bloechlCornerWeights` stays the literal transcription of the
+paper's uncorrected weight expressions, so a reader can check it
+against the reference without mentally subtracting a correction;
+the correction gets its own built-in self-consistency check,
+`sum(cornerCorrWt) == 0`, as strong as the existing
+`sum(cornerDOSWt_LAT) == dosContrib` identity and testable
+without reference to any other quantity; and the two can be
+measured apart, which folding them together forecloses.
+
+**The input it needs is already computed.** `D_T(E_F)` is
+`sum(cornerDOSWt)` for that tetrahedron before the `tetraVol`
+factor, and `latElectronCount` already calls
+`bloechlCornerDOSWt` at the same energy in the same loop (it
+needs the total as the derivative for its Newton step). The
+correction routine takes the same `(energy, sortedEps)` pair as
+its siblings and forms the quantity itself, so it stays a pure
+function of one tetrahedron's corners and shares their
+degenerate-corner guards.
+
+**Always on, with no new option.** A switch would be an
+option-contract change (6.2.10) and would reach the cache key
+through makeinput's outputs, which is a large cost for a
+validation convenience. It is not needed: the uncorrected ladder
+is preserved under
+`jobs/si_fingerprint/seed/ladders/linear-tetrahedral/`, so the
+comparison is a re-run against a saved baseline rather than two
+live configurations. Note that such a re-run needs `--force` or
+cleared run directories -- the cache asks whether this is the
+same calculation, not whether the engine has since improved
+(6.2.5), so a corrected binary alone will not miss.
+
+**Equation 22 is the whole of it.** An earlier reading of the
+reference list here cited "eqs. 22-24" as the correction, which
+invited the belief that two further terms were owed. They are
+not: 23 and 24 quantify the discrepancy between the true Fermi
+surface and the linearly interpolated polyhedral one, a
+comparison the paper makes rather than a formula anything
+computes. Nothing in this design or its implementation uses
+them, and a later reader should not go looking for the missing
+two-thirds of a correction that is already complete.
 
 ### 1.4 LAT PDOS (Energy-Resolved Partial DOS)
 
@@ -12356,7 +12459,13 @@ Phys. Rev. B 49, 16223 (1994). Key equations:
   integrated properties; energy derivatives
   `cornerDOSWt_LAT` from `bloechlCornerDOSWt` for
   energy-resolved DOS/PDOS
-- Eqs. 22-24: correction terms for improved accuracy
+- Eq. 22: the curvature correction to the corner
+  integration weights, `bloechlCornerCorrection` (1.3.1)
+- Eqs. 23-24: a comparison between the true Fermi
+  surface and the interpolated polyhedral one. Nothing
+  in Imago computes them; they are listed so a reader
+  meeting the range "22-24" elsewhere knows the
+  correction is eq. 22 alone
 
 A. K. Rappe, C. J. Casewit, K. S. Colwell, W. A.
 Goddard III, W. M. Skiff, "UFF, a Full Periodic Table

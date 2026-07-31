@@ -894,4 +894,96 @@ subroutine bloechlCornerDOSWt(energy, sortedEps, &
 
 end subroutine bloechlCornerDOSWt
 
+
+! Compute the four Bloechl curvature correction terms for one tetrahedron at a
+!   given energy (DESIGN 1.3.1; PSEUDOCODE 3a).
+!
+!   Linear interpolation of the band energy inside a tetrahedron misplaces the
+!   iso-energy surface, and the resulting error falls off only slowly as the
+!   k-point mesh is made denser. Bloechl's correction (PRB 49, 16223 (1994),
+!   equation 22) compensates for it by shifting integration weight between the
+!   four corners:
+!
+!!     dw_i = (1/40) * D_T(E_F) * sum_{j=1..4} (eps_j - eps_i)
+!!          = (1/10) * D_T(E_F) * (epsBar - eps_i)
+!
+!   where D_T(E_F) is THIS tetrahedron's density of states at the energy in
+!   question and epsBar is the mean of its four corner eigenvalues. The two
+!   forms are the same quantity, since sum_j (eps_j - eps_i) = 4*(epsBar -
+!   eps_i); the second is implemented because it makes the central property
+!   visible rather than leaving it to be derived.
+!
+!   That property is that the four terms SUM TO ZERO, identically, for any
+!   energy and any corner energies. The correction therefore moves weight
+!   between corners and never changes a tetrahedron's total, which is what
+!   makes it safe to add to a converged SCF path: the electron count is
+!   unchanged, so the Fermi search is unchanged, so the calibration of the
+!   total occupation against numElectrons cannot be broken by adding this.
+!   What does change is WHICH k-points hold the occupation, and therefore the
+!   charge density and the band energy.
+!
+!   The correction also vanishes wherever no iso-energy surface passes through
+!   the tetrahedron, since D_T is then zero. Insulators are untouched and only
+!   straddling tetrahedra move.
+!
+!   The caller adds these terms to the weights from bloechlCornerWeights rather
+!   than receiving them already folded in. That keeps that routine a literal
+!   transcription of the paper's uncorrected expressions, so a reader can check
+!   it against the reference without mentally subtracting a correction, and it
+!   gives this routine a self-contained test: sum(cornerCorrWt) must be zero to
+!   rounding, which needs no reference values and no other quantity.
+!
+!   Equation 22 is the whole correction. The reference list in DESIGN once
+!   cited "equations 22-24" together, which reads as though two further terms
+!   were owed here. They are not: 23 and 24 compare the true Fermi surface
+!   against the linearly interpolated polyhedral one, an assessment the paper
+!   makes rather than a formula anything computes. This routine is complete as
+!   written, and a reader should not go hunting for the rest of it.
+subroutine bloechlCornerCorrection(energy, sortedEps, &
+      & cornerCorrWt)
+
+   use O_Kinds
+
+   implicit none
+
+   ! Passed parameters.
+   real (kind=double), intent(in) :: energy
+   real (kind=double), dimension(4), intent(in) :: &
+         & sortedEps
+   real (kind=double), dimension(4), intent(out) :: &
+         & cornerCorrWt
+
+   ! Local variables.
+   real (kind=double), dimension(4) :: cornerDOSWt
+   real (kind=double) :: tetraDOSAtEnergy, meanEps
+   integer :: corner
+
+   ! No iso-energy surface passes through a tetrahedron lying wholly below or
+   !   wholly above the energy, so its DOS there is zero and so is the
+   !   correction. Both bounds are tested explicitly rather than left to the
+   !   arithmetic below: they are the common case (every fully occupied and
+   !   every empty tetrahedron in the mesh), and this is the test that keeps
+   !   gapped systems untouched.
+   if ((energy < sortedEps(1)) .or. &
+         & (energy >= sortedEps(4))) then
+      cornerCorrWt(:) = 0.0_double
+      return
+   endif
+
+   ! This tetrahedron's density of states at the energy is the sum of its four
+   !   corner DOS weights, taken before any tetrahedron-volume factor. Reusing
+   !   that routine rather than writing the per-case DOS expressions again is
+   !   what keeps the case logic and the degenerate-corner guards in one place.
+   call bloechlCornerDOSWt (energy, sortedEps, cornerDOSWt)
+   tetraDOSAtEnergy = sum(cornerDOSWt(:))
+
+   meanEps = sum(sortedEps(:)) / 4.0_double
+
+   do corner = 1, 4
+      cornerCorrWt(corner) = tetraDOSAtEnergy &
+            & * (meanEps - sortedEps(corner)) / 10.0_double
+   enddo
+
+end subroutine bloechlCornerCorrection
+
 end module O_MathSubs

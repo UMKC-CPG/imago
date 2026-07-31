@@ -337,15 +337,38 @@ function computeElectronPopulation_LAT(
                     bloechlCornerWeights(
                         eFermi, eps)
 
+                # Bloechl's curvature correction
+                # (DESIGN 1.3.1), added rather than
+                # folded in, so the weights above stay
+                # the paper's uncorrected expressions.
+                # It sums to zero across the four
+                # corners, so this loop's contribution
+                # to the electron COUNT is unchanged
+                # and only the distribution over
+                # k-points moves.
+                cornerCorrWt(1:4) =
+                    bloechlCornerCorrection(
+                        eFermi, eps)
+
                 for i = 1 to 4:
                     ki = corners(sigma(i))
                     electronPopulation_LAT(
                         n, ki, spin) +=
-                        cornerIntgWt_LAT(i)
+                        (cornerIntgWt_LAT(i)
+                         + cornerCorrWt(i))
                             * tetraVol
 
     return electronPopulation_LAT
 ```
+
+This one routine serves BOTH consumers of the corrected
+weights: the bond/effective-charge path calls it after the
+SCF (DESIGN 1.5), and `populateLAT` calls it at each
+converged trial Fermi level inside the SCF (DESIGN 1.6).
+Adding the correction here therefore reaches both, and there
+is no second insertion point to keep in step.  The DOS path
+is NOT a consumer -- it uses `bloechlCornerDOSWt`, and eq. 22
+corrects `w` rather than `dw/dE` (DESIGN 1.3.1).
 
 ---
 
@@ -645,6 +668,71 @@ function bloechlCornerWeights(E, eps):
     w(4) = (1 - f_un) - w(1) - w(2) - w(3)
     return w
 ```
+
+### The curvature correction (DESIGN 1.3.1)
+
+Linear interpolation of eps(k) inside a tetrahedron misplaces
+the iso-energy surface.  Bloechl's correction compensates it
+by shifting weight between the four corners:
+
+!! dw_i = (1/40) * D_T(E_F) * sum_{j=1..4} (eps_j - eps_i)
+!!      = (1/10) * D_T(E_F) * (epsBar - eps_i)
+
+with `D_T(E_F)` this tetrahedron's DOS at the Fermi level and
+`epsBar` the mean of its four corner eigenvalues.  The second
+form is the one implemented -- it is the same quantity, and it
+makes the zero-sum property self-evident rather than something
+a reader has to derive before trusting the routine near a
+converged SCF.
+
+`D_T(E_F)` needs no new formula: it is the sum of the corner
+DOS weights already specified in section 2a, evaluated at the
+same energy, before any `tetraVol` factor.  The routine forms
+it internally so that it stays a pure function of one
+tetrahedron's corners, exactly like its two siblings, and
+inherits their degenerate-corner guards by calling through
+them.
+
+```
+function bloechlCornerCorrection(E, eps):
+    # eps(1:4) sorted ascending, as for the two
+    # routines above.  Returns the four dw_i.
+
+    # A tetrahedron with no iso-energy surface through
+    # it has D_T = 0, so the correction vanishes.  The
+    # two bounds are handled explicitly rather than
+    # left to arithmetic, because they are the common
+    # case (every fully occupied or fully empty
+    # tetrahedron in the mesh) and because it is the
+    # property that keeps insulators untouched.
+    if E < eps(1) or E >= eps(4):
+        return [0, 0, 0, 0]
+
+    cornerDOSWt(1:4) = bloechlCornerDOSWt(E, eps)
+    D_T = sum(cornerDOSWt(1:4))
+    epsBar = sum(eps(1:4)) / 4
+
+    for i = 1 to 4:
+        dw(i) = D_T * (epsBar - eps(i)) / 10
+    return dw
+```
+
+**The self-check this buys.**  `sum(dw) == 0` to rounding, for
+ANY energy and any four corner energies, because
+`sum_i (epsBar - eps_i)` is identically zero.  That is a
+complete test of the routine requiring no reference values and
+no other quantity -- which is the reason the correction is a
+separate routine rather than folded into
+`bloechlCornerWeights`, where it could only be checked against
+hand-computed expectations.
+
+**Equation 22 is the whole correction.**  The reference list in
+DESIGN once cited "eqs. 22-24", which invited the belief that
+two further terms were owed here.  They are not: 23 and 24
+compare the true Fermi surface against the interpolated
+polyhedral one, which the paper does as an assessment rather
+than as a formula anything computes.  This routine is complete
+as written.
 
 ---
 

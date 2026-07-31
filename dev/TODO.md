@@ -853,40 +853,62 @@
   fullKPToIBZKPMap for eigenvalue unfolding (PSEUDOCODE 2)
 - [x] C4. Validate LAT TDOS against Gaussian broadening at
   high k-point density
-- [ ] C4a. Add Bloechl correction terms (eqs. 22-24) to the
-  corner weights, for accuracy at lower k-point densities
-  (DESIGN 1.3).  **Scope, widened.**  This entry named
-  `computeTDOS_LAT` because the DOS was the only consumer when
-  it was written.  There are now three -- the DOS path
-  (`computeTDOS_LAT`), the bond/effective-charge path
-  (`electronPopulation_LAT`), and the SCF occupation path added
-  by C138 -- and all three draw from the SAME
-  `bloechlCornerWeights` in `mathSubs.f90`, which is deliberate
-  (DESIGN 1.6: one copy of the formulas so they cannot drift).
-  The correction therefore belongs THERE, as one edit reaching
-  all three, not as a DOS-local change.  Written narrowly it
-  would leave the three consumers disagreeing about what the
-  weights mean, which is the outcome the shared module exists to
-  prevent.
-  **What is in the code today.**  The plain linear scheme, end
-  to end.  `bloechlCornerWeights` returns exactly `0.25` per
-  corner for a fully occupied tetrahedron and `f*t/4` terms in
-  the partial cases, each branch returning with nothing added
-  afterward; there is no `D_T(E_F)` factor and no
-  `sum_j (eps_j - eps_i)` anywhere in `src/imago/`.  The only
-  `dosAtFermi` in the LAT path is `latElectronCount`'s
-  derivative for the Newton root-find -- a different quantity
-  for a different purpose, not this term.
-  **Why it now matters more than "improved accuracy" suggests.**
-  The correction is proportional to a tetrahedron's DOS at the
-  Fermi level, so it vanishes identically where every
-  tetrahedron is full or empty.  It cannot disturb the
-  si_fd-3m insulator agreement that validated the
-  implementation, and it moves metals only -- which is exactly
-  where the si_cmce ladder (C138(a)) shows LAT still descending
-  at 720 k-points while the Gaussian ladder has long plateaued.
-  A plausible contributor to that, though not demonstrated, and
-  it does not explain the gapped-mesh discrepancy in C138(e).
+- [x] C4a. Add Bloechl's curvature correction to the corner
+  integration weights (DESIGN 1.3.1; PSEUDOCODE 3a).
+  DONE 2026-07-31.
+  `bloechlCornerCorrection` in `mathSubs.f90` returns the four
+  `dw_i`; `computeElectronPopulation_LAT` adds them to the
+  weights at the accumulation step.  One insertion point covers
+  both consumers, because `populateLAT` and the
+  bond/effective-charge path both fill the same array through
+  that routine.
+  **Scope, corrected twice.**  The entry originally named
+  `computeTDOS_LAT`, the one consumer the correction does NOT
+  reach: the DOS uses `cornerDOSWt_LAT`, the energy derivative
+  dw/dE, and eq. 22 corrects `w`.  It was then widened here to
+  "all three consumers", which was also wrong for the same
+  reason.  It reaches the two that evaluate cumulative
+  integration weights.  A DOS correction is a separate question
+  nothing has answered.
+  **Measured, not asserted.**  Three si_cmce ladders, same
+  manifest, one variable at a time (README beside the ladders):
+  Gaussian converges at [15,15,13] / 448 k-points; uncorrected
+  LAT does not converge and hits the ceiling at 720; corrected
+  LAT converges at [14,14,13] / 392 -- a LOWER density than
+  Gaussian, which is the accuracy-at-coarse-meshes claim the
+  correction exists to make.
+  The verdict is the weaker evidence, since all three rest on a
+  flatness test over a plateau whose scatter is near the
+  threshold.  The strong evidence is cross-scheme agreement:
+  from ~48 k-points up, corrected LAT tracks Gaussian to within
+  +/-0.0006 eV/atom, while uncorrected LAT sat +0.0084 away at
+  504 and was still moving.  Two approximations to the same BZ
+  integral must converge to each other; with the correction they
+  do, and that test is independent of the flatness rule.
+  The correction's size falls from -0.040 eV/atom at 12 k-points
+  to -0.0094 at 504, as a finite-mesh correction should, and it
+  resolves most of the C138(e) gapped-mesh puzzle.
+  **Verified invariants.**  A throwaway harness over 7
+  tetrahedron shapes (including two-fold, three-fold and total
+  degeneracy) x 201 energies: the four terms sum to zero to
+  5.6e-17, so the electron count and the Fermi search are
+  untouched; the correction is exactly zero at all 609
+  out-of-range samples, which is what leaves gapped systems
+  alone; the sign follows `(epsBar - eps_i)` everywhere.  The
+  harness is not in the build -- see C138(d), there is still no
+  Fortran test suite to put it in.
+  **The citation, settled.**  This entry and DESIGN's reference
+  list both said "eqs. 22-24", which reads as three equations
+  owed and cost a round of hedging in the code and the design.
+  Checked against the paper 2026-07-31: the correction is eq. 22
+  alone.  Equations 23 and 24 compare the true Fermi surface
+  against the interpolated polyhedral one -- an assessment the
+  paper makes, not a formula Imago computes.  The bibliography
+  now says so, so the range cannot mislead the next reader.
+  **Left open.**  The correction on a genuine insulator, where
+  it should vanish identically rather than merely become small.
+  si_fd-3m at a COARSE mesh is the cheap check, and it doubles
+  as the diagnostic C138(e) still wants.
 
 ### Phase B -- electronPopulation_LAT (integrated properties)
 
@@ -5094,31 +5116,46 @@ on the same data later with no schema change.  Built on P10.
   should change nothing.
   **What remains:**
   (a) **The metal comparison -- DONE 2026-07-31, and it answers
-  the question.**  Both ladders for `si_cmce_64_1999` are kept in
-  `jobs/si_fingerprint/seed/ladders/{gaussian,linear-tetrahedral}/`
-  with the analysis in the README beside them.  Same binary
-  (`55f4be4`), same manifest, one variable.  **The two schemes
-  return different verdicts on the same solid:** Gaussian
-  converges at [15,15,13] (448 k-points), LAT runs three rungs
-  further to the `max_count = 18` ceiling at [18,18,15] and does
-  not converge.  From [10,10,8] up the Gaussian ladder moves
-  +0.0005 eV/atom in total across thirteen strides while
-  individual strides reach +/-0.0028 -- it hit its own noise floor
-  near 120 k-points and has been oscillating in a +/-0.0015 band
-  since, so its convergence was declared on scatter rather than on
-  a settled energy.  LAT falls 0.0064 eV/atom over the same range
-  and is still falling at the top.  The [12,12,11] false positive
-  reproduces EXACTLY on the same binary (-0.00042 down, -0.00012
-  up, flat on both sides at 252 k-points, which a confident search
-  with `flat_needed = 1` would have taken); under LAT that rung is
-  flat on neither side.  The electron count reads 16.000000 at
-  every mesh and every iteration.  Caveat on the baseline: the
-  Gaussian ladder is unsmeared, and smearing is a Gaussian-path
-  setting only (DESIGN 1.6e -- `populate` takes the LAT branch
-  before it tests `thermalSigma`), so a smeared-versus-LAT run is
-  a DIFFERENT comparison and not a refinement of this one.
-  A first attempt at this comparison returned the tetrahedral
-  ladder verbatim while reporting Gaussian; that defect is C139.
+  the question.**  Three ladders for `si_cmce_64_1999` are kept
+  under `jobs/si_fingerprint/seed/ladders/` -- `gaussian`,
+  `linear-tetrahedral`, `linear-tetrahedral-corrected` -- with
+  the analysis in the README beside them.  Same manifest, one
+  variable at a time.
+
+        scheme                 verdict      mesh          nk
+        gaussian (unsmeared)   converged    [15,15,13]   448
+        LAT uncorrected        NOT conv.    [18,18,15]*  720
+        LAT corrected (C4a)    converged    [14,14,13]   392
+        * the per-axis ceiling, not convergence
+
+  **The schemes return different verdicts on the same solid**,
+  which is what this item was waiting for: LAT changes an answer
+  it ought to be able to change, at the level of the verdict
+  rather than the sixth decimal.  Gaussian's convergence is
+  declared on scatter -- from [10,10,8] up it moves +0.0005
+  eV/atom in total across thirteen strides while individual
+  strides reach +/-0.0028, having hit its noise floor near 120
+  k-points.  The [12,12,11] false positive reproduces EXACTLY
+  (-0.00042 down, -0.00012 up, flat both sides at 252 k-points,
+  which `flat_needed = 1` would have taken); neither LAT ladder
+  is catchable by it.  The electron count reads 16.000000 at
+  every mesh and iteration in both LAT runs.
+  **Read the agreement, not the verdict.**  All three verdicts
+  rest on a flatness test over a plateau whose scatter is near
+  the threshold, so none is strong evidence by itself.  What is
+  strong: from ~48 k-points up, corrected LAT tracks Gaussian to
+  within +/-0.0006 eV/atom, while uncorrected LAT sat +0.0084
+  away at 504 and was still moving.  Two approximations to one BZ
+  integral must converge to each other; with the correction they
+  do.  That test does not use the flatness rule at all.
+  Caveat on the baseline: the Gaussian ladder is unsmeared, and
+  smearing is a Gaussian-path setting only (DESIGN 1.6e --
+  `populate` takes the LAT branch before it tests
+  `thermalSigma`), so a smeared-versus-LAT run is a DIFFERENT
+  comparison and not a refinement of this one.
+  A first attempt at the Gaussian baseline returned the
+  tetrahedral ladder verbatim while reporting Gaussian; that
+  defect is C139.
   (b) **XANES/ELNES under LAT is refused, deliberately.**
   `populateLAT` stops with a message naming Gaussian integration as
   the supported path.  The Gaussian core-hole correction addresses
@@ -5137,35 +5174,60 @@ on the same data later with no schema change.  Built on P10.
   (d) No automated coverage exists for any of this -- the test
   suite is Python and this is Fortran.  The insulator electron-count
   check is currently a thing a person reads out of `gs_scf-fb.out`.
-  (e) **The gapped-mesh discrepancy, unexplained.**  At
-  `si_cmce_64_1999` mesh [4,4,3] both schemes report the SAME gap
-  (0.0588 eV) and yet differ by 0.031 eV/atom, already in the
-  FIRST SCF iteration (-30.581 vs -30.448 hartree) from the same
-  starting potential -- so this is the occupation machinery, not a
-  difference in the converged density.  The two also place the
-  Fermi level 0.099 eV apart (-7.8257 vs -7.7270 eV), which is
-  MORE than the reported gap, so both cannot be sitting inside one
-  gap at the Fermi level.
-  Why this should not happen: with a true gap at E_F every
-  tetrahedron is wholly occupied or wholly empty, the Blochl
-  weights reduce to 1/4 per corner (Case 0b), summing over the
-  tetrahedra sharing each k-point gives the uniform mesh weight,
-  and LAT must return the Gaussian answer.  That is exactly what
-  the si_fd-3m insulator at 6-6-6 showed.  Here it does not hold.
-  The missing correction terms of C4a are NOT a candidate
-  explanation -- that term is proportional to a tetrahedron's DOS
-  at the Fermi level and vanishes wherever this argument applies.
-  Candidates worth separating: whether `gap_ev` measures a gap at
-  E_F at all or merely a spacing between sorted level indices;
-  whether the tetrahedron construction is consistent with the
-  symmetry-reduced mesh (the corner lookup goes through
-  `fullKPToIBZKPMap`, so a mismatch there would misweight filled
-  bands without disturbing the electron COUNT, which stays exact);
-  and whether the two Fermi levels bracket different state sets.
-  Diagnostic that costs nothing: the insulator already passes, so
-  run a solid with a large true gap at a COARSE mesh -- if the
-  neutrality survives there and fails here, the gap report is
-  implicated rather than the weights.
+  (e) **The gapped-mesh discrepancy -- RESOLVED 2026-07-31, the
+  premise was false.**  As posed: at `si_cmce_64_1999` mesh
+  [4,4,3] both schemes report the SAME gap (0.0588 eV) and yet
+  differed by 0.031 eV/atom, already in the FIRST SCF iteration
+  (-30.581 vs -30.448 hartree) from the same starting potential,
+  with Fermi levels 0.099 eV apart -- more than the reported gap
+  is wide.  The argument for why that should be impossible: with
+  a true gap at E_F every tetrahedron is wholly occupied or
+  wholly empty, the Blochl weights reduce to 1/4 per corner
+  (Case 0b), summing over the tetrahedra sharing each k-point
+  gives back the uniform mesh weight, and LAT must return the
+  Gaussian answer -- as the si_fd-3m insulator at 6-6-6 showed.
+  **C4a settled it, by a route this entry got backwards.**  This
+  item originally ruled the correction out as an explanation,
+  reasoning that it vanishes wherever the neutrality argument
+  applies.  True, and that is exactly what makes it decisive: the
+  correction moved [4,4,3] by 0.040 eV/atom, and since it is
+  proportional to a tetrahedron's DOS at the Fermi level, a
+  nonzero shift PROVES tetrahedra straddle E_F at that mesh.  So
+  there is no true gap at the Fermi level there, the neutrality
+  argument never applied, and the premise of the puzzle was
+  false.  A term that vanishes under a hypothesis is a test OF
+  that hypothesis, not merely something the hypothesis excludes.
+  With the correction the same-mesh disagreement falls from
+  +0.031 to -0.009 eV/atom, ordinary for two approximations at 12
+  k-points, and the `fullKPToIBZKPMap` misweighting branch is
+  correspondingly weakened.
+  **`gap_ev` is not implicated, and this entry briefly said it
+  was.**  It reports exactly what it documents:
+  `populate.F90:482` takes the spacing between the highest
+  occupied and lowest unoccupied entries of the GLOBALLY sorted
+  eigenvalue list, and collapses it to zero below
+  `metalGapThresh = 1.0e-3` a.u.  The comment at
+  `populate.F90:253-265` describes this case in advance -- a true
+  metal on a discrete mesh shows a small artificial "gap" of
+  order the level spacing at the Fermi energy, ~1e-4 to 1e-2
+  a.u. depending on mesh density, and one exceeding the cutoff is
+  "a k-point convergence problem to be cured with a denser mesh".
+  0.0588 eV is 0.00216 a.u.: twice the cutoff, inside the
+  predicted band, far below the >= 0.5 eV named for a real
+  semiconductor gap.  The prescribed cure works -- the reported
+  gap is 0.0000 from [5,5,5] up in all three ladders.
+  So the coarse-mesh "gap" is a documented finite-mesh artifact,
+  not a gap at E_F, which is precisely why the neutrality
+  argument did not apply.  Two independent lines agree on that:
+  the correction being nonzero, and `metalGapThresh`'s own
+  account of what a sub-0.03 eV gap means at 12 k-points.
+  Also retracted: "both schemes cannot sit inside the same gap"
+  confused a SPACING with a position -- two runs converging to
+  different potentials can report the same spacing at different
+  absolute energies, which is all the 0.099 eV Fermi-level
+  difference says.  And C125's metal classification is not at
+  risk, since it reads the settled mesh, by which point the
+  artifact is long gone.
   CODE (Fortran); DESIGN 1.6; PSEUDOCODE 3a.
 
 - [ ] C136. Let a run suppress the k-mesh reduction while keeping
