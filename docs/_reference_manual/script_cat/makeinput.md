@@ -55,6 +55,7 @@ makeinput [-basisdb \$atomicBDB] [-potdb \$atomicPDB]
 ```
 
 **Variable Table:**
+
 | Variable        | Accepted Values                | Description |
 |:---------:      |:---------------------:         |:-----------:|
 |atomicBDB        |String; Directory Path          | Path to a different atomic basis function database |
@@ -114,6 +115,7 @@ makeinput [-basisdb \$atomicBDB] [-potdb \$atomicPDB]
 |nodes            |integer                         | Number of nodes requested in the slurm file|
 
 **Option Table:**
+
 | Option    | Outputs      | Defaults              | Descripition |
 |:---------:|:------------:|:---------------------:|:-------------|
 |-basisdb   |N/A           |$IMAGO\_DATA/atomicBDB | Give an alternate location for basis function database|
@@ -157,13 +159,13 @@ As an electronic structure calculation, Imago needs various information about th
 
 When doing this, Imago expects certain conventions to work properly. Ensure that your database follow these for it to work properly. Basis and Potential databases require different conventions so see each section on its own.
 
-#### Basis Databases
+#### **Basis Databases**
 
 > -basisdb
 
 Within the database directory each element has its own subdirectory named by the atomic symbol in all lowercase (e.g. al for aluminum). Inside you need
 
-#### Potential Databases
+#### **Potential Databases**
 
 > -potdb
 
@@ -193,7 +195,7 @@ While you can substitute out entire databases, you can also make substitutions f
 
 Additionally, if species are defined within the structure you can make the substitutions on a species-by-species definition rather than just by element.
 
-#### Basis Substitutions
+#### **Basis Substitutions**
 
 > -subbasis
 
@@ -204,7 +206,7 @@ Example:
 al contains: contract1.dat and contract2.dat 
 when running makeinput, if no -subbasis is given then Imago will use contract1.dat. However if `-subbasis al 2` is provided, then all aluminum atoms will use contract2.dat instead of contract1.dat but everything else will still use contract1.dat.
 
-#### Potential Substitutions
+#### **Potential Substitutions**
 
 > -subpot
 
@@ -219,11 +221,11 @@ when running makeinput, if no -subpot is given then Imago will use pot1. However
 
 In additions to full substitutions, you can modify potentials using coeff1.LABEL files within the database. Each element has a default LABEL which is used in most cases. Furthermore, you can adjust potentials by defining a minimum and maximum value to use.
 
-#### -pot
+#### **-pot**
 
 Manual override for the augmented per-element potential database (DESIGN 5.6).  When an element carries an s\_gaussian\_pot.toml database, LABEL names which entry to apply uniformly across the structure (e.g. "default\_solid" or "isolated").  Without -pot, each database's default-tagged entry is used.  LABEL must exist in every augmented database it applies to; a missing label is a hard error rather than a silent fall-back, because a manual override expresses deliberate intent.  Elements that have no augmented database fall back to the legacy pot1/coeff1 files (with a warning when -pot was requested).
 
-#### -modpot
+#### **-modpot**
 
 Modify the potential for the element specified by ELEM so that the minimum value is MIN, the maximum value is MAX, and the number of terms is NTERMS.  Note that this option can only be applied to one element as the program is presently written.
 
@@ -236,7 +238,7 @@ K-points are used for sampling and integration. Thus, they can have a large effe
 
 Additionally, you can selected from a few predefined integration methods using the kpint options. They follow the same scf\*,pscf\*,\* convention as defining the mesh.
 
-#### K-point mesh by dimensions
+#### **K-point mesh by dimensions**
 
 > -scfkp,-pscfkp,-kp
 
@@ -244,13 +246,13 @@ Specify the mesh of k-points to be used for the SCF calculation. The three param
 
 **NOTE:** for the sybd post-scf calculation, the used k-point mesh is instead given by the path associated with the crystalline cell or -sybdpath parameter if given.
 
-#### K-point mesh by density
+#### **K-point mesh by density**
 
 > -scfkpd,-pscfkpd,-kpd
 
 Specify the k-point volume density for the SCF calculation as a single number (kpoints per unit reciprocal-space volume, in Bohr^-3).  The total kpoint count will be density * V\_BZ, distributed as uniformly as possible across the three axes. Instead of giving explicit mesh dimensions, the program writes a style-code-2 k-point file and lets Imago compute the per-axis mesh counts from the reciprocal cell geometry at runtime.
 
-#### Shifting the K-point mesh
+#### **Shifting the K-point mesh**
 
 > -kpshift
 
@@ -258,7 +260,7 @@ This option does not differentiate between pscf and scf calculations.
 
 Force a specific shift to the kpoint mesh by the given fractional a, b, c amounts.
 
-#### K-point Integration Method
+#### **K-point Integration Method**
 
 Select the k-point integration method for the SCF calculation.  M is an integer: 0 = Gaussian/histogram (default), 1 = LAT (linear analytic tetrahedron). Higher integers are reserved for future methods. This value is written into the KPOINT\_INTG\_CODE field of the k-point input file.  Works with both mesh mode (-kp) and density mode (-kpd).
 
@@ -266,9 +268,9 @@ Select the k-point integration method for the SCF calculation.  M is an integer:
 
 ### Targeting and Reduction
 
-***Insert overview of the purpose of targeting and reduction here***
+Making when you make species, you allow yourself to compute the individual contributions of different groups of atoms by species. Targeting allows you to select atoms based on regions and the reduce call makes the species.
 
-#### Making species out of elements
+#### **Making species out of elements**
 
 > -reduce
 
@@ -285,7 +287,7 @@ Select the k-point integration method for the SCF calculation.  M is an integer:
 
 Collect information about each atom in order to group all the atoms based on the similarity of the information.  A group is defined by a series of spherical shells (levels), what neighbor atoms are in the shells, and what the distance is to each shell from the center.  Parameters can be adjusted to determine the number of shells (-level), the thickness of the shells (-thick), a maximum cutoff radius (-cutoff), and a distance threshold for comparing the same shell number from different atoms (-tolerance). The basic idea is to find the nearest atom to the current atom, define a shell of a given thickness and record what atoms are in that shell.  Then repeat (reduceLevel) times with the next nearest atom outside the shell.  Once all the shells have been defined for each atom, the results are compared in terms of the atoms in each shell and the shell distances.  This grouping method is not at all defined by boundaries and so does not have in and out -zone parameters.  It will also not have the ability to make grouping dissimilar (e.g. it will not find a group of atoms that are similar and then make them all different).  This method will only work to make species out of elements, and will not make types out of species.  It can be applied differently to different groups of atoms via -selection.
 
-#### Spherical Targeting
+#### **Spherical Targeting**
 
 > -target
 
@@ -303,7 +305,7 @@ Collect information about each atom in order to group all the atoms based on the
 
 Consider a point given either by an x,y,z location (-atxyz), an a,b,c location (-atabc), or an atom number (-atom).  Then the atoms either in or out of the zone (sphere of given -sphere radius) will be considered in terms of their -operand (species, type, reduce) and will be grouped by their -relate relation (alike or diff).  If the reduce operand is given then this target is used as a selecting tool for a reduce call.
 
-#### Block or Slab targeting
+#### **Block or Slab targeting**
 
 > -block
 
@@ -322,7 +324,7 @@ Consider a zone defined like a slab or block of the system using -abc to specify
 
 Imago uses exchange correlation methods to account for relativistic effects that classical potentials ignore. This is used to increase accuracy of calculations. Several methods are included with Imago, and there is no easy way to define extra methods at the moment.
 
-#### Selecting Exchange Correlation Code
+#### **Selecting Exchange Correlation Code**
 
 > -xccode
 
@@ -345,7 +347,7 @@ Several exchange correlations methods exist, and several are provided with Imago
 |Old\_vBarth-Hedin(rel)  |  352        | 2    | 1  |  0 |
 |PBE(rel)               |  400        | 1    | 1  |  1 |
 
-#### Exchange Correlation Mesh
+#### **Exchange Correlation Mesh**
 
 > -xcmesh
 
@@ -363,7 +365,7 @@ Exchange correlation methods have to sample the charge density, and the mesh use
 
 There are several options which can be turned on that will have makeinput create extra files. These are most often used when you plan to use some other program to assisst in your postprocessing. While some are used to generate files needed for certain calculations.
 
-#### Xanes
+#### **Xanes**
 
 > -xanes
 
@@ -376,37 +378,37 @@ There are several options which can be turned on that will have makeinput create
 
 Instead of generating one set of input files, make one set for each of the atomic species or listed xanes atoms in the system. Each input file set will be different in that a xanes atom of the current input file set will have the core orbitals included in the calculation, and the atoms within a given radius (default 3.50 A) of the xanes atom will all have different types.
  
-#### Brillouin zone
+#### **Brillouin zone**
 
 > -printbz
 
 Create an additional file as part of the input containing a description of the Brillouin zone suitable for importing in a Python script.  The two required options are an integer identifying which Brillouin zone to print and a scale factor that causes the size of the Brillouin zone to be scaled.
 
-#### Crystallographic Interchange Format
+#### **Crystallographic Interchange Format**
 
 > -cif
 
 Will generate an atomic structure file using the Crystallographic Interchange Format. Allows for a greater number of species for each atom. Preferred when doing so.
 
-#### Protein Data Bank
+#### **Protein Data Bank**
 
 > -pdb
 
 Generates a Protein Data Bank (PDB) crystal structure file.
 
-#### Basis Visualization
+#### **Basis Visualization**
 
 > - basisVis
 
 Ask the contract program to produce files in the .inputTemp directory for visualizing the complete atomic orbital basis.  The files are numerical data of the radial part of the basis functions, and a set of POVRay scene files (one for each type of atomic orbital in the system).
 
-#### EMU Config
+#### **EMU Config**
 
 > -emu
 
 Generates EMU configuration files.
 
-#### SLURM
+#### **SLURM**
 
 **Suboption Table**
 
@@ -431,7 +433,7 @@ The self-consisitent field (scf) calculation can take a very long time depending
 
 > -sybdpath
 
-Specify the type of cell and particular path to be used in the symmetric band calculation (SYBD).  You should be consistent with the actual cell type or you will get a warning (even though it will still allow you to create the input files).  The valid options are present in the $IMAGO\_DATA/sybdDB directory.  Simply specify one of those names as the sybdPath.
+Specify the type of cell and particular path to be used in the symmetric band calculation (SYBD).  You should be consistent with the actual cell type or you will get a warning (even though it will still allow you to create the input files).  The valid options are present in the \$IMAGO\_DATA/sybdDB directory.  Simply specify one of those names as the sybdPath.
 
 ### States to Calculate
 
