@@ -273,6 +273,7 @@ Select the k-point integration method for the SCF calculation.  M is an integer:
 > -reduce
 
 **Suboptions Table**
+
 |Option     | Default      | Description|
 |:---------:|:------------:|:-----------|
 |-level     | 2            |The number of shells |
@@ -289,6 +290,7 @@ Collect information about each atom in order to group all the atoms based on the
 > -target
 
 **Suboptions Table**
+
 |Suboption  |Default    |Description|
 |:---------:|:---------:|:----------|
 |-atom      |undefined  |Define an atom to make the center of the spherical target|
@@ -306,6 +308,7 @@ Consider a point given either by an x,y,z location (-atxyz), an a,b,c location (
 > -block
 
 **Suboptions Table**
+
 |Suboption  |Default       |Description|
 |:-------:  |:-----------: |:----------|
 |-abc       |undefined     | The block to consider; defined by from coord-\>to coord paradigm|
@@ -347,6 +350,7 @@ Several exchange correlations methods exist, and several are provided with Imago
 > -xcmesh
 
 **Suboption Table**
+
 |Suboption     | Default   | Description |
 |:------------:|:---------:|:------------|
 |-numvect      | 100       | The number of radial vectors used for sampling|
@@ -364,6 +368,7 @@ There are several options which can be turned on that will have makeinput create
 > -xanes
 
 **Suboption Table**
+
 |Suboption  | Default      | Description|
 |:---------:|:------------:|:-----------|
 |-sphere    |3.5 A         | Radius around the target atom(s)|
@@ -404,6 +409,7 @@ Generates EMU configuration files.
 #### SLURM
 
 **Suboption Table**
+
 |Suboption  | Default      | Description|
 |:---------:|:------------:|:-----------|
 |-p         |rulisp-lab    | Partition to charge|
