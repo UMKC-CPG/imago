@@ -387,14 +387,72 @@
   the dispatcher, never inside it).  Pairs later with a C-level
   implementation task once the surface is fixed.  Relates to D14
   (structure intake) and the C92 single-structure guidance path.
-- [ ] D21. The mesh ladder is not a monotone refinement, and the
-  flatness test assumes it is.  DESIGN 3.12.1 separates the roles
-  cleanly -- density is the currency, the mesh is the step -- and
-  3.12.2 justifies the step as "each is the *finest* mesh the
-  symmetry permits".  Both hold.  Neither establishes the property
-  the two-sided flatness test actually needs: that a later rung is
-  a BETTER sampling than the one before it.  For fcc at the
-  standard shift it is not.  Irreducible point counts by parity:
+- [ ] D21. The convergence threshold sits BELOW the ladder's own
+  noise floor, so passing it is luck rather than convergence.
+  This one sentence accounts for the whole cluster of symptoms
+  chased on 2026-07-31: si_cmce's Gaussian ladder "converging" on
+  scatter, three separate one-rung-short near-misses, and four of
+  five elemental metals running to the ceiling.  A bar beneath the
+  noise can only be cleared by a coin landing the same way twice.
+  **The measurement.**  Top-of-ladder rung-to-rung scatter, all in
+  eV per atom: Al 0.00082 under LAT and 0.00469 under Gaussian,
+  Fe ~0.0015, the transition metals ~0.001.  The threshold is
+  5e-4.
+  **What relaxing it does.**  Converged mesh by threshold, mesh
+  order, failed rungs excluded throughout:
+
+        solid              5e-4        1e-3        2e-3        5e-3
+        Al                 --          --          --          [18,18,18]
+        Co                 [16,16,16]  [16,16,16]  [16,16,16]  [12,12,12]
+        Cu                 --          [12,12,12]  [10,10,10]  [8,8,8]
+        Fe                 --          --          [13,13,13]  [12,12,12]
+        Ni                 --          --          [16,16,16]  [12,12,12]
+        si_cmce            [14,14,13]  [11,11,10]  [8,8,7]     [8,8,7]
+        si_fd-3m (six)     [12,12,12]  [10,10,10]  [10,10,10]  [8,8,8]
+        si_ia-3            --          --          [11,11,11]  [9,9,9]
+
+  At 2e-3, twelve of thirteen converge.  The insulators degrade
+  gracefully -- [12,12,12] to [10,10,10] -- while si_cmce, a
+  metal, pays most ([14,14,13] to [8,8,7]), which is precisely the
+  case DESIGN 3.12.3 already concedes should be rough.
+  **Why this suits the deliverable.**  3.12.3 justifies the metal
+  short-circuit by observing that "the initial-potential database
+  wants a *rough* good starting point for a later self-consistent
+  calculation, not a converged energy".  The threshold never got
+  the same scrutiny.  5e-4 eV/atom is 0.5 meV/atom -- a
+  publication-grade bar applied to a starting guess that the next
+  calculation re-converges anyway, and to guidance a curator reads
+  as advice rather than as an answer.
+  **Two properties that make this cheap and honest.**  It needs no
+  code: `kpoint_convergence_threshold` is already a per-solid
+  manifest key (`HARVEST_SETTING_KEYS`, curation_manifest.py), so
+  a curator wanting a tighter bar on one material can still ask
+  for it.  And it is self-describing: a staged entry carries
+  `metric_threshold` in `entry.verification`, so a looser entry is
+  labelled as such and the dataspace does not degrade silently.
+  **Proposed:** raise the default to sit above the measured noise
+  floor -- 2e-3 on this evidence -- and say in DESIGN that the
+  threshold MUST sit above it, with these numbers as the reason.
+  A later reader should not tighten it back without re-measuring
+  the floor.
+  **What this does NOT resolve.**  It makes the ladder's
+  non-monotonicity stop mattering; it does not remove it.  That
+  property is real, measured, and recorded below, and this entry
+  should not be closed as though the ladder were fixed.  Al also
+  survives relaxation -- it fails at 5e-4, 1e-3 and 2e-3 under
+  both orderings and converges only at 5e-3 -- so something
+  further is at work there.
+
+  ---
+
+  **The recorded property: the mesh ladder is not a monotone
+  refinement.**  DESIGN 3.12.1 separates the roles cleanly --
+  density is the currency, the mesh is the step -- and 3.12.2
+  justifies the step as "each is the *finest* mesh the symmetry
+  permits".  Both hold.  Neither establishes what the two-sided
+  flatness test assumes: that a later rung is a BETTER sampling
+  than the one before it.  For fcc at the standard shift it is
+  not.  Irreducible point counts by parity:
 
         odd  n:  19  44  85 146 231 344 489 670
         even n:   8  16  29  47  72 104 145 195 256
@@ -432,8 +490,11 @@
   Gaussian is still scattering at 1.3e-3 -- LAT converges Al and
   Gaussian does not.  Ladders kept at
   `jobs/al_parity/ladders/{linear-tetrahedral,gaussian}/`.
-  **Three independent fixes, and they should be weighed together
-  because they all concern what the flatness test may assume:**
+  **Secondary options, kept because they were measured, not
+  because they are the fix.**  Raising the threshold above the
+  noise floor buys twelve of thirteen; ordering buys two of five.
+  Reach for these only if the threshold change proves
+  insufficient, or in combination where a solid still resists.
   (a) Walk a sampling-consistent ladder.  Two candidates: fix a
   parity and step cubic n by 2, or order rungs by IRREDUCIBLE
   COUNT.  Re-scoring the existing metal ladders both ways favours
@@ -469,11 +530,13 @@
   which is unsurprising since they settle near the top.  Cheap to
   detect, and it converts near-misses into results.
   (c) Exclude rungs whose SCF did not converge from the flatness
-  test.  Today they are read as ordinary energies and can be
-  SELECTED: ni_fm-3m_225_2006 reported `converged_mesh =
-  [18,18,18]`, a rung whose own `result.toml` says
-  `status = "not_converged"`.  Cu and Fe carry failed rungs inside
-  their ladders too.  Wrong independently of (a) and (b).
+  test.  NOT secondary -- this one is a plain defect and survives
+  every threshold.  Today such rungs are read as ordinary energies
+  and can be SELECTED: ni_fm-3m_225_2006 reported
+  `converged_mesh = [18,18,18]`, a rung whose own `result.toml`
+  says `status = "not_converged"`.  Cu and Fe carry failed rungs
+  inside their ladders too.  Do this regardless of what happens to
+  the threshold.
   DESIGN 3.12.1 / 3.12.2 / 3.12.3.
 
 - [x] D16. Design the historical-guidance dataspace
