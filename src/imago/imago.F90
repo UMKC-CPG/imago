@@ -1247,13 +1247,23 @@ subroutine optc(inSCF,doOPTC)
       call printOptcResults(doOPTC) ! Internally distinguishes optc, poptc.
    endif
 
-   ! Deallocate unused matrices
+   ! Deallocate unused matrices.
    deallocate (transCounter)
    if (doOPTC /= 3) then  ! Not doing a sigma(E) calculation.
       deallocate (energyDiff)
-      if (detailCodePOPTC == 0) then
-         deallocate (transitionProb)
-      else
+
+      ! The total transition probability exists for every non-sigma(E)
+      !   calculation, partial or not: getEnergyStatistics allocates it
+      !   unconditionally, and a partial calculation still fills and
+      !   prints it (computePOPTCPairs sums each pair decomposition back
+      !   into it, and getOptcCond broadens it into the total spectrum).
+      !   So it is released here in both cases rather than only when the
+      !   decomposition is switched off.
+      deallocate (transitionProb)
+
+      ! The pair-resolved probability, by contrast, is created only when
+      !   a decomposition was requested, so it is released only then.
+      if (detailCodePOPTC /= 0) then
          deallocate (transitionProbPOPTC)
       endif
    endif

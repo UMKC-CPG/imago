@@ -9,7 +9,7 @@ PURPOSE:  This program will read the raw Epsilon 2 pOptc data
    file with the purpose of collecting label information and
    data along with creating a control file for makePDOS so
    that the raw data for one partial pair can be formatted
-   to run imagoKkc. The purpose of this script is to allow
+   to run imagoKKc. The purpose of this script is to allow
    for the calculation of partial ELF, Eps1, Eps1i and ref.
 
 AUTHOR:  Alysse Weigand (Perl original); Python port by Claude.
@@ -27,7 +27,7 @@ When the imago poptc calculation runs, it will produce a
    in fort.250. This program will read each partial epsilon2
    from the raw file. One at a time, the program will create
    a new file (fort.50) for each partial epsilon2, then it
-   will run imagoKkc on that file to produce the partial
+   will run imagoKKc on that file to produce the partial
    epsilon1, ELF, conductivity, etc. Those data sets are then
    appended into new "raw" files that (when complete) will
    contain all partial data for their respective spectral type.
@@ -40,15 +40,15 @@ FILE NUMBERING CONVENTION:
 
    Intermediate files (created and deleted per sequence):
       fort.700 — Control file for makePDOS
-      fort.450 — Temp eps2 (input to imagoKkc)
-      fort.500 — Temp eps1+eps2+ELF (output from imagoKkc)
-      fort.510 — Temp eps1 total, x, y, z (from imagoKkc)
-      fort.520 — Temp ELF total, x, y, z (from imagoKkc)
-      fort.530 — Temp ref. idx. total, x, y, z (from imagoKkc)
-      fort.540 — Temp ext. coeff. total, x, y, z (from imagoKkc)
-      fort.550 — Temp eps1i total, x, y, z (from imagoKkc)
-      fort.560 — Temp reflectivity total, x, y, z (from imagoKkc)
-      fort.570 — Temp absorp. coeff. total, x, y, z (from imagoKkc)
+      fort.450 — Temp eps2 (input to imagoKKc)
+      fort.500 — Temp eps1+eps2+ELF (output from imagoKKc)
+      fort.510 — Temp eps1 total, x, y, z (from imagoKKc)
+      fort.520 — Temp ELF total, x, y, z (from imagoKKc)
+      fort.530 — Temp ref. idx. total, x, y, z (from imagoKKc)
+      fort.540 — Temp ext. coeff. total, x, y, z (from imagoKKc)
+      fort.550 — Temp eps1i total, x, y, z (from imagoKKc)
+      fort.560 — Temp reflectivity total, x, y, z (from imagoKKc)
+      fort.570 — Temp absorp. coeff. total, x, y, z (from imagoKKc)
 
    Output files (spin 1 / spin 2):
       fort.300/301 — Raw poptc eps1, eps2, ELF
@@ -199,13 +199,13 @@ Partial Optical Properties (POPTC) post-processor.
 
 Reads the raw partial Epsilon 2 data file produced by the
 Imago poptc calculation (fort.250 or fort.251) and processes
-each partial pair through imagoKkc to produce the
+each partial pair through imagoKKc to produce the
 corresponding partial Epsilon 1, ELF, refractive index,
 extinction coefficient, Epsilon 1 imaginary, reflectivity,
 and absorption coefficient spectra.
 
 Each partial epsilon2 is extracted via makePDOS, run through
-imagoKkc with the appropriate scaling factor, and the results
+imagoKKc with the appropriate scaling factor, and the results
 are assembled into raw output files for downstream plotting
 or analysis.
 """
@@ -299,7 +299,7 @@ class POPTCData():
       3. For each element pair (sequence):
          a. Create a makePDOS control file.
          b. Run makePDOS to extract the pair's eps2 data.
-         c. Run imagoKkc to produce derived spectra.
+         c. Run imagoKKc to produce derived spectra.
          d. Append the derived spectra into raw output files.
       4. Clean up intermediate files.
 
@@ -590,7 +590,7 @@ class POPTCData():
         the raw data file (fort.250 or fort.251), and a new
         output file (fort.450) that will contain data that
         can be plotted. The fort.450 file is effectively an
-        eps2 file that can be used directly by the imagoKkc
+        eps2 file that can be used directly by the imagoKKc
         program.
 
         After makePDOS completes, the control file is removed
@@ -601,8 +601,10 @@ class POPTCData():
 
         # Construct the makePDOS command. The -i flag
         # provides the control file, -f provides the raw
-        # data file, and -o provides the output file.
-        make_pdos_cmd = os.path.join(imago_bin, "makePDOS")
+        # data file, and -o provides the output file. The
+        # installed name carries the .py suffix (see the
+        # scripts CMakeLists), so it must be spelled out.
+        make_pdos_cmd = os.path.join(imago_bin, "makePDOS.py")
         subprocess.run(
             [
                 make_pdos_cmd,
@@ -619,9 +621,9 @@ class POPTCData():
             os.remove(self.pdos_control)
 
     def call_imago_kkc(self, seq_num):
-        """Run imagoKkc on the current pair's eps2 data.
+        """Run imagoKKc on the current pair's eps2 data.
 
-        imagoKkc performs the Kramers-Kronig conversion to
+        imagoKKc performs the Kramers-Kronig conversion to
         produce derived optical spectra (eps1, ELF,
         refractive index, extinction coefficient, eps1i,
         reflectivity, absorption coefficient) from the eps2
@@ -643,7 +645,7 @@ class POPTCData():
         ----
         Currently not set up for spin 2 (see Imago source
         line 1376 in the original Perl comment). The spin 2
-        pathway exists for file naming but the imagoKkc call
+        pathway exists for file naming but the imagoKKc call
         uses the same flags regardless of spin.
         """
 
@@ -653,8 +655,11 @@ class POPTCData():
 
         imago_bin = os.getenv('IMAGO_BIN', '')
 
-        # Call imagoKkc.
-        kkc_cmd = os.path.join(imago_bin, "imagoKkc")
+        # Call imagoKKc. The executable target is spelled
+        # with two capital K's (see the auxiliary program
+        # CMakeLists); on a case sensitive filesystem any
+        # other spelling simply will not be found.
+        kkc_cmd = os.path.join(imago_bin, "imagoKKc")
         subprocess.run(
             [
                 kkc_cmd,
@@ -670,21 +675,30 @@ class POPTCData():
                   num_col_labels, label, seq_num):
         """Copy data from a temp file into a raw output file.
 
-        After imagoKkc produces its output for one element
+        After imagoKKc produces its output for one element
         pair, this subroutine appends that pair's data into
         the corresponding accumulated raw output file. It
         writes the sequence header (element names, type
         numbers, column labels) and then copies all data
-        lines, stripping the first two columns (which are
-        typically an index and the energy value already
-        captured in the file header).
+        lines, stripping the leading energy column.
+
+        The energy column is dropped because the energy
+        scale is written once in the file header (see
+        write_header) and is shared by every sequence, so
+        repeating it per pair would waste space and invite
+        the two copies to disagree. Every other column is
+        spectral data and must be kept: imagoKKc writes
+        four columns to fort.500 (energy, eps1, eps2, ELF)
+        and five to the rest (energy, total, x, y, z), so
+        after the strip the counts are the 3 and the 4 that
+        num_col_labels declares.
 
         Parameters
         ----------
         file_handle : file object
             An open file for the accumulated raw output.
         temp_file_name : str
-            Path to the temp file produced by imagoKkc for
+            Path to the temp file produced by imagoKKc for
             this spectral type.
         num_col_labels : int
             Number of column labels (3 for eps1/eps2/ELF,
@@ -725,17 +739,21 @@ class POPTCData():
             # Read past the header.
             temp_in.readline()
 
-            # Read all actual data lines in and copy to
-            # the raw file. For each line, strip the first
-            # two whitespace-separated tokens (typically an
-            # index and the energy value) and write the
-            # remaining values.
+            # Read all actual data lines in and copy to the
+            # raw file. For each line, strip the leading
+            # energy token and write the remaining values.
             for line in temp_in:
                 values = line.split()
-                # Remove the first two columns (index and
-                # energy), keeping only the spectral data.
-                if len(values) > 2:
-                    values = values[2:]
+                # Remove only the energy column, keeping
+                # every spectral column that follows it.
+                # NOTE: the Perl original indexed from 2
+                # here because Perl's split leaves an empty
+                # leading token on these Fortran-formatted
+                # lines; Python's split does not, so the
+                # index must drop by one or the first real
+                # spectral column is silently discarded.
+                if len(values) > 1:
+                    values = values[1:]
                 file_handle.write(
                     " ".join(values) + "\n"
                 )
@@ -755,7 +773,7 @@ class POPTCData():
           3. For each sequence:
              a. Create the makePDOS control file.
              b. Run makePDOS to extract the pair's eps2.
-             c. Run imagoKkc to produce derived spectra.
+             c. Run imagoKKc to produce derived spectra.
              d. Copy each derived spectrum into its raw
                 output file.
           4. Close all output files.
@@ -796,7 +814,7 @@ class POPTCData():
                 # file (fort.450).
                 self.call_make_pdos()
 
-                # Run imagoKkc on the current segment to
+                # Run imagoKKc on the current segment to
                 # produce all derived spectra from the
                 # extracted eps2.
                 self.call_imago_kkc(i)
@@ -865,7 +883,7 @@ def main():
       2. Initialize the POPTCData object (reads metadata
          from the raw eps2 file and KKC control data).
       3. Process all element pair sequences through the
-         makePDOS -> imagoKkc -> accumulate pipeline.
+         makePDOS -> imagoKKc -> accumulate pipeline.
     """
 
     # Get script settings from a combination of the resource

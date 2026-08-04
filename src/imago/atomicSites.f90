@@ -384,8 +384,14 @@ subroutine buildAtomPerm
             rotPos(axis) = modulo(rotPos(axis), 1.0_double)
          enddo
 
-         ! Search for the atom at the rotated position. Only atoms of
-         !   the same type can match (species is conserved by symmetry).
+         ! Search for the atom at the rotated position, considering only
+         !   atoms of the same type. Read this as a requirement being
+         !   imposed rather than a fact being exploited: a type is a
+         !   user-assigned grouping and need not be a symmetry orbit (an
+         !   amorphous cell bins atoms by local environment, and a defect
+         !   supercell keeps the pre-defect typing), so demanding that
+         !   every operation stay inside a type is what makes every
+         !   type-level sum invariant. The stop below enforces it.
          matchFound = .false.
          do atomB = 1, numAtomSites
 

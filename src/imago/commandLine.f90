@@ -256,10 +256,14 @@ subroutine readJobID
       doOPTC_SCF = 2
       write (20,*) "Doing SCF Photo-Absorption Cross Section"  ! XANES/ELNES
    elseif (jobID == 106) then
-      doOPTC_SCF = 3
+      ! The doOPTC codes are the ones declared above and acted on inside
+      !   the optc module: 3 selects sigma(E) and 4 selects the non-linear
+      !   properties. They are not the same numbering as the job ID, where
+      !   106 is non-linear and 107 is sigma(E), so the two cross over here.
+      doOPTC_SCF = 4
       write (20,*) "Doing SCF Non-Linear Optical Properties"
    elseif (jobID == 107) then
-      doOPTC_SCF = 4
+      doOPTC_SCF = 3
       write (20,*) "Doing SCF Sigma(E)"
    elseif (jobID == 108) then
       doSYBD_SCF = 1
@@ -289,10 +293,13 @@ subroutine readJobID
       doOPTC_PSCF = 2
       write (20,*) "Doing PSCF Photo-Absorption Cross Section"  ! XANES/ELNES
    elseif (jobID == 206) then
-      doOPTC_PSCF = 3
+      ! See the note on the matching SCF case above: the doOPTC code and
+      !   the job ID number the last two optical properties in opposite
+      !   order, so 206 (non-linear) maps to code 4 and 207 to code 3.
+      doOPTC_PSCF = 4
       write (20,*) "Doing PSCF Non-Linear Optical Properties"
    elseif (jobID == 207) then
-      doOPTC_PSCF = 4
+      doOPTC_PSCF = 3
       write (20,*) "Doing PSCF Sigma(E)"
    elseif (jobID == 208) then
       doSYBD_PSCF = 1

@@ -554,7 +554,14 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
             enddo
          enddo
 
-      elseif (detailCodePOPTC == 3) then ! Decompose by atom and QN_nl
+      ! Decompose by type and QN_nl. The pair of loop nests below walks
+      !   types, then l shells, then the radial functions of that shell,
+      !   which reproduces exactly the ordering that the pOptcIndex
+      !   construction in O_Optc laid down, so poptcI and poptcF address
+      !   the partial that was accumulated for the same (type, QN_nl)
+      !   pair. Every atom carrying a type has already been summed into
+      !   it, which is why no site loop appears here.
+      elseif (detailCodePOPTC == 3) then
 
          ! Print the partial contributions to the spectrum.
          poptcI = 0

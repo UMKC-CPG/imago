@@ -176,6 +176,15 @@ subroutine getEnergyStatistics(doOPTC)
    indirectGapEnergies(:,2)  = -bigThresh
    inDirectGap(:)            = 0.0_double
 
+   ! Initialize the running maximum for the transition pair count. This is
+   !   a module variable that is only ever built up with max() below, so it
+   !   needs a starting value smaller than any count it could be compared
+   !   against, and zero is the natural floor for a count. Setting it here
+   !   rather than leaving it to whatever the module variable happens to
+   !   hold keeps the result independent of how a given compiler chooses
+   !   to lay out and pre-fill module storage.
+   maxPairs = 0
+
    ! The purpose of this subroutine is to gather important statistics and
    !   indices for use later on.  The important values that will be determined
    !   are:  1) The first and last occupied state and the first and last 
@@ -438,6 +447,16 @@ subroutine getEnergyStatistics(doOPTC)
             ! lastOccupiedState determined above.
             ! firstUnoccupiedState determined above.
             ! lastUnoccupiedState determined above.
+         elseif (doOPTC == 4) then ! Non-linear optical properties.
+            ! The non-linear properties have an input block of their own
+            !   (NLOP_INPUT_DATA, read by readNlopControl) and a job ID
+            !   that reaches this far, but no routine anywhere computes
+            !   them: there is no counterpart to computePairs or
+            !   computeSigmaE for the second order response. Stopping here
+            !   is deliberate. The alternative is to fall through and
+            !   silently emit whichever spectrum the surrounding code
+            !   happens to produce, labelled as a non-linear result.
+            stop "Non-linear optical properties are not implemented."
          else
             ! Error, no other options.
             stop "Check optical properties command line parameter: doOPTC"
@@ -994,8 +1013,18 @@ subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
 
    ! Begin the double loop to determine the transition energies.
    do i = firstInit, lastInit
-      finalStateIndex = 0
       do j = firstFin, lastFin
+
+         ! Index into conjWaveMomSum, which was filled above for *every*
+         !   final state in the firstFin to lastFin range. The index is
+         !   derived from j rather than accumulated by a counter because
+         !   the loop below skips some j: with thermal smearing a state
+         !   can be both initial and final, and those skipped j still
+         !   occupy their slot in conjWaveMomSum. A counter incremented
+         !   only on accepted pairs would fall behind at the first skip
+         !   and read a different final state's momentum sum from then
+         !   on, silently, for the rest of this initial state.
+         finalStateIndex = j - firstFin + 1
 
          ! Recall that thermal smearing may allow some states to be both
          !   initial and final. We do not consider transitions where the final
@@ -1022,9 +1051,6 @@ subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
 
          ! Store the transition energy for the current pair.
          energyDiffTemp(transPairCount) = currentEnergyDiff
-
-         ! Increment the final state index for the conjWaveMomSum
-         finalStateIndex = finalStateIndex + 1
 
          ! In the event that thermal smearing is turned on. The state that the
          !   e- comes from and goes into may be fully, partially, or not
@@ -1185,7 +1211,7 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    integer :: newPartial
    integer, allocatable, dimension (:) :: numStatesAtom ! Vale states / atom
    real    (kind=double), allocatable, dimension (:)         :: partialsIndex
-   real    (kind=double), allocatable, dimension (:,:,:,:)   :: transitionProbTemp
+   real    (kind=double), allocatable, dimension (:,:,:,:) :: transitionProbTemp
 
    ! Define local variables that are the same as computePairs.
    integer :: initComponent
@@ -1210,7 +1236,7 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    complex (kind=double), allocatable, dimension (:,:,:)   :: valeValeXMom
 #else
    real    (kind=double) :: valeValeXMomGammaSum
-   real    (kind=double), allocatable, dimension (:,:,:,:) :: conjWaveMomSumGamma
+   real  (kind=double), allocatable, dimension (:,:,:,:) :: conjWaveMomSumGamma
    real    (kind=double), allocatable, dimension (:,:,:)   :: valeValeXMomGamma
 #endif
 
@@ -1230,9 +1256,20 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    elseif (detailCodePOPTC == 2) then
       allocate (cumulNumPartials (1)) ! Unused for this detailCodePOPTC.
 
-   ! Store pOptc for each QN_nl resolved atom.
-   !   (A sum over all m QN orbitals of a given nl orbital of a given atom.)
+   ! Store pOptc for each QN_nl resolved TYPE.
+   !   (A sum over all m QN orbitals of a given nl orbital, taken over
+   !   every atom of the type.) Note that this code groups by type even
+   !   though it sits between the two atom resolved codes: the index
+   !   built below comes from cumulNumPartials(currentType), so two
+   !   atoms of one type share a partial, and printSpectrumPOPTC walks
+   !   types to match. The distinction is not cosmetic. A sum over all
+   !   atoms of a type is invariant under the point operations used to
+   !   reduce the k-point mesh, while an atom resolved quantity is not,
+   !   so a reader who mistakes this for atom resolution would think it
+   !   needed an unfolding correction that it does not.
    elseif (detailCodePOPTC == 3) then
+      ! Only the first numAtomTypes+1 entries are ever used. The bound
+      !   here is the site count, which is always at least as large.
       allocate (cumulNumPartials (numAtomSites + 1))
 
    ! Store pOptc for each QN_nlm resolved atom.
@@ -1275,13 +1312,20 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    !   either types or atoms (at present).
    if (detailCodePOPTC == 1) then
       ! Store the total for each type.
-    
+
+      ! Nothing reads cumulNumPartials for this detail code: the group
+      !   index assigned below is simply the type number itself, and the
+      !   partial count is set directly on the next line. The running
+      !   sum is therefore inert, and its summand does not mean what the
+      !   name suggests. Do not build on it without first deciding what
+      !   it ought to hold.
       cumulNumPartials(1) = 0
-      
+
       do i = 1,numAtomTypes
          cumulNumPartials(i+1) = cumulNumPartials(i) + i
       enddo
-         
+
+
       ! Record number of Atom Types
       sumNumPartials = numAtomTypes
 
@@ -1292,20 +1336,25 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
       sumNumPartials = numAtomSites
 
    elseif (detailCodePOPTC == 3) then
-      ! Store the nl orbital totals for each atom. (Sum over m.)
+      ! Store the nl orbital totals for each type. (Sum over m, and over
+      !   every atom that carries the type.)
 
-      ! Initialize counter to index the cumulative sum of QN_l orbitals for all
-      !   atoms.  (Make a plot for each QN_nl pair of each atom.)
+      ! Initialize the counter that indexes the cumulative sum of QN_nl
+      !   orbitals over types. (Make a plot for each QN_nl pair of each
+      !   type.) Each type occupies a contiguous block of partials, and
+      !   this array records where each block begins.
       cumulNumPartials(1) = 0
 
-      ! Loop to record the number of orbitals that each atom contributes.
-      !   (An orbital is just a QN_nl pair.)
+      ! Loop to record the number of orbitals that each type contributes.
+      !   (An orbital is just a QN_nl pair.) Because every atom of a type
+      !   shares one basis, this count is a property of the type and is
+      !   taken once rather than once per atom.
       do i = 1, numAtomTypes
          cumulNumPartials(i+1) = cumulNumPartials(i) + sum( &
                & atomTypes(i)%numQN_lValeRadialFns(:))
       enddo
 
-      ! Record the total number of orbitals summed over all atoms.
+      ! Record the total number of orbitals summed over all types.
       sumNumPartials = cumulNumPartials(numAtomTypes + 1)
 
    elseif (detailCodePOPTC == 4) then
@@ -1415,8 +1464,13 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
          ! Record how many basis functions contribute to this partial for KKC.
          partialsIndex(i) = pOptcKKCIndex
 
-      ! In the case where the pOptc is collected by atom orbital (3).
-      elseif (detailCodePOPTC == 3) then ! Consider spdf for each atom too.
+      ! In the case where the pOptc is collected by type orbital (3) we
+      !   send each basis function to the slot its type reserved for that
+      !   QN_nl pair. The walk is over sites because the basis functions
+      !   are laid out per site, but the destination depends only on the
+      !   site's type, so every atom of a type accumulates into the same
+      !   partial.
+      elseif (detailCodePOPTC == 3) then ! Consider spdf for each type.
 
          numSQN_l = atomTypes(currentType)%numQN_lValeRadialFns(1)
          numPQN_l = atomTypes(currentType)%numQN_lValeRadialFns(2)
@@ -1432,14 +1486,14 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
          do j = 1, numSQN_l
             valeDimIndex = valeDimIndex + 1
             pOptcIndex(valeDimIndex) = initSIndex + j
-            ! Record how many valeDim contribute to this partial for imagoKkc
+            ! Record how many valeDim contribute to this partial for imagoKKc
             partialsIndex(initSIndex + j) = partialsIndex(initSIndex + j) + 1
          enddo
          do j = 1, numPQN_l
             do k = 1,3
                valeDimIndex = valeDimIndex + 1
                pOptcIndex(valeDimIndex) = initPIndex + j
-               ! Record how many valeDim contribute to this partial for imagoKkc
+               ! Record how many valeDim contribute to this partial for imagoKKc
                partialsIndex(initPIndex + j) = partialsIndex(initPIndex + j) + 1
             enddo
          enddo
@@ -1447,7 +1501,7 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
             do k = 1,5
                valeDimIndex = valeDimIndex + 1
                pOptcIndex(valeDimIndex) = initDIndex + j
-               ! Record how many valeDim contribute to this partial for imagoKkc
+               ! Record how many valeDim contribute to this partial for imagoKKc
                partialsIndex(initDIndex + j) = partialsIndex(initDIndex + j) + 1
             enddo
          enddo
@@ -1455,7 +1509,7 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
             do k = 1,7
                valeDimIndex = valeDimIndex + 1
                pOptcIndex(valeDimIndex) = initFIndex + j
-               ! Record how many valeDim contribute to this partial for imagoKkc
+               ! Record how many valeDim contribute to this partial for imagoKKc
                partialsIndex(initFIndex + j) = partialsIndex(initFIndex + j) + 1
             enddo
          enddo
@@ -1469,7 +1523,7 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
                 valeDimIndex = valeDimIndex + 1
                 pOptcIndex(valeDimIndex) = valeDimIndex ! Each QN_nlm is saved.
                 ! Record how many valeDim contribute to this partial for
-                ! imagoKkc because this detailCode is decomposed by QN_nlm each
+                ! imagoKKc because this detailCode is decomposed by QN_nlm each
                 ! valeDim will have a value of one.
                 partialsIndex(valeDimIndex) = 1
               enddo
@@ -1478,21 +1532,45 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
       endif
    enddo ! i = 1, numAtomSites
 
-   ! FIX: Bad array access of pOptcIndex and kkc indices for 3 and 4 not done.
-
-   ! The kkc index information for detailCode 2, 3, and 4 is calc above
-   ! Record how many basis functions contribute to this partial for imagoKkc
-   ! this detail code is calculated seperately from the pOptc Index.
+   ! The kkc index information for detailCode 2, 3, and 4 was computed in
+   !   the site loop above. Detail code 1 (group by type) is counted here
+   !   instead because its groups span whole runs of atoms rather than
+   !   individual atoms, so the count is a property of the finished basis
+   !   ordering rather than of any one site.
+   ! This walk counts the length of each run of identical pOptcIndex values
+   !   and therefore relies on all atoms of a given type being adjacent in
+   !   the basis ordering. That holds: Imago sorts atomic sites by type, a
+   !   requirement that comes from elsewhere in the method (interleaved
+   !   types would badly damage the efficiency of the integral and matrix
+   !   routines), so the basis functions of one type are always one
+   !   contiguous run and each run corresponds to exactly one partial.
    if (detailCodePOPTC == 1) then
       do j = 1, valeDimIndex
-         if (pOptcKKCIndex == 0 .or. (pOptcIndex(j) == pOptcIndex(j - 1))) then
+
+         ! The first basis function opens the first run. It is treated on
+         !   its own rather than folded into the comparison below because
+         !   the comparison would have to look at element j-1, and Fortran
+         !   does not promise to skip the second operand of an .or. whose
+         !   first operand is already true. Written as a separate branch,
+         !   the out of range subscript is never formed at all.
+         if (j == 1) then
+            pOptcKKCIndex = 1
+
+         ! Still inside the same type: extend the current run.
+         elseif (pOptcIndex(j) == pOptcIndex(j-1)) then
             pOptcKKCIndex = pOptcKKCIndex + 1
+
+         ! The type changed, so the run that just ended is a completed
+         !   partial. Record its length and start counting the next one.
          else
             partialsIndex(newPartial) = pOptcKKCIndex
             pOptcKKCIndex = 1
             newPartial = newPartial + 1
          endif
       enddo
+
+      ! The final run is closed by the end of the basis, not by a change
+      !   of type, so it has to be recorded after the loop.
       partialsIndex(newPartial) = pOptcKKCIndex
    endif
 
@@ -1649,8 +1727,18 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
 
    ! Begin the double loop to determine the transition energies.
    do i = firstInit, lastInit
-      finalStateIndex = 0
       do j = firstFin, lastFin
+
+         ! Index into conjWaveMomSum, which was filled above for *every*
+         !   final state in the firstFin to lastFin range. The index is
+         !   derived from j rather than accumulated by a counter because
+         !   the loop below skips some j: with thermal smearing a state
+         !   can be both initial and final, and those skipped j still
+         !   occupy their slot in conjWaveMomSum. A counter incremented
+         !   only on accepted pairs would fall behind at the first skip
+         !   and read a different final state's momentum sum from then
+         !   on, silently, for the rest of this initial state.
+         finalStateIndex = j - firstFin + 1
 
          ! Recall that thermal smearing may allow some states to be both
          !   initial and final. We do not consider transitions where the final
@@ -1661,7 +1749,7 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
          !   cut-off we go to the next initial state.
          if (energyEigenValues(j,currentKPoint,spinDirection) > &
                & energyCutoff) exit
-   
+
          ! Compute the energy of the transition from the current states.
          currentEnergyDiff = energyEigenValues(j,currentKPoint,spinDirection)-&
                & energyEigenValues(i,currentKPoint,spinDirection)
@@ -1677,9 +1765,6 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
 
          ! Store the transition energy for the current pair.
          energyDiffTemp(transPairCount) = currentEnergyDiff
-
-         ! Increment the final state index for the conjWaveMomSum
-         finalStateIndex = finalStateIndex + 1
 
          ! In the event that thermal smearing is turned on. The state that the
          !   e- comes from and goes into may be fully, partially, or not
@@ -1796,11 +1881,21 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
       segmentBorders(i - firstInit + 2) = transPairCount
    enddo ! Init loop i
 
-   ! Deallocate unnecessary matrix
+   ! Deallocate the matrices that the transition loop needed. Both are
+   !   finished with: the loop above closed at the "Init loop i" line and
+   !   nothing below this point reads either of them. The release is
+   !   written out explicitly even though a local allocatable is handed
+   !   back automatically when the subroutine returns, because this
+   !   routine is called once per k-point per spin and pairing each
+   !   deallocate with its allocate is what lets a reader confirm the
+   !   per-call cost is actually returned without having to rely on
+   !   knowing that language rule.
 #ifndef GAMMA
    deallocate (conjWaveMomSum)
+   deallocate (valeValeXMom)
 #else
    deallocate (conjWaveMomSumGamma)
+   deallocate (valeValeXMomGamma)
 #endif
 
    ! Determine if there was only one segment.  In this case we don't have to

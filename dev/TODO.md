@@ -5966,12 +5966,15 @@ is not carried only in conversation.
   PDOS mode 3, and is in any case unaffordable at present (see
   the scaling note below).
 
-  Note that code 3 is grouped by *type*, not by atom, despite
-  the comment above it in `optc.F90` saying "each QN_nl
-  resolved atom": its `pOptcIndex` is built from
-  `cumulNumPartials(currentType)` and `printSpectrumPOPTC`
-  loops over `numAtomTypes`.  Fix that comment while here; the
-  wrong reading of it would put code 3 in the unsafe column.
+  Code 3 is grouped by *type*, not by atom, and every comment
+  that said otherwise has been corrected (see O5).  Three
+  independent places agree on the reading: `pOptcIndex` is
+  built from `cumulNumPartials(currentType)`, the partial count
+  is `cumulNumPartials(numAtomTypes + 1)`, and
+  `printSpectrumPOPTC` walks `numAtomTypes` and writes a
+  `TYPE_1`/`TYPE_2` header.  Only the labels were wrong.  The
+  wrong reading would have put code 3 in the unsafe column and
+  bought it an unfolding correction it does not need.
 
   Two things make POPTC harder than PDOS, neither of which
   needs new infrastructure:
@@ -6036,6 +6039,92 @@ is not carried only in conversation.
   scaling problem) or remove the option so it cannot be
   selected.  Silently producing zeros is the worst of the
   three outcomes.
+
+- [x] O5. Correctness fixes along the partial optical
+  properties path.  DONE 2026-08-04.  These are the fixes O2
+  waits on: until they land, a full-mesh run and a reduced
+  run cannot be compared, because neither one is right.
+  Recompiled clean.
+
+  **The one that was silently wrong, not loudly wrong.**
+  `finalStateIndex` indexes `conjWaveMomSum`, which is filled
+  for *every* final state in the `firstFin` to `lastFin`
+  range.  It was a counter incremented only on *accepted*
+  pairs.  With thermal smearing a state can be both initial
+  and final, and such a pair is skipped -- but its slot in
+  `conjWaveMomSum` still exists, so from the first skip
+  onward the counter read a different final state's momentum
+  sum, for the rest of that initial state, with no symptom.
+  It is now derived, `j - firstFin + 1`.  Both copies of the
+  transition loop had it: `computePairs` and
+  `computePOPTCPairs`.
+
+  **Job IDs 106 and 107 were crossed.**  The `doOPTC` codes
+  and the job ID number the last two optical properties in
+  opposite order, so 106 (non-linear) was setting code 3
+  (sigma(E)) and 107 the reverse.  Both SCF and PSCF.  The
+  mapping is now correct and the crossover is commented at
+  both sites, since it looks like a typo either way round.
+
+  **Non-linear optical properties now stop rather than
+  pretend.**  They have an input block (`NLOP_INPUT_DATA`)
+  and a job ID that reaches `getEnergyStatistics`, but no
+  routine anywhere computes them -- there is no counterpart
+  to `computePairs` for the second-order response.  Falling
+  through emitted whichever spectrum the surrounding code
+  happened to produce, labelled as a non-linear result.
+
+  Also: `maxPairs` is initialized before being built up with
+  `max()`, so the result no longer depends on how a compiler
+  pre-fills module storage; the detail-code-1 basis-function
+  counting loop no longer forms the out-of-range subscript
+  `pOptcIndex(0)` on its first iteration; `transitionProb` is
+  released for partial runs too (it is allocated and used
+  unconditionally, so the old branch leaked it whenever a
+  decomposition was requested); and `valeValeXMom` is
+  released alongside `conjWaveMomSum`, which it never was.
+
+  **Two spellings that meant the post-processing simply did
+  not run.**  `processPOPTC.py` invoked `makePDOS` and
+  `imagoKkc`; the installed names are `makePDOS.py` and
+  `imagoKKc`, so on a case-sensitive filesystem neither was
+  ever found.  `imago.py` called `processPOPTC` (no suffix)
+  and discarded its output, which is how the whole thing
+  stayed hidden -- the total spectra still appeared and only
+  the partial files quietly went missing.  It now calls
+  `processPOPTC.py -s <channel>` and writes the result into
+  the runtime log.  Every comment naming the executable has
+  been normalized to `imagoKKc`.
+
+  **One more Perl-to-Python port defect.**  `copy_data`
+  stripped two leading columns from each `imagoKKc` output
+  line.  The Perl original indexed from 2 because Perl's
+  `split(/\s+/)` leaves an empty leading token on these
+  Fortran-formatted lines and Python's does not, so the port
+  was discarding the first real spectral column of every
+  partial.  Now strips one.
+
+  **Comment-only, but the point of O2:** code 3 was labelled
+  "each QN_nl resolved atom" in four places in `optc.F90` and
+  as "Decompose by atom and QN_nl" in `optcPrint.F90`, while
+  the code groups by *type*.  Corrected, with the reason the
+  distinction matters recorded at the index construction:
+  a type-level sum is invariant under the operations used to
+  reduce the k-point mesh and an atom-level one is not.
+
+  **Three things noted and deliberately not changed**, each
+  because touching it buys nothing and costs a re-verified
+  build.  `cumulNumPartials` is never read for detail code 1,
+  and the running sum built there adds `i` rather than 1 --
+  inert, now commented as such rather than repaired, since
+  what it *ought* to hold is undecided.  For code 3 the same
+  array is allocated to `numAtomSites + 1` while only
+  `numAtomTypes + 1` entries are used; harmless, since the
+  site count is always the larger.  And the program unit
+  inside `imagoKKc.f90` is still spelled `program imagoKkc`,
+  which affects nothing (CMake's target name sets the
+  executable name) but should be renamed the next time that
+  file is opened for real work.
 
 ## TOOLING (lint helpers)
 

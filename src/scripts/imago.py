@@ -1569,28 +1569,40 @@ def execute_program(job_clp, settings, fn, bin_dir,
             )
 
         # If we are doing the partial optical properties,
-        #   call processPOPTC for the imagoKKc calculation.
+        #   call processPOPTC.py for the imagoKKc calculation.
         #   (The fort.209 file contains the information
         #   needed to produce partial epsilon1 using
         #   Kramers-Kronig conversion. It is only produced
         #   by partial optical properties calculations.)
-        #   The processPOPTC will repeatedly call the
-        #   imagoKKc program.
+        #   The processPOPTC.py script will repeatedly call
+        #   the imagoKKc program, once per partial pair.
         if os.path.exists("fort.209"):
+
+            # A non-spin-polarized run carries only the "up
+            #   or total" channel. A spin polarized run needs
+            #   both channels processed separately because
+            #   each one reads its own raw partial eps2 file
+            #   (fort.250 for channel 1, fort.251 for 2).
             if spin_pol == 1:
-                subprocess.run(
-                    f"{bin_dir}/processPOPTC 1",
-                    shell=True,
-                )
+                poptc_channels = (1,)
             else:
-                subprocess.run(
-                    f"{bin_dir}/processPOPTC 1",
+                poptc_channels = (1, 2)
+
+            for channel in poptc_channels:
+                poptc_result = subprocess.run(
+                    f"{bin_dir}/processPOPTC.py -s {channel}",
                     shell=True,
+                    capture_output=True, text=True,
                 )
-                subprocess.run(
-                    f"{bin_dir}/processPOPTC 2",
-                    shell=True,
-                )
+
+                # Record whatever the post-processor said. A
+                #   silent call here is how a broken partial
+                #   optical properties pipeline stays hidden:
+                #   the total spectra still appear and only
+                #   the partial files quietly go missing.
+                runtime_fh.write(poptc_result.stdout)
+                if poptc_result.stderr:
+                    runtime_fh.write(poptc_result.stderr)
 
     # Check for the existence of the fort.2 file that signals
     #   completion of the fortran executable without abortive
