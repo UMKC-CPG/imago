@@ -672,6 +672,38 @@ class TestEmitter:
         reloaded = load_entry(path, "crystalline", {})
         assert reloaded.verification.converged_mesh == (8, 8, 6)
 
+    def test_round_trip_gap_spread(self, tmp_path):
+        # gap_spread survives save -> load, and an ABSENT one
+        #   reloads as None rather than 0.0 (DESIGN 7.2).  That
+        #   distinction is the whole point of the field: a stored
+        #   zero would claim the gap was perfectly settled, which
+        #   is the one thing an unmeasured gap must never assert.
+        original = _load_entry_text(tmp_path, _entry_text(
+            verification={**DEF_VER, "gap_spread": 0.0072}))
+        out = format_entry(original, "x")
+        assert "gap_spread" in out
+        path = save_entry(original, str(tmp_path))
+        reloaded = load_entry(path, "crystalline", {})
+        assert reloaded.verification.gap_spread == pytest.approx(
+            0.0072)
+
+        bare = _load_entry_text(tmp_path, _entry_text(
+            verification=DEF_VER))
+        assert "gap_spread" not in format_entry(bare, "x")
+        assert bare.verification.gap_spread is None
+
+    def test_gap_spread_must_not_be_negative(self, tmp_path):
+        # A relative change cannot be below zero, so a negative one
+        #   is corrupt.  Deliberately NOT bounded above: a gap that
+        #   halves between two rungs gives a spread over 1, and that
+        #   is a real reading worth keeping (DESIGN 7.2).
+        with pytest.raises(ValueError, match="gap_spread"):
+            _load_entry_text(tmp_path, _entry_text(
+                verification={**DEF_VER, "gap_spread": -0.1}))
+        wide = _load_entry_text(tmp_path, _entry_text(
+            verification={**DEF_VER, "gap_spread": 1.5}))
+        assert wide.verification.gap_spread == pytest.approx(1.5)
+
     def test_round_trip_manual_without_verification(self, tmp_path):
         text = _entry_text(
             top={**DEF_TOP, "source": "manual"}, verification=None)

@@ -275,6 +275,29 @@ class Verification:
     predictor_confidence: float       # [0.0, 1.0]
     predictor_neighbor_ids: tuple[str, ...]
 
+    # How far ``measured.gap_ev`` still moves with the mesh AT the
+    #   converged rung, as a FRACTION of that gap: the largest
+    #   relative change between it and the rungs two ladder
+    #   positions either side (DESIGN 7.2).  Small means the gap has
+    #   settled; large means the recorded gap is an accident of
+    #   where the ENERGY happened to converge.
+    #
+    # A measurement, not a verdict.  Storing a boolean would freeze
+    #   a tolerance nobody has chosen, and entries written under
+    #   different tolerances would then disagree silently -- exactly
+    #   what ``metric_threshold`` exists to prevent for the energy.
+    #   Nothing acts on this value today; it is recorded so the
+    #   decision about unsettled gaps can be taken later from data.
+    #
+    # None when the ladder holds no rung two positions either side
+    #   of the converged one, or on curator-authored entries.  None
+    #   means NOT MEASURED, never "settled".
+    #
+    # Last in the block, and defaulted, because it is OPTIONAL in
+    #   the schema: a hand-written entry need not carry it, and the
+    #   constructor should not force one.
+    gap_spread: float | None = None
+
 
 @dataclass(frozen=True)
 class Provenance:
@@ -755,12 +778,22 @@ def load_verification(raw_verification: dict[str, Any],
         _require(len(mesh) == 3, path,
                  "converged_mesh must be three axial counts")
 
+    # gap_spread is optional -- absent when the ladder was too short
+    #   to measure it -- but it is a relative change, so a present
+    #   one below zero is corrupt.  It is NOT bounded above: a gap
+    #   that halves between two rungs gives a spread above 1, and
+    #   that is a real reading worth keeping, not an error.
+    spread = v.get("gap_spread")
+    if spread is not None:
+        _require(spread >= 0.0, path, "gap_spread must be >= 0")
+
     return Verification(
         grid_values=tuple(grid),
         grid_energies=(tuple(energies)
                        if energies is not None else None),
         converged_at=v["converged_at"],
         converged_mesh=(tuple(mesh) if mesh is not None else None),
+        gap_spread=spread,
         metric=v["metric"],
         metric_threshold=v["metric_threshold"],
         predictor_confidence=v["predictor_confidence"],
@@ -976,6 +1009,13 @@ def format_entry(entry: GuidanceEntry, slug: str) -> str:
             counts = ", ".join(str(n) for n in v.converged_mesh)
             lines.append("converged_mesh".ljust(scalar_width)
                          + " = [" + counts + "]")
+        # gap_spread: how settled the recorded gap was at that same
+        #   rung (DESIGN 7.2).  Omitted when the ladder was too
+        #   short to measure it, so an absent field reads as NOT
+        #   MEASURED rather than as a settled gap.
+        if v.gap_spread is not None:
+            _emit_scalars(lines, [("gap_spread", v.gap_spread)],
+                          width=scalar_width)
         _emit_scalars(lines, [
             ("metric", v.metric),
             ("metric_threshold", v.metric_threshold),

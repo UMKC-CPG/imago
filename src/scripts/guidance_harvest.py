@@ -309,6 +309,64 @@ def is_gapless(rung, gap_threshold):
     return is_gapless_value(rung.gap, gap_threshold)
 
 
+#: How many ladder positions away the gap's flatness is measured.
+#: TWO, not one, and this is forced by measurement rather than
+#: chosen.  A k-point ladder carries a strong parity sawtooth in the
+#: gap: on diamond silicon adjacent rungs disagree by 19% --
+#: [11,11,11] reads 0.9572 eV against [12,12,12]'s 0.8046 -- even
+#: where the gap has settled to about 1% within one parity family.
+#: Odd and even meshes sample the zone differently near the band
+#: edges and approach the same limit at different rates, so
+#: comparing a rung to its immediate neighbours reports every ladder
+#: as unsettled and discriminates nothing (DESIGN 7.2).
+GAP_SPREAD_STRIDE = 2
+
+
+def measure_gap_spread(ladder_gaps, chosen_index):
+    """How far the gap still moves with the mesh at the chosen rung.
+
+    Returns the largest RELATIVE change between that rung's gap and
+    the rungs ``GAP_SPREAD_STRIDE`` positions either side of it, as
+    a fraction of the chosen gap -- or None when it cannot be
+    measured (DESIGN 7.2).
+
+    Relative rather than absolute, for a reason the seed ladders
+    supply.  Near the top of its ladder si_ia-3's gap moves by
+    0.010-0.014 eV per two rungs, SMALLER in absolute terms than
+    diamond silicon's mid-ladder movement -- yet si_ia-3's gap is
+    collapsing toward zero while silicon's has settled.  As
+    fractions the two separate cleanly, about 20% against about 1%.
+
+    None means NOT MEASURED, never "settled": too short a ladder,
+    a missing gap reading, or a zero gap (a metal, whose relative
+    change is undefined and which stages no entry anyway).  A caller
+    must not read None as evidence of anything.
+    """
+
+    if ladder_gaps is None or chosen_index is None:
+        return None
+    if not 0 <= chosen_index < len(ladder_gaps):
+        return None
+    chosen_gap = ladder_gaps[chosen_index]
+    if chosen_gap is None or chosen_gap <= 0.0:
+        return None
+
+    # Either side alone is enough.  The converged rung often sits
+    #   near the top of a ladder whose upper neighbours were never
+    #   computed, and one side still measures the thing we care
+    #   about: whether the gap is moving.
+    spreads = []
+    for offset in (-GAP_SPREAD_STRIDE, GAP_SPREAD_STRIDE):
+        neighbor_index = chosen_index + offset
+        if not 0 <= neighbor_index < len(ladder_gaps):
+            continue
+        neighbor_gap = ladder_gaps[neighbor_index]
+        if neighbor_gap is None:
+            continue
+        spreads.append(abs(neighbor_gap - chosen_gap) / chosen_gap)
+    return max(spreads) if spreads else None
+
+
 def is_gapless_value(gap_ev, gap_threshold):
     """Return whether a bare band-gap reading is metallic -- at or
     below ``gap_threshold`` (DESIGN 3.12.3 / 7.8).
@@ -466,7 +524,8 @@ def _require_field(result_toml: dict, field: str, unit_id: str):
 def build_entry(workspace_root, source_structure, prediction,
                 dataspace, structure, kpoint_threshold,
                 grid_values, grid_energies, converged_density,
-                chosen_result, ladder_is_metal=False):
+                chosen_result, ladder_is_metal=False,
+                ladder_gaps=None):
     """Assemble the rich :class:`GuidanceEntry` for one converged
     structure from its ALREADY-CHOSEN facts (DESIGN 7.8 step 3f;
     PSEUDOCODE 15.7).
@@ -581,6 +640,19 @@ def build_entry(workspace_root, source_structure, prediction,
 
     # system_type rides on this structure's prediction record (it
     #   carries it from the predictor, DESIGN 7.7).
+    # Where the chosen rung sits in the ladder, needed to read its
+    #   gap's neighbours.  Located by matching the converged density
+    #   in grid_values rather than passed in, because both callers
+    #   derive the two from the SAME numbers -- the producer from one
+    #   mesh-to-density computation, the standalone sweep from one
+    #   collapsed array -- so the equality is exact, not approximate.
+    #   A miss yields None, which measures nothing rather than
+    #   measuring the wrong rung.
+    try:
+        chosen_index = list(grid_values).index(converged_density)
+    except ValueError:
+        chosen_index = None
+
     system_type = prediction["system_type"]
 
     signature = compute_signature(
@@ -636,6 +708,12 @@ def build_entry(workspace_root, source_structure, prediction,
         converged_mesh=(tuple(chosen_result["kpoint_mesh"])
                         if chosen_result.get("kpoint_mesh")
                         is not None else None),
+        # How settled the recorded gap was at that same rung (DESIGN
+        #   7.2).  Recorded, never acted on: it lets a consumer see
+        #   that `measured.gap_ev` was read off a mesh chosen to
+        #   flatten the ENERGY, and decide for itself how far to
+        #   trust it.  None when the ladder was too short to measure.
+        gap_spread=measure_gap_spread(ladder_gaps, chosen_index),
         metric="total_energy",
         metric_threshold=kpoint_threshold,
         predictor_confidence=prediction["confidence"],
@@ -883,7 +961,14 @@ def harvest_flight(workspace_root, db_root, dataspace):
             dataspace, structure, kpoint_threshold,
             collapsed_densities, collapsed_energies,
             kpoint_densities[idx], result_tomls[idx],
-            ladder_is_metal=ladder_is_metal)
+            ladder_is_metal=ladder_is_metal,
+            # The gaps of the COLLAPSED ladder, parallel to
+            #   collapsed_densities: `kept` maps each surviving rung
+            #   back to the grid point it came from, so the two
+            #   arrays stay aligned through the duplicate-mesh
+            #   collapse (DESIGN 7.2).
+            ladder_gaps=[result_tomls[position].get("gap_ev")
+                         for position in kept])
 
         # g'. A metal builds no entry (DESIGN 7.8): build_entry
         #    returns None and BOTH harvest paths skip on it, so the

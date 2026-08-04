@@ -727,6 +727,23 @@
       settles regardless of where the energy settled.  Most
       correct, most expensive: it can demand meshes the energy
       never needed.
+  **DECIDED 2026-08-04: (1) with the flatness measurement recorded.
+  (3) is out** -- not as a controller for initial-potential
+  generation, nor for guidance, for now.
+  **(1) as literally worded was already done.**  The entry has
+  carried `verification.converged_mesh` since C118, and `gap_ev` is
+  read off that same rung, so the mesh the gap came from was always
+  recorded.  What was missing is any statement of how far that gap
+  could be trusted.  So the work became: measure (2)'s test, record
+  the number, act on nothing.  Landed as C147.
+  **A number, not a boolean.**  Storing a verdict would freeze a
+  tolerance nobody has chosen, and entries written under different
+  tolerances would then disagree silently -- exactly what
+  `metric_threshold` exists to prevent for the energy.  The stored
+  `gap_spread` is the raw relative movement, so a consumer picks
+  its own bar and every entry stays comparable.  It also means the
+  later decision about unsettled gaps can be taken from data
+  gathered during the rebuild rather than guessed at now.
   **The 2026-08-04 measurements point at (2), and (1) is worth
   doing anyway.**  The defect turned out to be a parity sawtooth
   rather than a slow drift, and a sawtooth is precisely what a
@@ -5400,6 +5417,58 @@ on the same data later with no schema change.  Built on P10.
   CODE.  DONE 2026-07-30.  +6 tests, 1257 pass.  Not yet exercised
   live: the si_cmce workspace is being cleared, so the LAT trial is
   the first run whose scheme change this will distinguish.
+
+- [x] C147. Record how settled a guidance entry's gap was
+  (`verification.gap_spread`).  DONE 2026-08-04.  DESIGN 7.2 led,
+  then PSEUDOCODE 15.2 / 15.4 / 15.7, then the code.  D22 option
+  (1), with the flatness measurement of option (2) recorded but NOT
+  acted on.
+  **What was actually missing.**  Option (1) said "record which
+  mesh the gap came from"; the entry has carried
+  `verification.converged_mesh` all along, and `gap_ev` is read off
+  that same rung, so that half was already done.  The gap in the
+  record was any statement of how far the gap could be TRUSTED.
+  **The measurement.**  `measure_gap_spread` returns the largest
+  relative change between the converged rung's gap and the rungs
+  two ladder positions either side, as a fraction of that gap.
+  Two design choices, both forced by measurement rather than taste:
+  *Two positions, not one.*  A ladder carries a strong parity
+  sawtooth in the gap.  Diamond silicon's adjacent rungs disagree
+  by 19% -- [11,11,11] reads 0.9572 eV against [12,12,12]'s
+  0.8046 -- even where the gap has settled to ~1% within one parity
+  family.  Comparing immediate neighbours calls every ladder
+  unsettled and discriminates nothing.
+  *Relative, not absolute.*  Near the top of its ladder si_ia-3's
+  gap moves 0.010-0.014 eV per two rungs, SMALLER in absolute terms
+  than settled silicon's mid-ladder movement -- yet si_ia-3's gap
+  is collapsing to zero.  As fractions: ~20% against ~1%.
+  **A number, not a verdict.**  A stored boolean would freeze a
+  tolerance nobody has chosen, and entries written under different
+  tolerances would disagree silently -- the failure
+  `metric_threshold` exists to prevent for the energy.  The raw
+  fraction lets a consumer pick its own bar and keeps entries
+  comparable.  Nothing acts on it today, by decision.
+  **None means NOT MEASURED, never "settled".**  Absent when the
+  ladder reaches two positions on neither side, when a gap was
+  never read, or when the gap is zero (a metal, whose relative
+  change is undefined and which stages no entry anyway).  The field
+  is omitted from the file rather than written as 0.0, because a
+  stored zero would claim a perfectly settled gap -- the one thing
+  an unmeasured gap must never assert.
+  Optional in the schema and therefore last and defaulted in
+  `Verification`, so a hand-written entry need not carry one.
+  Both harvest paths feed it: the producer from
+  `record_converged`'s new `grid_gaps`, the standalone sweep from
+  its own collapsed ladder.  The chosen rung's position is found by
+  matching the converged density in `grid_values` -- exact, since
+  both callers derive the two from the same numbers -- and a miss
+  measures nothing rather than the wrong rung.
+  +7 tests, suite green at 1278.
+  Does NOT close D22.  It makes the defect visible in the stored
+  entries instead of requiring a re-measure to find; whether an
+  unsettled gap should suppress an entry, or the metal test should
+  read this, are both still open.
+  CODE; DESIGN 7.2, PSEUDOCODE 15.2 / 15.4 / 15.7.
 
 - [x] C146. Lower `DEFAULT_KPOINT_CONVERGENCE_THRESHOLD` from 2e-3
   to 1e-3.  DONE 2026-08-04.  DESIGN 3.12.3 led, then PSEUDOCODE

@@ -2807,6 +2807,11 @@ def record_converged(rung, rungs, config):
         "grid_values": [_mesh_point_count(one.mesh) / volume
                         for one in trace],
         "grid_energies": [one.energy for one in trace],
+        # The same trace's band gaps, parallel to the two arrays
+        #   above, so the harvest can measure how settled the gap
+        #   was at the rung that settled the ENERGY (DESIGN 7.2).
+        #   A rung whose gap was never read contributes None.
+        "grid_gaps": [one.gap for one in trace],
     }
 
 
@@ -3307,7 +3312,8 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             harvest_inputs["converged_kpoint_density"],
             converged_result,
             ladder_is_metal=(verdicts[ref.reference_id]
-                             == VERDICT_METAL))
+                             == VERDICT_METAL),
+            ladder_gaps=harvest_inputs["grid_gaps"])
         if entry is not None:
             guidance_harvest.save_entry(entry, guidance_root)
         else:

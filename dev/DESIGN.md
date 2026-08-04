@@ -1090,6 +1090,10 @@ sum invariance (4) and bond order invariance (5):
   PDOS mode 1 (atom total) atom perm         eq. (4)
   PDOS mode 2 (atom, l)    atom perm         eq. (4)
   PDOS mode 3 (atom, lm)   D^l(R) matrices   **
+  POPTC code 1 (type)      nothing extra      * ***
+  POPTC code 3 (type, nl)  nothing extra      * ***
+  POPTC code 2 (atom)      atom perm twice   eq. (5) ***
+  POPTC code 4 (atom, nlm) D^l(R) matrices   ** ***
   ────────────────────────────────────────────────────
 
 *Mode 0 sums projections over all atoms of the same
@@ -1107,6 +1111,69 @@ mix via D^l(R), so atom permutation alone does not
 suffice. Correct unfolding requires the full
 representation matrices for each l-shell. This is
 deferred -- mode 3 is rarely used in practice.
+
+***The partial optical properties (POPTC) decompose a
+momentum matrix element between a *pair* of groups, so
+each row above carries over from its PDOS analogue with
+one change and one caveat.
+
+The change: an operation acts on both group indices at
+once. The pair matrix is conjugated by the permutation
+rather than re-indexed along one axis,
+
+    M(a,b) at k_full = M(invAtomPerm(R,a),
+                         invAtomPerm(R,b)) at k_IBZ
+
+which is the two-atom invariance (5) already used for
+bond order, applied to a different quantity. No new table
+is needed; invAtomPerm is simply used twice.
+
+Which codes need it follows from how each is grouped, and
+that is not what the code numbering suggests. Codes 1 and
+3 both group by TYPE -- code 3 resolves a QN_nl pair of a
+type, not of an atom, despite sitting between the two
+atom-resolved codes -- so the type-level sum argument (*)
+covers both and neither needs a correction. Code 2 groups
+by atom and needs the conjugation. Code 4 resolves
+individual QN_nlm orbitals and is blocked behind the same
+deferred D^l(R) matrices as PDOS mode 3.
+
+The caveat, and it limits what code 2 can claim: the
+momentum operator is a vector, so an operation both
+relabels the atoms and mixes the Cartesian components,
+P_i(Rk) = sum_j R_ij P_j(k). The atom permutation handles
+the first and not the second. The isotropic column that
+`printSpectrumPOPTC` writes is the sum of the three
+components divided by three -- a trace, invariant under
+the rotation -- so for that column the atom permutation
+is sufficient and the result is correct. The separate x,
+y and z columns need the rotation as well and remain
+unverified until it is added. This is the same defect
+that affects the per-axis columns of the TOTAL spectra,
+independently of any decomposition, so it is one fix for
+both rather than something peculiar to POPTC.
+
+Do not attempt to verify any of this with the identity
+that the partials sum to the total. That identity holds
+under ANY permutation of the two indices, because
+permuting summands does not change their sum, and it is
+therefore exactly blind to a missing or wrong unfolding.
+A passing sum rule proves nothing here. Verify instead by
+running a structure whose symmetry-equivalent atoms are
+inequivalently oriented on a full mesh and on a reduced
+mesh, and requiring the two to agree per atom.
+
+One cost note, because the obvious implementation is
+needlessly expensive. The star sum is a fixed linear map
+on the pair matrix and does not depend on energy, and
+broadening is linear. Symmetrize the pair matrix once per
+k-point per transition, before broadening, and leave the
+weighted accumulation over IBZ points as it stands.
+Placing the star loop inside the energy loop instead
+would multiply the innermost work -- a numAtomSites by
+numAtomSites by three slab per transition per energy
+point -- by the IBZ reduction factor of 4 to 48, for the
+same answer.
 
 **Resolution of D2.** The open question asked whether
 replacing electronPopulation with electronPopulation_LAT
@@ -10877,6 +10944,22 @@ the verification block sits at the entry level.
                                        Optional: absent on
                                        curator-authored or
                                        pre-mesh entries.
+  gap_spread                   real    How far `measured.gap_ev`
+                                       still moves with the mesh
+                                       AT the converged rung: the
+                                       largest relative change
+                                       between that rung's gap
+                                       and its neighbours two
+                                       ladder positions away, as
+                                       a fraction.  Small means
+                                       the gap has settled; large
+                                       means the recorded gap is
+                                       an accident of where the
+                                       ENERGY converged.  See
+                                       below.  Optional: absent
+                                       when the ladder is too
+                                       short to measure it, or on
+                                       curator-authored entries.
   metric                       string  Currently
                                        `"total_energy"`.
                                        Reserved:
@@ -10908,6 +10991,52 @@ the verification block sits at the entry level.
                                        empty if no
                                        prediction was
                                        made.
+
+**`gap_spread`: how far the recorded gap can be trusted.**
+
+`measured.gap_ev` is read off whichever rung converged the
+ENERGY.  Nothing has ever argued that a mesh chosen to flatten
+the energy also flattens the gap, and measurement says it often
+does not.  Since `gap_ev` is a predictor key -- stage 1's
+regression target and confidence source, stage 2's distance
+metric (7.6) -- and since nothing downstream re-converges it the
+way a consuming SCF re-converges a potential, an entry that
+cannot say how settled its gap was is asking to be trusted
+further than it has earned.  `gap_spread` is that statement.
+
+**It is a measurement, not a verdict, and deliberately so.**  A
+stored boolean would freeze a tolerance we have not chosen, and
+entries written under one tolerance would then silently disagree
+with entries written under another -- the exact failure
+`metric_threshold` exists to prevent for the energy.  A raw
+fraction leaves the choice to the consumer and keeps every entry
+comparable.  Nothing in the producer or the harvest acts on this
+value today: it is recorded so that the decision of what to do
+about an unsettled gap can be taken later, from data, rather
+than guessed at now.
+
+**Measured against neighbours TWO ladder positions away, not
+one.**  This is forced by the data.  A k-point ladder carries a
+strong parity sawtooth in the gap: on diamond silicon, adjacent
+rungs disagree by 19% (`[11,11,11]` reads 0.9572 eV against
+`[12,12,12]`'s 0.8046) even where the gap is settled to about 1%
+within a single parity family.  Odd and even meshes sample the
+zone differently near the band edges and converge to the same
+limit at different rates.  Comparing a rung to its immediate
+neighbours would therefore report every ladder as unsettled and
+discriminate nothing.
+
+**Relative, not absolute**, for a reason the same data supplies.
+Near the top of its ladder si_ia-3's gap moves by 0.010-0.014 eV
+per two rungs, which is *smaller* in absolute terms than diamond
+silicon's mid-ladder movement -- yet si_ia-3's gap is collapsing
+toward zero while silicon's has settled.  As fractions the two
+separate cleanly, about 20% against about 1%.
+
+Absent when the ladder holds no rung two positions either side
+of the converged one, which a short climb or a metal
+short-circuit can leave.  Absent is "not measured", never
+"settled".
 
 **Provenance block, under `[entry.provenance]`
 (required):**

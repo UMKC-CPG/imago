@@ -10835,6 +10835,19 @@ dataclass Verification:
     metric_threshold       : float
     predictor_confidence   : float        # [0.0, 1.0]
     predictor_neighbor_ids : tuple[str]
+    gap_spread             : float | None = None
+                                          #   how far measured.gap_ev
+                                          #   still moves with the
+                                          #   mesh AT the converged
+                                          #   rung, as a fraction of
+                                          #   it (7.2).  Recorded,
+                                          #   never acted on.  Last
+                                          #   and defaulted because
+                                          #   it is OPTIONAL: a
+                                          #   hand-written entry need
+                                          #   not carry one.  None
+                                          #   means NOT MEASURED,
+                                          #   never "settled".
 
 dataclass Provenance:
     flight_id        : str
@@ -11204,6 +11217,14 @@ function load_verification(v, measured, path):
     if mesh is not None:
         require(len(mesh) == 3, path,
             "converged_mesh must be three axial counts")
+    # gap_spread optional (absent when the ladder was too short to
+    #   measure it).  It is a relative change, so a present one
+    #   below zero is corrupt.  NOT bounded above: a gap that halves
+    #   between two rungs gives a spread over 1, which is a real
+    #   reading rather than an error (7.2).
+    spread = v.get("gap_spread")
+    if spread is not None:
+        require(spread >= 0.0, path, "gap_spread must be >= 0")
     return Verification(
         grid_values            = tuple(grid),
         grid_energies          = (tuple(energies)
@@ -11212,6 +11233,7 @@ function load_verification(v, measured, path):
         converged_at           = v["converged_at"],
         converged_mesh         = (tuple(mesh)
                                   if mesh is not None else None),
+        gap_spread             = spread,
         metric                 = v["metric"],
         metric_threshold       = v["metric_threshold"],
         predictor_confidence   = v["predictor_confidence"],
@@ -11335,6 +11357,11 @@ function format_entry(entry, slug):
             out.append("converged_mesh = ["
                 + join_csv(str(n) for n in v.converged_mesh)
                 + "]")
+        # gap_spread: how settled the recorded gap was at that same
+        #   rung (7.2).  Omitted when None, so an absent field reads
+        #   as NOT MEASURED rather than as a settled gap.
+        if v.gap_spread is not None:
+            emit_kv(out, "gap_spread", v.gap_spread)
         emit_kv(out, "metric",           v.metric)
         emit_kv(out, "metric_threshold", v.metric_threshold)
         emit_kv(out, "predictor_confidence",
@@ -11982,7 +12009,8 @@ workspace root's basename; both live in
 function build_entry(workspace_root, source_structure, prediction,
                      dataspace, structure, kpoint_threshold,
                      grid_values, grid_energies, converged_density,
-                     chosen_result, ladder_is_metal = false):
+                     chosen_result, ladder_is_metal = false,
+                     ladder_gaps = None):
     # Assemble one converged structure's GuidanceEntry (DESIGN 7.8
     # step 3f).  The ONE entry builder both harvests feed (the
     # Q1-Q2 shared core, DESIGN 5.7): the density sweep
@@ -12105,6 +12133,55 @@ function build_entry(workspace_root, source_structure, prediction,
             imago_commit     = chosen_result.get("imago_commit")
                                or "unknown",
             curator          = "guidance_harvest.py"))
+
+
+# How many ladder positions away the gap's flatness is measured.
+# TWO, not one, and forced by measurement rather than chosen: a
+# k-point ladder carries a strong parity sawtooth in the gap.  On
+# diamond silicon adjacent rungs disagree by 19% -- [11,11,11]
+# reads 0.9572 eV against [12,12,12]'s 0.8046 -- even where the gap
+# has settled to about 1% within one parity family.  Odd and even
+# meshes sample the zone differently near the band edges and reach
+# the same limit at different rates, so comparing a rung to its
+# immediate neighbours calls every ladder unsettled and
+# discriminates nothing (DESIGN 7.2).
+GAP_SPREAD_STRIDE = 2
+
+
+function measure_gap_spread(ladder_gaps, chosen_index):
+    # How far the gap still moves with the mesh at the chosen rung:
+    # the largest RELATIVE change between its gap and the rungs
+    # GAP_SPREAD_STRIDE positions either side, as a fraction of the
+    # chosen gap.  None when it cannot be measured (DESIGN 7.2).
+    #
+    # Relative rather than absolute, for a reason the seed ladders
+    # supply: near the top of its ladder si_ia-3's gap moves by
+    # 0.010-0.014 eV per two rungs, SMALLER in absolute terms than
+    # diamond silicon's mid-ladder movement -- yet si_ia-3's gap is
+    # collapsing to zero while silicon's has settled.  As fractions
+    # they separate cleanly, ~20% against ~1%.
+    #
+    # None means NOT MEASURED, never "settled": too short a ladder,
+    # a missing reading, or a zero gap (a metal, whose relative
+    # change is undefined and which stages no entry anyway).
+    if ladder_gaps is None or chosen_index is None:
+        return None
+    if chosen_index outside range(ladder_gaps):
+        return None
+    chosen_gap = ladder_gaps[chosen_index]
+    if chosen_gap is None or chosen_gap <= 0:
+        return None
+    # Either side alone suffices.  The converged rung often sits
+    #   near the top of a ladder whose upper neighbours were never
+    #   computed, and one side still answers the question asked:
+    #   is the gap still moving?
+    spreads = []
+    for offset in (-GAP_SPREAD_STRIDE, +GAP_SPREAD_STRIDE):
+        j = chosen_index + offset
+        if j inside range(ladder_gaps) and ladder_gaps[j] is not None:
+            spreads.append(abs(ladder_gaps[j] - chosen_gap)
+                           / chosen_gap)
+    return max(spreads) if spreads else None
 
 
 function is_gapless_value(gap_ev, gap_threshold):

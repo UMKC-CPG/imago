@@ -691,6 +691,97 @@ def test_build_entry_earns_an_entry_just_above_the_cut(patched):
     assert entry.measured.gap_ev == 0.06
 
 
+def test_measure_gap_spread_uses_the_two_step_neighbours():
+    """The gap's flatness is measured against rungs TWO ladder
+    positions away, never one (DESIGN 7.2).
+
+    A k-point ladder carries a strong parity sawtooth in the gap.
+    These are diamond silicon's real values around [12,12,12]: the
+    chosen rung sits 19% BELOW both its immediate neighbours, while
+    its same-parity neighbours agree with it to well under a percent.
+    Comparing against the immediate neighbours would call a settled
+    gap unsettled -- and would do so for every ladder, which
+    discriminates nothing."""
+    #             [10]    [11]    [12]    [13]    [14]
+    ladder = [0.8061, 0.9572, 0.8046, 0.9145, 0.8104]
+    spread = gh.measure_gap_spread(ladder, 2)
+
+    # Against [10] and [14]: 0.19% and 0.72%.  Settled.
+    assert spread == pytest.approx(0.0072, abs=5e-4)
+
+    # What the immediate neighbours would have said, for contrast.
+    naive = max(abs(ladder[1] - ladder[2]),
+                abs(ladder[3] - ladder[2])) / ladder[2]
+    assert naive > 0.13
+
+
+def test_measure_gap_spread_catches_a_collapsing_gap():
+    """si_ia-3's real values: a gap falling toward zero reads as a
+    large relative spread even though its ABSOLUTE movement is
+    smaller than settled silicon's mid-ladder movement.
+
+    That is why the measure is relative.  Absolute deltas here are
+    0.010-0.014 eV, comparable to values a settled ladder shows;
+    as fractions they are 20-25%, which separates cleanly."""
+    #             [16]    [17]    [18]    [19]    [20]
+    ladder = [0.0702, 0.0917, 0.0564, 0.0755, 0.0464]
+    spread = gh.measure_gap_spread(ladder, 2)
+    assert spread > 0.15
+
+
+def test_measure_gap_spread_returns_none_when_unmeasurable():
+    """None means NOT MEASURED and never "settled", so every way of
+    failing to measure returns it rather than a reassuring zero."""
+    ladder = [0.8, 0.9, 0.8, 0.9, 0.8]
+    assert gh.measure_gap_spread(None, 2) is None      # no ladder
+    assert gh.measure_gap_spread(ladder, None) is None  # no index
+    assert gh.measure_gap_spread(ladder, 9) is None     # off the end
+    # Neither side reachable -- a two-rung ladder has no rung two
+    #   positions from either end.
+    assert gh.measure_gap_spread([0.8, 0.9], 0) is None
+    assert gh.measure_gap_spread([None] * 5, 2) is None  # no gap read
+    # A zero gap is a metal; its relative change is undefined, and a
+    #   metal stages no entry anyway.
+    assert gh.measure_gap_spread([0.8, 0.9, 0.0, 0.9, 0.8],
+                                 2) is None
+
+    # One side present is enough: the converged rung often sits near
+    #   the top of a ladder whose upper neighbours were never run.
+    assert gh.measure_gap_spread([0.8, 0.9, 1.0], 2) == \
+        pytest.approx(0.2)
+
+
+def test_build_entry_records_the_gap_spread(patched):
+    """The entry carries how settled its gap was, so a consumer can
+    see that ``measured.gap_ev`` was read off a mesh chosen to
+    flatten the ENERGY (DESIGN 7.2).
+
+    Recorded, never acted on: the entry is staged either way.  What
+    changes is that the reader is no longer obliged to assume."""
+    structure = gh.load_structure("si.skl")
+    entry = gh.build_entry(
+        "/workspace", "si.skl", _prediction(), _DATASPACE, structure,
+        5.0e-4, [50.0, 100.0, 200.0, 400.0, 800.0],
+        [0.5, 0.5, 0.5, 0.5, 0.5], 200.0,
+        _chosen_result(gap_ev=0.8046),
+        ladder_gaps=[0.8061, 0.9572, 0.8046, 0.9145, 0.8104])
+    assert entry is not None
+    assert entry.verification.gap_spread == pytest.approx(
+        0.0072, abs=5e-4)
+
+
+def test_build_entry_gap_spread_absent_without_a_ladder(patched):
+    """A caller that offers no per-rung gaps gets None, not a zero.
+
+    Absent has to read as "not measured": a stored 0.0 would claim
+    the gap was perfectly settled, which is the one thing an
+    unmeasured gap must never assert."""
+    structure = gh.load_structure("si.skl")
+    entry = _build_entry(structure, _prediction(), _chosen_result())
+    assert entry is not None
+    assert entry.verification.gap_spread is None
+
+
 def test_build_entry_takes_the_callers_ladder_reading(patched):
     """The caller's multi-rung reading is sufficient on its own, even
     when the chosen rung shows a healthy gap (DESIGN 7.8 d').
