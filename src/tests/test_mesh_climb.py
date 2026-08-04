@@ -550,13 +550,22 @@ def test_climb_policy_merges_the_metal_gap_threshold():
     assert thresholds.metal_gap_threshold == 0.1
 
 
-def test_climb_policy_rejects_a_non_positive_metal_gap_threshold():
-    """A zero or negative gap threshold could never flag a metal (a
-    real band gap is non-negative) -- a mistake -- so it fails loudly.
-    """
-    with pytest.raises(ValueError, match="metal_gap_threshold"):
-        mesh_climb.climb_policy_from_manifest(
-            {"metal_gap_threshold": 0.0})
+def test_climb_policy_accepts_any_metal_gap_threshold():
+    """Every real gap threshold is meaningful, so none is rejected.
+
+    A NEGATIVE one is the documented way to disable the metal test for
+    a diagnostic ladder -- no band gap can be negative, so the test can
+    never fire (DESIGN 3.12.3 / 3.12.6).  A range check here would
+    reject exactly the setting the design tells a curator to use.  Zero
+    is meaningful too: a true metal's gap collapses to exactly zero, so
+    a zero threshold is the strictest test that still fires on one."""
+    thresholds, _ = mesh_climb.climb_policy_from_manifest(
+        {"metal_gap_threshold": -1.0})
+    assert thresholds.metal_gap_threshold == -1.0
+
+    thresholds, _ = mesh_climb.climb_policy_from_manifest(
+        {"metal_gap_threshold": 0.0})
+    assert thresholds.metal_gap_threshold == 0.0
 
 
 def test_climb_policy_merges_the_crystalline_floor_axis_count():

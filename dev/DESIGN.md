@@ -2261,7 +2261,21 @@ gap on a coarse mesh and have it close only as the mesh refines,
 so the trigger is the first rung that actually reads zero,
 wherever on the climb that falls -- a material that opens at a
 gap of, say, 0.15 eV and reads zero two rungs later is declared a
-metal there, and settles there. The justification is the
+metal there, and settles there.
+
+**Which rung, when more than one is in hand.** A confident opening
+grid resolves several rungs at once, and a refine fill lands rungs
+*below* ones already computed, so at the moment the test fires the
+gapless rung need not be the densest mesh on the ladder. It is the
+coarsest gapless rung that is settled on. The two readings
+coincide on a plain upward walk, which is how the distinction
+comes to be lost. They part exactly where it costs something:
+settling on the densest mesh can settle on a rung that read a
+*gap*, and anything that later re-reads that single rung -- the
+harvest does (7.8) -- then sees an insulator where the climb saw a
+metal, and records a k-point convergence claim that was never
+made. The coarsest gapless rung is also the cheapest, and
+roughness is the whole intent. The justification is the
 deliverable itself (6.2, 3.12). The initial-potential database
 wants a *rough* good starting point for a later self-consistent
 calculation, not a converged energy. A metal's energy cannot be
@@ -2323,10 +2337,43 @@ coarse-mesh guard it needed are both gone, and the search wants
 no separate oscillation or stall test on top. It branches once,
 on the gap, and gives each material the treatment that suits it:
 the insulator its two-sided convergence, the metal a prompt,
-rough, floor-level stop. Like the bail it replaces, this stop
-belongs to the automatic bracket-refine climb; the fine unit-step
-climb (3.12.5), the conservative shape a curator pins on purpose,
-still walks every rung to the ceiling.
+rough, floor-level stop.
+
+**The test belongs to every search shape**, and the branch is
+taken before the shape is chosen rather than inside any one of
+them. This design once scoped it to the automatic bracket-refine
+climb, on the reasoning that the fine unit-step walk is the
+conservative shape a curator pins on purpose and should be left
+to compute every rung. That confused two different things. A
+*stopping rule* is properly a matter of search shape, because the
+shapes exist precisely to disagree about which rungs are worth
+computing. A *classification* is not. Recognising that a material
+is a metal is the second kind, and a shape that declines to make
+the classification is not being conservative. It is blind, and it
+is blind in the direction that costs the most.
+
+Follow what the unit-step climb actually does with a metal when
+it cannot make the call. It walks every rung to the ceiling
+looking for a flat interior. A metal has none to find -- that is
+the whole point of the classification -- so it exhausts the
+ladder and stops non-converged. And a non-converged stop harvests
+*nothing*: no potential is extracted, no entry is staged. So
+withholding the test does not buy the same rough potential more
+slowly. It converts a serviceable rough potential into no
+potential at all, after paying for the entire ladder. It also
+leaves the harvest's single-rung gap reading as the only metal
+judgment anywhere in the system, which is exactly the reading
+that recorded Al and Cu as insulators above.
+
+The diagnostic use the old scoping was protecting survives, by an
+existing dial rather than a special case. A band gap cannot be
+negative, so a `metal_gap_threshold` (3.12.6) set below zero is a
+test no rung can ever trigger. A curator who wants every rung of
+a known metal computed -- to read the ladder itself, as the
+seed-run gap ladders did -- sets it negative and gets the
+walk-to-the-ceiling behaviour back, with the reason written down
+in the manifest rather than implied by which climb shape was
+chosen.
 
 #### 3.12.4 Seeding the climb from a prediction
 
@@ -2456,7 +2503,8 @@ go; it is the bracket-then-refine search of 3.12.3 by default,
 with the fine unit-step climb available as an explicit option for
 the most conservative reading. All three shapes -- grid,
 bracket-refine, unit climb -- share the rung rule (3.12.2), the
-two-sided stop test (3.12.3), and the harvest (7.8); they differ
+two-sided stop test and the metal test (3.12.3), and the harvest
+(7.8); they differ
 only in how the ladder is sampled: the grid lays a fixed
 neighbourhood all at once, the bracket-refine climb strides then
 fills the bracket it lands in, and the unit climb walks every
@@ -5543,6 +5591,55 @@ resolvable from the manifest at all.  The rest are per solid.
   `-thermsmear` option, written into `THERMAL_SMEARING_SIGMA`, in
   eV).  A bare `"gaussian"` names no width, so makeinput keeps its
   rc-sourced default (no smearing).
+
+  **The tetrahedron method is this path's default, and the reason
+  is metals.**  The producer cannot know whether a reference solid
+  is a metal before it runs one: that is what the k-point ladder
+  discovers, and often not until several rungs up.  So the
+  integration scheme has to be chosen while the answer is still
+  unknown, which means choosing the one that is safe under both
+  outcomes rather than the one that suits the commoner case.
+
+  Unsmeared Gaussian integration assigns each state to the
+  occupied set or the empty set by where its eigenvalue falls
+  relative to the Fermi level, one mesh point at a time.  In a
+  metal the Fermi level cuts through a partly filled band, so a
+  small refinement of the mesh can move a state across it and
+  change the total energy by a full state's worth.  Refining the
+  mesh therefore does not settle the energy smoothly; it rattles
+  it, and the rattle does not shrink in proportion to the mesh
+  spacing.  That is the mechanism behind the noise floor the
+  convergence threshold has to sit above (3.12.3).  The
+  tetrahedron method instead interpolates the bands linearly
+  between mesh points and integrates over the occupied volume, so
+  the occupied fraction of a tetrahedron straddling the Fermi
+  level varies continuously as the mesh moves, and the Blochl
+  correction removes the leading curvature error of that linear
+  interpolation (1.6).
+
+  **The choice costs an insulator nothing.**  Where a real gap
+  sits at the Fermi level every tetrahedron is wholly occupied or
+  wholly empty, the Blochl weights reduce to one quarter per
+  corner, summing over the tetrahedra that share a k-point returns
+  the uniform mesh weight, and the tetrahedron method reproduces
+  the Gaussian answer exactly.  This is measured, not argued:
+  `si_fd-3m_227_2001` at mesh 6-6-6 returns the same total energy
+  under both schemes.  So the default is not a trade -- it is free
+  where it does not matter and load-bearing where it does, which
+  is what lets it be set before the metal question is answered.
+
+  **The default belongs to the ground state, not to every
+  calculation.**  A core-level spectroscopy run (XANES/ELNES)
+  names `"gaussian"` and gets it: `populateLAT` stops with a
+  message naming Gaussian integration as the supported path,
+  because the core-hole correction is written against the flat
+  sorted occupation array and its band arithmetic does not carry
+  over to the `(band, kpoint, spin)` array unexamined.  A wrong
+  correction there misplaces exactly one electron, which presents
+  as a convergence problem and is never traced back.  That
+  refusal is deliberate and is tracked with the rest of the
+  occupation work; it does not qualify the ground-state default,
+  it scopes it.
 - `cell` (string): which cell the reference run computes in --
   `"prim"` (the primitive reduction of the structure's space
   group, the default) or `"full"` (its conventional cell).  It
@@ -5719,11 +5816,16 @@ built-in policy.  The knobs are:
   convergence threshold, setting how eagerly a nearly-settled
   stride is bracketed and so how much top-end overshoot is shaved
   (3.12.3).
-- `metal_gap_threshold` (real > 0, eV): the band-gap value below
+- `metal_gap_threshold` (real, eV): the band-gap value below
   which a rung is read as gapless, so the climb declares the
   material a metal and settles at once on a rough, floor-level
   mesh; low enough that no real insulator crosses it, high enough
-  to catch a true metal's near-zero gap (3.12.3).
+  to catch a true metal's near-zero gap (3.12.3).  Applies to
+  every climb shape.  A NEGATIVE value turns the test off, since
+  no band gap can be negative -- the way a curator asks for every
+  rung of a known metal to be computed, for a diagnostic ladder
+  (3.12.3).  This needs no special case in the rule itself, which
+  is why it is stated here as a use rather than coded as one.
 - `crystalline_floor_axis_count` (positive int): the per-axis cap
   on a crystalline climb's opening floor mesh -- the most points
   any one axis of the coarsest starting mesh may carry, `4` by
@@ -6154,11 +6256,29 @@ Predict in density, search in mesh, record in density.
    because a solid climbs on the instant its own rung lands, a
    late, expensive solid never holds back the ones already done.
    The producer runs no SCF itself.  Each solid's
-   outcome is either its **converged rung** (the mesh, its
+   outcome is either its **settled rung** (the mesh, its
    energy, and the ascending distinct-mesh ladder below it) or
    `NON_CONVERGED` -- a ceiling, or a rung that failed to run.  A
    non-converged solid is flagged, never retried here: retries are
    the runner's job (Principle 12).
+
+   **The reason for the stop travels with the rung.**  Two
+   different reasons yield a settled rung: the energy went flat
+   (a k-converged insulator) or the material read gapless (a
+   metal settled on a deliberately rough potential, 3.12.3).
+   They are not interchangeable downstream, so the climb reports
+   which one it was rather than leaving each later stage to work
+   it out again from whatever evidence it happens to hold. Three
+   verdicts, then: `converged`, `metal`, `not_converged`.
+
+   This matters because a *classification* the system already
+   made should not be re-derived from weaker evidence later. The
+   climb reads the whole ladder; a later stage looking at one
+   rung sees an artificial gap whose size depends on where the
+   mesh points fell (1.6), and can reach the opposite conclusion
+   with nothing to warn it. Carrying the verdict makes the metal
+   path a decision taken once and remembered, which is also what
+   lets the run log say what actually happened.
 5. **Harvest.**  For each `[[reference_solid]]`:
    a. If the solid is `NON_CONVERGED`, flag it in the run log and
       harvest no potential (a non-converged sweep earns neither a
@@ -6252,9 +6372,22 @@ Predict in density, search in mesh, record in density.
 6. Save each affected `ElementDatabase` to disk via
    `initial_potential_db.save()` (5.5).
 7. Write `share/curation/run_log.toml` capturing the manifest
-   snapshot, per-run iteration counts, the converged mesh and its
+   snapshot, per-run iteration counts, the settled mesh and its
    k-density chosen for each solid, and the Imago commit.  The
    validation harness (5.8) reads this log.
+
+   Each row carries the climb's `verdict` verbatim -- one of
+   `converged`, `metal`, `not_converged` -- and a `converged`
+   boolean that means what it says: k-point converged, and so
+   FALSE for a metal.  The two fields are not redundant, because
+   they answer different questions.  `converged` answers "is
+   this energy a converged one?", which the validation harness
+   needs before it treats a row as a reproducible target.
+   `verdict` answers "why did it stop?", which is what
+   distinguishes the two false cases from each other: a metal
+   row names a mesh and DID yield a potential, a not_converged
+   row yielded nothing at all.  Collapsing them would force a
+   reader to guess which kind of false it was looking at.
 
 **Reporting: outcomes and problems, not progress.**  A run says
 what it achieved and what went wrong with it.  It does not
@@ -11943,11 +12076,31 @@ place, in this same field.
          structure.  Non-converged sweeps do not earn
          an entry.  The user must widen the grid and
          re-run.
-      d'. If the chosen run is gapless (`gap_ev` at or
-         below `metal_gap_threshold`, the same test the
-         climb's metal short-circuit applies, 3.12.3), log
-         the metal and SKIP this structure.  A metal stages
-         no guidance entry.  See below.  The threshold
+      d'. If the structure reads as a metal, log it and
+         SKIP: a metal stages no guidance entry.  See
+         below.  TWO independent readings can say so, and
+         EITHER is sufficient.  The first is the chosen
+         run's own gap (`gap_ev` at or below
+         `metal_gap_threshold`, the same test the climb's
+         metal short-circuit applies, 3.12.3).  The second
+         is the caller's LADDER reading: whether any rung
+         it computed came back gapless, which this step
+         receives as an argument rather than re-deriving.
+         Each caller supplies it from the multi-rung
+         evidence it has -- the producer from the climb's
+         verdict (3.12.3), this standalone harvest from the
+         gaps of every point in its own grid.
+         **Why one reading is not enough.**  A metal on a
+         discrete mesh shows a small artificial gap whose
+         size depends on where the mesh points fall (1.6),
+         so a SINGLE rung's reading is close to a coin
+         toss: fcc Al reads zero at several meshes and
+         0.124 eV at another.  The chosen rung alone is
+         therefore weak evidence, and the ladder taken
+         whole is strong.  Taking either as sufficient
+         means neither reading can be outvoted by a worse
+         one, and nothing currently caught stops being
+         caught.  The threshold
          rides on this structure's `prediction` record,
          the same channel `kpoint_convergence_threshold`
          uses and for the same reason: it is a manifest

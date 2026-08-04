@@ -466,7 +466,7 @@ def _require_field(result_toml: dict, field: str, unit_id: str):
 def build_entry(workspace_root, source_structure, prediction,
                 dataspace, structure, kpoint_threshold,
                 grid_values, grid_energies, converged_density,
-                chosen_result):
+                chosen_result, ladder_is_metal=False):
     """Assemble the rich :class:`GuidanceEntry` for one converged
     structure from its ALREADY-CHOSEN facts (DESIGN 7.8 step 3f;
     PSEUDOCODE 15.7).
@@ -522,17 +522,39 @@ def build_entry(workspace_root, source_structure, prediction,
     of DESIGN 7.6.  The guard sits HERE, in the one builder both
     harvest paths share, so neither can grow its own version of the
     rule.  The producer's potential harvest is unaffected: a rough
-    starting potential is exactly what that database is for."""
+    starting potential is exactly what that database is for.
 
-    # The metal test, before any other work: the cut is read off the
-    #   prediction record, which is how a manifest knob reaches a
-    #   standalone tool that never sees a manifest (the same channel
-    #   kpoint_threshold uses, DESIGN 7.8 step 3d').  is_gapless_value
-    #   is the scalar core the climb's rung-shaped is_gapless also
-    #   calls, so one rule serves both -- including its side on
-    #   missing data: an UNKNOWN gap is NOT metallic, because a
-    #   missing reading must never silently suppress an entry a real
-    #   insulator earned.
+    TWO readings decide it and EITHER is sufficient (DESIGN 7.8 d').
+    ``ladder_is_metal`` is the CALLER's multi-rung reading, passed in
+    rather than worked out here because only the caller holds the
+    ladder: the producer passes the climb's verdict, the standalone
+    sweep passes the any-rung test over its own grid.  It defaults to
+    False, which means "no multi-rung evidence offered" and leaves
+    the chosen rung as the only witness -- never "known not to be a
+    metal".  The chosen rung's own gap is the second reading.
+
+    Neither reading is redundant.  A metal on a discrete mesh shows
+    an artificial gap whose size depends on where the mesh points
+    fall (DESIGN 1.6), so one rung is weak evidence -- fcc Al reads
+    zero at several meshes and 0.124 eV at another -- while the
+    ladder taken whole is strong.  Accepting either means the
+    stronger reading cannot be overruled by the weaker one, and
+    nothing the chosen-rung test already caught stops being caught."""
+
+    # The caller's ladder reading first: it rests on more evidence
+    #   than anything available here, and settles the question when
+    #   it fires.
+    if ladder_is_metal:
+        return None
+
+    # The chosen rung's own gap.  The cut is read off the prediction
+    #   record, which is how a manifest knob reaches a standalone tool
+    #   that never sees a manifest (the same channel kpoint_threshold
+    #   uses, DESIGN 7.8 step 3d').  is_gapless_value is the scalar
+    #   core the climb's rung-shaped is_gapless also calls, so one
+    #   rule serves both -- including its side on missing data: an
+    #   UNKNOWN gap is NOT metallic, because a missing reading must
+    #   never silently suppress an entry a real insulator earned.
     metal_gap_threshold = prediction.get("metal_gap_threshold")
     if metal_gap_threshold is None:
         raise ValueError(
@@ -802,11 +824,27 @@ def harvest_flight(workspace_root, db_root, dataspace):
         #   result.toml -- the SAME shape the producer's in-memory
         #   climb hands it, so the two paths stage identical entries
         #   and cannot drift on a schema change (7.8 3f).
+        # This path has no climb to take a verdict FROM, so it makes
+        #   the multi-rung reading itself, over the gaps of every
+        #   point in its own grid -- the same any-rung rule the climb
+        #   applies to its ladder, on the evidence this path holds.
+        #   The gaps were parsed in step (b) and simply never looked
+        #   at before: only the chosen rung's was consulted, and one
+        #   rung's apparent gap on a discrete mesh is close to a coin
+        #   toss (DESIGN 1.6 / 7.8 d').
+        #   A record with no threshold at all is left to build_entry,
+        #   which names the missing field and what it is for; reading
+        #   it here would raise a bare comparison error instead.
+        ladder_gap_cut = prediction.get("metal_gap_threshold")
+        ladder_is_metal = ladder_gap_cut is not None and any(
+            is_gapless_value(result_toml.get("gap_ev"), ladder_gap_cut)
+            for result_toml in result_tomls)
         entry = build_entry(
             workspace_root, grid[0].structure, prediction,
             dataspace, structure, kpoint_threshold,
             collapsed_densities, collapsed_energies,
-            kpoint_densities[idx], result_tomls[idx])
+            kpoint_densities[idx], result_tomls[idx],
+            ladder_is_metal=ladder_is_metal)
 
         # g'. A metal builds no entry (DESIGN 7.8): build_entry
         #    returns None and BOTH harvest paths skip on it, so the

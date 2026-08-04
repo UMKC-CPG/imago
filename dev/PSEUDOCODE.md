@@ -2063,10 +2063,20 @@ function at_ceiling(mesh, max_count):
 ### 4e.3 One material's next action
 
 Three search shapes (DESIGN 3.12.3 / 3.12.5) share the two-sided
-stop test (4e.2) and the rung rule (4e.1); they differ only in
-which rungs they compute.  `climb_next` dispatches on the mode,
-threading a per-material search `state` for the stateful
-bracket-refine shape; the grid and the unit-step climb ignore it.
+stop test (4e.2), the metal test (4e.2) and the rung rule (4e.1);
+they differ only in which rungs they compute.  `climb_next`
+dispatches on the mode, threading a per-material search `state`
+for the stateful bracket-refine shape; the grid and the unit-step
+climb ignore it.
+
+The metal test sits in `climb_next` itself, ABOVE the dispatch,
+which is what makes it shared rather than replicated (DESIGN
+3.12.3).  Recognising a metal is a classification, and a
+classification cannot belong to a search shape: the shapes exist
+to disagree about which rungs are worth computing, not about what
+a computed rung means.  Placing it here also means there is
+exactly one copy of the rule, so no shape can grow its own
+variant of it.
 Every shape returns one of: `RUN(mesh)` -- run one more mesh;
 `CONVERGED(rung)` -- done, an insulator settled at that rung;
 `METAL(rung)` -- stop, a metal recognised by its vanishing gap
@@ -2084,6 +2094,36 @@ function climb_next(rungs, state, config):
     #   metal test (4e.2), alongside the energy the stop test reads.
     # state: the per-material search state (bracket-refine only).
     # Returns (action, state').
+    #
+    # The metal test, ahead of every shape's own logic and ahead of
+    #   any convergence work (DESIGN 3.12.3): if any computed rung
+    #   reads gapless, stop and settle ON THAT RUNG -- a rough metal
+    #   potential, not a k-converged energy.  A metal reads gap ~ 0
+    #   from the floor up, so this usually fires on the opening rung;
+    #   a near-metal that shows a small gap coarse and closes it
+    #   finer fires on the rung where the gap first vanishes.
+    #
+    # rungs is sorted ascending by mesh, so scanning it in order and
+    #   taking the FIRST match settles on the COARSEST gapless rung.
+    #   That is the rule DESIGN 3.12.3 states, and it is not the same
+    #   as the densest rung on the ladder: a confident opening grid
+    #   resolves several rungs at once and a refine fill lands below
+    #   rungs already computed, so the gapless rung need not be the
+    #   last one.  Settling on the densest instead could settle on a
+    #   rung that read a GAP, and the harvest re-reads that single
+    #   rung (7.8 / 15.7) -- it would then see an insulator where
+    #   this test saw a metal.  Taking the gapless rung makes the two
+    #   agree by construction rather than by coincidence.
+    #
+    # A NEGATIVE metal_gap_threshold can never fire, since no band
+    #   gap is negative -- that is how a curator asks for a known
+    #   metal's every rung to be computed (DESIGN 3.12.3 / 3.12.6).
+    #   No special case is needed for it here; it falls out of the
+    #   comparison.
+    metal_rung = first r in rungs with
+        is_gapless(r, config.metal_gap_threshold)
+    if metal_rung is not None:
+        return METAL(metal_rung), state
     if config.mode == BRACKET_REFINE:
         return bracketRefineNext(rungs, state, config)
     # UNIT_STEP, or a GRID opening that did not converge and now
@@ -2095,7 +2135,9 @@ function climb_next(rungs, state, config):
 function climbAction(rungs, config):
     # The unit-step climb (DESIGN 3.12.3): walk one rung at a time,
     # testing the whole accumulated ladder.  RUN one more, CONVERGED
-    # at the flat interior rung, or CEILING.
+    # at the flat interior rung, or CEILING.  It returns no METAL of
+    # its own -- climb_next tests the gap before dispatching here, so
+    # a metal never reaches this function.
     idx = pick_converged_climb(
         rungs, config.cell_atom_count, config.threshold,
         config.flat_needed)
@@ -2125,18 +2167,11 @@ machine.  Its per-material `state`:
 
 ```
 function bracketRefineNext(rungs, state, config):
-    # A metal is recognised by its gap, ahead of any convergence
-    #   work (DESIGN 3.12.3): if any computed rung reads gapless, stop
-    #   and settle at the densest rung reached so far -- a rough metal
-    #   potential, not a k-converged energy.  A metal reads gap ~ 0
-    #   from the floor up, so this usually fires on the opening rung;
-    #   a near-metal that shows a small gap coarse and closes it finer
-    #   fires on the rung where the gap first vanishes.  Settling at
-    #   the current rung keeps it cheap; a +1 denser sample is a dial
-    #   (3.12.6).  Rides on this automatic climb only -- the fine
-    #   unit-step climb (climbAction) walks every rung to the ceiling.
-    if any(is_gapless(r, config.metal_gap_threshold) for r in rungs):
-        return METAL(rungs[-1]), state
+    # No metal test here: climb_next above applies it to every shape
+    #   before dispatching, so by the time this runs no rung on the
+    #   ladder is gapless.  The recursive resume at the foot of this
+    #   function may therefore skip it too -- the rungs it re-judges
+    #   are the same ones climb_next already read.
     if state.phase == BRACKET:
         top = state.endpoints[-1]
         if length(state.endpoints) == 1:
@@ -2146,8 +2181,8 @@ function bracketRefineNext(rungs, state, config):
         # Two or more endpoints.  The bracket test uses the LOOSER
         #   stride_threshold (4e.2); the refine below keeps the strict
         #   convergence threshold.  (No near-metal check here: a metal
-        #   is caught by the gap test at the top of this function,
-        #   before any stride is judged.)
+        #   is caught by climb_next's gap test before this shape is
+        #   dispatched at all, so before any stride is judged.)
         prev = state.endpoints[-2]
         if stride_is_flat(rung_at(rungs, prev), rung_at(rungs, top),
                           config.cell_atom_count,
@@ -2391,9 +2426,14 @@ or `UNIT_STEP`), so a typo like `"unit-step"` fails loudly rather
 than falling through to a default shape.  The
 `stride_flatness_multiple` is likewise checked to be `>= 1`, since
 a value below one would invert its meaning (a stricter-than-
-convergence bracket); the `metal_gap_threshold` is checked `> 0`
-as an absolute band gap in eV; and `crystalline_floor_axis_count`
-is checked `>= 1` as a per-axis count.  The provisional default
+convergence bracket); and `crystalline_floor_axis_count` is
+checked `>= 1` as a per-axis count.  `metal_gap_threshold` is
+NOT range-checked: any real value is meaningful.  It is an
+absolute band gap in eV, and a negative one is the documented way
+to disable the metal test for a diagnostic ladder, since no band
+gap is negative (DESIGN 3.12.3 / 3.12.6).  A `> 0` check here
+would reject exactly the setting the design tells a curator to
+use.  The provisional default
 values themselves are still to be fixed by the seed experiment
 (3.12.6).
 
@@ -2402,9 +2442,18 @@ values themselves are still to be fixed by the seed experiment
 ```
 function converge_by_climb(materials, configs, seed_densities,
                            dispatcher, on_non_converged):
-    # Drive every material through the climb to a verdict --
-    # converged, or non-converged (a ceiling, or a rung that failed
-    # to run).  Serial within a material, concurrent across, and NO
+    # Drive every material through the climb to a verdict -- one of
+    # CONVERGED (the energy went flat), METAL (a rung read gapless,
+    # 3.12.3) or NOT_CONVERGED (a ceiling, or a rung that failed to
+    # run).  Returns (outcomes, rungs, verdicts): outcomes[m] is the
+    # settled Rung or the NON_CONVERGED sentinel, verdicts[m] is the
+    # REASON, kept because CONVERGED and METAL both produce a settled
+    # rung and are NOT interchangeable downstream (DESIGN 5.7).
+    # Discarding the reason here is what forced every later stage to
+    # re-derive the classification from whatever evidence it happened
+    # to hold -- and the harvest holds only ONE rung, whose apparent
+    # gap on a discrete mesh is close to a coin toss (DESIGN 1.6).
+    # Serial within a material, concurrent across, and NO
     # material waits on another: a chain climbs on the instant its
     # own rung lands (DESIGN 3.12.5).  The injected `dispatcher`
     # owns the in-flight set so this loop tracks only its per-
@@ -2425,15 +2474,21 @@ function converge_by_climb(materials, configs, seed_densities,
     rungs    = { m: [] for m in materials }
     search   = {}                  # per-material search state (4e.4)
     outcomes = {}
+    verdicts = {}                  # m -> CONVERGED | METAL |
+                                   #      NOT_CONVERGED
     active   = set(materials)
     in_air   = {}                  # rungs still in flight, per m
     opening  = set(materials)      # still in the opening (grid) phase
 
-    # retire m with a verdict and drop it from the active set; a
-    #   non-converged stop tags the mismatch (7.8 3d).
-    function retire(m, verdict):
-        outcomes[m] = verdict
-        if verdict is NON_CONVERGED:
+    # retire m with a settled rung (or the NON_CONVERGED sentinel)
+    #   AND its reason, then drop it from the active set.  One place
+    #   writes both, so an outcome can never be recorded without the
+    #   reason that produced it.  A non-converged stop also tags the
+    #   prediction mismatch (7.8 3d).
+    function retire(m, outcome, verdict):
+        outcomes[m] = outcome
+        verdicts[m] = verdict
+        if verdict is NOT_CONVERGED:
             on_non_converged(m)
         active.discard(m)
 
@@ -2445,13 +2500,16 @@ function converge_by_climb(materials, configs, seed_densities,
         (action, search[m]) = climb_next(rungs[m], search[m],
                                           configs[m])
         if action is CONVERGED or action is METAL:
-            outcomes[m] = action.rung                # record the rung;
-            active.discard(m)                        #   a METAL's is a
-            #   rough metal potential (DESIGN 3.12.3), a CONVERGED's a
-            #   k-converged insulator energy -- both usable results,
-            #   distinguished only by their reason tag for the record.
+            # Both record a settled rung -- a METAL's is a rough metal
+            #   potential (DESIGN 3.12.3), a CONVERGED's a k-converged
+            #   insulator energy -- and both leave active with no
+            #   mismatch tag.  They are told apart by the verdict, and
+            #   ONLY by it: nothing about the rung itself says which
+            #   kind of stop produced it.
+            retire(m, action.rung,
+                   METAL if action is METAL else CONVERGED)
         elif action is CEILING:
-            retire(m, NON_CONVERGED)                 # 7.8 3d; a hard
+            retire(m, NON_CONVERGED, NOT_CONVERGED)  # 7.8 3d; a hard
             #   insulator still steep at the count ceiling, dropped.
         else:                                        # RUN(mesh)
             dispatcher.send({ m: [action.mesh] })
@@ -2490,7 +2548,8 @@ function converge_by_climb(materials, configs, seed_densities,
                 continue
             opening.discard(m)
             if rungs[m] is empty:
-                retire(m, NON_CONVERGED)             # run failure
+                retire(m, NON_CONVERGED,
+                       NOT_CONVERGED)                # run failure
             else:
                 judge(m)
         else:
@@ -2499,11 +2558,12 @@ function converge_by_climb(materials, configs, seed_densities,
             #   rather than re-dispatch it forever (7.7); otherwise
             #   judge the extended ladder.
             if result is FAILED:
-                retire(m, NON_CONVERGED)             # run failure
+                retire(m, NON_CONVERGED,
+                       NOT_CONVERGED)                # run failure
             else:
                 judge(m)
 
-    return outcomes, rungs
+    return outcomes, rungs, verdicts
 ```
 
 No chain ever waits on another: a material advances the instant
@@ -6196,7 +6256,7 @@ function buildInitialPotentials(manifest_path,
             prune_problems = prune_problems)
         materials = [ref.reference_id
                      for ref in manifest.reference_solids]
-        outcomes, rungs = converge_by_climb(
+        outcomes, rungs, verdicts = converge_by_climb(
             materials, configs, seed_densities, dispatcher,
             on_non_converged =
                 lambda m: tag_prediction_mismatch(workspace, m))
@@ -6231,10 +6291,17 @@ function buildInitialPotentials(manifest_path,
             struct, options_of[ref.reference_id], outcome.mesh,
             id = ref.reference_id, record = record)
         converged_result = read_result_toml(workspace, converged)
-        # The run log records the converged mesh AND its k-density
-        # (both from record_converged) and the SCF iteration count.
+        # The run log records the settled mesh AND its k-density
+        # (both from record_converged), the SCF iteration count, and
+        # the climb's VERDICT verbatim.  The row's `converged` flag
+        # is derived from the verdict rather than asserted: it means
+        # k-point converged, so it is FALSE for a metal even though
+        # the row names a mesh and a potential WAS harvested (DESIGN
+        # 5.7).  Asserting it true here is what made a metal
+        # indistinguishable from an insulator on disk.
         log.append(make_run_log_entry(
-            ref, harvest, converged_result))
+            ref, harvest, converged_result,
+            verdicts[ref.reference_id]))
 
         # Harvest one representative per DISTINCT ENVIRONMENT the
         # converged run discovered (DESIGN 5.7).  The grouping pass
@@ -6314,13 +6381,21 @@ function buildInitialPotentials(manifest_path,
         # and its density is no convergence claim -- and build_entry
         # returns None for it (15.7).  Not every converged solid
         # contributes an entry; every converged NON-METAL does.
+        #
+        # ladder_is_metal hands build_entry the climb's VERDICT
+        # rather than making it re-derive the classification from the
+        # one settled rung it can see (DESIGN 7.8 d').  The climb read
+        # every rung; the builder reads one, and one rung's apparent
+        # gap on a discrete mesh is close to a coin toss (DESIGN 1.6).
         entry = build_entry(
             workspace, struct, predictions[ref.reference_id],
             dataspace, load_structure(struct),
             ref.kpoint_convergence_threshold,
             harvest.grid_values, harvest.grid_energies,
             harvest.converged_kpoint_density,
-            converged_result)
+            converged_result,
+            ladder_is_metal =
+                (verdicts[ref.reference_id] is METAL))
         if entry is not None:
             save_entry(entry, "share/historicalGuidanceDB/")
         else:
@@ -7728,6 +7803,71 @@ function format_manifest(manifest):
 
 function write_manifest(manifest, path):
     write_file(path, format_manifest(manifest))
+```
+
+The four run-setting values an authoring tool writes into a
+fresh `[defaults]` block live here, in the schema library, so
+that `cod_fish` and `expand_manifest` cannot drift apart.  Note
+what these are NOT: the loader requires every run setting to
+resolve from the solid or from `[defaults]` (11.4, rule 2), so
+none of them is a resolve-time fallback.  They are the answer to
+"what should a newly authored manifest say?", and a manifest
+that says something else is honoured as written.
+
+```
+# The full basis.  These are reference-quality potentials that
+#   every later calculation starts from, so the producer pays
+#   for the larger basis once rather than have every consumer
+#   inherit a minimal-basis starting guess.
+DEFAULT_BASIS = "fb"
+
+# The Wigner interpolation functional -- Imago's own default,
+#   and a predictor sub-model selector, so a database built on
+#   anything else cannot inform a run built on this.
+DEFAULT_FUNCTIONAL = "wigner"
+
+# Linear tetrahedral Brillouin-zone integration, with the
+#   Bloechl correction (DESIGN 5.7, 1.6).  The default because
+#   the producer must choose an integration scheme BEFORE it
+#   knows whether the solid is a metal -- that is what the
+#   k-point ladder discovers, often several rungs up -- and this
+#   is the choice that is safe under both answers.  In a metal
+#   the tetrahedron method varies the occupied volume
+#   continuously as the mesh refines, where unsmeared Gaussian
+#   integration moves whole states across the Fermi level and
+#   rattles the energy by amounts that do not shrink with the
+#   mesh spacing.  In a gapped system it costs nothing at all:
+#   every tetrahedron is wholly occupied or wholly empty, the
+#   Bloechl weights reduce to a quarter per corner, and the
+#   result is the Gaussian answer exactly (measured on
+#   si_fd-3m_227_2001 at mesh 6-6-6).
+#
+# This default is the GROUND STATE's.  A core-level
+#   spectroscopy run names "gaussian" and gets it, because the
+#   core-hole correction is not written against the tetrahedral
+#   occupation array (DESIGN 5.7).
+DEFAULT_KPOINT_INTEGRATION = "linear-tetrahedral"
+
+# The SCF self-consistency threshold.  Distinct from the k-point
+#   flatness tolerance in 11.4: this one governs a SINGLE run's
+#   iteration to its own fixed point, and it IS part of the
+#   cache key.
+DEFAULT_SCF_THRESHOLD = 1.0e-6
+
+function default_run_settings():
+    # kpoint_spec is EMPTY on purpose: the producer predicts a
+    #   starting density and verifies it by climbing the ladder,
+    #   so a pinned density would only override
+    #   predict-then-verify.  cell is emitted even though it is
+    #   exempt from rule 2 -- an authoring tool writing a fresh
+    #   file should say what it chose rather than leave a reader
+    #   to know the built-in.
+    return { "basis"              : DEFAULT_BASIS,
+             "functional"         : DEFAULT_FUNCTIONAL,
+             "kpoint_integration" : DEFAULT_KPOINT_INTEGRATION,
+             "kpoint_spec"        : {},
+             "scf_threshold"      : DEFAULT_SCF_THRESHOLD,
+             "cell"               : DEFAULT_CELL }
 ```
 
 `cod_fish` writes the common COD case straight through this
@@ -11735,11 +11875,23 @@ function harvest_flight(workspace_root, db_root, dataspace):
         #    producer's in-memory climb (11.4, which picks via the
         #    climb and record_converged) hand build_entry the SAME
         #    shape, so they stage identical entries and cannot drift.
+        #
+        #    This path has no climb to take a verdict FROM, so it
+        #    makes the multi-rung reading itself, over the gaps of
+        #    every point in its own grid -- the same any-rung rule
+        #    the climb applies to its ladder (4e.3), on the evidence
+        #    this path happens to hold.  The gaps were parsed in step
+        #    (b) and simply never looked at before.
+        ladder_is_metal = any(
+            is_gapless_value(rt.get("gap_ev"),
+                             prediction["metal_gap_threshold"])
+            for rt in rts)
         entry = build_entry(
             workspace_root, grid[0].structure, prediction,
             dataspace, sc, kpoint_threshold,
             c_kpoint_densities, c_energies,
-            kpoint_densities[idx], rts[idx])
+            kpoint_densities[idx], rts[idx],
+            ladder_is_metal = ladder_is_metal)
 
         # g'. A metal builds no entry (DESIGN 7.8).  build_entry
         #    returns None and BOTH harvests skip on it, so the one
@@ -11765,7 +11917,7 @@ workspace root's basename; both live in
 function build_entry(workspace_root, source_structure, prediction,
                      dataspace, structure, kpoint_threshold,
                      grid_values, grid_energies, converged_density,
-                     chosen_result):
+                     chosen_result, ladder_is_metal = false):
     # Assemble one converged structure's GuidanceEntry (DESIGN 7.8
     # step 3f).  The ONE entry builder both harvests feed (the
     # Q1-Q2 shared core, DESIGN 5.7): the density sweep
@@ -11798,6 +11950,25 @@ function build_entry(workspace_root, source_structure, prediction,
     # guard sits HERE, in the shared builder, so neither harvest
     # path can grow its own version of the rule.
     #
+    # TWO readings, EITHER sufficient (DESIGN 7.8 d').
+    #
+    # `ladder_is_metal` is the CALLER's multi-rung reading, passed in
+    # rather than re-derived here, because only the caller has the
+    # ladder: the producer passes the climb's verdict (11.4), the
+    # standalone harvest passes the any-rung test over its own grid
+    # (below).  It defaults to false, which means "no multi-rung
+    # evidence offered" and leaves the chosen-rung test as the only
+    # one -- never "known not to be a metal".
+    #
+    # The chosen rung's own gap is the second reading.  Neither is
+    # redundant.  A metal on a discrete mesh shows an artificial gap
+    # whose size depends on where the mesh points fall (DESIGN 1.6),
+    # so the single chosen rung is weak evidence -- fcc Al reads zero
+    # at several meshes and 0.124 eV at another -- while the ladder
+    # taken whole is strong.  Taking either as sufficient means the
+    # stronger reading cannot be overruled by the weaker one, and
+    # nothing the chosen-rung test already caught stops being caught.
+    #
     # The cut is read off the prediction record, which is how a
     # manifest knob reaches a standalone tool that never sees a
     # manifest (15.6, the same channel kpoint_threshold uses).  The
@@ -11806,6 +11977,8 @@ function build_entry(workspace_root, source_structure, prediction,
     # both -- including its side on missing data: an UNKNOWN gap is
     # not metallic, because a missing reading must never silently
     # suppress an entry a real insulator earned.
+    if ladder_is_metal:
+        return None
     if is_gapless_value(chosen_result.get("gap_ev"),
                         prediction["metal_gap_threshold"]):
         return None

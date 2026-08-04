@@ -764,14 +764,13 @@ def climb_policy_from_manifest(climb_settings):
             "kpoint_climb.stride_flatness_multiple must be >= 1 (it "
             "scales the convergence threshold up), got "
             "{0!r}".format(flatness))
-    # metal_gap_threshold is an absolute band gap in eV, so it must be
-    #   positive: a zero or negative threshold could never flag a
-    #   metal (a real band gap is non-negative).
-    gap_threshold = climb_settings.get("metal_gap_threshold")
-    if gap_threshold is not None and gap_threshold <= 0:
-        raise ValueError(
-            "kpoint_climb.metal_gap_threshold must be > 0 (an "
-            "absolute band gap in eV), got {0!r}".format(gap_threshold))
+    # metal_gap_threshold is deliberately NOT range-checked.  It is an
+    #   absolute band gap in eV, and every real value is meaningful --
+    #   including a negative one, which is the documented way to
+    #   disable the metal test for a diagnostic ladder, since no band
+    #   gap can be negative (DESIGN 3.12.3 / 3.12.6).  A "> 0" check
+    #   here would reject exactly the setting the design tells a
+    #   curator to use.
     # The crystalline floor's per-axis cap is a k-point count, so it
     #   too must be at least one point.
     floor_axis = climb_settings.get("crystalline_floor_axis_count")

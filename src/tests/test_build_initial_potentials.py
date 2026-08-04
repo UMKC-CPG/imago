@@ -2246,7 +2246,19 @@ def test_write_run_log_round_trips(tmp_path):
             {"converged_mesh": [4, 4, 4],
              "converged_kpoint_density": 100,
              "grid_values": [], "grid_energies": []},
-            {"scf_iterations": 7}),
+            {"scf_iterations": 7},
+            bip.VERDICT_CONVERGED),
+        # A METAL row: it names a settled mesh and a potential WAS
+        #   harvested from it, but the energy is not k-converged, so
+        #   `converged` reads False and only `verdict` distinguishes
+        #   it from the drop below (DESIGN 5.7).
+        make_run_log_entry(
+            _ref(reference_id="al_fcc"),
+            {"converged_mesh": [4, 4, 4],
+             "converged_kpoint_density": 100,
+             "grid_values": [], "grid_energies": []},
+            {"scf_iterations": 9},
+            bip.VERDICT_METAL),
         make_nonconverged_log_entry(_ref(reference_id="ag_fcc")),
     ]
     write_run_log(log_path, "abc123", "2026-06-12T00:00:00Z", rows)
@@ -2254,10 +2266,21 @@ def test_write_run_log_round_trips(tmp_path):
         data = tomllib.load(handle)
     assert data["imago_commit"] == "abc123"
     assert data["run"][0]["reference_id"] == "au_fcc"
+    assert data["run"][0]["verdict"] == "converged"
     assert data["run"][0]["converged"] is True
     assert data["run"][0]["converged_kpoint_density"] == 100
     assert data["run"][0]["converged_mesh"] == [4, 4, 4]
+
+    # The two FALSE rows differ in kind, and `verdict` is the only
+    #   field that says how: the metal names a mesh, the drop does
+    #   not.  Before the verdict existed the metal row asserted
+    #   `converged = true` and was indistinguishable from row 0.
+    assert data["run"][1]["verdict"] == "metal"
     assert data["run"][1]["converged"] is False
+    assert data["run"][1]["converged_mesh"] == [4, 4, 4]
+    assert data["run"][2]["verdict"] == "not_converged"
+    assert data["run"][2]["converged"] is False
+    assert "converged_mesh" not in data["run"][2]
 
 
 # ---- the orchestrator (toolchain seam mocked) ----------------
@@ -2343,7 +2366,8 @@ def _install_climb_mocks(monkeypatch, workspace, *,
                       on_non_converged=None):
         outcomes = {m: bip.Rung(list(converged_mesh), -1.0)
                     for m in materials}
-        return outcomes, {m: ladder for m in materials}
+        return (outcomes, {m: ladder for m in materials},
+                {m: bip.VERDICT_CONVERGED for m in materials})
 
     monkeypatch.setattr(bip, "converge_by_climb", fake_converge)
 
@@ -2755,7 +2779,8 @@ def test_producer_local_default_attaches_no_config(monkeypatch,
     monkeypatch.setattr(
         bip, "converge_by_climb",
         lambda materials, *a, **k: (
-            {m: bip.NON_CONVERGED for m in materials}, {}))
+            {m: bip.NON_CONVERGED for m in materials}, {},
+            {m: bip.VERDICT_NOT_CONVERGED for m in materials}))
     monkeypatch.setattr(bip, "save_databases", lambda *a, **k: None)
     monkeypatch.setattr(bip, "write_run_log", lambda *a, **k: None)
 
@@ -3212,7 +3237,7 @@ def test_climb_converges_over_several_rungs():
     seed_densities = {"si": 27.0}            # seeds the [3,3,3] mesh
     dispatcher = _SyntheticDispatcher({"si": _converging_energy})
 
-    outcomes, rungs = bip.converge_by_climb(
+    outcomes, rungs, _ = bip.converge_by_climb(
         materials, configs, seed_densities, dispatcher)
 
     assert outcomes["si"].mesh == [6, 6, 6]
@@ -3233,7 +3258,7 @@ def test_grid_mode_converges_in_the_opening():
     dispatcher = _SyntheticDispatcher(
         {"si": _flat_everywhere_energy}, send_counter=counter)
 
-    outcomes, _ = bip.converge_by_climb(
+    outcomes, _, _ = bip.converge_by_climb(
         materials, configs, seed_densities, dispatcher)
 
     assert outcomes["si"].mesh == [5, 5, 5]
@@ -3252,7 +3277,7 @@ def test_climb_stops_at_ceiling_and_tags_non_converged():
     dispatcher = _SyntheticDispatcher({"metal": _ceiling_energy})
     flagged = []
 
-    outcomes, _ = bip.converge_by_climb(
+    outcomes, _, _ = bip.converge_by_climb(
         materials, configs, seed_densities, dispatcher,
         on_non_converged=flagged.append)
 
@@ -3277,7 +3302,7 @@ def test_materials_climb_independently():
         {"good": _converging_energy, "bad": _ceiling_energy})
     flagged = []
 
-    outcomes, _ = bip.converge_by_climb(
+    outcomes, _, _ = bip.converge_by_climb(
         materials, configs, seed_densities, dispatcher,
         on_non_converged=flagged.append)
 
@@ -3306,7 +3331,7 @@ def test_bracket_refine_converges_at_the_same_mesh_as_unit_step():
     seed_densities = {"si": 27.0}            # seeds the [3,3,3] mesh
     dispatcher = _SyntheticDispatcher({"si": _converging_energy})
 
-    outcomes, _ = bip.converge_by_climb(
+    outcomes, _, _ = bip.converge_by_climb(
         materials, configs, seed_densities, dispatcher)
 
     assert outcomes["si"].mesh == [6, 6, 6]
@@ -3364,7 +3389,7 @@ def test_bracket_refine_stops_filling_once_converged():
             super().send(mesh_lists)
 
     dispatcher = _RecordingDispatcher({"si": _early_plateau_energy})
-    outcomes, _ = bip.converge_by_climb(
+    outcomes, _, _ = bip.converge_by_climb(
         materials, configs, seed_densities, dispatcher)
 
     assert outcomes["si"].mesh == [6, 6, 6]
@@ -3417,7 +3442,7 @@ def test_loose_stride_threshold_brackets_earlier():
             start_offset=0, max_count=20,
             stride_threshold=stride_threshold)
         dispatcher = _RecordingDispatcher({"si": _grey_stride_energy})
-        outcomes, _ = bip.converge_by_climb(
+        outcomes, _, _ = bip.converge_by_climb(
             ["si"], {"si": config}, {"si": 1.0}, dispatcher)
         return outcomes["si"].mesh, sent
 
@@ -3446,7 +3471,7 @@ def test_bracket_refine_stops_at_ceiling():
     dispatcher = _SyntheticDispatcher({"metal": _ceiling_energy})
     flagged = []
 
-    outcomes, _ = bip.converge_by_climb(
+    outcomes, _, _ = bip.converge_by_climb(
         materials, configs, seed_densities, dispatcher,
         on_non_converged=flagged.append)
 
@@ -3478,7 +3503,7 @@ def test_bracket_refine_settles_a_metal_on_its_gap():
         mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
         start_offset=0, max_count=20)
     flagged = []
-    outcomes, rungs = bip.converge_by_climb(
+    outcomes, rungs, _ = bip.converge_by_climb(
         materials, {"metal": config}, seed_densities,
         _SyntheticDispatcher(
             {"metal": _metal_energy},
@@ -3491,6 +3516,163 @@ def test_bracket_refine_settles_a_metal_on_its_gap():
     assert outcomes["metal"].mesh == [1, 1, 1]
     assert flagged == []
     assert [r.mesh for r in rungs["metal"]] == [[1, 1, 1]]
+
+
+def test_unit_step_settles_a_metal_on_its_gap():
+    """The metal test belongs to EVERY search shape, not only the
+    automatic bracket-refine climb, because recognising a metal is a
+    classification rather than a stopping rule (DESIGN 3.12.3).  So the
+    fine unit-step walk settles a gapless material exactly as the
+    bracket-refine climb above does.
+
+    What the test buys here is not speed but a RESULT.  Without it the
+    unit-step climb walks every rung to the ceiling hunting a flatness
+    a metal does not have, stops non-converged, and harvests no
+    potential at all -- worse than the rough floor-level potential the
+    metal path is designed to yield, and paid for in full."""
+    materials = ["metal"]
+    seed_densities = {"metal": 1.0}          # opens at [1,1,1]
+    config = _cubic_config(
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
+        start_offset=0, max_count=20)
+    flagged = []
+    outcomes, rungs, _ = bip.converge_by_climb(
+        materials, {"metal": config}, seed_densities,
+        _SyntheticDispatcher(
+            {"metal": _ceiling_energy},       # never flat: only the
+            gap_of={"metal": lambda mesh: 0.0}),   # gap can stop it
+        on_non_converged=flagged.append)
+
+    # Settled as a metal on the opening rung: a recorded Rung, no
+    #   mismatch tag, and one calculation rather than a walk to [20]^3.
+    assert outcomes["metal"] is not bip.NON_CONVERGED
+    assert outcomes["metal"].mesh == [1, 1, 1]
+    assert flagged == []
+    assert [r.mesh for r in rungs["metal"]] == [[1, 1, 1]]
+
+
+def test_negative_gap_threshold_disables_the_metal_test():
+    """A NEGATIVE metal_gap_threshold turns the metal test off, because
+    no band gap can be negative and so no rung can ever satisfy it
+    (DESIGN 3.12.3 / 3.12.6).  That is how a curator asks for every
+    rung of a KNOWN metal to be computed -- a diagnostic gap ladder,
+    the kind the seed runs used to measure where a metal's apparent gap
+    closes.  It needs no special case in the rule; it falls out of the
+    comparison.
+
+    Here the material reads a gap of exactly zero at every rung and its
+    energy never goes flat, so with the test disabled the only stop
+    left is the ceiling."""
+    materials = ["known_metal"]
+    seed_densities = {"known_metal": 1.0}
+    config = _cubic_config(
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
+        start_offset=0, max_count=4, metal_gap_threshold=-1.0)
+    flagged = []
+    outcomes, rungs, _ = bip.converge_by_climb(
+        materials, {"known_metal": config}, seed_densities,
+        _SyntheticDispatcher(
+            {"known_metal": _ceiling_energy},
+            gap_of={"known_metal": lambda mesh: 0.0}),
+        on_non_converged=flagged.append)
+
+    # Every rung up to the ceiling was computed, and the walk ended
+    #   non-converged -- the pre-metal-test behaviour, on request.
+    assert outcomes["known_metal"] is bip.NON_CONVERGED
+    assert flagged == ["known_metal"]
+    assert [r.mesh for r in rungs["known_metal"]] == [
+        [1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]]
+
+
+def test_the_climb_reports_why_each_material_stopped():
+    """Every material leaves the climb with a VERDICT saying why it
+    stopped, tracked per material alongside its outcome (DESIGN 5.7).
+
+    Two of the three endings produce a settled rung, and nothing about
+    the rung itself says which produced it: an insulator's flat rung
+    and a metal's gapless rung are the same shape of object.  Before
+    the verdict was carried, the run log asserted `converged = true`
+    for both, and the guidance harvest had to re-derive the
+    classification from the one rung it could see."""
+    insulator = _cubic_config(
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
+        start_offset=0, max_count=20)
+    metal = _cubic_config(
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
+        start_offset=0, max_count=20)
+    hard = _cubic_config(              # never flat, low ceiling
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
+        start_offset=0, max_count=3)
+
+    flagged = []
+    outcomes, _, verdicts = bip.converge_by_climb(
+        ["insulator", "metal", "hard"],
+        {"insulator": insulator, "metal": metal, "hard": hard},
+        {"insulator": 1.0, "metal": 1.0, "hard": 1.0},
+        _SyntheticDispatcher(
+            {"insulator": _converging_energy,
+             "metal": _ceiling_energy,
+             "hard": _ceiling_energy},
+            # Only the metal supplies gaps; the others read None,
+            #   which is NOT metallic (a missing reading must never
+            #   suppress a real result).
+            gap_of={"metal": lambda mesh: 0.0}),
+        on_non_converged=flagged.append)
+
+    assert verdicts["insulator"] == bip.VERDICT_CONVERGED
+    assert verdicts["metal"] == bip.VERDICT_METAL
+    assert verdicts["hard"] == bip.VERDICT_NOT_CONVERGED
+
+    # The two settled rungs are indistinguishable without the verdict
+    #   -- both are plain Rungs, neither is the NON_CONVERGED
+    #   sentinel -- which is exactly why it has to be carried.
+    assert outcomes["insulator"] is not bip.NON_CONVERGED
+    assert outcomes["metal"] is not bip.NON_CONVERGED
+    assert outcomes["hard"] is bip.NON_CONVERGED
+
+    # Only the non-converged ending tags a prediction mismatch: a
+    #   metal stopped on purpose, and did not miss a prediction.
+    assert flagged == ["hard"]
+
+
+def test_metal_settles_on_the_gapless_rung_not_the_densest():
+    """A metal settles on the rung that READ gapless -- the coarsest
+    such rung -- and not merely on the densest mesh computed (DESIGN
+    3.12.3).
+
+    The two coincide on a plain upward walk, which is how the
+    distinction is easy to lose, and they part on the paths where more
+    than one rung is in hand at once: a confident opening grid resolves
+    several rungs together, and a refine fill lands rungs BELOW ones
+    already computed.  It matters because the harvest re-reads the ONE
+    settled rung to decide whether to stage a guidance entry.  Settling
+    on the densest rung here would hand it [4,4,4], whose 0.124 eV
+    reading is the finite-mesh artifact that recorded fcc Al and fcc Cu
+    as insulators -- an entry claiming a k-point convergence for a
+    material that has none.  Settling on the gapless rung makes the
+    climb and the harvest agree by construction.
+
+    The rule lives in climb_next, above the dispatch on search shape,
+    so it holds for every shape; both are checked here."""
+    ladder = [bip.Rung([2, 2, 2], 0.0, 0.5),      # gapped
+              bip.Rung([3, 3, 3], -1.0, 0.0),     # gapless: settle HERE
+              bip.Rung([4, 4, 4], -2.0, 0.124)]   # gapped, and densest
+
+    unit = _cubic_config(
+        mesh_climb.UNIT_STEP, flat_needed=2, grid_width=0,
+        start_offset=0, max_count=20)
+    action, _ = bip.climb_next(ladder, None, unit)
+    assert action.kind == bip._ACTION_METAL
+    assert action.rung.mesh == [3, 3, 3]
+    assert action.rung.gap == 0.0
+
+    bracket = _cubic_config(
+        mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
+        start_offset=0, max_count=20)
+    action, _ = bip.climb_next(
+        ladder, bip.new_bracket_refine_state([2, 2, 2]), bracket)
+    assert action.kind == bip._ACTION_METAL
+    assert action.rung.mesh == [3, 3, 3]
 
 
 def _flat_insulator_energy(mesh):
@@ -3525,7 +3707,7 @@ def test_crystalline_floor_opens_above_the_coarse_regime():
         config = _cubic_config(
             mesh_climb.BRACKET_REFINE, flat_needed=2, grid_width=0,
             start_offset=0, max_count=20, opening_floor=opening_floor)
-        outcomes, _ = bip.converge_by_climb(
+        outcomes, _, _ = bip.converge_by_climb(
             materials, {"ins": config}, seed_densities,
             _SyntheticDispatcher(
                 {"ins": _flat_insulator_energy},
@@ -3747,7 +3929,7 @@ def test_climb_opening_failure_is_non_converged():
         {"si": _converging_energy}, fail={("si", (2, 2, 2))})
     flagged = []
 
-    outcomes, _ = bip.converge_by_climb(
+    outcomes, _, _ = bip.converge_by_climb(
         ["si"], configs, {"si": 27.0}, dispatcher,
         on_non_converged=flagged.append)
 
@@ -3767,7 +3949,7 @@ def test_climb_missing_continuation_rung_is_non_converged():
         {"si": _converging_energy}, fail={("si", (3, 3, 3))})
     flagged = []
 
-    outcomes, _ = bip.converge_by_climb(
+    outcomes, _, _ = bip.converge_by_climb(
         ["si"], configs, {"si": 27.0}, dispatcher,
         on_non_converged=flagged.append)
 

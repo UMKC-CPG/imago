@@ -248,7 +248,45 @@ class CurationManifest:
 
 DEFAULT_BASIS = "fb"
 DEFAULT_FUNCTIONAL = "wigner"
-DEFAULT_KPOINT_INTEGRATION = "gaussian"
+
+# Linear tetrahedral Brillouin-zone integration, with the Bloechl
+#   correction (DESIGN 5.7, DESIGN 1.6).  This is the default
+#   because the producer has to pick an integration scheme BEFORE
+#   it can know whether the solid is a metal -- that is what the
+#   k-point ladder discovers, often only several rungs up -- so the
+#   choice must be safe under both answers.
+#
+# In a metal it is the one that behaves.  Unsmeared Gaussian
+#   integration sorts each state into the occupied or the empty set
+#   by which side of the Fermi level its eigenvalue falls on, so a
+#   small refinement of the mesh can carry a state across and move
+#   the total energy by a whole state's worth.  Refining then
+#   rattles the energy instead of settling it, by amounts that do
+#   not shrink with the mesh spacing -- the noise floor the k-point
+#   flatness tolerance below has to sit above.  The tetrahedron
+#   method interpolates the bands between mesh points and
+#   integrates over the occupied volume, so a tetrahedron straddling
+#   the Fermi level changes its occupied fraction continuously.
+#
+# In an insulator it costs nothing.  Where a real gap sits at the
+#   Fermi level every tetrahedron is wholly occupied or wholly
+#   empty, the Bloechl weights reduce to a quarter per corner, and
+#   summing over the tetrahedra sharing a k-point gives back the
+#   uniform mesh weight -- so the scheme returns the Gaussian answer
+#   exactly.  Measured, not argued: si_fd-3m_227_2001 at mesh 6-6-6
+#   gives the same total energy either way.
+#
+# The default belongs to the GROUND STATE.  A core-level
+#   spectroscopy run (XANES/ELNES) names "gaussian" and gets it:
+#   the core-hole correction is written against the flat sorted
+#   occupation array and its band arithmetic does not carry over to
+#   the tetrahedral (band, kpoint, spin) array unexamined.
+DEFAULT_KPOINT_INTEGRATION = "linear-tetrahedral"
+
+# The SCF self-consistency threshold: how far a SINGLE run must
+#   iterate toward its own fixed point.  Distinct from the k-point
+#   flatness tolerance below, which compares FINISHED runs to each
+#   other; this one is part of the cache key, and that one is not.
 DEFAULT_SCF_THRESHOLD = 1.0e-6
 
 # The cell a reference run computes in (DESIGN 5.7): ``"prim"``
@@ -353,9 +391,14 @@ KPOINT_CLIMB_KEYS = ("confidence_high", "grid_width",
 def default_run_settings() -> dict[str, Any]:
     """The shared ``[defaults]`` run settings the authoring tools
     emit (DESIGN 5.7): the full basis, the Wigner functional,
-    Gaussian k-point integration, no fixed k-point density (the
-    producer predicts and verifies it), the 1e-6 SCF threshold,
-    and the primitive cell.
+    linear tetrahedral k-point integration, no fixed k-point
+    density (the producer predicts and verifies it), the 1e-6 SCF
+    threshold, and the primitive cell.
+
+    These are what a NEWLY AUTHORED manifest says, not fallbacks.
+    The loader requires every run setting to resolve from the solid
+    or from ``[defaults]`` (rule 2), so a manifest that names
+    something else is honoured exactly as written.
 
     ``cell`` is emitted here even though it is exempt from the
     resolvability rule: a manifest need not name it, but an

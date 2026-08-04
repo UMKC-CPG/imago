@@ -684,6 +684,49 @@ def test_build_entry_earns_an_entry_just_above_the_cut(patched):
     assert entry.measured.gap_ev == 0.06
 
 
+def test_build_entry_takes_the_callers_ladder_reading(patched):
+    """The caller's multi-rung reading is sufficient on its own, even
+    when the chosen rung shows a healthy gap (DESIGN 7.8 d').
+
+    This is the failure the argument was really about.  A metal on a
+    discrete mesh shows an artificial gap whose size depends on where
+    the mesh points fall, so ONE rung is close to a coin toss: fcc Al
+    reads zero at several meshes and 0.124 eV at another.  Handed only
+    that 0.124, the builder would stage an entry claiming a converged
+    k-density for a material that has none -- and record the artifact
+    as a real gap, which is a predictor key.  The caller saw the whole
+    ladder; the builder defers to it."""
+    structure = gh.load_structure("si.skl")
+    metallic_artifact = _chosen_result(gap_ev=0.124)
+
+    # Without the ladder reading the single rung earns an entry...
+    assert gh.build_entry(
+        "/workspace", "si.skl", _prediction(), _DATASPACE, structure,
+        5.0e-4, [50.0, 100.0, 200.0], [0.5, 0.5, 0.5], 100.0,
+        metallic_artifact) is not None
+
+    # ...and with it, the same rung stages nothing.
+    assert gh.build_entry(
+        "/workspace", "si.skl", _prediction(), _DATASPACE, structure,
+        5.0e-4, [50.0, 100.0, 200.0], [0.5, 0.5, 0.5], 100.0,
+        metallic_artifact, ladder_is_metal=True) is None
+
+
+def test_build_entry_ladder_reading_defaults_to_no_evidence(patched):
+    """Omitting the ladder reading means "no multi-rung evidence
+    offered", NOT "known not to be a metal".
+
+    The chosen-rung test still runs and still decides, so a caller
+    that has no ladder -- or has not been taught to pass one -- loses
+    nothing it had before.  The two readings are cumulative: either
+    suffices, and neither can overrule the other."""
+    structure = gh.load_structure("si.skl")
+    assert _build_entry(structure, _prediction(),
+                        _chosen_result(gap_ev=0.0)) is None
+    assert _build_entry(structure, _prediction(),
+                        _chosen_result(gap_ev=1.5)) is not None
+
+
 def test_build_entry_demands_the_cut_on_the_prediction_record(patched):
     """The cut is a manifest knob (``[kpoint_climb]``) and this harvest
     is a standalone tool pointed at a finished workspace, so it never
@@ -707,6 +750,29 @@ def test_a_metal_sweep_stages_nothing_and_says_so(patched, tmp_path):
     root = _make_workspace(tmp_path, [50, 100, 200], [0.5, 0.5, 0.5],
                            gaps=[0.0, 0.0, 0.0],
                            kinds=["none", "none", "none"])
+    summaries = gh.harvest_flight(root, str(tmp_path / "db"),
+                                  _DATASPACE)
+    assert patched["entries"] == []
+    assert "metal" in summaries[0]
+
+
+def test_a_sweep_is_metallic_if_any_point_is(patched, tmp_path):
+    """The density harvest judges metallicity on its WHOLE grid, not
+    on the single point it settles at (DESIGN 7.8 d').
+
+    Here the chosen point reads 0.124 eV -- comfortably above the 0.05
+    cut -- while a coarser point in the same sweep read zero.  That is
+    exactly fcc Al's ladder, where the apparent gap of a metal on a
+    discrete mesh depends on where the mesh points fall, and it is how
+    Al and Cu were once recorded as gapped insulators.
+
+    This path has no climb to take a verdict from, so it makes the
+    multi-rung reading itself: same any-rung rule, applied to the
+    evidence it holds.  The gaps were always parsed here; only the
+    chosen one was ever consulted."""
+    root = _make_workspace(tmp_path, [50, 100, 200], [0.5, 0.5, 0.5],
+                           gaps=[0.0, 0.124, 0.124],
+                           kinds=["none", "indirect", "indirect"])
     summaries = gh.harvest_flight(root, str(tmp_path / "db"),
                                   _DATASPACE)
     assert patched["entries"] == []

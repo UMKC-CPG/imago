@@ -492,7 +492,9 @@ def test_default_helpers_match_authoring_values():
     settings = default_run_settings()
     assert settings["basis"] == "fb"
     assert settings["functional"] == "wigner"
-    assert settings["kpoint_integration"] == "gaussian"
+    # Tetrahedral, not Gaussian: the producer must choose before it
+    #   knows whether the solid is a metal (PSEUDOCODE 11.6).
+    assert settings["kpoint_integration"] == "linear-tetrahedral"
     assert settings["kpoint_spec"] == {}
     assert settings["scf_threshold"] == 1.0e-6
     recipe = default_characterization()

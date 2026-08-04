@@ -5283,6 +5283,178 @@ on the same data later with no schema change.  Built on P10.
   live: the si_cmce workspace is being cleared, so the LAT trial is
   the first run whose scheme change this will distinguish.
 
+- [x] C144. Carry the climb's verdict forward instead of discarding
+  it.  DONE 2026-08-04.  DESIGN 5.7 + 7.8 led, then PSEUDOCODE 4e.5 /
+  11.4 / 15.7, then the code.
+  **The defect.** `converge_by_climb` computed WHY a material stopped
+  and threw it away one line later: CONVERGED and METAL both wrote
+  `outcomes[m] = action.rung` and nothing else.  Two different stops,
+  one indistinguishable record -- a settled rung carries no trace of
+  which produced it.  So every later stage had to work the
+  classification out again from whatever evidence it held, and the
+  harvest holds ONE rung.
+  **Three things now carry it.**  (a) `converge_by_climb` returns a
+  third dict, `verdicts[m]`, written by `retire()` alongside the
+  outcome so an outcome can never be recorded without its reason.
+  (b) The run log records `verdict` verbatim and DERIVES `converged`
+  from it -- so `converged` finally means k-point converged and reads
+  false for a metal.  Both fields are kept because they answer
+  different questions: `converged` gates the 5.8 harness, `verdict`
+  separates the two false cases (a metal row names a mesh and yielded
+  a potential; a not_converged row yielded nothing).  (c)
+  `build_entry` takes `ladder_is_metal`.
+  **Either reading says metal (decision, 2026-08-04).**
+  `ladder_is_metal` is the CALLER's multi-rung reading and the chosen
+  rung's own gap is the second; either suffices, neither can overrule
+  the other.  Default false = "no evidence offered", never "known not
+  to be a metal", so nothing previously caught stops being caught.
+  **The standalone harvest re-derives nothing either.**  It has no
+  climb to read a verdict from, so it makes the multi-rung reading
+  itself over its own grid's gaps -- same rule, on the evidence that
+  path holds.  Those gaps were always parsed there; only the chosen
+  one had ever been consulted.  This closes the same hole on the
+  second path.
+  +4 tests, suite green at 1267.  The sharpest is
+  `test_a_sweep_is_metallic_if_any_point_is`: chosen point 0.124 eV
+  against a 0.05 cut, a coarser point at zero -- fcc Al's ladder, and
+  the shape that recorded Al and Cu as gapped insulators.
+  **Fixed a defect C142 introduced.**
+  `climb_policy_from_manifest` rejected `metal_gap_threshold <= 0`, so
+  the negative-disables escape hatch C142 documented could not be set
+  from a manifest at all -- only by building a ClimbConfig directly,
+  which is what its test did.  The range check is gone: every real
+  value is meaningful, and a `> 0` check rejected exactly the setting
+  DESIGN 3.12.6 tells a curator to use.  Zero is meaningful too (a
+  true metal's gap collapses to exactly zero).
+  Deferred, by decision: marking the harvested POTENTIAL itself as a
+  metal's.  Nothing in the potential database distinguishes a
+  deliberately rough metal potential from a converged one, but fixing
+  it means a schema change, and not now.
+  CODE; DESIGN 5.7 / 7.8, PSEUDOCODE 4e.4 / 4e.5 / 11.4 / 15.7.
+
+- [x] C143. Settle a metal on the rung that READ gapless, not on the
+  densest rung computed.  DONE 2026-08-04.
+  **This was a drift, not a design change.**  DESIGN 3.12.3 has said
+  since it was written that the trigger is "the first rung that
+  actually reads zero, wherever on the climb that falls" and that the
+  material "settles there".  PSEUDOCODE 4e.3 said `METAL(rungs[-1])`,
+  glossed as "the densest rung reached so far", and the code followed
+  the pseudocode.  So the two lower levels had drifted from DESIGN and
+  agreed with each other, which is the shape of drift that survives
+  review.  Corrected downward, per the chain: DESIGN was the level in
+  the right, so PSEUDOCODE and the code moved to it.
+  **The two readings coincide on a plain upward walk**, which is how
+  the distinction was lost.  They part wherever more than one rung is
+  in hand when the test fires: a confident opening GRID resolves
+  several rungs at once, and the bracket-refine REFINE phase fills
+  from the bottom, landing rungs BELOW ones already computed.  There
+  `rungs[-1]` can be a rung that read a GAP while a lower rung read
+  zero.
+  **What that cost.**  The harvest re-reads the ONE settled rung to
+  decide whether to stage a guidance entry.  Handed a gapped rung it
+  sees an insulator where the climb saw a metal, and stages a k-point
+  convergence claim for a material that has none -- with the
+  finite-mesh artifact recorded as a real gap, which is a predictor
+  key (DESIGN 7.6).  This is the Al/Cu failure of 3.12.3 reached by a
+  second route.  Settling on the gapless rung makes the climb and the
+  harvest agree BY CONSTRUCTION rather than by coincidence, which is
+  why it was worth doing before the larger verdict-carrying work.
+  Also the cheaper rung, and roughness is the intent.
+  DESIGN 3.12.3 gained a short paragraph naming which rung is taken
+  when several are in hand, so the same drift cannot recur silently.
+  +1 test (`test_metal_settles_on_the_gapless_rung_not_the_densest`),
+  covering both search shapes since the rule sits in `climb_next`
+  above the dispatch.  Suite green at 1263.
+  Does NOT close D22, and does not remove the need to carry the
+  climb's verdict forward: the run log's `"converged": True` at
+  `make_run_log_entry` is a hardcoded literal that no amount of
+  climb/harvest agreement can fix.  Settled follow-on decisions,
+  2026-08-04: a material counts as a metal if EITHER the climb or the
+  harvest says so; the standalone harvest READS the verdict off the
+  prediction record rather than re-deriving it; and marking the
+  harvested potential itself as a metal's is deferred -- no potential
+  database schema change for now.
+  CODE; DESIGN 3.12.3, PSEUDOCODE 4e.3.
+
+- [x] C142. Apply the metal test to every climb shape, not just the
+  automatic one.  DONE 2026-08-04.  DESIGN 3.12.3 led, then
+  PSEUDOCODE 4e.3, then the code.
+  **The old scoping confused two different things.**  DESIGN 3.12.3
+  put the gap test in the bracket-refine climb alone, reasoning that
+  the fine unit-step walk is the conservative shape a curator pins on
+  purpose and should compute every rung.  But a STOPPING RULE is
+  properly a matter of search shape -- the shapes exist to disagree
+  about which rungs are worth computing -- while a CLASSIFICATION is
+  not.  Recognising a metal is the second kind.
+  **And the omission cost a result, not just time.**  Without the
+  test the unit-step climb walks a metal to the ceiling hunting a
+  flatness a metal does not have, stops non-converged, and harvests
+  NO potential at all -- strictly worse than the rough floor-level
+  potential the metal path exists to produce, and paid for in full.
+  It also left the harvest's single-rung gap reading as the only
+  metal judgment anywhere in the system, which is the reading that
+  recorded Al and Cu as insulators (3.12.3, and D22).
+  **One test, one place.**  It moved OUT of `bracket_refine_next` and
+  UP into `climb_next`, above the shape dispatch, so all three shapes
+  -- grid, bracket-refine, unit-step -- share one copy of the rule
+  and none can grow a variant.  The recursive resume at the foot of
+  `bracket_refine_next` may skip it safely: the rungs it re-judges
+  are the ones `climb_next` already read.
+  **The diagnostic ladder survives, by an existing dial.**  A band
+  gap cannot be negative, so `metal_gap_threshold = -1.0` is a test
+  no rung can trigger -- how a curator asks for every rung of a KNOWN
+  metal to be computed, as the seed-run gap ladders did.  No special
+  case was needed; it falls out of the comparison.  DESIGN 3.12.6
+  now states it, and a test pins it.
+  +2 tests (`test_unit_step_settles_a_metal_on_its_gap`,
+  `test_negative_gap_threshold_disables_the_metal_test`); suite green
+  at 1262.  The pair is the demonstration: same energy model, same
+  zero gap, and the only difference is the threshold's sign.
+  Does NOT close D22.  This fixes which climbs ASK the question; D22
+  is that the climb and the harvest ask it of different evidence (any
+  rung versus the one settled rung), which item 3 addresses.
+  CODE; DESIGN 3.12.3 / 3.12.6, PSEUDOCODE 4e.3.
+
+- [x] C141. Make linear tetrahedral integration the authored
+  default for the initial-potential producer.  DONE 2026-08-04.
+  DESIGN 5.7 led, then PSEUDOCODE 11.6, then the code constant --
+  the same order C140 took.
+  **The reason is that the choice has to be made before the answer
+  is known.**  The producer cannot tell a metal from an insulator
+  until the ladder has climbed several rungs, so the integration
+  scheme is fixed while the question is still open.  That rules out
+  "pick the one that suits the commoner case" and leaves "pick the
+  one that is safe under both".  Unsmeared Gaussian integration
+  moves whole states across the Fermi level as the mesh refines and
+  rattles the energy by amounts that do not shrink with the mesh
+  spacing -- the noise floor C140's threshold had to be raised
+  above.  Tetrahedral integration varies the occupied volume
+  continuously instead.
+  **It costs the insulators nothing**, which is what makes it a
+  free choice rather than a trade: in a gapped system every
+  tetrahedron is wholly occupied or wholly empty, the Bloechl
+  weights reduce to a quarter per corner, and the scheme returns
+  the Gaussian answer exactly.  Measured on `si_fd-3m_227_2001` at
+  mesh 6-6-6, where the total energy is unchanged between schemes
+  (C138's insulator check).
+  **Scoped to the ground state.**  DESIGN 5.7 now says so
+  explicitly: a XANES/ELNES run names `"gaussian"` and gets it,
+  because `populateLAT` refuses the core-hole path deliberately
+  (C138(b)).  The default is the producer's and the ground-state
+  SCF's, not a global one.
+  Three touches only: DESIGN 5.7's `kpoint_integration` bullet
+  gains the decision and its reasons; PSEUDOCODE 11.6 gains the
+  four `[defaults]` run-setting constants and `default_run_settings`,
+  which it had referenced but never specified; and
+  `curation_manifest.py` changes the one token.  These constants are
+  what a NEWLY AUTHORED manifest says, not resolve-time fallbacks --
+  rule 2 makes every run setting resolvable from the solid or
+  `[defaults]`, so a manifest naming `gaussian` is still honoured as
+  written, and the existing seed manifests are unaffected.
+  One test changed, `test_default_helpers_match_authoring_values`.
+  Suite green at 1260.
+  CODE; DESIGN 5.7, PSEUDOCODE 11.6.
+
 - [x] C140. Raise `DEFAULT_KPOINT_CONVERGENCE_THRESHOLD` from
   5.0e-4 to 2e-3 (`curation_manifest.py`), per DESIGN 3.12.3.
   DONE 2026-07-31.  PSEUDOCODE led the code, as the chain requires:
@@ -5319,9 +5491,11 @@ on the same data later with no schema change.  Built on P10.
   is a plain defect at any threshold.
   CODE; DESIGN 3.12.3.
 
-- [ ] C139. Make a commit clear the run-directory root copies it
-  supersedes.  A cache MISS over a surviving run directory currently
-  re-runs the unit against the PREVIOUS calculation's inputs.
+- [x] C139. Make a commit clear the run-directory root copies it
+  supersedes.  **VERIFIED LIVE 2026-08-04 -- the acceptance below was
+  run and it PASSES.**  A cache MISS over a surviving run directory
+  had been re-running the unit against the PREVIOUS calculation's
+  inputs.
   `commit_prepared_inputs` refreshes the staged `inputs/`, but the
   flattened copies at the run-directory root are what `imago.py`
   actually reads, and it only ever populates those when they are
@@ -5370,6 +5544,35 @@ on the same data later with no schema change.  Built on P10.
   `kpoint_integration`, re-run over the surviving workspace, and
   confirm the root `kp-scf.dat` carries the new `KPOINT_INTG_CODE`
   and the energy moves.
+  **RESULT, 2026-08-04.  All three observables PASS.**  The check is
+  kept at `jobs/c139_check/` -- manifest, README, and a
+  `before_state.txt` recording the directory as it stood at launch, so
+  the comparison rests on a reading rather than on memory.  It reused
+  the si_cmce_64_1999 run at [4,4,3] left by the corrected-LAT ladder
+  and asked for `gaussian` over the top of it, which IS the
+  re-run-over-a-surviving-directory this item asks for.
+  Both candidate energies were already measured on this binary at
+  this mesh, so the numbers were PREDICTED, not read after the fact:
+        observable            before      predicted   actual
+        root KPOINT_INTG_CODE    1            0          0
+        total_energy         -30.8009762  -30.798312  -30.79831196
+        summary SCF KP Intg     LAT       Gaussian    Gaussian
+  The energy is the Gaussian value to every predicted digit -- the
+  other scheme's answer exactly, not a generously-read near miss.
+  Two corroborations point the same way: `scf_iterations` 12 -> 5,
+  and `gap_ev` 0.05881958 -> 0.05880924, the small shift two
+  integration schemes should give at one mesh.  `inputs/kp-scf.dat`
+  and the root copy now BOTH read 0, so the commit refreshed the
+  staged inputs and cleared the superseded root copy.
+  The cache behaved as predicted too -- the driver logged `0 to
+  reuse, 1 to run`.  The miss was correct, which is why `--force`
+  could never have rescued this.
+  **The three unit tests had been passing against a mocked
+  filesystem the whole time.**  Every re-run since the fix landed was
+  handed an EMPTIED run directory, which is precisely the workaround
+  that hides the defect, so none of them had touched the real path.
+  That is the general lesson worth keeping: a fix whose only
+  exercise is a test that mocks the thing it fixes is unverified.
 
 - [ ] C138. Finish and validate LAT in the SCF occupation path.
   The path itself is CODED and building (DESIGN 1.6, PSEUDOCODE 3a,
@@ -5581,6 +5784,60 @@ on the same data later with no schema change.  Built on P10.
   then CODE.
 
 ---
+
+## OPTICAL PROPERTIES (imported OLCAO code)
+
+Items in this section sit outside the document chain.  The
+optical properties code (`optc.F90`, `optcPrint.F90`,
+`imagoKKc.f90`, `processPOPTC.py`) came across from OLCAO and
+has never had a DESIGN or PSEUDOCODE section written above it.
+Bringing it into the chain is itself a future task; until then
+these entries record what is known to be open so the knowledge
+is not carried only in conversation.
+
+- [ ] O1. Settle the Kramers-Kronig prefactor in
+  `imagoKKc.f90`.  `kramersKronig` sets `multFactor =
+  2.0/3.0/pi` (line 434) and applies it to each Cartesian
+  component of eps1 separately.  The Kramers-Kronig relation
+  wants `2/pi` per component; the extra `1/3` looks like a
+  directional average applied one level too early, because
+  `averageFunctions` then divides the three components by 3
+  again to form `totalEps1`.  Read literally that is a factor
+  of three applied twice.
+  Counter-evidence, and the reason this is a question rather
+  than a defect: computed eps1(0) values (the square of the
+  refractive index) have historically agreed well with
+  measured indices of refraction, which they could not do if
+  the result were off by a constant of this size.  So either
+  the `1/3` is compensated somewhere upstream -- check what
+  `printSpectrum` actually writes into the eps2 columns of
+  fort.50 that `readOPTCData` consumes -- or the agreement is
+  being read from a quantity that does not carry the error.
+  Resolve by evaluating eps1(0) for a material with a
+  well-known refractive index and comparing directly.
+  This affects the total optical properties path, not just
+  POPTC, so every eps1/ELF/n/k/R/alpha value Imago has printed
+  depends on the answer.
+
+- [ ] O2. Determine how k-point unfolding interacts with the
+  partial optical properties calculation.  The same question
+  had to be settled for the partial density of states, and the
+  answer there does not obviously transfer: POPTC decomposes a
+  momentum matrix element between a *pair* of basis-function
+  groups, so an unfolding weight has to be applied to a
+  quantity carrying two group indices rather than one.  Work
+  out whether the weight enters once per transition (as it
+  does for the total spectrum, through `kPointFactor` in
+  `optcPrint.F90`) or whether the decomposition needs the
+  weight distributed across the pair, and confirm that
+  whichever choice is made still lets the partials sum exactly
+  to the total.  That sum rule is the property the current
+  decomposition is built to preserve (`optc.F90` lines
+  1743-1753) and it is the cheapest check that an unfolding
+  scheme has not broken anything.
+  Do this after O1 and after the correctness fixes in
+  `optc.F90` have landed, so the baseline being compared
+  against is trustworthy.
 
 ## TOOLING (lint helpers)
 

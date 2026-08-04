@@ -1740,21 +1740,39 @@ def make_imago_provenance(commit: str, timestamp: str,
 # ============================================================
 
 def make_run_log_entry(ref: ReferenceSolid, harvest_inputs: dict,
-                       result_toml: dict) -> dict[str, Any]:
-    """One converged-solid row for the run log: the reference id,
-    the converged mesh AND its k-density, and the SCF iteration
-    count the 5.8 harness reads (PSEUDOCODE 11.4).
+                       result_toml: dict,
+                       verdict: str) -> dict[str, Any]:
+    """One settled-solid row for the run log: the reference id, the
+    settled mesh AND its k-density, the SCF iteration count the 5.8
+    harness reads, and why the climb stopped (PSEUDOCODE 11.4).
 
     ``harvest_inputs`` is :func:`record_converged`'s output for this
-    solid, so the mesh and density are the exact converged rung's --
+    solid, so the mesh and density are the exact settled rung's --
     the climb searches in mesh space, and a mesh does not round-trip
     from its calc tag the way a swept density did, so both are read
     from the recorded rung rather than the unit's tag (DESIGN
-    3.12.4)."""
+    3.12.4).
+
+    ``verdict`` is the climb's own (``VERDICT_CONVERGED`` or
+    ``VERDICT_METAL``; a non-converged solid never reaches here) and
+    is written out verbatim.  The ``converged`` flag is DERIVED from
+    it rather than asserted: it means k-point converged, so it is
+    False for a metal even though this row names a mesh and a
+    potential WAS harvested from it.
+
+    The two fields are not redundant -- they answer different
+    questions.  ``converged`` answers "is this a converged energy?",
+    which the 5.8 harness needs before treating a row as a
+    reproducible target.  ``verdict`` answers "why did it stop?",
+    which is what separates the two False cases: a metal row names a
+    mesh and yielded a potential, a not_converged row yielded
+    nothing.  Collapsing them would leave a reader guessing which
+    kind of False this was (DESIGN 5.7)."""
 
     return {
         "reference_id": ref.reference_id,
-        "converged": True,
+        "verdict": verdict,
+        "converged": verdict == VERDICT_CONVERGED,
         "converged_mesh": harvest_inputs["converged_mesh"],
         "converged_kpoint_density":
             harvest_inputs["converged_kpoint_density"],
@@ -1764,11 +1782,20 @@ def make_run_log_entry(ref: ReferenceSolid, harvest_inputs: dict,
 
 def make_nonconverged_log_entry(ref: ReferenceSolid
                                 ) -> dict[str, Any]:
-    """One non-converged-solid row for the run log: the sweep never
+    """One non-converged-solid row for the run log: the climb never
     flattened, so no potential was harvested and the curator must
-    widen the grid (DESIGN 7.9)."""
+    widen the grid (DESIGN 7.9).
 
-    return {"reference_id": ref.reference_id, "converged": False}
+    Both this and a metal row carry ``converged = False``; the
+    ``verdict`` is what tells them apart, and the difference is
+    material -- a metal row names a settled mesh and DID yield a
+    potential, this one names nothing and yielded nothing."""
+
+    return {
+        "reference_id": ref.reference_id,
+        "verdict": VERDICT_NOT_CONVERGED,
+        "converged": False,
+    }
 
 
 def write_run_log(path: str, imago_commit: str, timestamp: str,
@@ -1995,6 +2022,20 @@ _ACTION_CONVERGED = "converged"
 _ACTION_CEILING = "ceiling"
 _ACTION_METAL = "metal"
 
+# How a material's climb ENDED, as recorded per material by
+#   ``converge_by_climb`` and carried on into the run log and the
+#   guidance harvest (DESIGN 5.7 / 7.8).  Distinct from the action
+#   kinds above, which are one step's instruction: ``ceiling`` and a
+#   failed run are different steps but the same ending, and no ending
+#   corresponds to ``run``.
+#
+# These are the strings written into ``run_log.toml``, so they are
+#   part of that file's contract and are spelled for a human reading
+#   it rather than abbreviated.
+VERDICT_CONVERGED = "converged"
+VERDICT_METAL = "metal"
+VERDICT_NOT_CONVERGED = "not_converged"
+
 # A climb-step result.  ``kind`` is one of the four verdicts above;
 #   ``rung`` is the settled ``Rung`` (set for CONVERGED and METAL);
 #   ``mesh`` is the next mesh to run (set for RUN only).  CONVERGED
@@ -2067,6 +2108,10 @@ def climb_action(rungs, config):
       without converging, so the search stops non-converged;
     - ``run`` with the next mesh up the climb otherwise
       (``mesh_climb.climb_one_rung``).
+
+    It never returns ``metal`` of its own: ``climb_next`` tests the
+    gap before dispatching here, so a metal never reaches this
+    function (PSEUDOCODE 4e.3).
 
     This is also the continuation of a confident ``PARALLEL_GRID``
     whose opening grid did not converge: the grid becomes a unit-step
@@ -2198,18 +2243,11 @@ def bracket_refine_next(rungs, state, config):
 
     Returns ``(action, next_state)``.  ``rungs`` is the material's
     computed ladder, ascending; ``state`` its bracket-refine state."""
-    # A metal is recognised by its gap, ahead of any convergence work
-    #   (DESIGN 3.12.3): if any computed rung reads gapless, stop and
-    #   settle at the densest rung reached so far -- a rough metal
-    #   potential, not a k-converged energy.  A metal reads gap ~ 0
-    #   from the floor up, so this usually fires on the opening rung;
-    #   a near-metal that shows a small gap coarse and closes it finer
-    #   fires on the rung where the gap first vanishes.  Rides on this
-    #   automatic climb only -- the fine unit-step climb walks every
-    #   rung to the ceiling (climb_action).
-    if any(guidance_harvest.is_gapless(rung, config.metal_gap_threshold)
-           for rung in rungs):
-        return ClimbAction(_ACTION_METAL, rungs[-1], None), state
+    # No metal test here: climb_next applies it to every shape before
+    #   dispatching, so by the time this runs no rung on the ladder is
+    #   gapless.  The recursive resume at the foot of this function
+    #   may therefore skip it too -- the rungs it re-judges are the
+    #   same ones climb_next already read.
     if state.phase == _PHASE_BRACKET:
         top = state.endpoints[-1]
         if len(state.endpoints) == 1:
@@ -2224,8 +2262,8 @@ def bracket_refine_next(rungs, state, config):
         #   strict convergence threshold, so a stride that reads
         #   loosely flat but has not truly converged is caught there
         #   (DESIGN 3.12.3).  No near-metal check here: a metal is
-        #   caught by the gap test at the top of this function, before
-        #   any stride is judged.
+        #   caught by climb_next's gap test before this shape is
+        #   dispatched at all, so before any stride is judged.
         if guidance_harvest.stride_is_flat(
                 mesh_climb.rung_at(rungs, prev),
                 mesh_climb.rung_at(rungs, top),
@@ -2321,7 +2359,50 @@ def climb_next(rungs, state, config):
     unit-step climb and a grid continuation are stateless in the
     ladder, so they run ``climb_action`` and pass the state through
     untouched.  Returns ``(action, next_state)`` so the caller can
-    persist the advanced state."""
+    persist the advanced state.
+
+    The metal test runs HERE, above the dispatch, so every search
+    shape gets it and there is exactly one copy of the rule (DESIGN
+    3.12.3).  It sits above rather than inside a shape because
+    recognising a metal is a CLASSIFICATION, not a stopping rule: the
+    shapes exist to disagree about which rungs are worth computing,
+    never about what a computed rung means.  A shape that skipped the
+    test would not be more conservative, it would be blind -- it
+    would walk a metal to the ceiling looking for a flatness that
+    cannot exist there, stop non-converged, and so harvest NO
+    potential at all, where the test would have yielded a
+    serviceable rough one."""
+    # If any computed rung reads gapless, stop and settle ON THAT
+    #   RUNG -- a rough metal potential, not a k-converged energy.  A
+    #   metal reads a gap near zero from the opening floor up, so this
+    #   usually fires on the first rung; a near-metal showing a small
+    #   gap on a coarse mesh and closing it on a finer one fires where
+    #   the gap first vanishes.
+    #
+    # ``rungs`` is sorted ascending by mesh, so taking the FIRST match
+    #   settles on the COARSEST gapless rung (DESIGN 3.12.3).  That is
+    #   deliberately not "the densest rung on the ladder": a confident
+    #   opening grid resolves several rungs at once, and a refine fill
+    #   lands rungs BELOW ones already computed, so the gapless rung
+    #   need not be the last one.  Settling on the densest could
+    #   settle on a rung that read a GAP -- and since the harvest
+    #   re-reads that one settled rung to decide whether to stage a
+    #   guidance entry (guidance_harvest.build_entry), it would then
+    #   see an insulator where this test saw a metal and record a
+    #   k-point convergence claim nobody made.  Taking the gapless
+    #   rung makes the two agree by construction.
+    #
+    # A NEGATIVE metal_gap_threshold can never fire, because no band
+    #   gap is negative.  That is how a curator asks for every rung of
+    #   a known metal to be computed -- a diagnostic ladder (DESIGN
+    #   3.12.3 / 3.12.6).  It needs no special case here; it falls out
+    #   of the comparison in is_gapless.
+    metal_rung = next(
+        (rung for rung in rungs
+         if guidance_harvest.is_gapless(
+             rung, config.metal_gap_threshold)), None)
+    if metal_rung is not None:
+        return ClimbAction(_ACTION_METAL, metal_rung, None), state
     if config.mode == mesh_climb.BRACKET_REFINE:
         return bracket_refine_next(rungs, state, config)
     return climb_action(rungs, config), state
@@ -2380,25 +2461,41 @@ def converge_by_climb(materials, configs, seed_densities,
 
     Returns
     -------
-    (outcomes, rungs)
-        ``outcomes[material]`` is the converged ``Rung`` or the
+    (outcomes, rungs, verdicts)
+        ``outcomes[material]`` is the settled ``Rung`` or the
         ``NON_CONVERGED`` sentinel (a ceiling stop or a run failure);
         ``rungs[material]`` is the full distinct-mesh ladder that
         material climbed, ascending -- the flatness trace the harvest
-        re-judges (4e.6)."""
+        re-judges (4e.6); ``verdicts[material]`` is the REASON for the
+        stop, one of ``VERDICT_CONVERGED``, ``VERDICT_METAL`` or
+        ``VERDICT_NOT_CONVERGED``.
+
+        The reason is kept because a settled rung arises from two
+        different stops -- the energy went flat, or a rung read
+        gapless -- and downstream they are not interchangeable
+        (DESIGN 5.7).  Nothing about the rung itself says which it
+        was.  Discarding it here is what forced each later stage to
+        re-derive the classification from whatever evidence it had,
+        and the harvest holds only ONE rung, whose apparent gap on a
+        discrete mesh is close to a coin toss (DESIGN 1.6)."""
 
     rungs = {material: [] for material in materials}
     search = {}                 # per-material search state (4e.4)
     outcomes = {}
+    verdicts = {}               # material -> why it stopped
     active = set(materials)
     in_air = {}                 # rungs still in flight, per material
     opening = set(materials)    # still in the opening (grid) phase
 
-    def retire(material, verdict):
-        # Record a material's outcome and drop it from the active
-        #   set; a non-converged stop tags the mismatch (7.8 3d).
-        outcomes[material] = verdict
-        if verdict == NON_CONVERGED and on_non_converged is not None:
+    def retire(material, outcome, verdict):
+        # Record a material's outcome AND the reason for it, then drop
+        #   it from the active set.  One place writes both, so an
+        #   outcome can never be recorded without its reason.  A
+        #   non-converged stop also tags the mismatch (7.8 3d).
+        outcomes[material] = outcome
+        verdicts[material] = verdict
+        if verdict == VERDICT_NOT_CONVERGED \
+                and on_non_converged is not None:
             on_non_converged(material)
         active.discard(material)
 
@@ -2415,13 +2512,16 @@ def converge_by_climb(materials, configs, seed_densities,
             #   so it leaves active with no failure tag.  A METAL's
             #   rung is a rough metal potential (DESIGN 3.12.3), a
             #   CONVERGED's a k-converged insulator energy; both are
-            #   usable results recorded the same way.
-            outcomes[material] = action.rung
-            active.discard(material)
+            #   usable results, told apart by the verdict and ONLY by
+            #   it -- the rung carries no trace of which stop it came
+            #   from.
+            retire(material, action.rung,
+                   VERDICT_METAL if action.kind == _ACTION_METAL
+                   else VERDICT_CONVERGED)
         elif action.kind == _ACTION_CEILING:
             # The non-converged verdict (7.8 3d): a hard insulator
             #   still steep at the count ceiling, dropped.
-            retire(material, NON_CONVERGED)
+            retire(material, NON_CONVERGED, VERDICT_NOT_CONVERGED)
         else:                                            # _ACTION_RUN
             dispatcher.send({material: [action.mesh]})
             in_air[material] += 1
@@ -2466,7 +2566,8 @@ def converge_by_climb(materials, configs, seed_densities,
                 continue
             opening.discard(material)
             if not rungs[material]:
-                retire(material, NON_CONVERGED)          # run failure
+                retire(material, NON_CONVERGED,          # run failure
+                       VERDICT_NOT_CONVERGED)
             else:
                 judge(material)
         else:
@@ -2475,11 +2576,12 @@ def converge_by_climb(materials, configs, seed_densities,
             #   than re-dispatch it forever (7.7); otherwise judge the
             #   extended ladder.
             if result is _RUN_FAILED:
-                retire(material, NON_CONVERGED)          # run failure
+                retire(material, NON_CONVERGED,          # run failure
+                       VERDICT_NOT_CONVERGED)
             else:
                 judge(material)
 
-    return outcomes, rungs
+    return outcomes, rungs, verdicts
 
 
 def _unit_key(unit):
@@ -3055,7 +3157,7 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             prune_problems=prune_problems)
         materials = [ref.reference_id
                      for ref in manifest.reference_solids]
-        outcomes, rungs = converge_by_climb(
+        outcomes, rungs, verdicts = converge_by_climb(
             materials, configs, seed_densities, dispatcher,
             on_non_converged=lambda material:
                 guidance_harvest.tag_prediction_mismatch(
@@ -3094,7 +3196,8 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             ref.reference_id, record=unit_record)
         converged_result = _read_unit_result(workspace, converged)
         per_run_log.append(
-            make_run_log_entry(ref, harvest_inputs, converged_result))
+            make_run_log_entry(ref, harvest_inputs, converged_result,
+                               verdicts[ref.reference_id]))
         scf_iterations = converged_result.get("scf_iterations")
 
         # Discover one representative per distinct environment in the
@@ -3157,6 +3260,12 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
         #   all -- and build_entry returns None for it (DESIGN 7.8).
         #   Not every converged solid contributes an entry; every
         #   converged NON-METAL does.
+        #   ``ladder_is_metal`` hands the builder the climb's VERDICT
+        #   instead of making it re-derive the classification from
+        #   the one settled rung it can see.  The climb read every
+        #   rung; the builder reads one, and one rung's apparent gap
+        #   on a discrete mesh is close to a coin toss (DESIGN 1.6 /
+        #   7.8 d').
         entry = guidance_harvest.build_entry(
             workspace, struct, predictions[ref.reference_id],
             dataspace, guidance_harvest.load_structure(struct),
@@ -3164,7 +3273,9 @@ def build_initial_potentials(manifest_path: str, pdb_root: str,
             harvest_inputs["grid_values"],
             harvest_inputs["grid_energies"],
             harvest_inputs["converged_kpoint_density"],
-            converged_result)
+            converged_result,
+            ladder_is_metal=(verdicts[ref.reference_id]
+                             == VERDICT_METAL))
         if entry is not None:
             guidance_harvest.save_entry(entry, guidance_root)
         else:
