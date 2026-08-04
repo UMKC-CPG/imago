@@ -431,6 +431,33 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
 
    real (kind=double) :: multFactor
 
+   ! This constant carries TWO unrelated factors that happen to be
+   !   applied at the same moment, and reading it as one number is
+   !   misleading enough to be worth spelling out. The real part of the
+   !   dielectric function is recovered from the imaginary part by the
+   !   Kramers-Kronig relation, evaluated here as a composite Simpson
+   !   integration over the fine-grained energy scale:
+   !
+   !! eps1(w) = 1 + (2/pi) * P Int[ eps2(w') w' / (w'^2 - w^2) dw' ]
+   !!
+   !!           |<-- KK prefactor        |<-- Simpson's rule
+   !!           |    2/pi                |    (h/3)*[f_0 + 4*odd
+   !!           |    one per Cartesian   |     + 2*even + f_n]
+   !!           |    component           |
+   !
+   !   The 2/pi is the Kramers-Kronig prefactor and belongs to each
+   !   Cartesian component separately. The 1/3 is Simpson's third: the
+   !   quadrature expression below multiplies by fineEnergyDiff, which
+   !   is the plain fine-grid spacing h and not h/3, so the missing
+   !   third is supplied from here instead.
+   !
+   !   The 1/3 is therefore NOT a directional average. The only average
+   !   over x, y and z is the division by three in averageFunctions,
+   !   which forms totalEps1 from the three component eps1 values. A
+   !   reader who takes this 1/3 for that average will conclude the
+   !   code divides by three twice and that every eps1, ELF, n, k, R
+   !   and alpha Imago prints is too small by a factor of three. It
+   !   does not, and they are not.
    multFactor = 2.0_double/3.0_double/pi
 
    allocate (totalSum   (dim3))
@@ -497,6 +524,13 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
          totalSumi(:)=totalSumi(:)+integrandi(:,numValues-grain)
       endif
 
+      ! Assemble the Simpson sum. The leading fineEnergyDiff is the bare
+      !   fine-grid spacing h, so the third that completes Simpson's h/3
+      !   arrives with multFactor instead; see the note at its
+      !   assignment. The trailing pOptcFactor is the additive 1 of
+      !   eps1 = 1 + (2/pi)*Int[...], divided among the partials by the
+      !   caller so that a full set of them still sums to that single 1
+      !   rather than to one per partial.
       eps1(:,i)=fineEnergyDiff*(integrand(:,int(numValues-grain)) + &
             & integrand(:,1) + 2.0_double * evenSum(:) + 4.0_double * &
             & oddSum(:)) * multFactor + pOptcFactor

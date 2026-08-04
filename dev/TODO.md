@@ -409,7 +409,22 @@
         Ni                 --          --          [16,16,16]  [12,12,12]
         si_cmce            [14,14,13]  [11,11,10]  [8,8,7]     [8,8,7]
         si_fd-3m (six)     [12,12,12]  [10,10,10]  [10,10,10]  [8,8,8]
-        si_ia-3            --          --          [11,11,11]  [9,9,9]
+        si_ia-3            [11,11,11]  [9,9,9]     [7,7,7]     [6,6,6]
+
+  **The si_ia-3 row is CORRECTED, 2026-08-04.**  It previously read
+  `--  --  [11,11,11]  [9,9,9]`, i.e. failing at the two tightest
+  bars.  That is wrong in a specific and instructive way: the whole
+  row was shifted one column right, so every entry was attributed
+  to the next looser threshold.  D22's numbers for the same solid
+  disagreed with it and turned out to be the correct ones.
+  Re-measured from scratch on a clean 17-rung ladder (meshes 4 to
+  20, one binary, one integration scheme, every rung converged,
+  computed in a single run) under `jobs/si_ia3_remeasure/`.  The
+  new energies match the old ones digit for digit, so the shift was
+  in the SCORING, not the physics.
+  Consequence: si_ia-3 converges at every bar, including 5e-4.  The
+  claim that tightening the threshold would cost us this solid --
+  which nearly blocked C146 -- was never true.
 
   At 2e-3, ALL THIRTEEN converge.  The insulators degrade
   gracefully -- [12,12,12] to [10,10,10] -- while si_cmce, a
@@ -598,17 +613,58 @@
   a silent, material-dependent one, which is worse.  Both entries
   were deleted from staging before promotion could fix them in
   place; the underlying defect is untouched.
-  **Failure 2: insulator gaps degraded, with nothing to notice it
-  by.**  si_ia-3, same material and same scheme, differing only in
-  the convergence bar:
+  **Failure 2: the recorded gap moves with the convergence bar.**
+  si_ia-3, same material and same scheme, differing only in the
+  bar (numbers confirmed 2026-08-04 on a clean re-measured ladder):
 
         thr=5e-4   mesh=[11,11,11]   gap_ev=0.193
+        thr=1e-3   mesh=[9,9,9]      gap_ev=0.257
         thr=2e-3   mesh=[7,7,7]      gap_ev=0.370
+        thr=5e-3   mesh=[6,6,6]      gap_ev=0.429
 
-  Not WRONG the way aluminium's was -- si_ia-3 really is an
-  insulator -- so no classification error flags it.  The gap it
-  teaches the dataspace simply moved 0.18 eV for no reason but the
-  threshold.
+  **This entry's reading of that was WRONG, and the truth is
+  worse.**  It said "si_ia-3 really is an insulator" and called the
+  move a degraded gap.  The premise is false.  Scored over 17 rungs
+  from [4,4,4] to [20,20,20], si_ia-3's gap goes to ZERO as 1/n^2:
+
+        n     gap      gap*n^2
+        10    0.1682   16.82
+        14    0.0900   17.64
+        18    0.0564   18.27
+        20    0.0464   18.56
+
+  `gap*n^2` is flat -- it rises by a factor of 1.10 while n
+  DOUBLES.  A real gap approaches a constant, so that product would
+  have grown by a factor of 4 over the same span.  This is not a
+  gap converging; it is the level spacing at the Fermi surface
+  shrinking with the mesh, the artifact `populate.F90:253-265`
+  describes in advance.  Si III in the BC8 structure is reported as
+  semimetallic, which fits.
+  So the 0.193-to-0.370 move is not a real gap degrading.  It is
+  the SAME artifact read at two different meshes, and every value
+  in the table above is fictitious.
+  At [20,20,20] the gap reads 0.0464 eV -- BELOW the 0.05 eV metal
+  cut.  Push the ladder a little further and this solid classifies
+  as a metal.
+  **Failure 2 therefore has no example left, and needs one.**  The
+  general claim is unharmed and in fact strengthened -- a gap read
+  at the energy-converged mesh is not a converged gap -- but
+  whether a GENUINE insulator's gap degrades with the bar is now
+  untested.  si_fd-3m is the material to check and its ladder is
+  cheap.
+  **And this is a live miss by the metal machinery.**  At the
+  meshes the climb actually stops on -- 7, 9, 11 -- the gap reads
+  0.37, 0.26, 0.19 and looks solidly insulating.  Nothing C142,
+  C143 or C144 added catches it, because all of those read gaps at
+  meshes the ENERGY chose.  The classification's reliability
+  therefore depends on the energy threshold, which was never meant
+  to carry that weight: a tighter bar climbs higher and is more
+  likely to see the collapse.  This is the same defect as Failure
+  1, reached from the other end.
+  Note the contrast with the energy on that same ladder, which is
+  genuinely settled: scatter across meshes 14-20 is 9.8e-5 eV/atom,
+  five times below even the old 5e-4 bar.  The energy converges and
+  the gap does not, on one ladder, which is this item in one line.
   **Why this is not just a D21 side-effect.**  The case for a
   looser threshold (D21) was argued about the ENERGY, and holds
   there: the deliverable is a rough starting potential and a rough
@@ -5318,14 +5374,22 @@ on the same data later with no schema change.  Built on P10.
   under, and flags the multiple for re-checking if the bar moves far.
   Suite green at 1271, no test changed -- the one test that asserts
   the default reads the CONSTANT, which is what C140 fixed it to do.
-  **NOT yet verified live, and one case needs watching.** `si_ia-3`
-  is a narrow-gap insulator, the seed closest to metallic behaviour.
-  D21's table and D22's numbers CONTRADICT each other about it: D21
-  says it fails at 5e-4 and converges at 2e-3 to [11,11,11]; D22
-  says it converged at 5e-4 to [11,11,11] and at 2e-3 to [7,7,7].
-  Both cannot be right, the same mesh appears against different
-  bars in each, and this is exactly the ad-hoc-re-scoring trap.
-  Re-measure from the ladders before trusting either table.
+  **The one case that needed watching is CLEAR, 2026-08-04.**
+  `si_ia-3` was the worry: the seed closest to metallic behaviour,
+  and the two tables contradicted each other about it.  Re-measured
+  from scratch on a clean 17-rung ladder
+  (`jobs/si_ia3_remeasure/`), it converges at EVERY bar, 1e-3
+  included, at [9,9,9] against [7,7,7] at 2e-3.  So the tightening
+  costs it two rungs and loses nothing.  D22's numbers were the
+  correct ones; D21's row was shifted a column and is now fixed.
+  Nothing else in the seed set is at risk from the change: the six
+  si_fd-3m insulators pick the same mesh at 1e-3 and 2e-3, and the
+  metals no longer reach this test at all.
+  The re-measure turned up something larger, carried in D22:
+  si_ia-3 is not an insulator.  Its gap goes to zero as 1/n^2, so
+  every gap value recorded for it is a finite-mesh artifact.  That
+  does not affect this item -- the ENERGY on that ladder is
+  genuinely settled, to 9.8e-5 eV/atom at the top.
   CODE; DESIGN 3.12.3, PSEUDOCODE 11.4.
 
 - [x] C145. Reject a rung whose SCF did not converge (D21(c)).
@@ -5881,29 +5945,44 @@ Bringing it into the chain is itself a future task; until then
 these entries record what is known to be open so the knowledge
 is not carried only in conversation.
 
-- [ ] O1. Settle the Kramers-Kronig prefactor in
-  `imagoKKc.f90`.  `kramersKronig` sets `multFactor =
-  2.0/3.0/pi` (line 434) and applies it to each Cartesian
-  component of eps1 separately.  The Kramers-Kronig relation
-  wants `2/pi` per component; the extra `1/3` looks like a
-  directional average applied one level too early, because
-  `averageFunctions` then divides the three components by 3
-  again to form `totalEps1`.  Read literally that is a factor
-  of three applied twice.
-  Counter-evidence, and the reason this is a question rather
-  than a defect: computed eps1(0) values (the square of the
-  refractive index) have historically agreed well with
-  measured indices of refraction, which they could not do if
-  the result were off by a constant of this size.  So either
-  the `1/3` is compensated somewhere upstream -- check what
-  `printSpectrum` actually writes into the eps2 columns of
-  fort.50 that `readOPTCData` consumes -- or the agreement is
-  being read from a quantity that does not carry the error.
-  Resolve by evaluating eps1(0) for a material with a
-  well-known refractive index and comparing directly.
-  This affects the total optical properties path, not just
-  POPTC, so every eps1/ELF/n/k/R/alpha value Imago has printed
-  depends on the answer.
+- [x] O1. Settle the Kramers-Kronig prefactor in
+  `imagoKKc.f90`.  RESOLVED 2026-08-04 by inspection, with no
+  measurement needed: **the prefactor is correct.**  No code
+  changed; the two factors it multiplies together are now
+  documented where it is assigned and where it is used.
+
+  `kramersKronig` sets `multFactor = 2.0/3.0/pi` and applies
+  it to each Cartesian component of eps1 separately, while
+  `averageFunctions` divides the three components by 3 again
+  to form `totalEps1`.  Read as a single number that is a
+  factor of three applied twice.  It is not a single number.
+
+  **The `1/3` is Simpson's third, not a directional average.**
+  The quadrature multiplies by `fineEnergyDiff`, which
+  `getFineEnergyDiff` computes as the mean fine-grid spacing
+  -- the bare `h`, not `h/3`.  Composite Simpson needs `h/3`,
+  so the missing third is carried in `multFactor` alongside
+  the `2/pi` that is the actual Kramers-Kronig prefactor.
+  Each component therefore receives `2/pi` exactly once, and
+  the only average over x, y and z is the one in
+  `averageFunctions`.  The historical agreement of computed
+  eps1(0) with measured refractive indices is not a
+  coincidence in need of explanation; it is what a correct
+  calculation produces.
+
+  Also settled while reading, since it is the other unlabelled
+  constant in the same expression: the trailing `pOptcFactor`
+  is the additive 1 of `eps1 = 1 + (2/pi)*Int[...]`.  For a
+  total run it is literally 1.  For a partial run `optc.F90`
+  writes each pair a share, `partialsIndex(j)*partialsIndex(k)
+  / valeDimIndex**2`, which sums over all pairs to exactly 1
+  -- so a complete set of partials carries the constant once
+  between them rather than once each.  `partialsIndex` is
+  `real`, so this is real division and not the integer
+  division it resembles.
+
+  What this does NOT settle is whether the quadrature that
+  the `1/3` belongs to is itself right; see O6.
 
 - [ ] O2. Apply IBZ atom-permutation unfolding to the
   atom-resolved POPTC detail codes.  DESIGN 2.5 already
@@ -6125,6 +6204,57 @@ is not carried only in conversation.
   which affects nothing (CMake's target name sets the
   executable name) but should be renamed the next time that
   file is opened for real work.
+
+- [ ] O6. Check the Simpson integration in `kramersKronig`.
+  Opened 2026-08-04, out of the O1 reading.  Settling that the
+  `1/3` in `multFactor` is Simpson's third means the sum it
+  belongs to has to actually be a Simpson sum, and on three
+  counts it is not quite one.  None of these is a scale error
+  -- eps1 is not off by a constant -- so the symptom to expect
+  is a loss of accuracy, not a wrong answer, which is why it
+  has gone unnoticed against experiment.
+
+  1. **The even and odd weights look swapped.**  Composite
+     Simpson over 1-based nodes wants `[f_1 + 4f_2 + 2f_3 +
+     4f_4 + ... + f_n]`: weight 4 on the even-indexed nodes,
+     weight 2 on the odd interior ones.  The loop tests
+     `(j/2)*2 .eq. j` and sends even `j` to `evenSum`, which
+     the final expression multiplies by 2, and odd `j` to
+     `oddSum`, which it multiplies by 4.  That is the other
+     way round.  The total weight is preserved when the two
+     populations are equal in size, so there is no scale
+     error, but the cancellation that makes Simpson fourth
+     order is lost.  The residual goes roughly as
+     `(h/3)*(f_end - f_start)`, first order in `h`.  In
+     practice small: the integrand `eps2(w')w'/(w'^2 - w^2)`
+     is ~0 below the gap and modest in the tail, and `grain`
+     = 10 keeps `h` small.  Confirm the reading before
+     changing anything -- swapping the two branches is a
+     one-line change whose effect on published spectra should
+     be measured, not assumed.
+  2. **The node count is even.**  Composite Simpson needs an
+     odd number of nodes.  The sum runs over `numValues -
+     grain` = `grain*(length-1)` nodes, which for the default
+     `grain` of 10 is always even.
+  3. **The pole exclusion breaks the alternation anyway.**
+     Points within 1e-5 of `energy(i)` are skipped to avoid
+     the pole, so the surviving nodes are not the strict
+     alternating sequence either weighting assumes.  A rule
+     that tolerates a gap in the middle of its range may be
+     the more honest fix than repairing the weights of one
+     that does not.
+
+  Note also that `totalSum` and `totalSumi` are accumulated
+  throughout and never read by anything.  Either they were
+  meant to be the quadrature and the Simpson expression
+  replaced them, or they are a leftover trapezoid check.
+  Decide and delete.
+
+  Unrelated but in the same expression, and cheap to fix
+  whenever this is opened: `valeDimIndex**2` in the
+  `POPTC_KKC_FACTOR` write in `optc.F90` is evaluated in
+  default integer, so a valence basis above about 46000
+  functions overflows it.  Remote, but silent if reached.
 
 ## TOOLING (lint helpers)
 
