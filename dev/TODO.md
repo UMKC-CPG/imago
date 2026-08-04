@@ -646,12 +646,54 @@
   At [20,20,20] the gap reads 0.0464 eV -- BELOW the 0.05 eV metal
   cut.  Push the ladder a little further and this solid classifies
   as a metal.
-  **Failure 2 therefore has no example left, and needs one.**  The
-  general claim is unharmed and in fact strengthened -- a gap read
-  at the energy-converged mesh is not a converged gap -- but
-  whether a GENUINE insulator's gap degrades with the bar is now
-  untested.  si_fd-3m is the material to check and its ladder is
-  cheap.
+  **Failure 2 as originally stated is REFUTED, and the real defect
+  is a different one.**  Measured 2026-08-04 on diamond silicon,
+  the unambiguous insulator of the seed set: 21 rungs from [4,4,4]
+  to [24,24,24], one build, one scheme, every rung converged
+  (`jobs/si_fd3m_gapcheck/`).  Its gap IS real -- `gap*n^2` grew
+  30.45x from n=4 to n=24 against 36x predicted for a constant gap,
+  as against si_ia-3's 1.10x -- and it settles near 0.805 eV.
+  The threshold costs that gap almost nothing:
+
+        thr=5e-4   mesh=[12,12,12]   gap_ev=0.8046
+        thr=1e-3   mesh=[10,10,10]   gap_ev=0.8061
+        thr=2e-3   mesh=[10,10,10]   gap_ev=0.8061
+        thr=5e-3   mesh=[8,8,8]      gap_ev=0.8285
+
+  A TENFOLD change in the bar moves the recorded gap by 3% -- 24
+  meV.  The 0.18 eV move this entry was built on came entirely from
+  si_ia-3, where the gap was fictitious at every mesh.  On a
+  material with a real gap, the convergence bar is not the problem.
+  **What IS the problem: mesh parity.**  Consecutive rungs of the
+  same ladder disagree far more than any two thresholds do:
+
+        [11,11,11]  0.9572
+        [12,12,12]  0.8046
+        [13,13,13]  0.9145
+
+  19% between neighbours.  The ladder carries a strong parity
+  sawtooth -- even meshes settle to ~0.805 by n=12 while odd meshes
+  are still 4.6% high at n=23 (0.8419) -- so the two families
+  approach the same limit at very different rates.  The recorded
+  gap therefore depends on the PARITY of whichever rung the climb
+  stops at.  This run landed on 12, 10, 10 and 8, all even, and
+  agreed with itself by luck; a bar settling on [11,11,11] would
+  have recorded 0.957 against 0.806.
+  So the headline claim survives intact -- a gap read at the
+  energy-converged mesh is not a converged gap -- but the mechanism
+  is mesh-family sensitivity of order 19% between neighbours, not
+  threshold sensitivity of order 2x.  That is a smaller error and a
+  much more erratic one: it does not scale with anything a curator
+  controls, and it cannot be reasoned about from the threshold.
+  The energy on that same ladder is settled to the eighth decimal,
+  -7.77652760 repeated across the top nine rungs.
+  Caveat on provenance: the si_fd-3m ladder was built by commit
+  9e5a936b and the si_ia-3 one by a5fc5bc9, a POPTC commit having
+  landed between them.  Each ladder is internally consistent, which
+  is what the scaling test needs, and the change was to the optical
+  path rather than the ground-state SCF -- but the two solids were
+  not measured by one binary, and that is worth saying rather than
+  assuming away.
   **And this is a live miss by the metal machinery.**  At the
   meshes the climb actually stops on -- 7, 9, 11 -- the gap reads
   0.37, 0.26, 0.19 and looks solidly insulating.  Nothing C142,
@@ -673,11 +715,31 @@
   and compared across materials.  So the trade D21 makes is energy
   roughness we accept in exchange for gap roughness nobody agreed
   to -- and the defect predates D21, which only widened it.
-  **Candidates,** roughly in increasing cost: record in the entry
-  WHICH mesh the gap came from, so a consumer can discount it;
-  require the gap to persist as the mesh densifies, the same shape
-  as the flatness test's own persistence rule; converge the gap on
-  its own terms rather than inheriting the energy's mesh.
+  **Candidates** -- three possible fixes, in increasing cost:
+  (1) **Record which mesh the gap came from**, in the entry, so a
+      consumer can discount it.  Bookkeeping only: it does not
+      improve the number, it makes the number inspectable.
+  (2) **Require the gap to persist as the mesh densifies** -- the
+      same two-sided, flat-over-consecutive-rungs test the ENERGY
+      already gets, applied to the gap.  A gap that has not gone
+      flat is not recorded as though it had.
+  (3) **Converge the gap on its own terms**, climbing until the gap
+      settles regardless of where the energy settled.  Most
+      correct, most expensive: it can demand meshes the energy
+      never needed.
+  **The 2026-08-04 measurements point at (2), and (1) is worth
+  doing anyway.**  The defect turned out to be a parity sawtooth
+  rather than a slow drift, and a sawtooth is precisely what a
+  two-sided flatness test rejects: at [12,12,12] the gap sits 19%
+  below both its neighbours, so it cannot read flat, while a
+  genuinely settled gap passes.  The test would also have caught
+  si_ia-3, whose gap falls monotonically and never goes flat at
+  all -- so one rule covers both failures.  (3) is not obviously
+  needed: on diamond silicon the even-mesh family settles by n=12,
+  which is where the energy converges anyway, so the cost may be
+  ladder-shape rather than extra rungs.  (1) is cheap, independent,
+  and would have made both of these findings visible from the
+  stored entries instead of requiring a re-measure.
   The metal test needs the same treatment either way -- reading
   one rung's gap is what let a free-electron metal past it.
   Relates to C138(e) (what `gap_ev` measures, and why a coarse
@@ -6205,50 +6267,111 @@ is not carried only in conversation.
   executable name) but should be renamed the next time that
   file is opened for real work.
 
-- [ ] O6. Check the Simpson integration in `kramersKronig`.
-  Opened 2026-08-04, out of the O1 reading.  Settling that the
-  `1/3` in `multFactor` is Simpson's third means the sum it
-  belongs to has to actually be a Simpson sum, and on three
-  counts it is not quite one.  None of these is a scale error
-  -- eps1 is not off by a constant -- so the symptom to expect
-  is a loss of accuracy, not a wrong answer, which is why it
-  has gone unnoticed against experiment.
+- [x] O6. Repair the integration in `kramersKronig`.  DONE
+  2026-08-04.  Opened out of the O1 reading and closed the same
+  day: deciding that the `1/3` in `multFactor` belongs to
+  Simpson's rule means the sum it multiplies has to actually be
+  a Simpson sum, and reading it closely to check that turned up
+  five separate faults, two of them more serious than the one
+  that prompted the look.  Line numbers below are as the file
+  stood at commit `3bb73f2`, before the repair.
 
-  1. **The even and odd weights look swapped.**  Composite
-     Simpson over 1-based nodes wants `[f_1 + 4f_2 + 2f_3 +
-     4f_4 + ... + f_n]`: weight 4 on the even-indexed nodes,
-     weight 2 on the odd interior ones.  The loop tests
-     `(j/2)*2 .eq. j` and sends even `j` to `evenSum`, which
-     the final expression multiplies by 2, and odd `j` to
-     `oddSum`, which it multiplies by 4.  That is the other
-     way round.  The total weight is preserved when the two
-     populations are equal in size, so there is no scale
-     error, but the cancellation that makes Simpson fourth
-     order is lost.  The residual goes roughly as
-     `(h/3)*(f_end - f_start)`, first order in `h`.  In
-     practice small: the integrand `eps2(w')w'/(w'^2 - w^2)`
-     is ~0 below the gap and modest in the tail, and `grain`
-     = 10 keeps `h` small.  Confirm the reading before
-     changing anything -- swapping the two branches is a
-     one-line change whose effect on published spectra should
-     be measured, not assumed.
-  2. **The node count is even.**  Composite Simpson needs an
-     odd number of nodes.  The sum runs over `numValues -
-     grain` = `grain*(length-1)` nodes, which for the default
-     `grain` of 10 is always even.
-  3. **The pole exclusion breaks the alternation anyway.**
-     Points within 1e-5 of `energy(i)` are skipped to avoid
-     the pole, so the surviving nodes are not the strict
-     alternating sequence either weighting assumes.  A rule
-     that tolerates a gap in the middle of its range may be
-     the more honest fix than repairing the weights of one
-     that does not.
+  **How this was measured, since none of it is visible in a
+  single run.**  The routine integrates a straight-line
+  interpolation of eps2 between the computed energy points, and
+  that integral can be written in closed form, so the yardstick
+  used here is an exact formula rather than a finer version of
+  the same quadrature.  (An earlier attempt used a finer grid
+  and was discarded: its own error near the pole was larger
+  than the effects being measured, which made a refinement
+  study read as though the code stopped converging.)  A Python
+  copy of the routine, defect for defect, reproduces the
+  compiled program to six figures, so each fault could be
+  switched off on its own and its cost read directly.  The test
+  spectrum is silicon-like: absorption beginning at a 1.1 eV
+  gap, two peaks, 201 energy points to 30 eV.
 
-  Note also that `totalSum` and `totalSumi` are accumulated
-  throughout and never read by anything.  Either they were
-  meant to be the quadrature and the Simpson expression
-  replaced them, or they are a leftover trapezoid check.
-  Decide and delete.
+  **Fault 1, the worst one: the last point of the range was
+  evaluated at the wrong energy.**  Line 517 read
+  `original_e=energy(length)` where every other point in the
+  sum uses `energy(i)`, the energy the eps1 value is being
+  computed for.  The consequence is not a small inaccuracy.
+  That node sits exactly one fine step below the top of the
+  range, so the difference in its denominator was always that
+  one step, making the node evaluate to about
+  `-eps2(top)/(2h)`.  The `h` in that expression then cancelled
+  against the `h` the whole sum is multiplied by, leaving a
+  constant `-eps2(top)/(3*pi)` subtracted from **every** eps1
+  value.  Being independent of the grid, it was the one error
+  that survived any amount of refinement -- refining to a grain
+  of 320 left it untouched at 0.067.  Predicted -0.06366,
+  measured -0.06386.  It vanishes only when the spectrum is
+  carried far enough out that eps2 has decayed to nothing,
+  which is why it has never been caught: a well-converged
+  spectrum hides it completely, and a truncated one shifts by
+  about 0.4 percent of eps1(0).
+
+  **Fault 2: the first point of the range was read but never
+  written.**  `makeFineGrainEnergy` sets `fine_energy(1)`
+  exactly equal to `energy(1)`, and line 482 compared it
+  against `energy(1)` as well, so the guard on line 483 asked
+  whether zero exceeds 1e-5 and answered no on every pass of
+  every iteration.  The assignment on line 484 therefore never
+  executed -- yet line 535 read `integrand(:,1)` into the sum.
+  That is a read of memory that was allocated and never
+  written.  Confirmed by filling the array with -12345 before
+  use, which moved eps1(0) from 16.954 to -22.276, matching the
+  predicted shift.  It has been harmless in practice only
+  because a fresh allocation usually hands back zeroed memory,
+  and zero happens to be the right contribution for a material
+  whose energy range starts below its gap.  For a metal the
+  right value is not zero, though even there the term is worth
+  only about 5e-5.  The danger was never the size of the error;
+  it was that the answer depended on memory nobody had set.
+
+  **Fault 3: the Simpson weights were the wrong way round.**
+  Counting the first node as number one, Simpson's rule weights
+  the even-numbered nodes by four and the odd-numbered interior
+  ones by two.  The test on line 503 sent even-numbered nodes
+  to `evenSum`, which line 535 multiplied by two, and odd ones
+  to `oddSum`, which it multiplied by four.  Exactly doubling
+  the error of the integration: measured largest error 0.193
+  against 0.097 for the corrected weighting, on a spectrum with
+  no truncation, and the same factor of two at every grid
+  refinement tested.
+
+  **Fault 4, recorded but NOT repaired: the number of nodes is
+  even.**  Simpson's rule needs an odd number, so that the
+  points pair up into complete spans.  The sum runs over
+  `numValues - grain` nodes, which is `grain*(length-1)` and
+  therefore even for the default grain of 10.  Repairing this
+  means changing how the fine grid is built, not adjusting a
+  weight, and it is why the corrected weighting still converges
+  only in proportion to the step size rather than far faster as
+  a correct Simpson rule would.  Left alone deliberately: the
+  gain is accuracy the calculation does not currently need, and
+  the change is to a data structure rather than an expression.
+
+  **Fault 5: two accumulators computed and never read.**
+  `totalSum` and `totalSumi` were built up on lines 473, 486,
+  489, 510, 511, 521 and 524 and never used.  Deleted.
+
+  **What the repair is worth, compiled program against the
+  exact formula, on a spectrum truncated while eps2 is still
+  0.60:** eps1(0) moves from 16.95412 to 17.01786 against an
+  exact 17.01812, so its error falls from 0.064 to 0.00026.
+  Across the spectrum the largest error falls from 0.258 to
+  0.098 and the average error from -0.067 to -0.002.  Note what
+  the remaining 0.098 is: it is the ordinary error of a
+  step-size-limited rule near the pole, it shrinks with the
+  grid, and it is no longer a constant bias.
+
+  **This changes every optical spectrum Imago produces.**  The
+  shift is largest for spectra cut off while absorption is
+  still appreciable, and negligible for spectra carried out to
+  where it has died away.  Anyone comparing new output against
+  a previously published figure should expect a small upward
+  move in eps1 and in everything derived from it.
 
   Unrelated but in the same expression, and cheap to fix
   whenever this is opened: `valeDimIndex**2` in the

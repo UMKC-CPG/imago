@@ -145,7 +145,14 @@ program imagoKkc
       end subroutine printData
    end interface
 
-   ! Get command line parameter for the number of lines.
+   ! Get command line parameter for the number of lines. Note that the
+   !   caller passes a count of LINES in the eps2 file, header included,
+   !   not a count of data points. Both callers produce it that way:
+   !   imago.py runs "wc -l" on fort.50 for the total spectrum, and
+   !   processPOPTC.py counts the lines of the fort.450 that makePDOS.py
+   !   wrote for one partial pair. Each of those files carries exactly
+   !   one header line, so one line is subtracted just below and every
+   !   later use of "length" means the number of data points.
    call getarg(1,buffer)
    read (buffer,*) length
 
@@ -153,7 +160,13 @@ program imagoKkc
    length = length - 1
 
    ! Determine the number of values from the number of lines and the
-   !   granularity we desire.
+   !   granularity we desire. This is an upper bound rather than the
+   !   working size: makeFineGrainEnergy interpolates between adjacent
+   !   pairs of data points, and there are length-1 such gaps, so only
+   !   the first grain*(length-1) entries are ever filled or read. That
+   !   count is written throughout as numValues-grain, which is where
+   !   that otherwise puzzling expression comes from. The final grain
+   !   entries of the fine arrays stay untouched.
    numValues=length*grain
 
    ! Determine if this is a spin polarized calculation or not.
@@ -425,8 +438,8 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
 
    integer :: i,j
    real (kind=double) :: fine_e,original_e
-   real (kind=double), allocatable, dimension (:) :: totalSum,evenSum,oddSum
-   real (kind=double), allocatable, dimension (:) :: totalSumi,evenSumi,oddSumi
+   real (kind=double), allocatable, dimension (:) :: evenSum,oddSum
+   real (kind=double), allocatable, dimension (:) :: evenSumi,oddSumi
    real (kind=double), allocatable, dimension (:,:) :: integrand,integrandi
 
    real (kind=double) :: multFactor
@@ -460,33 +473,40 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
    !   does not, and they are not.
    multFactor = 2.0_double/3.0_double/pi
 
-   allocate (totalSum   (dim3))
    allocate (evenSum    (dim3))
    allocate (oddSum     (dim3))
    allocate (integrand  (dim3,numValues))
-   allocate (totalSumi  (dim3))
    allocate (evenSumi   (dim3))
    allocate (oddSumi    (dim3))
    allocate (integrandi (dim3,numValues))
 
    do i=1,length
-      totalSum(:)  = 0.0_double
       oddSum(:)    = 0.0_double
       evenSum(:)   = 0.0_double
-      totalSumi(:) = 0.0_double
       oddSumi(:)   = 0.0_double
       evenSumi(:)  = 0.0_double
 
-      ! Do the first point explicitly to save computation in the loop
+      ! The first and last nodes each carry weight one in the sum below,
+      !   and each is skipped when it lands on the pole at energy(i).
+      !   Clear them before the guards so that a skipped node adds
+      !   nothing, rather than adding whatever the array happened to
+      !   hold. On the first pass through i it holds nothing at all,
+      !   because an allocate does not initialize.
+      integrand(:,1)                = 0.0_double
+      integrandi(:,1)               = 0.0_double
+      integrand(:,numValues-grain)  = 0.0_double
+      integrandi(:,numValues-grain) = 0.0_double
+
+      ! Do the first point explicitly to save computation in the loop.
+      !   The pole sits at energy(i), the energy this eps1 value is
+      !   being computed for, and not at either end of the range.
       fine_e=fine_energy(1)
-      original_e=energy(1)
+      original_e=energy(i)
       if (abs(fine_e - original_e) .gt. 0.00001_double) then
          integrand(:,1)=fine_eps2(:,1)*fine_e/ &
                & (original_e + fine_e)/(fine_e - original_e)
-         totalSum(:)=totalSum(:)+integrand(:,1)
          integrandi(:,1)=fine_eps2(:,1)*fine_e/ &
                & (fine_e*fine_e + original_e*original_e)
-         totalSumi(:)=totalSumi(:)+integrandi(:,1)
       endif
 
       ! Loop through the middle part
@@ -507,21 +527,24 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
                oddSum(:)=oddSum(:)+integrand(:,j)
                oddSumi(:)=oddSumi(:)+integrandi(:,j)
             endif
-            totalSum(:)=totalSum(:)+integrand(:,j)
-            totalSumi(:)=totalSumi(:)+integrandi(:,j)
          endif
       enddo
 
-      ! Do the last point explicitly to save computation in the loop
+      ! Do the last point explicitly to save computation in the loop.
+      !   The pole is energy(i) here too. Using the top of the range
+      !   instead put this node a single fine step from its own pole for
+      !   every i, so it evaluated to roughly -eps2(top)/(2h). The h
+      !   then cancelled against the h the sum is multiplied by, leaving
+      !   a spurious constant -eps2(top)/(3*pi) subtracted from every
+      !   eps1 value -- an error that no amount of grid refinement could
+      !   reduce, because it did not depend on the grid.
       fine_e=fine_energy(numValues-grain)
-      original_e=energy(length)
-      if (abs(fine_e - original_e) .gt. 0.00001) then
+      original_e=energy(i)
+      if (abs(fine_e - original_e) .gt. 0.00001_double) then
          integrand(:,numValues-grain)=fine_eps2(:,numValues-grain)*fine_e/ &
                & (original_e + fine_e)/(fine_e - original_e)
-         totalSum(:)=totalSum(:)+integrand(:,numValues-grain)
          integrandi(:,numValues-grain)=fine_eps2(:,numValues-grain)*fine_e/ &
                & (fine_e*fine_e + original_e*original_e)
-         totalSumi(:)=totalSumi(:)+integrandi(:,numValues-grain)
       endif
 
       ! Assemble the Simpson sum. The leading fineEnergyDiff is the bare
@@ -531,19 +554,22 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
       !   eps1 = 1 + (2/pi)*Int[...], divided among the partials by the
       !   caller so that a full set of them still sums to that single 1
       !   rather than to one per partial.
+      ! Simpson's rule weights the even-numbered nodes by four and the
+      !   odd-numbered interior ones by two, counting the first node as
+      !   number one. The two weights were previously the other way
+      !   round, which left the total weight short and doubled the
+      !   error of the whole integration.
       eps1(:,i)=fineEnergyDiff*(integrand(:,int(numValues-grain)) + &
-            & integrand(:,1) + 2.0_double * evenSum(:) + 4.0_double * &
+            & integrand(:,1) + 4.0_double * evenSum(:) + 2.0_double * &
             & oddSum(:)) * multFactor + pOptcFactor
       eps1i(:,i)=fineEnergyDiff*(integrandi(:,int(numValues-grain)) + &
-            & integrandi(:,1) + 2.0_double * evenSumi(:) + 4.0_double * &
+            & integrandi(:,1) + 4.0_double * evenSumi(:) + 2.0_double * &
             & oddSumi(:)) * multFactor + pOptcFactor
    enddo
 
-   deallocate (totalSum)
    deallocate (evenSum)
    deallocate (oddSum)
    deallocate (integrand)
-   deallocate (totalSumi)
    deallocate (evenSumi)
    deallocate (oddSumi)
    deallocate (integrandi)
