@@ -2666,15 +2666,23 @@ class _ClimbDispatcher:
     def next_rung(self):
         """Block until the next rung lands and translate it to
         ``(material, Rung)`` -- or ``(material, _RUN_FAILED)`` for a
-        unit that did not complete (the climb stops that material as a
-        run failure, 4e.5).  A landed mesh must equal the one
-        requested (DESIGN 7.7): a resolved mesh that differs means
-        makeinput or imago silently changed it, so fail loudly rather
-        than record the wrong rung."""
+        unit that did not complete OR whose SCF did not converge (the
+        climb stops that material as a run failure, 4e.5).  A landed
+        mesh must equal the one requested (DESIGN 7.7): a resolved
+        mesh that differs means makeinput or imago silently changed
+        it, so fail loudly rather than record the wrong rung."""
         unit, entry, remaining = self._collect_next_fn(
             self._flight, self._outstanding)
         self._outstanding = remaining
         material, mesh = self._origin[_unit_key(unit)]
+
+        # Two different questions, answered in two different places.
+        #   The flight entry's status says whether the JOB completed.
+        #   ``converged`` in the run's own result.toml says whether
+        #   the SCF reached its fixed point.  A run that hit its
+        #   iteration ceiling does BOTH -- exits cleanly and writes a
+        #   total energy -- so it clears the check just below and its
+        #   energy is then indistinguishable from a real one.
         if entry.status != "done":
             return material, _RUN_FAILED
         result = self._read_fn(self._workspace, unit)
@@ -2685,6 +2693,30 @@ class _ClimbDispatcher:
                 f"{material!r} resolved {list(resolved)}; an "
                 f"explicit scfkp mesh must be honoured exactly "
                 f"(DESIGN 7.7)")
+
+        # An unconverged energy is wherever the iteration happened to
+        #   stop, so putting it on the ladder inverts what the
+        #   flatness test asks: the test wants an energy that has
+        #   stopped moving with the MESH, and this one stopped moving
+        #   for a reason that has nothing to do with the mesh.  It can
+        #   read flat by coincidence and it can break a real plateau.
+        #
+        # Treated as a rung that did not run, which stops the
+        #   material.  Dropping it and climbing on was rejected: the
+        #   climb picks its next mesh FROM the ladder, so a ladder
+        #   that does not grow re-requests the same mesh forever.
+        #
+        # Only an EXPLICIT False drops it.  A result.toml carrying no
+        #   ``converged`` field cannot be judged and is kept -- the
+        #   same side taken on a missing gap reading (is_gapless), and
+        #   for the same reason: missing data must never silently
+        #   discard evidence a real run earned.
+        if result.get("converged") is False:
+            print(material + ": SCF did not converge at mesh "
+                  + "-".join(str(count) for count in mesh)
+                  + " -- rung rejected, climb stopped")
+            return material, _RUN_FAILED
+
         return material, Rung(list(mesh), result["total_energy"],
                               result.get("gap_ev"))
 

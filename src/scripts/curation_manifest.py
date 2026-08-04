@@ -315,7 +315,7 @@ DEFAULT_BISPECTRUM_SUB_SPEC = {
 # The producer's built-in k-point flatness tolerance, used when a
 #   solid names neither its own kpoint_convergence_threshold nor a
 #   [harvest] block (DESIGN 5.7 / 7.8).  Per atom, in eV
-#   (2e-3 = 2 meV/atom).  Unlike the run settings this has a
+#   (1e-3 = 1 meV/atom).  Unlike the run settings this has a
 #   resolve-time fallback, so the [harvest] block -- and the key --
 #   may be omitted entirely.
 #
@@ -324,17 +324,34 @@ DEFAULT_BISPECTRUM_SUB_SPEC = {
 #   the energies it judges: a bar beneath the noise cannot be
 #   cleared by convergence, only by two coincidences in a row, so a
 #   search that demands persistence will reject correct answers and
-#   occasionally accept lucky ones.  Measured scatter across the
-#   seed solids runs 0.0008 to 0.0047 eV/atom depending on the solid
-#   and the integration scheme.  The former 5.0e-4 sat beneath all
-#   of it and converged two of thirteen seed solids; 2e-3 converged
-#   all thirteen while moving the insulators only from [12,12,12] to
-#   [10,10,10].  Anyone tempted to tighten this back should
-#   re-measure the scatter first -- and note that a looser value
-#   also loosens the bracket phase, which reads this multiplied by
+#   occasionally accept lucky ones.  The earlier 5.0e-4 sat beneath
+#   all measured scatter and converged two of thirteen seed solids.
+#
+# The scatter that argued for a 2e-3 bar -- 0.0008 to 0.0047
+#   eV/atom across the seed solids -- was measured on METALS, whose
+#   energies oscillate as the mesh crosses the Fermi surface.  That
+#   is not incidental: the oscillation is why their ladders are
+#   noisy AND why they cannot converge in k-points at all.  Those
+#   ladders no longer reach this test, because the gap test stops a
+#   metal on every search shape before any convergence work is done.
+#   What is left for this threshold to judge is insulators, whose
+#   ladders settle rather than oscillate, and for the six ordinary
+#   si_fd-3m seeds 1e-3 and 2e-3 pick the IDENTICAL mesh,
+#   [10,10,10].
+#
+# What the tightening buys is GAP quality, not energy.  ``gap_ev``
+#   is read off whichever rung the climb stopped on and is a
+#   predictor key that nothing downstream re-converges -- unlike the
+#   potential, which the consuming SCF re-converges by
+#   construction.  A looser bar stops earlier and so records a
+#   coarser-mesh gap.
+#
+# Before moving this again, re-measure the scatter of the ladders
+#   it will actually judge -- and note that a looser value also
+#   loosens the bracket phase, which reads this multiplied by
 #   `stride_flatness_multiple`, so two climbs at different
 #   thresholds are not one ladder scored twice.
-DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 2.0e-3
+DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 1.0e-3
 
 # The six run settings that may live in the top-level [defaults]
 #   block and be inherited per solid (DESIGN 5.7).  system_type is

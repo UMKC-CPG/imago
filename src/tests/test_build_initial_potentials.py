@@ -3824,17 +3824,27 @@ def _mesh_of_unit(unit):
     return [int(part) for part in token.split("-")]
 
 
-def _mesh_reader(energy_by_mesh, resolved_by_mesh=None):
+def _mesh_reader(energy_by_mesh, resolved_by_mesh=None,
+                 converged_by_mesh=None):
     """A fake result reader: return each mesh unit's chosen energy
     and, unless overridden, echo the requested mesh as the resolved
-    one."""
+    one.
+
+    ``converged_by_mesh`` sets the run's SCF ``converged`` flag per
+    mesh.  A mesh not named there gets NO such field at all, which
+    stands for a result.toml that predates it -- the case the
+    dispatcher must keep rather than discard."""
     def read_fn(workspace, unit):
         mesh = _mesh_of_unit(unit)
         resolved = mesh
         if resolved_by_mesh is not None:
             resolved = resolved_by_mesh.get(tuple(mesh), mesh)
-        return {"total_energy": energy_by_mesh[tuple(mesh)],
-                "kpoint_mesh": resolved}
+        result = {"total_energy": energy_by_mesh[tuple(mesh)],
+                  "kpoint_mesh": resolved}
+        if converged_by_mesh is not None \
+                and tuple(mesh) in converged_by_mesh:
+            result["converged"] = converged_by_mesh[tuple(mesh)]
+        return result
     return read_fn
 
 
@@ -3864,7 +3874,7 @@ def _fake_collect_next(status_by_mesh):
 
 
 def _make_climb(energy_by_mesh, *, status_by_mesh=None,
-                resolved_by_mesh=None):
+                resolved_by_mesh=None, converged_by_mesh=None):
     """Build a make_climb_dispatcher with the toolchain seam mocked:
     a no-op prepare, a fake ``send_off``, a fake ``collect_next`` that
     assigns each mesh a status, and a fake result reader."""
@@ -3873,7 +3883,8 @@ def _make_climb(energy_by_mesh, *, status_by_mesh=None,
         prepare_fn=lambda flight, workspace, units=None: None,
         send_off_fn=_fake_send_off,
         collect_next_fn=_fake_collect_next(status_by_mesh or {}),
-        read_fn=_mesh_reader(energy_by_mesh, resolved_by_mesh))
+        read_fn=_mesh_reader(energy_by_mesh, resolved_by_mesh,
+                             converged_by_mesh))
 
 
 def test_climb_dispatcher_reads_rungs_back():
@@ -3898,6 +3909,49 @@ def test_climb_dispatcher_marks_a_failed_mesh():
     landed = [dispatcher.next_rung(), dispatcher.next_rung()]
     assert landed[0] == ("si", bip.Rung([4, 4, 4], -1.0))
     assert landed[1] == ("si", bip._RUN_FAILED)
+
+
+def test_climb_dispatcher_rejects_a_rung_whose_scf_did_not_converge(
+        capsys):
+    """Finishing and converging are DIFFERENT questions, answered in
+    different places (DESIGN 5.7).
+
+    The flight entry says the job completed; ``converged`` in the
+    run's own result.toml says the SCF reached its fixed point.  A run
+    that hit its iteration ceiling does both -- exits cleanly AND
+    writes a total energy -- so the status check above passes it, and
+    from then on its energy is indistinguishable from a real one.
+
+    But that energy is wherever the iteration happened to stop, which
+    inverts what the flatness test asks: the test wants an energy that
+    has stopped moving with the MESH.  So the rung is rejected, and
+    said out loud rather than dropped quietly."""
+    dispatcher = _make_climb(
+        {(4, 4, 4): -1.0, (5, 5, 5): -1.1},
+        converged_by_mesh={(4, 4, 4): True, (5, 5, 5): False})
+    dispatcher.send({"si": [[4, 4, 4], [5, 5, 5]]})
+    landed = [dispatcher.next_rung(), dispatcher.next_rung()]
+    assert landed[0] == ("si", bip.Rung([4, 4, 4], -1.0))
+    assert landed[1] == ("si", bip._RUN_FAILED)
+
+    printed = capsys.readouterr().out
+    assert "5-5-5" in printed
+    assert "did not converge" in printed
+
+
+def test_climb_dispatcher_keeps_a_rung_with_no_convergence_field():
+    """A result.toml carrying no ``converged`` field cannot be judged,
+    so the rung is KEPT.
+
+    This is the same side taken on a missing gap reading: missing data
+    must never silently discard evidence a real run earned.  Only an
+    EXPLICIT False rejects, so an older result.toml -- or an imago
+    build that does not yet write the field -- behaves exactly as it
+    did before the check existed, rather than stopping every material
+    in the campaign."""
+    dispatcher = _make_climb({(4, 4, 4): -1.0})   # no flag at all
+    dispatcher.send({"si": [[4, 4, 4]]})
+    assert dispatcher.next_rung() == ("si", bip.Rung([4, 4, 4], -1.0))
 
 
 def test_climb_dispatcher_asserts_the_mesh_is_honoured():

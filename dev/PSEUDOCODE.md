@@ -1048,8 +1048,14 @@ function buildAtomPerm(numPointOps, abcRealPointOps,
                 rotPos(i) = modulo(rotPos(i), 1.0)
 
             # Search for the atom at the rotated
-            # position. R preserves species, so only
-            # atoms of the same type can match.
+            # position, restricted to atoms of the same
+            # type. This restriction is what MAKES the
+            # type-level sums invariant rather than a
+            # consequence of them: a type need not be a
+            # symmetry orbit (see DESIGN 2.3), so the
+            # requirement that R stay within a type is
+            # imposed here and the stop below enforces
+            # it.
             atomPerm(R, A) = -1  # sentinel
             for B = 1 to numAtomSites:
                 if atomType(B) != atomType(A):
@@ -2808,10 +2814,29 @@ function make_climb_dispatcher(structures, options_by_material,
         (unit, entry, remaining) = collect_next(flight, outstanding)
         outstanding = remaining
         (m, mesh) = origin[identity(unit)]
+        # TWO different questions, answered in two places.  The
+        #   flight entry says whether the JOB completed; res.converged
+        #   says whether the SCF reached its own fixed point.  A
+        #   NOT_CONVERGED run does both -- exits cleanly AND writes a
+        #   total energy -- so it passes the first test and its energy
+        #   is indistinguishable from a real one once it is a number
+        #   on a ladder (DESIGN 5.7).
         if entry.status != "done":
             return (m, FAILED)
         res = readResult(unit)                   # result.toml (6.1.2)
         assert res.kpoint_mesh == mesh           # honoured exactly
+        # An unconverged energy is wherever the iteration happened to
+        #   stop, so a flatness test over it asks the wrong question:
+        #   it wants energy that has stopped moving with the MESH.
+        #   Such a rung is treated as one that did not run, which
+        #   stops the material.  Dropping it and climbing on was
+        #   rejected -- the next mesh is chosen FROM the ladder, so a
+        #   ladder that does not grow re-requests the same mesh
+        #   forever.  Only an EXPLICIT false drops it: a result.toml
+        #   with no such field cannot be judged and is kept, the same
+        #   side taken on a missing gap (4e.2).
+        if res.converged is false:
+            return (m, FAILED)
         return (m, Rung(mesh, res.total_energy))
 
     return dispatcher(send = send, next_rung = next_rung)
@@ -6995,14 +7020,24 @@ EXEMPT_RUN_SETTING_KEYS = ("cell",)
 # The value is a FLOOR set by the ladder, not a taste (DESIGN
 #   3.12.3).  It must sit ABOVE the rung-to-rung scatter of the
 #   energies it judges, because a bar beneath the noise can be
-#   cleared only by two coincidences in a row.  Measured scatter
-#   across the seed solids runs 0.0008 to 0.0047 eV/atom depending
-#   on solid and integration scheme.  The former 5.0e-4 sat below
-#   all of it and converged two of thirteen seed solids; 2e-3
-#   converged all thirteen while moving the insulators only from
-#   [12,12,12] to [10,10,10].  Do not tighten this without
-#   re-measuring the scatter first.
-DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 2.0e-3    # 2 meV/atom
+#   cleared only by two coincidences in a row.  The former 5.0e-4
+#   sat below all measured scatter and converged two of thirteen
+#   seed solids.
+#
+# The scatter that once argued for 2e-3 -- 0.0008 to 0.0047
+#   eV/atom -- was measured on METALS, whose energies oscillate as
+#   the mesh crosses the Fermi surface.  Those ladders no longer
+#   reach this test at all: the gap test stops a metal on every
+#   search shape before any convergence work (4e.3).  What is left
+#   to judge is insulators, which settle rather than oscillate,
+#   and for the six ordinary si_fd-3m seeds 1e-3 and 2e-3 pick the
+#   IDENTICAL mesh, [10,10,10].
+#
+# Tightening buys gap quality: gap_ev is read off whichever rung
+#   the climb stopped on and is a predictor key nothing downstream
+#   re-converges, so a looser bar records a coarser-mesh gap
+#   (DESIGN 7.6, and the defect carried as D22).
+DEFAULT_KPOINT_CONVERGENCE_THRESHOLD = 1.0e-3    # 1 meV/atom
 
 # The adaptive-climb tuning knobs that may live in the optional
 #   [harvest.kpoint_climb] sub-table (DESIGN 5.7 / 3.12.6).  All but
@@ -11803,15 +11838,36 @@ function harvest_flight(workspace_root, db_root, dataspace):
         #    is None when result.toml carries no kpoint_mesh (an
         #    older run, or imago not yet emitting it), which the
         #    guard treats as "cannot collapse" (see collapse_by_mesh).
+        #    A point whose SCF did not converge is DROPPED here, so
+        #    it never reaches the flatness test (DESIGN 7.8 step 3b).
+        #    Its energy is wherever the iteration stopped, for a
+        #    reason unrelated to the mesh, so it can read flat by
+        #    coincidence and can break a plateau that was real.
+        #    Dropping (rather than stopping the structure, as the
+        #    climb does) is right here because this grid is a fixed
+        #    set of points, not a sequence that chooses its next
+        #    member -- removing one cannot stall anything.  If too
+        #    few survive, step (e)'s "too few distinct meshes" arm
+        #    already covers it.  Only an EXPLICIT false drops a
+        #    point; a result.toml with no such field cannot be judged
+        #    and is kept.  Never silent: the drops are reported.
         kpoint_densities, energies, meshes, rts = [], [], [], []
+        dropped = []
         for u in grid:
             rt = read_result_toml(
                 join(workspace_root, "wingbeats", u.id, *u.calc,
                      "result.toml"))
+            if rt.get("converged") is false:
+                dropped.append(swept_value_of(u, axis))
+                continue
             kpoint_densities.append(swept_value_of(u, axis))
             energies.append(rt["total_energy"])
             meshes.append(rt.get("kpoint_mesh"))
             rts.append(rt)
+        if dropped:
+            warn(unit_id + ": dropped " + str(len(dropped))
+                 + " grid point(s) whose SCF did not converge: "
+                 + str(dropped))
 
         # c. A single-point grid harvests deliverables but does
         #    NOT auto-stage a guidance entry (DESIGN 6.2.1 / 7.7):
@@ -11821,7 +11877,16 @@ function harvest_flight(workspace_root, db_root, dataspace):
         #    the two-sided convergence test below needs >= 3
         #    points and would otherwise misreport one as "energy
         #    still moving."
-        if len(grid) == 1:
+        #
+        #    Counted over the SURVIVING points, not the requested
+        #    ones, since everything downstream reads the survivors --
+        #    and the zero case has to be caught before scf_threshold
+        #    is read off rts[0].
+        if len(rts) == 0:
+            log(unit_id + ": every grid point failed to converge"
+                + " (not staged)")
+            continue
+        if len(rts) == 1:
             log(unit_id + ": single point (not staged)")
             continue
 

@@ -50,7 +50,7 @@ def _make_workspace(tmp_path, kpds, energies, *,
                     scf_threshold=1.0, write_scf_threshold=True,
                     kpoint_convergence_threshold=5.0e-4,
                     metal_gap_threshold=0.05,
-                    write_gap=True, add_loen=False,
+                    write_gap=True, converged=None, add_loen=False,
                     policy="verify_around_prediction",
                     system_type="crystalline", confidence=0.9,
                     neighbor_ids=("mp-1", "mp-2"),
@@ -123,6 +123,13 @@ def _make_workspace(tmp_path, kpds, energies, *,
                 result_file.write(
                     f"kpoint_mesh = [{a_count}, {b_count}, "
                     f"{c_count}]\n")
+            if converged is not None:
+                # Whether this point's SCF reached its fixed point.
+                #   Left OUT entirely by default, which is the case a
+                #   result.toml predating the field presents -- and
+                #   which the harvest must keep rather than discard.
+                result_file.write(
+                    toml_line("converged", converged[index]))
             if write_scf_threshold:
                 result_file.write(
                     toml_line("scf_threshold", scf_threshold))
@@ -754,6 +761,55 @@ def test_a_metal_sweep_stages_nothing_and_says_so(patched, tmp_path):
                                   _DATASPACE)
     assert patched["entries"] == []
     assert "metal" in summaries[0]
+
+
+def test_a_non_converged_grid_point_is_dropped_and_reported(
+        patched, tmp_path):
+    """A point whose SCF did not converge never reaches the flatness
+    test (DESIGN 7.8 step 3b).
+
+    Its energy is wherever the iteration happened to stop, for reasons
+    unrelated to the mesh, so it can read flat by coincidence and -- as
+    here -- can break a plateau that was real.  The four converged
+    points hold a genuine plateau from 400 up; the unconverged point
+    at 200 sits in the middle of it with a wildly wrong energy, and
+    while it is on the ladder the two-sided test finds nothing at all.
+
+    Dropping (rather than stopping the structure, as the climb does)
+    is right here: this grid is a fixed set of points, not a sequence
+    that chooses its next member from what it has, so removing one
+    cannot stall anything."""
+    root = _make_workspace(
+        tmp_path, [50, 100, 200, 400, 800],
+        [0.9, 0.5, 5.0, 0.5, 0.5],
+        converged=[True, True, False, True, True])
+    summaries = gh.harvest_flight(root, str(tmp_path / "db"),
+                                  _DATASPACE)
+
+    # The plateau is found once the bad point is gone.  Without the
+    #   drop nothing converges, because every interior candidate has
+    #   the 5.0 outlier as a neighbour.
+    assert len(patched["entries"]) == 1
+
+    # Never silent: the curator has to know the sweep was judged on
+    #   fewer points than were run.
+    assert any("did not converge" in line for line in summaries)
+    assert any("200" in line for line in summaries)
+
+
+def test_a_sweep_whose_every_point_failed_stages_nothing(patched,
+                                                         tmp_path):
+    """If nothing survives the drop there is no grid left to judge,
+    and that is caught before anything downstream is handed an empty
+    one."""
+    root = _make_workspace(
+        tmp_path, [50, 100, 200], [0.5, 0.5, 0.5],
+        converged=[False, False, False])
+    summaries = gh.harvest_flight(root, str(tmp_path / "db"),
+                                  _DATASPACE)
+    assert patched["entries"] == []
+    assert any("every grid point failed" in line
+               for line in summaries)
 
 
 def test_a_sweep_is_metallic_if_any_point_is(patched, tmp_path):

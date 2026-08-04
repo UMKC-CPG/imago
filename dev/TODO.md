@@ -5283,6 +5283,92 @@ on the same data later with no schema change.  Built on P10.
   live: the si_cmce workspace is being cleared, so the LAT trial is
   the first run whose scheme change this will distinguish.
 
+- [x] C146. Lower `DEFAULT_KPOINT_CONVERGENCE_THRESHOLD` from 2e-3
+  to 1e-3.  DONE 2026-08-04.  DESIGN 3.12.3 led, then PSEUDOCODE
+  11.4, then the code -- the order C140 and C141 took.
+  **Not a reversal of C140; the population changed.**  The floor
+  principle is untouched: a threshold must sit above the scatter of
+  the ladders it judges.  What changed is WHICH ladders those are.
+  Every scatter figure that argued for 2e-3 -- Al 0.0047 under
+  Gaussian, Fe ~0.0015, the transition metals ~0.001 -- was measured
+  on a METAL, and that is not incidental: a metal's energy
+  oscillates as the mesh crosses the Fermi surface, which is both
+  why its ladder is noisy and why it cannot converge in k-points at
+  all.  Those ladders no longer reach the flatness test.  C142 and
+  C143 stop a metal on the gap, on every search shape, before any
+  convergence work.  So 2e-3 was a floor set by ladders the test
+  never sees, and "all thirteen converge" counted five solids that
+  now stop for an entirely different reason.
+  **What it costs the insulators: nothing measurable.**  For the six
+  ordinary si_fd-3m seeds, 1e-3 and 2e-3 pick the IDENTICAL mesh,
+  [10,10,10].
+  **What it buys: gap quality.**  `gap_ev` is read off whichever
+  rung the climb stopped on, is a predictor key, and is the one
+  recorded quantity nothing downstream re-converges -- unlike the
+  potential, which the consuming SCF re-converges by construction.
+  A looser bar stops earlier and records a coarser-mesh gap.  This
+  does not fix D22, but it stops widening it.
+  Swept the stale 5e-4 text with it: five DESIGN sites plus the
+  "0.5 meV/atom is looser than the textbook 1 meV/atom" paragraph,
+  which now reads the other way round -- 1 meV/atom IS the textbook
+  bar, reached from below by measurement rather than adopted for
+  being familiar.  One `mesh_climb` comment cited 5e-4 as "the
+  default" while explaining how `stride_flatness_multiple` was
+  tuned; it now names 5e-4 as the condition that experiment ran
+  under, and flags the multiple for re-checking if the bar moves far.
+  Suite green at 1271, no test changed -- the one test that asserts
+  the default reads the CONSTANT, which is what C140 fixed it to do.
+  **NOT yet verified live, and one case needs watching.** `si_ia-3`
+  is a narrow-gap insulator, the seed closest to metallic behaviour.
+  D21's table and D22's numbers CONTRADICT each other about it: D21
+  says it fails at 5e-4 and converges at 2e-3 to [11,11,11]; D22
+  says it converged at 5e-4 to [11,11,11] and at 2e-3 to [7,7,7].
+  Both cannot be right, the same mesh appears against different
+  bars in each, and this is exactly the ad-hoc-re-scoring trap.
+  Re-measure from the ladders before trusting either table.
+  CODE; DESIGN 3.12.3, PSEUDOCODE 11.4.
+
+- [x] C145. Reject a rung whose SCF did not converge (D21(c)).
+  DONE 2026-08-04.  DESIGN 5.7 + 7.8 step 3b led, then PSEUDOCODE
+  4e.7 and 15.7, then the code.
+  **Two different questions, answered in two different places.**
+  The flight entry's status says whether the JOB completed;
+  `converged` in the run's own result.toml says whether the SCF
+  reached its fixed point.  A run that hits its iteration ceiling
+  does both -- exits cleanly AND writes a total energy -- so it
+  passed the only check either path made, and from that point its
+  energy was indistinguishable from a real one.  DESIGN 6.2 already
+  said such a run's outputs "must not be harvested as a reference
+  potential"; neither path enforced it.
+  **Why an unconverged energy is worse than useless on a ladder.**
+  It is wherever the iteration happened to stop, which inverts what
+  the flatness test asks -- the test wants an energy that has
+  stopped moving with the MESH, and this one stopped moving for a
+  reason that has nothing to do with the mesh.  It can read flat by
+  coincidence and it can break a plateau that was real.
+  **The two paths need opposite treatments, and get them.**  The
+  climb treats it as a rung that did not run, which stops the
+  material: the climb picks its next mesh FROM the ladder, so a
+  ladder that does not grow would re-request the same mesh forever.
+  The standalone density harvest DROPS the point and carries on --
+  its grid is a fixed set of points, not a sequence that chooses
+  its next member, so removing one cannot stall anything.
+  **Missing data never discards.**  Only an EXPLICIT `converged =
+  false` rejects.  A result.toml with no such field cannot be
+  judged and is kept -- the same side taken on a missing `gap_ev`,
+  and for the same reason.  An older workspace behaves exactly as
+  before rather than stopping every material in the campaign.
+  Neither drop is silent: the climb prints the material and mesh,
+  the harvest adds a summary line naming the dropped densities.
+  Also fixed while there: the harvest's single-point guard counted
+  the REQUESTED points, so after filtering it could hand an empty
+  grid downstream.  It now counts survivors and catches zero.
+  +4 tests, suite green at 1271.  The sharpest is the harvest one:
+  four converged points hold a real plateau and one unconverged
+  point sits in the middle of it, so nothing converges at all while
+  it is on the ladder.
+  CODE; DESIGN 5.7 / 7.8, PSEUDOCODE 4e.7 / 15.7.
+
 - [x] C144. Carry the climb's verdict forward instead of discarding
   it.  DONE 2026-08-04.  DESIGN 5.7 + 7.8 led, then PSEUDOCODE 4e.5 /
   11.4 / 15.7, then the code.
@@ -5819,25 +5905,137 @@ is not carried only in conversation.
   POPTC, so every eps1/ELF/n/k/R/alpha value Imago has printed
   depends on the answer.
 
-- [ ] O2. Determine how k-point unfolding interacts with the
-  partial optical properties calculation.  The same question
-  had to be settled for the partial density of states, and the
-  answer there does not obviously transfer: POPTC decomposes a
-  momentum matrix element between a *pair* of basis-function
-  groups, so an unfolding weight has to be applied to a
-  quantity carrying two group indices rather than one.  Work
-  out whether the weight enters once per transition (as it
-  does for the total spectrum, through `kPointFactor` in
-  `optcPrint.F90`) or whether the decomposition needs the
-  weight distributed across the pair, and confirm that
-  whichever choice is made still lets the partials sum exactly
-  to the total.  That sum rule is the property the current
-  decomposition is built to preserve (`optc.F90` lines
-  1743-1753) and it is the cheapest check that an unfolding
-  scheme has not broken anything.
-  Do this after O1 and after the correctness fixes in
-  `optc.F90` have landed, so the baseline being compared
-  against is trustworthy.
+- [ ] O2. Apply IBZ atom-permutation unfolding to the
+  atom-resolved POPTC detail codes.  DESIGN 2.5 already
+  settled the governing rule for PDOS, and it carries over to
+  POPTC once each detail code is matched to its PDOS analogue.
+
+  The decisive property is that a sum taken over all atoms of
+  a type is invariant under the operations used for IBZ
+  reduction, while anything resolving individual atoms is not.
+  Note carefully that this does *not* follow from type meaning
+  "symmetry equivalent", because in Imago it often does not:
+  in an amorphous cell a type is a bin of locally similar
+  environments with no symmetry content at all, and in a point
+  defect supercell types are deliberately assigned from the
+  *pre-defect* symmetry to keep the cost down even though the
+  defect has destroyed that symmetry.  DESIGN 2.3 states the
+  rule as though species implied equivalence; that premise is
+  false in general and should be corrected there.
+
+  What actually guarantees the invariance is a runtime check.
+  `buildAtomPerm` in `atomicSites.f90` requires every point
+  operation to carry each atom onto an atom carrying the same
+  `atomTypeAssn`, and stops with a fatal error if no such
+  partner exists.  So whatever the types happen to mean, the
+  operations Imago actually reduces by are guaranteed to
+  permute atoms within a type -- which is exactly the closure
+  property a type-level sum needs.  The two awkward cases both
+  land safely for this reason rather than by assumption: an
+  amorphous cell carries no operations to reduce by (P1, so
+  the permutation is the identity), and a defect supercell
+  typed from the original symmetry is *coarser* than the true
+  orbits of the reduced group, which is the safe direction --
+  a union of orbits is still closed.  Typing *finer* than the
+  orbits is the unsafe direction, and that is the case
+  `buildAtomPerm` aborts on.
+
+  The gap is style code 0.  With an explicit k-point list
+  Imago cannot build the symmetry maps, so neither the
+  unfolding nor the `buildAtomPerm` consistency check runs --
+  only the warning noted in DESIGN.  A hand-supplied reduced
+  k-point list for a defect supercell is therefore the one
+  configuration where a wrong type-level decomposition can
+  pass silently.  Worth restating in the O2 write-up.
+
+  Mapping the four detail codes onto the rule:
+
+  ```
+  code  grouping        PDOS analogue   needs
+  ------------------------------------------------------
+  1     type            mode 0          nothing extra
+  3     type + QN_nl    mode 0          nothing extra
+  2     atom            mode 1          atomPerm/invAtomPerm
+  4     atom + QN_nlm   mode 3          D^l(R); deferred
+  ```
+
+  So codes 1 and 3 are already correct on a symmetry-reduced
+  mesh and need no work.  Code 2 needs the same treatment bond
+  order and Q* received in Phase F.  Code 4 is blocked behind
+  the same deferred D^l(R) representation matrices that block
+  PDOS mode 3, and is in any case unaffordable at present (see
+  the scaling note below).
+
+  Note that code 3 is grouped by *type*, not by atom, despite
+  the comment above it in `optc.F90` saying "each QN_nl
+  resolved atom": its `pOptcIndex` is built from
+  `cumulNumPartials(currentType)` and `printSpectrumPOPTC`
+  loops over `numAtomTypes`.  Fix that comment while here; the
+  wrong reading of it would put code 3 in the unsafe column.
+
+  Two things make POPTC harder than PDOS, neither of which
+  needs new infrastructure:
+
+  1. The decomposed quantity carries *two* group indices (an
+     initial-state group and a final-state group), so an
+     operation permutes both at once -- the pair matrix is
+     conjugated by the permutation rather than re-indexed
+     along a single axis:
+       M(a,b) at k_full = M(invAtomPerm(R,a), invAtomPerm(R,b))
+                          at k_IBZ
+     The existing `invAtomPerm` table supplies this; it is
+     simply applied twice.
+  2. **The partials-sum-to-total identity cannot be used to
+     check this.**  That identity (`optc.F90`, the
+     `Re*ReSum + Im*ImSum` construction) holds under *any*
+     permutation of the two indices, because permuting the
+     summands does not change their sum.  It is exactly blind
+     to a missing or wrong unfolding, so a passing sum rule
+     proves nothing here.  Check instead against a structure
+     with symmetry-equivalent-but-inequivalently-oriented
+     atoms, comparing a full-mesh run against an IBZ-reduced
+     run of the same system; those must agree per atom.
+
+  Do this after O1 and after the `optc.F90` correctness fixes
+  have landed, so the baseline being compared against is
+  trustworthy.
+
+- [ ] O3. Decide whether the x, y, and z resolved columns of
+  the optical output are meaningful on a symmetry-reduced
+  k-point mesh.  This is independent of POPTC and affects the
+  *total* spectra that Imago already produces.
+  The momentum operator is a vector: under a point group
+  operation its Cartesian components mix, P_i(Rk) = sum_j
+  R_ij P_j(k).  `getOptcCond` accumulates
+  `transitionProb(:,j,i,h) * kPointFactor(i)` over the IBZ
+  points only, so every member of a k-point's star is credited
+  with the *representative's* orientation, scaled by the star
+  multiplicity carried in `kPointWeight`, with no rotation of
+  the components.
+  The isotropic average is safe: summing x, y and z is a trace
+  and is invariant under the rotation, so the "total" column
+  that `printSpectrum` and `printSpectrumPOPTC` write (the
+  sum over the three components divided by three) is correct.
+  The three individual columns are not, unless the crystal is
+  cubic or the mesh was never reduced.
+  Decide between rotating the components during accumulation
+  and documenting the per-axis columns as valid only for
+  unreduced meshes.  Until then treat anisotropic per-axis
+  eps2, conductivity, n, k, R and alpha as unverified.
+
+- [ ] O4. Repair or remove the serial XYZ path.  `imago.py`
+  exposes `serialxyz` as a user setting and passes it through
+  to `serialXYZ` in `commandLine.f90`, but the branch it
+  selects in `computeTransitions` is entirely commented out.
+  A run with the flag set therefore computes no transitions
+  at all, prints zero-valued spectra, and then fails in
+  cleanup trying to deallocate a `transitionProbPOPTC` that
+  was never allocated.  Either restore the branch (its intent
+  was to do the three Cartesian components one at a time to
+  reduce peak memory, which is directly relevant to the POPTC
+  scaling problem) or remove the option so it cannot be
+  selected.  Silently producing zeros is the worst of the
+  three outcomes.
 
 ## TOOLING (lint helpers)
 

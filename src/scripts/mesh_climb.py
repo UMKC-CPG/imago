@@ -626,8 +626,10 @@ PolicyThresholds = namedtuple(
 #   crossed in a handful of computed points.  The bracket phase reads
 #   a stride flat within five times the convergence threshold, so a
 #   nearly-settled stride is bracketed a geometric step early (the
-#   seed experiment found three too tight to catch the [4->8] stride
-#   at the default 5e-4 threshold).  A rung whose band gap is
+#   seed experiment found three too tight to catch the [4->8]
+#   stride; it was run against a 5e-4 convergence threshold, so the
+#   multiple is worth re-checking if that bar moves far).  A rung
+#   whose band gap is
 #   0.05 eV or less is judged a metal, and the climb settles at once
 #   on a rough floor-level mesh rather than chasing a convergence a
 #   metal never reaches; 0.05 eV sits above a true metal's near-zero

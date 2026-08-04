@@ -347,8 +347,11 @@ permutation on-the-fly to map the channel index:
 
 where the channel permutation follows from atomPerm
 and the operation stored in fullKPToIBZOpMap(k_full).
-For mode 0 (per atom-type, per l-shell), R preserves
-species, so no channel permutation is needed.
+For mode 0 (per atom-type, per l-shell), R carries each
+atom onto an atom of the same type, so the type-level sum
+maps onto itself and no channel permutation is needed.
+That closure is enforced by `buildAtomPerm` rather than
+assumed from the meaning of a type; see section 2.3.
 
 This reduces memory by the IBZ reduction factor
 (typically 4-48x depending on point group symmetry):
@@ -377,12 +380,13 @@ atomPerm, with array shape (numPointOps, numAtomSites).
   Mode  Channel           Permutation rule
   ───────────────────────────────────────────────────
   0     per-type, per-l   None: type-level sum is
-                          invariant under R
+                          invariant under R (closure
+                          enforced by buildAtomPerm)
   1     per-atom total    invAtomPerm(R, atomIdx)
   2     per-atom, per-l   invAtomPerm remaps atom;
                           l-shell offset unchanged
-                          (same species ⇒ same
-                          orbital structure)
+                          (a type shares one basis,
+                          so the offset carries over)
   3     per-atom, per-lm  Not supported: requires
                           D^l(R) rotation matrices
   ───────────────────────────────────────────────────
@@ -878,6 +882,60 @@ applied to the two-atom coefficient product:
 In every case, no explicit rotation matrices are needed
 -- only the atom relabeling A -> R(A).
 
+**Why a type-level sum needs no relabeling at all.**
+Equations (4) and (5) relate a quantity on atom A to the
+same quantity on atom R(A). A sum taken over *every* atom
+of one type needs one further property: that R carries
+each atom of the type onto an atom of the same type. The
+set being summed then maps onto itself, and the sum is
+unchanged without any relabeling being applied.
+
+It is tempting to justify that property by saying point
+group operations permute atoms only within a species.
+**That premise is not safe in Imago**, because a type is
+a user-assigned grouping and need not be a symmetry
+orbit. Two ordinary cases break it. In an amorphous cell
+a type is a bin of locally similar atomic environments
+and carries no symmetry content whatever. In a point
+defect supercell, types are deliberately assigned from
+the *pre-defect* symmetry -- to keep the number of
+distinct potentials down and the cost with it -- even
+though the defect has destroyed that symmetry.
+
+What actually guarantees the property is a runtime check.
+`buildAtomPerm` (O_AtomicSites) accepts a partner for
+R(A) only among atoms sharing A's `atomTypeAssn`, and
+stops with a fatal error when no such partner exists. So
+whatever the types happen to mean physically, the
+operations Imago actually reduces by are closed on each
+type -- verified at startup rather than assumed.
+
+The direction of a mis-typing decides whether it is
+caught or is harmless:
+
+- Typing **coarser** than the orbits (one type is a union
+  of several orbits) is still closed, because a union of
+  orbits of a group remains closed under any subgroup of
+  it. This is where the defect supercell lands: types
+  built from the original symmetry are unions of the
+  reduced group's true orbits. Harmless, and it passes.
+- Typing **finer** than the orbits (a single orbit split
+  between two types) is not closed, and this is exactly
+  the case `buildAtomPerm` rejects.
+
+An amorphous cell reaches the same safety from the other
+direction: with no symmetry to declare it carries only
+the identity operation, so the permutation is trivial.
+
+**The exception is style code 0.** With an explicit
+k-point list Imago cannot build the symmetry maps, so
+neither the unfolding nor the `buildAtomPerm` check runs
+-- only the warning described in section 2.6. A hand
+supplied, already-reduced k-point list is therefore the
+one configuration in which a type partition finer than
+the orbits can pass unnoticed and corrupt a type-level
+decomposition.
+
 **Why individual orbitals break the pattern.** For a
 single orbital mu (not summed over a shell), the Mulliken
 population at Rk is:
@@ -1035,9 +1093,13 @@ sum invariance (4) and bond order invariance (5):
   ────────────────────────────────────────────────────
 
 *Mode 0 sums projections over all atoms of the same
-type. Since point-group operations permute atoms only
-within the same species, the type-level sum is
-automatically invariant -- no correction needed.
+type. Every operation carries each atom onto an atom of
+the same type, so the set being summed maps onto itself
+and the type-level sum is invariant -- no correction
+needed. Note that this closure is enforced at startup by
+`buildAtomPerm`, not inferred from a type being a
+symmetry orbit; in an amorphous cell or a defect
+supercell it is not one. See section 2.3.
 
 **Mode 3 resolves individual Cartesian Gaussian
 components (px, py, pz separately). Under rotation these
@@ -2067,20 +2129,59 @@ of them. That single mismatch produced every symptom the seed
 runs showed: a Gaussian ladder declaring convergence on scatter,
 ladders stopping one rung short of confirming what they had
 found, and four of five elemental metals climbing to the ceiling.
-The bar is therefore **2e-3 eV per atom**, which converged all
-thirteen seed solids where 5e-4 converged two, while moving the
-insulators only from `[12,12,12]` to `[10,10,10]`. A later reader
-must not tighten it back without re-measuring the scatter first:
-the number is not a taste, it is a floor set by the ladder.
+The bar was therefore raised to 2e-3 eV per atom, which converged
+all thirteen seed solids where 5e-4 converged two, while moving
+the insulators only from `[12,12,12]` to `[10,10,10]`.
+
+**The bar is now 1e-3 eV per atom, because the population it
+judges has changed.** The floor principle above is unaltered and
+is not a taste: a threshold must sit above the scatter of the
+ladders it is applied to. What changed is *which ladders those
+are*. Every scatter figure quoted above -- Al at 0.0047 under
+unsmeared Gaussian, Fe at ~0.0015, the transition metals at
+~0.001 -- was measured on a METAL. That is not incidental. A
+metal's energy oscillates as the mesh crosses the Fermi surface,
+which is the whole reason its ladder is noisy, and it is also
+the reason a metal cannot converge in k-points at all. Those
+ladders no longer reach the flatness test: the gap test stops a
+metal on every search shape before any convergence work is done.
+So 2e-3 was a floor set by ladders the test now never sees, and
+"all thirteen converge" counted five solids that today stop for
+a different reason entirely.
+
+What remains for the threshold to judge is insulators, whose
+ladders settle rather than oscillate. For the six ordinary
+`si_fd-3m` seeds, 1e-3 and 2e-3 pick the identical mesh,
+`[10,10,10]`, so the tightening costs them nothing measurable.
+
+The reason to spend anything at all here is the **gap**, not the
+energy. `gap_ev` is read off whichever rung the climb stopped
+on, and it is a predictor key (7.6) that nothing downstream
+re-converges -- unlike the potential, which the consuming SCF
+re-converges by construction. A looser bar stops earlier and
+therefore records a coarser-mesh gap. That is the defect carried
+as D22, and while this threshold does not fix it, a bar no
+looser than the ladders need stops widening it.
+
+**The case to watch is `si_ia-3`,** a narrow-gap insulator that
+sits closest to the metals in behaviour. The recorded evidence
+disagrees with itself about which meshes it reaches at which
+bar, so it must be re-measured live rather than read off either
+table.
 
 This suits the deliverable rather than merely rescuing it. The
 initial-potential database wants a rough good starting point for
 a later self-consistent calculation, and that calculation
 re-converges what it is given; the guidance dataspace is advice a
 curator weighs, not an answer. 5e-4 eV per atom is 0.5 meV per
-atom -- a publication-grade bar applied to a starting guess. The
-same reasoning already justifies the metal short-circuit below;
-it was simply never applied to the threshold.
+atom -- a publication-grade bar applied to a starting guess, and
+that is the sense in which the original number was wrong, quite
+apart from sitting under the noise. The same reasoning already
+justifies the metal short-circuit below; it was simply never
+applied to the threshold. Note where it stops: the argument
+licenses *not* being tighter than the work needs. It does not
+license being looser, which is why the bar is set by measurement
+from below rather than by how rough a starting guess may be.
 
 Two cautions the seed runs earned. The threshold is a *harvest*
 setting and is not part of the run-reuse cache key (6.2.5), so
@@ -5460,7 +5561,7 @@ kpoint_integration = "linear-tetrahedral"
 # it does not name its own, and an omitted setting falls back to
 # the producer's built-in value (validation rule 2).
 [harvest]
-kpoint_convergence_threshold = 5.0e-4   # eV/atom; 0.5 meV/atom
+kpoint_convergence_threshold = 1.0e-3   # eV/atom; 1 meV/atom
 
 [[reference_solid]]
 reference_id          = "au_fcc"
@@ -5771,7 +5872,7 @@ and resolves against the `[harvest]` block, not `[defaults]`:
   ladder must reach before its converged rung is harvested
   (DESIGN 7.8).  Given per solid to override just that solid's
   value, else inherited from the top-level `[harvest]` block,
-  else the producer's built-in default of 5e-4 (0.5 meV/atom).
+  else the producer's built-in default of 1e-3 (1 meV/atom).
   It never enters a calculation -- it is consulted only when the
   finished runs are read back -- and the resolved value is
   recorded on each guidance entry the solid contributes.
@@ -5916,7 +6017,7 @@ k-point-density ladder must reach before its converged rung is
 harvested (DESIGN 7.8).  Like the run settings it may be named
 per solid to override just that solid's value, resolving to the
 `[harvest]` block when the solid is silent; unlike them it also
-carries a built-in producer default (5e-4 eV/atom = 0.5 meV per
+carries a built-in producer default (1e-3 eV/atom = 1 meV per
 atom), so a manifest may omit the block entirely.  The
 *resolved* value -- whether authored or defaulted -- is recorded
 on every guidance entry the run contributes (its
@@ -6000,7 +6101,7 @@ file (5.2):
    always written down, once per solid or once in `[defaults]`.
    The harvest setting `kpoint_convergence_threshold` is exempt
    from this resolvability requirement: it carries a built-in
-   producer default (5e-4 eV/atom), so a solid that names neither
+   producer default (1e-3 eV/atom), so a solid that names neither
    it nor a `[harvest]` block is not refused -- the default
    applies and its resolved value is still recorded in provenance
    (the guidance entry's `metric_threshold`, 7.8).
@@ -6261,6 +6362,28 @@ Predict in density, search in mesh, record in density.
    `NON_CONVERGED` -- a ceiling, or a rung that failed to run.  A
    non-converged solid is flagged, never retried here: retries are
    the runner's job (Principle 12).
+
+   **A rung whose SCF did not converge never joins the ladder.**
+   Finishing and converging are different things, answered in
+   different places: the flight entry's status says the job
+   completed, while `converged` in the run's own result.toml says
+   the SCF reached its fixed point.  A `NOT_CONVERGED` run exits
+   cleanly and writes a total energy (6.2's run statuses already
+   say its outputs "must not be harvested as a reference
+   potential"), so nothing marks that energy as unfinished once it
+   is a number on a ladder.  It is wherever the iteration
+   happened to stop.  Handing it to a flatness test inverts what
+   the test is asking: the test wants to know whether the energy
+   has stopped moving with the MESH, and this one stopped moving
+   for a reason that has nothing to do with the mesh.  It can read
+   flat by coincidence, and it can break a plateau that was real.
+
+   Such a rung is treated as a rung that did not run, which stops
+   that material.  The alternative -- drop the rung and keep
+   climbing -- was rejected: the climb chooses its next mesh FROM
+   the ladder, so a ladder that does not grow yields the same
+   request again, forever.  Stopping surfaces the problem to the
+   curator, which is what a run that would not converge deserves.
 
    **The reason for the stop travels with the rung.**  Two
    different reasons yield a settled rung: the energy went flat
@@ -12020,12 +12143,35 @@ place, in this same field.
          NOT staged as a guidance entry -- one converged
          calc is weaker evidence than a grid (6.2.1) --
          and is skipped here before the convergence test.
-      b. For each CalcUnit's converged run, parse
-         result.toml for total_energy, gap_ev, gap_kind,
+      b. For each CalcUnit's run, parse result.toml for
+         total_energy, gap_ev, gap_kind,
          total_magnetization, scf_threshold, and
          kpoint_mesh (the resolved axial counts, 6.1.2 /
          PSEUDOCODE 4c.6); read the swept k-density out of
          the CalcUnit's calc tag.
+
+         **DROP a point whose SCF did not converge.**  A run
+         that finished is not the same as a run that
+         converged, and the two questions are answered in
+         different places: the flight entry's status says
+         whether the job completed, while `converged` in
+         result.toml says whether the SCF reached its own
+         fixed point.  A non-converged run finishes normally
+         and writes a total energy, so nothing distinguishes
+         it downstream -- its energy is simply wherever the
+         iteration happened to stop.  Feeding that into a
+         flatness test is worse than useless: the test asks
+         whether the energy has stopped moving with the mesh,
+         and this energy was not finished moving for reasons
+         that have nothing to do with the mesh.  It can read
+         flat by accident and it can break a genuine plateau.
+         Only an EXPLICIT `converged = false` drops a point.
+         A result.toml carrying no such field cannot be
+         judged, and is kept -- the same side this design
+         takes on a missing `gap_ev` (3.12.3), and for the
+         same reason: a missing reading must never silently
+         discard evidence a real run earned.  Dropping is
+         reported, never silent.
       c. Collapse duplicate-mesh rungs, then pick the
          converged grid point.  A requested k-density does
          not map one-to-one onto the mesh imago integrates:
@@ -12066,7 +12212,7 @@ place, in this same field.
          resolved from the solid's
          `kpoint_convergence_threshold` (its own value, else
          the manifest `[harvest]` block, else the built-in
-         0.5 meV/atom = 5e-4 eV/atom default; 5.7) --
+         1 meV/atom = 1e-3 eV/atom default; 5.7) --
          separate from `scf_threshold`, which governs one SCF
          run, not the flatness of energy versus k-density.
       d. If no point satisfies the criterion (energy
@@ -12177,18 +12323,19 @@ mixes cells of very different size (2 to 16+ atoms), and a
 fixed absolute total-energy tolerance would demand
 ever-tighter relative convergence as the cell grows.
 
-The 0.5 meV/atom default is looser than the textbook
-1 meV/atom, a deliberate choice for a *seed* database.  A
-purely local flatness test cannot both reject a low-density
-false plateau and converge a genuinely slow structure with a
-single threshold: a small high-symmetry cell can sit on a
-plateau flat to a few hundredths of a meV/atom yet a few
-tenths of a meV/atom above its true asymptote, while a larger
-cell only truly flattens at a few tenths of a meV/atom.
+The 1 meV/atom default is the textbook bar, arrived at from
+below rather than chosen for its familiarity: 3.12.3 sets it as
+a floor above the scatter of the ladders the test actually
+judges.  A purely local flatness test cannot both reject a
+low-density false plateau and converge a genuinely slow
+structure with a single threshold: a small high-symmetry cell
+can sit on a plateau flat to a few hundredths of a meV/atom yet
+a few tenths of a meV/atom above its true asymptote, while a
+larger cell only truly flattens at a few tenths of a meV/atom.
 Since a seed potential is a starting point that every
 downstream run re-converges, the choice is to accept a
 modestly loose plateau rather than complicate the detector --
-a threshold near 0.5 meV/atom converges the well-behaved and
+a threshold near 1 meV/atom converges the well-behaved and
 the slow structures alike, while a genuinely pathological
 sweep (an energy swinging by tens of meV/atom across the
 grid) is still correctly left unharvested for the curator.

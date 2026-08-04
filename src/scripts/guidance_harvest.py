@@ -753,13 +753,43 @@ def harvest_flight(workspace_root, db_root, dataspace):
         #    (d); it is None when result.toml carries no
         #    kpoint_mesh, which the guard treats as "cannot
         #    collapse" (collapse_by_mesh), keeping it inert.
+        #    A point whose SCF did NOT converge is dropped here, so it
+        #    never reaches the flatness test (DESIGN 7.8 step 3b).
+        #    Finishing and converging are different things: a run that
+        #    hit its iteration ceiling exits cleanly and writes a
+        #    total energy, so nothing downstream marks that energy as
+        #    unfinished.  It is wherever the iteration stopped, for a
+        #    reason unrelated to the mesh, so it can read flat by
+        #    coincidence and can break a plateau that was real.
+        #
+        #    Dropping is right HERE, where the climb instead stops the
+        #    material: this grid is a fixed set of points rather than
+        #    a sequence that chooses its next member from what it has,
+        #    so removing one cannot stall anything.  Only an EXPLICIT
+        #    False drops a point; a result.toml with no ``converged``
+        #    field cannot be judged and is kept, the same side taken
+        #    on a missing gap (is_gapless_value).
         kpoint_densities, energies, meshes, result_tomls = [], [], [], []
+        dropped_densities = []
         for unit in grid:
             result_toml = _read_result_toml(workspace_root, unit)
+            if result_toml.get("converged") is False:
+                dropped_densities.append(swept_value_of(unit, axis))
+                continue
             kpoint_densities.append(swept_value_of(unit, axis))
             energies.append(result_toml["total_energy"])
             meshes.append(result_toml.get("kpoint_mesh"))
             result_tomls.append(result_toml)
+
+        #    Never silently: a curator reading the summary has to know
+        #    the sweep was judged on fewer points than were run.
+        if dropped_densities:
+            summaries.append(
+                unit_id + ": dropped " + str(len(dropped_densities))
+                + " grid point(s) whose SCF did not converge (at "
+                + "k-density " + ", ".join(
+                    str(density) for density in dropped_densities)
+                + ")")
 
         # c. A single-point grid harvests deliverables but stages NO
         #    entry (DESIGN 6.2.1 / 7.7): one converged calc is weaker
@@ -767,7 +797,16 @@ def harvest_flight(workspace_root, db_root, dataspace):
         #    single-point curator override, and MUST precede
         #    pick_converged -- the two-sided test below needs >= 3
         #    points and would report one point as "still moving".
-        if len(grid) == 1:
+        #    Counted over the SURVIVING points rather than the
+        #    requested ones, since everything below reads the
+        #    survivors -- and the empty case must be caught before
+        #    build_entry is handed a grid with nothing in it.
+        if not result_tomls:
+            summaries.append(
+                unit_id + ": every grid point failed to converge "
+                "(not staged)")
+            continue
+        if len(result_tomls) == 1:
             summaries.append(
                 unit_id + ": single point (not staged)")
             continue
