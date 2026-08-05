@@ -6336,11 +6336,33 @@ is not carried only in conversation.
   3. **The totals did not move**, as predicted, so the sum
      rule confirmed nothing -- which is the point.
 
-  Not done: a direct A/B against a binary with the block
-  disabled.  The three findings above make that redundant
-  rather than merely inconvenient, but it is the one check
-  that would settle it by construction rather than by
-  inference.
+  **The A/B control, run 2026-08-05.**  The same reduced mesh
+  through a binary with the block disabled by a leading
+  `.false.` on its guard, inputs byte-identical to the
+  corrected run so the binary was the only variable
+  (`reduced_nofix`).  Without the correction the worst
+  relative disagreement against the full mesh is **1.78**,
+  against 1.2e-8 with it -- eight orders of magnitude, not a
+  refinement.  The three oxygens, which must be identical,
+  spread by 1.02 relative.
+
+  The control validates itself, which is the part worth
+  keeping.  Every atom pair that does NOT involve oxygen is
+  unchanged to the last digit by the correction: K-K sits at
+  1.22e-8 in both tables, K-Nb at 1.86e-12, Nb-K at 2.41e-37,
+  Nb-Nb at 1.09e-37.  K and Nb are alone in their types and
+  every operation maps them to themselves, so the permutation
+  is the identity for them and the block must be a no-op --
+  and it is, exactly.  Every pair involving an oxygen, the
+  only orbit of size greater than one, is wrong by 35 to 178
+  percent without it.  A correction that fired indiscriminately
+  would have moved the K and Nb pairs too.
+
+  Afterwards the source was restored, rebuilt and reinstalled,
+  and the reduced run repeated on the restored install: its
+  output file is byte-identical to the original corrected run,
+  so the installed binary is confirmed back to the committed
+  source rather than merely assumed to be.
 
   Incidental, found while setting this up and worth its own
   fix: the user-facing POPTC legend disagrees with the code
