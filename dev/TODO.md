@@ -764,6 +764,79 @@
   climb stops on).
   DESIGN 3.12.3 / 7.6; guidance schema in DESIGN 7.2.
 
+- [ ] D23. A declared cache key file that a unit's job never stages
+  makes that unit permanently uncacheable.  Found 2026-08-05 while
+  checking whether the producer works at its own defaults
+  (`jobs/defaults_live_check/`).  Two consecutive campaigns under a
+  byte-identical manifest each reported the fingerprint calculation
+  as `run (no usable result)` while all ten ladder rungs reused, so
+  the miss is deterministic rather than a stale-workspace accident.
+  **The mechanism.**  `standard_key_fields` declares the same two
+  key files for every unit
+  (`kaleidoscope/builders/kpoint_convergence.py:276`):
+
+        _KEY_FILE_NAMES = ("structure.dat", "kp-scf.dat")
+
+  `cache_key_matches` requires each of them to exist at the run
+  directory's ROOT and to byte-equal the freshly prepared copy, and
+  returns a miss when the staged side is absent (`cache.py:90-93`).
+  The fingerprint unit is a `loen` job built with `scf_basis = "no"`
+  (`build_initial_potentials.py:1067-1069`): it runs no SCF, so the
+  flattening step puts `kp-pscf.dat` at its run-directory root and
+  never `kp-scf.dat`.  The staged side is therefore absent forever
+  and the unit can never be reused.  Read off disk, the fingerprint
+  unit beside a mesh rung of the same solid:
+
+        unit             structure.dat       kp-scf.dat
+        loen-bispectrum  present, identical  ABSENT from run dir
+        kpt-mesh-10      present, identical  present, identical
+
+  **Introduced 2026-07-30 by C135** (`f7bfc96`), which added
+  `kp-scf.dat` as a second key file so that a change of integration
+  scheme could not silently return another scheme's answer.  Its own
+  comment states the assumption that broke: "A key FILE costs
+  nothing, because every run directory already stages this one."
+  True of the SCF rungs it was reasoned about; false of the
+  fingerprint job, which was not in view.
+  **What it costs.**  Every fingerprint calculation in every
+  campaign since 2026-07-30 has been recomputed from scratch.  On
+  the one-atom silicon cell that is 0.28 s, which is why it went
+  unseen, but the cost scales with cell size and with the
+  fingerprint cutoff.  Second, for that unit the discrimination C135
+  bought does not operate at all, because the file it compares is
+  not there to compare.  It fails SAFE -- a permanent miss rather
+  than a wrong hit -- but that is not the designed behaviour and no
+  document says it is what should happen.
+  **Candidates** -- three, in increasing damage:
+  (1) **Compare the `inputs/` copies rather than the flattened root
+      copies.**  Both sides keep an `inputs/` carrying
+      `structure.dat`, `kp-scf.dat` and `kp-pscf.dat` for every
+      unit -- verified on the fingerprint unit itself -- so the
+      comparison becomes symmetric and every declared key file
+      exists for every unit.  This also dissolves the prepare step's
+      asymmetry, which `build_initial_potentials.py:1896-1918`
+      spends a paragraph explaining.  Confirm first that no cleanup
+      path reclaims `inputs/`: no reference was found in
+      `tidy_scratch.py`, but the reclamation path was not traced end
+      to end.
+  (2) **Declare key files per job type**, so the fingerprint unit
+      keys on `kp-pscf.dat`.  Correct, but it restores the
+      hand-maintained list of "options that matter" that
+      `standard_key_fields` was written to avoid.
+  (3) **Treat a declared-but-unstaged key file as not applicable**
+      rather than as a miss.  Cheapest and worst: it silently
+      weakens the key in exactly the way C135 existed to prevent.
+  Whichever is chosen, DESIGN 6.2.5 must first say what a declared
+  key file means for a unit whose job does not produce it.  The
+  contract is silent on that today, which is how the two halves of
+  the mechanism came to disagree without either one looking wrong on
+  its own.
+  Relates to C135 (which added the second key file) and to C134
+  (which made the cache key physics-only, so a surviving workspace
+  is now expected to be reused across builds and this miss is felt
+  on every campaign rather than only after a rebuild).
+  DESIGN 6.2.5; PSEUDOCODE 13.4.
+
 - [x] D16. Design the historical-guidance dataspace
   (VISION Goal 5, ARCHITECTURE §10).  Done 2026-05-28
   (categorical signature shape, Jaccard lookup); rewritten
