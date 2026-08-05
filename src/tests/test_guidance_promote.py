@@ -436,6 +436,37 @@ def test_a_duplicate_within_one_batch_takes_the_ordinary_branch(
     assert _count(db_root, "staging") == 0
 
 
+def test_a_claim_staged_many_times_still_lands_once(tmp_path):
+    """The rule applies once per file after the first, not once.
+
+    The test above stages a pair, which is the shallowest case and
+    the only one that was covered.  Depth is not hypothetical: the
+    live staging area reached SIX files for one solid, because every
+    campaign harvests afresh and the REGENERATE model leaves the
+    duplicates for promotion to resolve.  Six is used here for that
+    reason rather than picked.
+
+    Nothing in the mechanism should care how deep a group runs --
+    the promoted index is live, so the second file finds the claim
+    occupied and so does the sixth -- but "should not care" is what
+    a test is for.  A batch-resolution pass or a ``generated_at``
+    tie-break, both of which this design removed, are exactly the
+    shapes that work for two and go wrong for more."""
+    db_root = str(tmp_path / "db")
+    for month in range(1, 7):
+        _stage(db_root, converged_mesh=(6, 6, 6),
+               generated_at=f"2026-{month:02d}-01T00:00:00Z")
+    assert _count(db_root, "staging") == 6
+
+    results = gp.promote(db_root, "all", output=lambda m: None)
+
+    actions = sorted(action for _, action in results)
+    assert actions == ["promoted"] + ["superseded"] * 5
+    assert _count(db_root, "entries") == 1
+    assert _count(db_root, "superseded") == 5
+    assert _count(db_root, "staging") == 0
+
+
 def test_dry_run_reports_the_dedup_but_moves_nothing(tmp_path):
     """A curator must be able to see every outcome -- including
     retirements -- before a single file is touched."""
