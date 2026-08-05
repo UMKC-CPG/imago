@@ -180,10 +180,17 @@ def test_key_fields_distinguish_the_integration_scheme():
     on ``structure.dat`` alone, one solid at one mesh under two
     schemes shares a run directory and HITS, returning the other
     scheme's answer under the name of the one asked for.  That is
-    wrong physics reported silently, not merely a stale result."""
+    wrong physics reported silently, not merely a stale result.
+
+    Both are named under ``inputs/``: that is where makeinput writes
+    them for every unit, whatever that unit's job reads, whereas the
+    run-directory root carries only the names a given job needs.  A
+    path that is absent for a whole job kind makes that kind
+    permanently uncacheable (TODO D23), so the prefix is part of the
+    contract rather than a detail of where the files happen to sit."""
     fields = kc.standard_key_fields(_STRUCTURE, _OPTIONS)
-    assert [key_file.name for key_file in fields.files] == [
-        "structure.dat", "kp-scf.dat"]
+    assert [key_file.path for key_file in fields.files] == [
+        "inputs/structure.dat", "inputs/kp-scf.dat"]
 
 
 def test_key_scalars_stay_the_convergence_limit_alone():
@@ -192,7 +199,8 @@ def test_key_scalars_stay_the_convergence_limit_alone():
     ``cache_key.toml`` carries would invalidate every cached unit in
     every surviving workspace at once -- a mass false miss, which is
     the failure the cache design works hardest to avoid.  A key file
-    costs nothing, because every run directory already stages it."""
+    costs nothing provided its path names a file every unit has,
+    which is why the declared paths sit under ``inputs/``."""
     fields = kc.standard_key_fields(
         _STRUCTURE, dict(_OPTIONS, converg=1.0e-6, scfkpint=1))
     assert fields.scalars == {"converg": 1.0e-6}

@@ -4235,9 +4235,9 @@ class TestPrepareUnitsKeyFileSource:
                 #   6.2.5) -- kp-scf.dat is what distinguishes two
                 #   k-point integration schemes, which structure.dat
                 #   does not record.
-                files=[KeyFile(name="structure.dat",
+                files=[KeyFile(path="inputs/structure.dat",
                                source="PROVISIONAL"),
-                       KeyFile(name="kp-scf.dat",
+                       KeyFile(path="inputs/kp-scf.dat",
                                source="PROVISIONAL")]))
         return Flight(root=str(tmp_path / "ws"), units=[unit]), unit
 
@@ -4280,25 +4280,27 @@ class TestPrepareUnitsKeyFileSource:
 
         for key_file in unit.key_fields.files:
             assert os.path.exists(key_file.source), (
-                f"prepare pointed the {key_file.name} cache key at "
+                f"prepare pointed the {key_file.path} cache key at "
                 f"{key_file.source}, which does not exist")
 
-    def test_source_sits_under_the_inputs_directory(
+    def test_source_is_the_prepare_dir_joined_to_the_declared_path(
             self, tmp_path, monkeypatch):
         # Named separately from the existence check because this
-        #   is the *reason* the path is what it is: a prepare
-        #   directory is never run, so it is never flattened, and
-        #   the file exists only under inputs/ (DESIGN 6.2.5).
-        makeinput = self._fake_makeinput(monkeypatch)
+        #   is the *reason* the path is what it is: the prepare
+        #   pass makes exactly the join the hit-test makes on the
+        #   run directory, so the two sides of the byte comparison
+        #   are one expression and neither side carries a layout
+        #   the other has to be kept in step with (DESIGN 6.2.5).
+        self._fake_makeinput(monkeypatch)
         flight, unit = self._flight_of_one(tmp_path)
 
         bip.prepare_units(flight, str(tmp_path / "ws"))
 
         assert [key_file.source for key_file
                 in unit.key_fields.files] == [
-            os.path.join(unit.prepared_dir, makeinput.INPUTS_DIR,
-                         name)
-            for name in ("structure.dat", "kp-scf.dat")]
+            os.path.join(unit.prepared_dir, path)
+            for path in ("inputs/structure.dat",
+                         "inputs/kp-scf.dat")]
 
 
 # ============================================================

@@ -271,9 +271,18 @@ _KEY_SCALAR_NAMES = ("converg",)
 #   Adding the scheme to ``_KEY_SCALAR_NAMES`` instead would compare
 #   a scalar table no stored ``cache_key.toml`` carries, invalidating
 #   every cached unit in every surviving workspace at once.  A key
-#   FILE costs nothing, because every run directory already stages
-#   this one.
-_KEY_FILE_NAMES = ("structure.dat", "kp-scf.dat")
+#   FILE costs nothing PROVIDED the path names a file every unit
+#   has -- which is why both are declared under ``inputs/``, where
+#   makeinput writes them for every unit whatever that unit's job
+#   reads.  Declared at the run-directory root instead, they are
+#   reached only for jobs that run an SCF, so a fingerprint unit --
+#   which runs none -- can never match and recomputes on every
+#   campaign, at full price and in silence (TODO D23).
+#
+#   The paths are relative to the unit's directory and are joined
+#   the same way onto the prepare directory and the run directory,
+#   so the two sides of the comparison are one expression.
+_KEY_FILE_PATHS = ("inputs/structure.dat", "inputs/kp-scf.dat")
 
 
 def standard_key_fields(structure, options):
@@ -290,19 +299,19 @@ def standard_key_fields(structure, options):
     The key files are makeinput's RESOLVED outputs, not the raw
     skeleton, so an input that changes the result misses the cache on
     its own -- there is no hand-maintained list of "options that
-    matter" to fall out of date.  See ``_KEY_FILE_NAMES`` for why
-    both files are needed.  Each ``source`` set here is provisional
-    (the skeleton path); the producer's prepare step re-points every
-    key file at its built copy before the hit-test (DESIGN 6.2.5,
-    Model A)."""
+    matter" to fall out of date.  See ``_KEY_FILE_PATHS`` for why
+    both files are needed and why both are named under ``inputs/``.
+    Each ``source`` set here is provisional (the skeleton path); the
+    producer's prepare step re-points every key file at its built
+    copy before the hit-test (DESIGN 6.2.5, Model A)."""
     source = (structure if isinstance(structure, str)
               else getattr(structure, "imago_skl", "imago.skl"))
     scalars = {name: options[name]
                for name in _KEY_SCALAR_NAMES if name in options}
     return KeyFields(
         scalars=scalars,
-        files=[KeyFile(name=name, source=source)
-               for name in _KEY_FILE_NAMES])
+        files=[KeyFile(path=path, source=source)
+               for path in _KEY_FILE_PATHS])
 
 
 def _load_structure(structure):

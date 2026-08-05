@@ -393,7 +393,7 @@ def _staged_unit(tmp_path, source_text, staged_text,
         id="s1", structure=str(source),
         key_fields=KeyFields(
             scalars=scalars,
-            files=[KeyFile(name="structure.skl",
+            files=[KeyFile(path="structure.skl",
                            source=str(source))]))
     write_cache_key(str(wingbeat_dir), unit)
     return str(wingbeat_dir), unit
@@ -459,22 +459,38 @@ def test_cache_misses_when_the_source_is_gone(tmp_path):
 
 
 def _two_file_unit(tmp_path, structure_text, kpoint_text,
-                   staged_kpoint_text):
-    """A unit keyed on TWO files, the shape the producer declares
+                   staged_kpoint_text, root_copies=True):
+    """A unit keyed on TWO files, in the shape the producer declares
     (DESIGN 6.2.5): the resolved structure and the resolved k-point
-    file.  ``staged_kpoint_text`` may differ from ``kpoint_text`` to
-    model a prior run made under a different integration scheme."""
+    file, both named under ``inputs/`` because that is the one
+    surface makeinput writes for every unit whatever its job reads.
+
+    The directories mirror a real flight.  makeinput builds into
+    ``inputs/`` on both sides, so the source is
+    ``<prepare>/inputs/<name>`` and the staged copy is
+    ``<run>/inputs/<name>`` -- the same relative path.  A run
+    directory additionally carries the flattened root copies the
+    engine reads, which is what ``root_copies`` writes.
+
+    ``staged_kpoint_text`` may differ from ``kpoint_text`` to model a
+    prior run made under a different integration scheme.  Setting
+    ``root_copies=False`` models a job that reads neither file at its
+    root -- the fingerprint unit of TODO D23."""
     wingbeat_dir = tmp_path / "run"
-    wingbeat_dir.mkdir()
-    sources = tmp_path / "src"
-    sources.mkdir()
+    (wingbeat_dir / "inputs").mkdir(parents=True)
+    sources = tmp_path / "prepare"
+    (sources / "inputs").mkdir(parents=True)
     files = []
     for name, current, staged in (
             ("structure.dat", structure_text, structure_text),
             ("kp-scf.dat", kpoint_text, staged_kpoint_text)):
-        (sources / name).write_text(current)
-        (wingbeat_dir / name).write_text(staged)
-        files.append(KeyFile(name=name, source=str(sources / name)))
+        (sources / "inputs" / name).write_text(current)
+        (wingbeat_dir / "inputs" / name).write_text(staged)
+        if root_copies:
+            (wingbeat_dir / name).write_text(staged)
+        files.append(KeyFile(
+            path=f"inputs/{name}",
+            source=str(sources / "inputs" / name)))
     unit = CalcUnit(id="s1", structure=str(sources),
                     key_fields=KeyFields(scalars={}, files=files))
     write_cache_key(str(wingbeat_dir), unit)
@@ -504,8 +520,9 @@ def test_the_same_scheme_still_hits(tmp_path):
     name to the scalar table would mismatch every stored
     ``cache_key.toml`` at once, since the scalars are compared whole
     -- a mass false miss, the failure with no escape valve.  A key
-    file costs nothing, because every run directory already stages
-    it, so an unchanged scheme reuses its result exactly as before."""
+    file costs nothing provided its path names a file every unit
+    has, which is what ``inputs/`` guarantees, so an unchanged
+    scheme reuses its result exactly as before."""
     wingbeat_dir, unit = _two_file_unit(
         tmp_path, "cell 1 2 3\n",
         "KPOINT_INTG_CODE\n0\n", "KPOINT_INTG_CODE\n0\n")

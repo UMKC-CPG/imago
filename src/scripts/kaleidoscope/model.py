@@ -29,13 +29,25 @@ class KaleidoscopeError(Exception):
 @dataclass
 class KeyFile:
     """One file that contributes to a unit's cache identity
-    (DESIGN 6.2.5).  ``name`` is the path, relative to the run
-    directory, of the staged copy left by a prior run;
-    ``source`` is the absolute path of the current input the
-    cache compares against it, byte-for-byte.  Naming both
-    explicitly keeps kaleidoscope from guessing how a client's
-    inputs map onto staged files."""
-    name: str
+    (DESIGN 6.2.5).  ``path`` says where the staged copy sits
+    *relative to the unit's directory*, and the same path is
+    joined onto the prepare directory and the run directory
+    alike, so the two sides of the comparison are one
+    expression.  ``source`` is the absolute path of the current
+    input the cache compares against it, byte-for-byte.  Naming
+    both explicitly keeps kaleidoscope from guessing how a
+    client's inputs map onto staged files.
+
+    The field is ``path`` rather than ``name`` because it
+    usually carries a directory part: the producer declares
+    ``inputs/structure.dat``, since ``inputs/`` is the one
+    surface every unit has whatever its job reads.  A reader
+    who takes this for a bare filename will put the comparison
+    back on the run-directory root, which holds only the names
+    a given job reads -- and any unit whose job does not read a
+    declared name then misses forever, at full price and in
+    silence."""
+    path: str
     source: str
 
 
