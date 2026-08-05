@@ -764,7 +764,7 @@
   climb stops on).
   DESIGN 3.12.3 / 7.6; guidance schema in DESIGN 7.2.
 
-- [ ] D23. A declared cache key file that a unit's job never stages
+- [x] D23. A declared cache key file that a unit's job never stages
   makes that unit permanently uncacheable.  Found 2026-08-05 while
   checking whether the producer works at its own defaults
   (`jobs/defaults_live_check/`).  Two consecutive campaigns under a
@@ -875,7 +875,55 @@
   (which made the cache key physics-only, so a surviving workspace
   is now expected to be reused across builds and this miss is felt
   on every campaign rather than only after a rebuild).
-  DESIGN 6.2.5; PSEUDOCODE 13.4.
+  **DONE 2026-08-05, candidate (1), down the chain in order:**
+  DESIGN 6.2.5 (`095517e`), then PSEUDOCODE 13.1 / 13.4 / 11.4
+  Phase 1b (`1d277b8`), then the code (`b2babdc`), then the tests
+  (`512baef`).  `KeyFile.name` became `KeyFile.path` and holds a
+  path relative to the unit's directory; the producer declares
+  `inputs/structure.dat` and `inputs/kp-scf.dat`; `prepare_units`
+  collapsed to the same join the hit-test makes.
+  **The agreement test was added rather than the property being
+  handed to C139.**  Moving identity off the run-directory root
+  would have transferred a guarantee: today the cache compares the
+  very file the engine reads, so the key necessarily describes what
+  runs.  So a root copy that EXISTS must byte-equal its `inputs/`
+  copy, which separates the two cases one test could not -- absent
+  means this job does not read that file, present-and-disagreeing
+  means the engine would run inputs the key does not describe.
+  C139 still prevents the second at the source; this is the
+  backstop, and 6.2.5 says neither may be dropped for the other.
+  **A second, pre-existing defect fell out of the tests.**  The
+  agreement test passed, then failed, then passed.  `filecmp.cmp`
+  memoizes on a (mode, size, mtime) signature, which is blind to
+  precisely what this cache must catch: a same-size rewrite in
+  place.  Two writes microseconds apart routinely share one mtime
+  tick -- 169 of 200 measured here -- and in EVERY one of those the
+  comparison reported differing files as equal.  That is a false
+  HIT, a stored result returned for inputs that changed, and it is
+  the failure with no escape valve, since nobody knows to reach for
+  `--force`.  It predates this work: `filecmp` was already how
+  bytes were compared, and the agreement test is simply the first
+  test that compares one pair twice with a change in between.
+  PSEUDOCODE 13.4 already specified an unconditional read, so the
+  constraint was written there and `cache_key_matches` now clears
+  the memo first.  A test forces the condition with `os.utime`
+  rather than leaving it to luck.
+  **Confirmed live 2026-08-05**, campaign `15725038` after
+  `cmake --install`: 11 of 11 units reused, 0 run, the fingerprint
+  line reading `reuse` for the first time since C135 landed.  The
+  ten rungs still reuse from `9e5a936b` while the fingerprint
+  reuses from `76eff98`, so the physics-only key still works across
+  builds and no existing hit was lost.  The staged entry diffs
+  IDENTICAL against the pre-fix run apart from `entry_id` and
+  `generated_at` -- same mesh, same `gap_ev`, same `gap_spread` --
+  so the cache change moved no science.
+  Each campaign stages a fresh entry file for the same solid at the
+  same settings (three now, byte-identical in content), which is
+  the REGENERATE model working as designed: promotion resolves
+  duplicates into one entry plus superseded ones.  Noted only
+  because promotion has been seen to handle two copies and not yet
+  three.
+  DESIGN 6.2.5; PSEUDOCODE 13.1 / 13.4 / 11.4.
 
 - [x] D16. Design the historical-guidance dataspace
   (VISION Goal 5, ARCHITECTURE §10).  Done 2026-05-28
