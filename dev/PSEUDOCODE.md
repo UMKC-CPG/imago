@@ -5976,20 +5976,14 @@ function prepare_units(flight, workspace, units = None):
         # standard_key_fields left it provisional because only
         # this pass knows where the unit was staged.
         #
-        # Note the INPUTS_DIR level.  makeinput writes its
-        # outputs under `inputs/` in the directory it builds; a
-        # run directory also carries them flattened at its root,
-        # because that is where imago reads them when the unit
-        # runs, but a prepare directory is never run and so is
-        # never flattened (DESIGN 6.2.5).  The source therefore
-        # lives at `<staging>/inputs/<name>` even though the
-        # staged side is `<wingbeat_dir>/<name>`.  Omitting the
-        # level costs nothing on a first run -- the compare is
-        # not reached until a prior cache_key.toml exists -- and
-        # then fails every re-run.
+        # The join is the unit's directory plus the declared
+        # PATH, and it is the same join the hit-test makes on the
+        # run directory (13.4).  That symmetry is the point: the
+        # declared path already carries the `inputs/` level, so
+        # this pass adds nothing to it and has no layout of its
+        # own to keep in step (DESIGN 6.2.5).
         for key_file in unit.key_fields.files:
-            key_file.source = join(staging, INPUTS_DIR,
-                                   key_file.name)
+            key_file.source = join(staging, key_file.path)
 ```
 
 ```
@@ -8478,8 +8472,12 @@ all domain harvest is client-side (13.6).
 
 ```
 dataclass KeyFile:
-    name   : str     # the staged copy's path, relative to the
-                     #   run dir (what a prior run left there)
+    path   : str     # where the staged copy sits, RELATIVE to
+                     #   the unit's directory.  Usually carries a
+                     #   directory part -- the producer declares
+                     #   `inputs/structure.dat` -- and the same
+                     #   path is joined onto the prepare dir and
+                     #   the run dir alike (13.4 / DESIGN 6.2.5)
     source : str     # the current input byte-compared against
                      #   that staged copy
 
@@ -8488,7 +8486,7 @@ dataclass KeyFields:
                      #   producer just {converg} (DESIGN 6.2.5).
                      #   The engine build is NOT among them: it is
                      #   recorded per run and never compared
-    files   : list   # KeyFile entries to byte-compare (name +
+    files   : list   # KeyFile entries to byte-compare (path +
                      #   source); naming both keeps the core from
                      #   guessing how inputs map onto staged files
 
@@ -8882,45 +8880,76 @@ function cache_key_matches(unit, wingbeat_dir):
     # Scalar fields: verbatim field-by-field compare.
     if saved["scalars"] != unit.key_fields.scalars:
         return False
-    # Key files: byte-compare each declared key file's current
-    # source against the copy already staged in the run dir under
-    # its name.  No hashing -- a developer can diff the files to
-    # see why a cache missed (DESIGN 6.2.5 / 5.7).
-    #
-    # BOTH sides are guarded, and a file that cannot be read is a
-    # MISS rather than an error (DESIGN 6.2.5).  Either may be
-    # absent -- a prepare directory reclaimed as scratch, a
-    # structure cache that moved, a run directory left half
-    # written by a job that died -- and all of those mean the one
-    # thing: this unit's identity cannot be established, so re-run
-    # it rather than trust it.  Raising here would let a single
-    # unreadable file abort a campaign that had already paid for
-    # hours of converged rungs.
+    # Each key file is checked TWICE, for two different things
+    # (DESIGN 6.2.5).  No hashing anywhere -- a developer can diff
+    # the files to see why a cache missed (DESIGN 6.2.5 / 5.7).
     for key_file in unit.key_fields.files:
-        staged = join(wingbeat_dir, key_file.name)
+
+        # (1) IDENTITY.  Both sides at the SAME relative path,
+        # which for the producer is under inputs/ -- the one
+        # surface makeinput writes for every unit, whatever that
+        # unit's job reads.  Declaring a name the run directory
+        # carries only for some job kinds makes the other kinds
+        # permanently uncacheable (TODO D23).
+        #
+        # BOTH sides are guarded, and a file that cannot be read
+        # is a MISS rather than an error (DESIGN 6.2.5).  Either
+        # may be absent -- a prepare directory reclaimed as
+        # scratch, a structure cache that moved, a run directory
+        # left half written by a job that died -- and all of those
+        # mean the one thing: this unit's identity cannot be
+        # established, so re-run it rather than trust it.  Raising
+        # here would let a single unreadable file abort a campaign
+        # that had already paid for hours of converged rungs.
+        staged = join(wingbeat_dir, key_file.path)
         if not exists(staged) or not exists(key_file.source):
             return False
         if not files_byte_equal(key_file.source, staged):
             return False
+
+        # (2) AGREEMENT.  The flattened root copy is the file
+        # imago actually reads, so it must not say something the
+        # key does not.  ABSENT is not a fault: it means this
+        # unit's job does not read that file, and identity has
+        # already been settled on inputs/.  PRESENT and
+        # disagreeing means the engine would run inputs the key
+        # does not describe -- miss, and re-run (DESIGN 6.2.5).
+        #
+        # A client declaring a bare name (no directory part)
+        # lands root_copy on staged itself, so the compare is
+        # self against self and the test is a no-op.  That is the
+        # intended behaviour, not a case to special-case away.
+        root_copy = join(wingbeat_dir, basename(key_file.path))
+        if exists(root_copy):
+            if not files_byte_equal(root_copy, staged):
+                return False
     return True
 ```
 
 ```
 function write_cache_key(wingbeat_dir, unit):
     # The identity snapshot, written on launch (13.5).  Only the
-    # key-file NAMES are recorded (for inspection); the byte
+    # key-file PATHS are recorded (for inspection); the byte
     # compare reads the staged files themselves, not this list.
+    # So changing what the declared paths are called does NOT
+    # invalidate a stored unit -- nothing compares this array.
     write_toml(join(wingbeat_dir, "cache_key.toml"),
         { scalars = unit.key_fields.scalars,
-          files   = [kf.name for kf in unit.key_fields.files] })
+          files   = [kf.path for kf in unit.key_fields.files] })
 ```
 
 Each `KeyFile` names both halves the compare needs -- the
-`source` (the current input) and the `name` (the staged copy's
-run-dir path) -- so the core stays oblivious to how a client's
-inputs map onto staged files (DESIGN 6.2.5).  For the producer,
-the driver's prepare step (11.4, Phase 1b) points the
-`structure.dat` KeyFile's `source` at the staged copy it builds.
+`source` (the current input) and the `path` (where the staged
+copy sits, relative to the unit's directory) -- so the core
+stays oblivious to how a client's inputs map onto staged files
+(DESIGN 6.2.5).  The field is `path` rather than `name`
+precisely because it routinely carries a directory part:
+the producer declares `inputs/structure.dat` and
+`inputs/kp-scf.dat`, and a reader who takes it for a bare
+filename will put the compare back on the run-directory root,
+which is the D23 defect.  For the producer, the driver's
+prepare step (11.4, Phase 1b) points each KeyFile's `source`
+at the copy it builds.
 
 ### 13.5 Dispatch driver (DESIGN 6.2.3)
 
@@ -11724,8 +11753,15 @@ KEY_SCALAR_NAMES = ("converg",)
 #   Adding the scheme to KEY_SCALAR_NAMES instead would invalidate
 #   every stored cache_key.toml at once (the scalars are compared
 #   as a whole table), which is a mass false miss.  A key FILE
-#   costs nothing: every run directory already stages this file.
-KEY_FILE_NAMES = ("structure.dat", "kp-scf.dat")
+#   costs nothing PROVIDED the path names a file every unit has --
+#   which is why both are declared under `inputs/`, where
+#   makeinput writes them for every unit whatever its job reads.
+#   Naming them at the run-directory root instead reaches them
+#   only for jobs that run an SCF, so every fingerprint unit --
+#   which runs none -- misses forever and in silence (TODO D23).
+#   The paths are relative to the unit's directory and are joined
+#   the same way on both sides of the compare (13.4 / 11.4).
+KEY_FILE_PATHS = ("inputs/structure.dat", "inputs/kp-scf.dat")
 
 
 function standard_key_fields(structure, options):
@@ -11742,8 +11778,8 @@ function standard_key_fields(structure, options):
         scalars = { name : options[name]
                     for name in KEY_SCALAR_NAMES
                     if name in options },
-        files   = [KeyFile(name = name, source = structure)
-                   for name in KEY_FILE_NAMES])
+        files   = [KeyFile(path = path, source = structure)
+                   for path in KEY_FILE_PATHS])
 ```
 
 
