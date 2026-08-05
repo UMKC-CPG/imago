@@ -1319,6 +1319,35 @@ def test_build_loen_units_builds_one_run_per_subspec():
     assert unit.options["xccode"] == 100
 
 
+def test_loen_units_key_on_paths_every_unit_has():
+    """The unit at the centre of D23, tied to the contract that
+    makes it cacheable.
+
+    This is the one unit kind that runs no SCF (``scf_basis =
+    "no"``), so ``kp-scf.dat`` is never flattened to its run
+    directory's root however many times it has been computed.  A key
+    file named at the root is therefore absent for this kind and
+    present for every other, which is not a stale result but an
+    uncacheable one: it recomputes on every campaign, at full price,
+    reporting only 'no usable result'.
+
+    Naming both key files under ``inputs/`` -- where makeinput
+    writes them for every unit whatever its job reads -- is what
+    makes the fingerprint unit reusable, so the assertion belongs
+    here beside the unit rather than only beside the declaration."""
+    ref = _ref(entries=[
+        ReferenceEntry(element="Si", atom_site=1, label="a",
+                       default=True, description="d",
+                       fingerprints=[_BISPEC_DECL])])
+    options = {"xccode": 100, "imago_commit": "abc", "converg": 1.0e-6}
+    unit = build_loen_units(ref, "si.skel", options, [])[0]
+
+    assert unit.options["scf_basis"] == "no"
+    assert [key_file.path for key_file
+            in unit.key_fields.files] == [
+        "inputs/structure.dat", "inputs/kp-scf.dat"]
+
+
 def test_build_loen_units_covers_characterization_recipe():
     """The database-wide ``[characterization]`` recipe must build its
     own loen unit even when no entry declares a per-entry fingerprint.

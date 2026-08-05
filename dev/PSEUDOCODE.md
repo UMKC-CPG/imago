@@ -8883,6 +8883,18 @@ function cache_key_matches(unit, wingbeat_dir):
     # Each key file is checked TWICE, for two different things
     # (DESIGN 6.2.5).  No hashing anywhere -- a developer can diff
     # the files to see why a cache missed (DESIGN 6.2.5 / 5.7).
+    #
+    # files_byte_equal READS BOTH FILES, every call.  It must not
+    # memoize on a stat signature: size and mtime are exactly what
+    # a same-size in-place rewrite leaves unchanged, and mtime
+    # resolution is coarse enough that two writes a few
+    # microseconds apart routinely share one tick -- measured at
+    # 169 of 200 on this filesystem.  A memoized comparison then
+    # answers "equal" for files that differ, which is a false HIT:
+    # the stored result is returned for a calculation whose inputs
+    # have changed.  Python's `filecmp.cmp` memoizes exactly this
+    # way, so an implementation built on it must clear that cache
+    # before use (TODO D23).
     for key_file in unit.key_fields.files:
 
         # (1) IDENTITY.  Both sides at the SAME relative path,

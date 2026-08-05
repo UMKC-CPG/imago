@@ -97,6 +97,17 @@ def cache_key_matches(unit, wingbeat_dir):
     if saved is None:
         return False
 
+    # ``filecmp`` memoizes on a (mode, size, mtime) signature, and
+    #   that signature is blind to precisely the change this cache
+    #   must catch: a same-size rewrite in place.  Two writes a few
+    #   microseconds apart routinely share one mtime tick -- 169 of
+    #   200 when measured here -- so a memoized answer reports
+    #   differing files as equal, which is a false HIT returning a
+    #   stored result for inputs that have changed.  The comparison
+    #   below must read both files, every time, so the memo is
+    #   dropped before any of it runs.
+    filecmp.clear_cache()
+
     # Scalar fields: verbatim, field-by-field.
     if saved.get("scalars", {}) != unit.key_fields.scalars:
         return False

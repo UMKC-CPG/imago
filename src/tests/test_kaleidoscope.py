@@ -529,6 +529,105 @@ def test_the_same_scheme_still_hits(tmp_path):
     assert is_cache_hit(unit, wingbeat_dir) is True
 
 
+def test_a_unit_whose_job_stages_no_root_copy_still_hits(tmp_path):
+    """The fault D23 closes.  A run directory carries flattened root
+    copies only of the names its own job reads, so a fingerprint
+    unit -- which runs no SCF -- has no ``kp-scf.dat`` at its root
+    however many times it has been computed.
+
+    Keyed on the root, such a unit can never match: it is not stale,
+    it is uncacheable, and it recomputes on every campaign at full
+    price while the log says only 'no usable result'.  Keyed under
+    ``inputs/``, which makeinput writes for every unit, the same
+    directory is recognised."""
+    wingbeat_dir, unit = _two_file_unit(
+        tmp_path, "cell 1 2 3\n",
+        "KPOINT_INTG_CODE\n0\n", "KPOINT_INTG_CODE\n0\n",
+        root_copies=False)
+    assert is_cache_hit(unit, wingbeat_dir) is True
+
+
+def test_declaring_a_bare_name_is_what_made_it_uncacheable(tmp_path):
+    """The same directory, judged under the two declarations, so the
+    defect and its fix are visible side by side rather than asserted.
+
+    Nothing about the stored run changes here.  Only the declared
+    path changes -- a bare ``kp-scf.dat``, which resolves to the
+    run-directory root, against ``inputs/kp-scf.dat``, which resolves
+    to the surface every unit has.  The first cannot match and the
+    second does, which is the whole of D23 in one comparison."""
+    wingbeat_dir, unit = _two_file_unit(
+        tmp_path, "cell 1 2 3\n",
+        "KPOINT_INTG_CODE\n0\n", "KPOINT_INTG_CODE\n0\n",
+        root_copies=False)
+    assert is_cache_hit(unit, wingbeat_dir) is True
+
+    for key_file in unit.key_fields.files:
+        key_file.path = os.path.basename(key_file.path)
+    assert is_cache_hit(unit, wingbeat_dir) is False
+
+
+def test_a_root_copy_that_disagrees_misses(tmp_path):
+    """The agreement test, and the backstop under C139.
+
+    The root copy is the file the engine actually reads.  A commit
+    that refreshed ``inputs/`` while leaving a previous
+    calculation's root copy in place would run the OLD physics while
+    the key file, the run's summary and the flight report all
+    described the new -- silently, and on a hit, so the wrong answer
+    would be returned for free rather than merely recomputed.
+
+    C139's rule stops that arising by clearing the root copies a
+    commit supersedes.  This test is why the cache does not simply
+    rely on it: the property that the key describes what the engine
+    reads is checked where a reader checking the cache can see it,
+    and it holds for a directory built before that rule existed."""
+    wingbeat_dir, unit = _two_file_unit(
+        tmp_path, "cell 1 2 3\n",
+        "KPOINT_INTG_CODE\n0\n", "KPOINT_INTG_CODE\n0\n")
+    assert is_cache_hit(unit, wingbeat_dir) is True
+
+    # The staged inputs stay correct; only the flattened copy the
+    #   engine would read goes stale.
+    with open(os.path.join(wingbeat_dir, "kp-scf.dat"), "w") as f:
+        f.write("KPOINT_INTG_CODE\n1\n")
+    assert is_cache_hit(unit, wingbeat_dir) is False
+
+
+def test_a_same_size_rewrite_is_caught_despite_the_memo(tmp_path):
+    """The comparison must read both files, every call.
+
+    ``filecmp`` memoizes on a (mode, size, mtime) signature, which
+    is blind to exactly the change this cache exists to catch: a
+    rewrite in place that keeps the length.  mtime resolution is
+    coarse enough that two writes microseconds apart routinely
+    share one tick, so the memo answers "equal" for files that
+    differ -- a false HIT, returning a stored result for inputs
+    that have changed.  That is the failure with no escape valve:
+    ``--force`` turns hits into misses, but nobody knows to reach
+    for it.
+
+    The test above meets this by luck, since it depends on whether
+    two writes happened to land in the same tick.  This one removes
+    the luck: the mtime is restored explicitly, so the memoized
+    signature is guaranteed identical and only a real re-read of
+    the bytes can answer correctly."""
+    wingbeat_dir, unit = _two_file_unit(
+        tmp_path, "cell 1 2 3\n",
+        "KPOINT_INTG_CODE\n0\n", "KPOINT_INTG_CODE\n0\n")
+    assert is_cache_hit(unit, wingbeat_dir) is True   # warms it
+
+    root_copy = os.path.join(wingbeat_dir, "kp-scf.dat")
+    was = os.stat(root_copy)
+    with open(root_copy, "w") as handle:
+        handle.write("KPOINT_INTG_CODE\n1\n")         # same length
+    os.utime(root_copy, ns=(was.st_atime_ns, was.st_mtime_ns))
+
+    assert os.path.getsize(root_copy) == was.st_size
+    assert os.stat(root_copy).st_mtime_ns == was.st_mtime_ns
+    assert is_cache_hit(unit, wingbeat_dir) is False
+
+
 def test_is_cache_hit_requires_done_status(tmp_path):
     """A matching key is necessary but not sufficient: the run
     must also have reached the ``done`` status.  A still-running
