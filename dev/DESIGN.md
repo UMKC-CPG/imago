@@ -1090,10 +1090,8 @@ sum invariance (4) and bond order invariance (5):
   PDOS mode 1 (atom total) atom perm         eq. (4)
   PDOS mode 2 (atom, l)    atom perm         eq. (4)
   PDOS mode 3 (atom, lm)   D^l(R) matrices   **
-  POPTC code 1 (type)      nothing extra      * ***
-  POPTC code 3 (type, nl)  nothing extra      * ***
-  POPTC code 2 (atom)      atom perm twice   eq. (5) ***
-  POPTC code 4 (atom, nlm) D^l(R) matrices   ** ***
+  POPTC codes 1, 2 (type)  nothing extra      * ***
+  POPTC codes 3, 4 (atom)  atom perm twice   eq. (5) ***
   ────────────────────────────────────────────────────
 
 *Mode 0 sums projections over all atoms of the same
@@ -1128,17 +1126,25 @@ which is the two-atom invariance (5) already used for
 bond order, applied to a different quantity. No new table
 is needed; invAtomPerm is simply used twice.
 
-Which codes need it follows from how each is grouped, and
-that is not what the code numbering suggests. Codes 1 and
-3 both group by TYPE -- code 3 resolves a QN_nl pair of a
-type, not of an atom, despite sitting between the two
-atom-resolved codes -- so the type-level sum argument (*)
-covers both and neither needs a correction. Code 2 groups
-by atom and needs the conjugation. Code 4 resolves
-individual QN_nlm orbitals and is blocked behind the same
-deferred D^l(R) matrices as PDOS mode 3.
+Which codes need it follows from the grouping alone, and the
+numbering is arranged so that it can be read off the code
+number. Section 11.3 orders the codes with grouping as the
+major key: codes 1 and 2 group by TYPE, so the type-level
+sum argument (*) covers both and neither needs a correction;
+codes 3 and 4 group by ATOM and need the conjugation. The
+test is a threshold, `detailCodePOPTC >= 3`, not a set of
+cases.
 
-The caveat, and it limits what code 2 can claim: the
+The resolution axis does not enter, because both offered
+resolutions -- whole group, and QN_nl summed over its m
+components -- are complete-shell sums, which is exactly the
+condition equation (4) needs. An nlm resolution would break
+that and require D^l(R), which is one of the two reasons
+section 11.2 gives for not offering it. The consequence is
+worth stating plainly: **no offered POPTC decomposition
+depends on the deferred D^l(R) matrices.**
+
+The caveat, and it limits what codes 3 and 4 can claim: the
 momentum operator is a vector, so an operation both
 relabels the atoms and mixes the Cartesian components,
 P_i(Rk) = sum_j R_ij P_j(k). The atom permutation handles
@@ -1170,9 +1176,10 @@ broadening is linear. Symmetrize the pair matrix once per
 k-point per transition, before broadening, and leave the
 weighted accumulation over IBZ points as it stands.
 Placing the star loop inside the energy loop instead
-would multiply the innermost work -- a numAtomSites by
-numAtomSites by three slab per transition per energy
-point -- by the IBZ reduction factor of 4 to 48, for the
+would multiply the innermost work -- a partials by
+partials by three slab per transition per energy point,
+with the partial count taken from the table in section
+11.3 -- by the IBZ reduction factor of 4 to 48, for the
 same answer.
 
 **Resolution of D2.** The open question asked whether
@@ -14067,3 +14074,231 @@ discard the citations the run earned.
   their own `open(20,...)` calls. They are also rarely run
   directly by a user composing a paper, so the benefit is
   smaller and the duplication real.
+
+
+## 11. Partial Optical Properties: Decomposition Scheme
+
+This section specifies which decompositions the partial
+optical properties offer, how they are numbered, and why the
+set stops where it does. It is the first part of the optical
+properties code to be brought under the document chain.
+
+### 11.1 What is being decomposed
+
+A total optical calculation forms, for each transition
+between an occupied state i and an unoccupied state j, the
+momentum matrix element between them, and accumulates its
+squared magnitude into a broadened spectrum.
+
+A partial calculation splits that matrix element by where
+its two ends sit. Each basis function is assigned to a
+group; the matrix element is then resolved into
+contributions M(a,b) from initial-state group a and
+final-state group b, and the transition probability is
+distributed over the resulting pair matrix so that the sum
+over (a,b) reproduces the total.
+
+The decisive structural fact is that **the quantity carries
+two group indices, not one.** The partial DOS resolves a
+single-index quantity, so its storage grows linearly in the
+number of groups. The partial optical properties resolve a
+pair, so storage grows as the square, and the square is
+multiplied by the number of transition pairs, the number of
+Cartesian components, the number of k-points and the number
+of spins. Everything below follows from that.
+
+### 11.2 The two axes, and the cells worth offering
+
+A decomposition is fixed by two independent choices.
+
+**Grouping** -- what a partial belongs to:
+
+- **type**: every atom of one atomic type contributes to a
+  single partial.
+- **atom**: every atomic site gets its own partial.
+
+**Resolution** -- how finely a group's basis functions are
+split:
+
+- **total**: all basis functions of the group in one
+  partial.
+- **nl**: one partial per radial function, so per QN_nl
+  pair, summed over the m components of each shell.
+- **nlm**: one partial per basis function, resolving the
+  individual Cartesian components of each shell.
+
+That is a two by three grid. **The nlm column is not
+offered**, for two reasons that are independent of each
+other, either of which would be sufficient.
+
+The first is cost. At nlm resolution the partial count is
+the full valence dimension, so the pair matrix is
+`valeDim` by `valeDim` for every transition pair at every
+k-point. For a small five atom cell with an extended basis
+that is already terabytes. It is not a decomposition that
+can be requested and waited for; it is one that cannot be
+run.
+
+The second is correctness, and it would bite even if the
+storage were free. Individual m components mix under a point
+group operation via the representation matrices D^l(R), so
+an nlm-resolved quantity cannot be unfolded from an
+irreducible wedge by relabeling atoms. Section 2.3 gives the
+proof. Note that this applies to the type-grouped nlm cell
+as well: summing over every atom of a type does not rescue
+it, because the mixing is within a shell rather than between
+atoms.
+
+The four remaining cells are all offered:
+
+```
+                total            nl
+  type      (type, total)   (type, nl)
+  atom      (atom, total)   (atom, nl)
+```
+
+### 11.3 Numbering, and the principle behind the order
+
+```
+  code  grouping   resolution   partial count
+  ------------------------------------------------
+  0     --         --           no decomposition
+  1     type       total        numAtomTypes
+  2     type       nl           sum over types of
+                                  their radial fns
+  3     atom       total        numAtomSites
+  4     atom       nl           sum over sites of
+                                  their radial fns
+```
+
+Code 0 is the default and means an ordinary total optical
+calculation with no decomposition performed.
+
+**Grouping is the major key and resolution the minor one.**
+The type-grouped cells come first and the atom-grouped cells
+after, so the code number is monotone in how finely the
+decomposition resolves position. This is not a cosmetic
+choice. It makes the IBZ correction a threshold rather than
+a memorized set: codes 1 and 2 need nothing, codes 3 and 4
+need the atom permutation, and the boundary is a single
+comparison. A numbering that interleaved the two groupings
+would leave the reader with no way to tell which codes need
+the correction except by looking them up, and a reader who
+guessed would guess wrong half the time.
+
+**Any cell added later must respect the ordering.** A new
+type-grouped cell belongs among the low numbers and a new
+atom-grouped one at the end. A change that breaks the
+monotonicity costs more than the renumbering it saves,
+because it silently invalidates every place that tests the
+threshold.
+
+**The numbering is deliberately independent of the partial
+DOS detail codes.** The two quantities offer different sets
+-- the partial DOS offers nlm and does not offer
+(type, total), for the cost reasons above that apply to a
+pair matrix and not to a single-index quantity -- so a
+shared numbering would have to leave gaps in both. They are
+separate schemes and each is stated in full where it is
+defined.
+
+### 11.4 Cost, and who is responsible for it
+
+Storage for the pair matrix is
+
+    partials^2 * 3 * transitionPairs * kPoints * spins
+
+in double precision. The `partials` column of the table
+above is what to substitute.
+
+The four cells span a wide range. The atom grouped cells
+grow with the cell: (atom, total) as the square of the site
+count, and (atom, nl) as the square of the site count times
+the radial functions per site, which makes it the most
+expensive of the four by a wide margin. A few tens of atoms
+at nl resolution reaches tens of gigabytes.
+
+The type-grouped cells are bounded by the number of atomic
+types instead, and **how much cheaper that is depends
+entirely on what the types mean in the system at hand.** For
+an ordinary crystal the type count is small and fixed, so a
+type-grouped decomposition costs essentially nothing however
+large the cell grows. A point defect supercell behaves the
+same way and for a reason worth knowing: its types are
+assigned from the *pre-defect* symmetry precisely to keep
+the count down, so growing the supercell adds sites without
+adding types. An amorphous cell does not behave this way at
+all. There a type is a bin of locally similar environments
+rather than a symmetry orbit, so the type count is set by
+how finely the environments were binned and can grow with
+the cell. A type-grouped decomposition of an amorphous cell
+is therefore not automatically the cheap option, and in the
+limit of one type per environment it approaches the cost of
+the atom-grouped cell it was chosen instead of. See section
+2.3 for what types do and do not mean.
+
+**Imago does not currently estimate this at input parse
+time.** A request that cannot fit is discovered when the
+allocation fails rather than when it is made. Choosing an
+affordable decomposition is presently the user's
+responsibility. A general facility for projecting the
+resource cost of a requested calculation before running it
+belongs with the resource and cost guidance of section 8
+rather than being built once here for one quantity.
+
+### 11.5 Relation to IBZ correctness
+
+Which cells need an unfolding correction on a
+symmetry-reduced k-point mesh follows from the grid
+coordinates alone, and is stated with its proof in section
+2.5. In summary: the type-grouped cells need nothing,
+because every operation carries each atom onto an atom of
+the same type and a type-level sum therefore maps onto
+itself; the atom-grouped cells need the atom permutation
+applied to both indices of the pair matrix.
+
+Because the nlm column is not offered, **the partial optical
+properties do not depend on the deferred D^l(R)
+representation matrices at all.** Every offered cell is
+correctable with the atom permutation alone. This is not
+true of the partial DOS, whose nlm mode still waits on them.
+
+That the type-grouped cells need no correction is a
+statement about arithmetic, and it holds whatever the types
+happen to mean physically, because `buildAtomPerm` verifies
+the closure at startup rather than inferring it (section
+2.3). The exception is style code 0, where no symmetry maps
+are built and so nothing is verified.
+
+### 11.6 What a type-grouped partial means
+
+Choosing a grouping is not only a cost decision, because
+what a type-grouped partial *is* varies with the system.
+
+In a crystal it is what it appears to be: a sum over
+symmetry-equivalent atoms, which are physically
+indistinguishable, so nothing is lost by summing them.
+
+In an amorphous cell a type is a bin of locally similar
+environments carrying no symmetry content, so a type-grouped
+partial is an average over a population of genuinely
+different sites. That may be exactly what is wanted -- it is
+the spectroscopic analogue of asking what a *kind* of
+environment contributes -- but it is an average over
+inequivalent things, not a redundant sum over equivalent
+ones, and the spread within the bin is not recoverable from
+the output.
+
+In a point defect supercell the trap is sharper. Types are
+assigned from the pre-defect symmetry, so the atoms
+neighbouring the defect usually carry the same type as
+chemically identical atoms far from it. A type-grouped
+decomposition then averages the perturbed neighbourhood into
+the unperturbed bulk, which dilutes the defect signature by
+roughly the ratio of the supercell size to the neighbourhood
+size -- and the larger the supercell, the more thoroughly it
+is diluted. **A defect study almost always wants an
+atom-grouped cell**, and wants it for a reason that has
+nothing to do with symmetry: the decomposition must be able
+to separate atoms that the type assignment deliberately does
+not.

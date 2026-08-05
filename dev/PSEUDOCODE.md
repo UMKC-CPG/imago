@@ -3045,30 +3045,75 @@ transition-pair index.
 ### Which detail codes this touches
 
 ```
-code  grouping         analogue      action here
+code  grouping       resolution   action here
 -------------------------------------------------------
-1     type             PDOS mode 0   nothing
-3     type + QN_nl     PDOS mode 0   nothing
-2     atom             bond order    star average
-4     atom + QN_nlm    PDOS mode 3   deferred, needs D^l
+1     type           total        nothing
+2     type           nl           nothing
+3     atom           total        star average
+4     atom           nl           star average
 ```
 
-Codes 1 and 3 both group by TYPE -- code 3 resolves a QN_nl
-pair of a type, not of an atom, despite sitting between the
-two atom-resolved codes.  Every operation Imago reduces by
-carries each atom onto an atom of the same type, which
-`buildAtomPerm` enforces at startup rather than infers from
-a type being a symmetry orbit (DESIGN 2.3), so a type-level
-sum maps onto itself and is already correct on a reduced
-mesh.  Code 4 resolves individual QN_nlm orbitals and is
-blocked behind the same D^l(R) representation matrices that
-block PDOS mode 3.
+DESIGN 11.3 numbers the codes with grouping as the major
+key, so the test is a threshold rather than a set of cases:
+**codes 1 and 2 need nothing, codes 3 and 4 need the star
+average, and the boundary is `detailCodePOPTC >= 3`.**
 
-Only code 2 is treated below.  For it the two group indices
-*are* atom site indices: `pOptcIndex(mu)` is the site
-carrying basis function mu and `sumNumPartials` equals
-`numAtomSites`, so `atomPerm` indexes the pair matrix
-directly with no translation layer in between.
+The type-grouped codes are already correct on a reduced mesh
+because every operation Imago reduces by carries each atom
+onto an atom of the same type -- which `buildAtomPerm`
+enforces at startup rather than infers from a type being a
+symmetry orbit (DESIGN 2.3) -- so a type-level sum maps onto
+itself.  The resolution axis does not enter for either
+grouping: both offered resolutions sum over complete shells,
+which is the condition equation (4) of DESIGN 2.3 needs.
+
+**The distinction matters because types are often not
+orbits.**  In an amorphous cell a type is a bin of locally
+similar environments with no symmetry content; in a point
+defect supercell types come from the *pre-defect* symmetry.
+Both land safely here, but by verification rather than by
+assumption: the amorphous cell carries only the identity to
+reduce by, and the defect supercell is typed *coarser* than
+the true orbits, which is the safe direction because a union
+of orbits stays closed.  Typing *finer* than the orbits is
+the unsafe direction, and that is the case `buildAtomPerm`
+aborts on.  DESIGN 2.3 has the argument; DESIGN 11.6 has
+what it means for reading the output, which is a separate
+question from whether the arithmetic is sound.
+
+### The permuted partial
+
+For code 3 the partial index *is* the atom site index, and
+`atomPerm` could index the pair matrix directly.  For code 4
+it is not: section 18.2 lays a partial out as a slot within
+a segment, so a partial carries a site and a QN_nl slot
+together.  The correction therefore permutes PARTIALS, not
+atoms, and the atom permutation is what the partial
+permutation is built from:
+
+```
+# The image of each partial under operation R.  Built once
+#   per run, not per k-point -- it depends only on the
+#   permutation table and the layout of section 18.2.
+for R = 1, numPointOps:
+   for site = 1, numAtomSites:
+      siteRot = atomPerm(R, site)
+      for slot = 1, slotsPerSegment(site):
+         partialPerm(R, segmentBase(site) + slot) =
+               segmentBase(siteRot) + slot
+```
+
+**The slot survives the permutation unchanged**, and that is
+the whole reason this works.  `buildAtomPerm` only ever maps
+an atom onto an atom of the same type, and atoms of one type
+share a basis, so the permuted site's slots stand in
+one-to-one correspondence with the original's and carry the
+same QN_nl meaning.  This is the same argument `computeBond`
+already relies on for orbital-resolved charge.
+
+For code 3 there is one slot per segment and `partialPerm`
+reduces to `atomPerm` exactly, so the block below is written
+once for both codes rather than special-cased.
 
 ### The correction
 
@@ -3076,9 +3121,9 @@ directly with no translation layer in between.
 # In computePOPTCPairs, after the transition double loop has
 #   filled transitionProbTemp(:,:,c,1..transPairCount) for
 #   IBZ k-point i, and BEFORE the mergeSort copy into
-#   transitionProbPOPTC.  Detail code 2 only.
+#   transitionProbPOPTC.  Atom-grouped codes only.
 
-if (detailCodePOPTC /= 2)       skip
+if (detailCodePOPTC < 3)        skip
 if (.not. allocated(atomPerm))  skip, after the style code 0
                                 warning described below
 
@@ -3086,7 +3131,7 @@ if (.not. allocated(atomPerm))  skip, after the style code 0
 #   section 7.
 starSize = count(fullKPToIBZKPMap(:) == i)
 
-allocate pairSlabSym(numAtomSites, numAtomSites)
+allocate pairSlabSym(sumNumPartials, sumNumPartials)
 
 for each transition pair p = 1, transPairCount:
    for each Cartesian component c = initComponent,
@@ -3097,10 +3142,10 @@ for each transition pair p = 1, transPairCount:
       for each full-mesh kpoint f with
               fullKPToIBZKPMap(f) == i:
          R = fullKPToIBZOpMap(f)
-         for a = 1, numAtomSites:
-            aRot = atomPerm(R,a)
-            for b = 1, numAtomSites:
-               bRot = atomPerm(R,b)
+         for a = 1, sumNumPartials:
+            aRot = partialPerm(R,a)
+            for b = 1, sumNumPartials:
+               bRot = partialPerm(R,b)
                pairSlabSym(aRot,bRot) =
                      pairSlabSym(aRot,bRot)
                      + transitionProbTemp(a,b,c,p)
@@ -3209,15 +3254,18 @@ linear, so it is applied once per transition per k-point,
 before broadening, and the weighted accumulation over IBZ
 points in `getOptcCondPOPTC` is left exactly as it stands.
 Placing the star loop inside the energy loop instead would
-multiply the innermost work -- a numAtomSites by
-numAtomSites by three slab per transition per energy point
+multiply the innermost work -- a sumNumPartials by
+sumNumPartials by three slab per transition per energy point
 -- by the reduction factor of 4 to 48 for the same answer.
 
 The cost as written is transPairCount * 3 * starSize *
-numAtomSites^2 additions per IBZ k-point, against a
-transition loop that is already valeDim * numAtomSites^2 per
-pair.  The scratch slab is one numAtomSites by numAtomSites
-double array.
+sumNumPartials^2 additions per IBZ k-point, against a
+transition loop that is already valeDim * sumNumPartials^2
+per pair.  The scratch slab is one sumNumPartials by
+sumNumPartials double array.  Code 4 makes that partial
+count the larger of the two atom-grouped cells, so this is
+the cell where the star loop's cost is felt; DESIGN 11.4
+gives the sizes.
 
 When O3 is taken up, this block moves.  Rotating the
 Cartesian components correctly cannot be done on T at all:
@@ -3234,10 +3282,11 @@ what makes the full-mesh comparison above interpretable.
 
 ### Guards
 
-Detail codes 1, 3 and 4 skip the block entirely: 1 and 3
-because they need nothing, 4 because it is deferred and a
-permutation of QN_nlm indices without D^l(R) would be worse
-than leaving it alone.
+Detail codes 1 and 2 skip the block entirely, because a
+type-grouped sum is already invariant.  Nothing is deferred:
+every offered cell is either correct as computed or made
+correct here, since DESIGN 11.2 withdraws the one resolution
+that would have needed D^l(R).
 
 Style code 0 supplies an explicit k-point list, from which
 Imago cannot build the symmetry maps, so neither this
@@ -14357,3 +14406,158 @@ Two questions this pass could not close.
    predicate easier for a reader to notice, and nothing more.
    It remains true that a method can be added to Imago and go
    uncited with no symptom at all.
+
+---
+
+## 18. POPTC Decomposition Index (DESIGN 11)
+
+Before any transition is computed, a partial optical run must
+decide which partial each basis function belongs to.  This
+section specifies that assignment for all four offered cells.
+The IBZ correction applied afterwards is section 7a.
+
+### 18.1 What is built
+
+Three things, all sized from the decomposition request:
+
+- `sumNumPartials` -- how many partials this run produces.
+  The stored pair matrix is this squared, so it is also the
+  cost driver of DESIGN 11.4.  Note that a type-grouped
+  request is not automatically the small one: `numAtomTypes`
+  is fixed and tiny for a crystal or a defect supercell, but
+  in an amorphous cell a type is an environment bin and the
+  count grows with the cell (DESIGN 11.4).
+- `pOptcIndex(valeDim)` -- for each basis function, the
+  partial it contributes to.  This is the whole of the
+  decomposition; everything downstream just accumulates
+  through it.
+- `partialsIndex(sumNumPartials)` -- how many basis functions
+  feed each partial.  The Kramers-Kronig consumer needs it to
+  normalize, since a complete set of partials must carry the
+  additive constant of `eps1 = 1 + (2/pi) Int[...]` exactly
+  once between them rather than once each.
+
+### 18.2 One walk, two parameters
+
+DESIGN 11.2 defines a cell by two independent choices, and
+the assignment mirrors that directly rather than branching
+per code.  The two parameters are:
+
+- **segment key** -- what a partial belongs to.  The atom's
+  TYPE index for the type-grouped cells, the atom's SITE
+  index for the atom-grouped ones.
+- **slots per segment** -- ONE for the total-resolved cells,
+  and one per radial function (per QN_nl pair) for the
+  nl-resolved ones.
+
+Writing it as one parameterized walk rather than four
+branches is worth doing for a reason beyond tidiness: it
+makes the grid of DESIGN 11 visible in the code, so that a
+cell added later is a new parameter value rather than a new
+branch that must remember to do everything the others do.
+
+The walk itself is indifferent to what a type means -- it
+reads `atomTypeAssn` and groups by it.  What that grouping
+is *worth* to the reader of the output is not indifferent,
+and DESIGN 11.6 is where that is set out: for a defect
+supercell in particular, a type-grouped partial averages the
+defect neighbourhood into the bulk, because the types were
+assigned from the pre-defect symmetry on purpose.
+
+```
+# Resolve the request into the two parameters.
+#   detailCodePOPTC 0 does not reach here at all.
+if detailCodePOPTC in (1, 2):  grouping = TYPE
+else:                          grouping = ATOM
+if detailCodePOPTC in (1, 3):  resolution = TOTAL
+else:                          resolution = NL
+
+if grouping == TYPE: numSegments = numAtomTypes
+else:                numSegments = numAtomSites
+
+# Lay out the partials: each segment owns a contiguous block,
+#   and segmentBase records where each block starts.
+segmentBase(1) = 0
+for s = 1, numSegments:
+   typeOfSegment = (grouping == TYPE) ? s
+                                      : atomTypeAssn(s)
+   if resolution == TOTAL:
+      slots = 1
+   else:
+      slots = sum over l of
+              atomTypes(typeOfSegment)%numQN_lValeRadialFns(l)
+   segmentBase(s+1) = segmentBase(s) + slots
+
+sumNumPartials = segmentBase(numSegments + 1)
+
+# Assign every basis function.  The walk is over SITES in all
+#   four cells, because that is the order the basis functions
+#   are laid out in; only the destination differs.
+partialsIndex(:) = 0
+valeDimIndex = 0
+for site = 1, numAtomSites:
+   currentType = atomTypeAssn(site)
+   segment = (grouping == TYPE) ? currentType : site
+
+   slot = 0
+   for l = 1, lAngMomCount:                 # 1=s 2=p 3=d 4=f
+      for radialFn = 1, atomTypes(currentType)%
+                        numQN_lValeRadialFns(l):
+
+         # A total-resolved segment has a single slot that
+         #   every radial function shares.  An nl-resolved
+         #   one advances, so the slots run s, p, d, f in
+         #   the order the basis is laid out.
+         if resolution == TOTAL: slot = 1
+         else:                   slot = slot + 1
+
+         partial = segmentBase(segment) + slot
+
+         for m = 1, (l-1)*2 + 1
+            valeDimIndex = valeDimIndex + 1
+            pOptcIndex(valeDimIndex) = partial
+            partialsIndex(partial) = partialsIndex(partial) + 1
+```
+
+**Note what this removes.**  Counting `partialsIndex` by
+incrementing once per assigned basis function is correct for
+every cell, including the type-grouped ones where several
+sites feed one partial.  A type-grouped count obtained
+instead by measuring runs of equal `pOptcIndex` would be
+correct only while every atom of a type is contiguous in the
+basis ordering.  That happens to hold -- Imago sorts sites by
+type for reasons that have nothing to do with this code --
+but depending on it means an unrelated change to site
+ordering breaks the normalization silently.  The increment
+does not care.
+
+### 18.3 The withdrawn cell
+
+There is no branch for a QN_nlm resolution.  Assigning each
+basis function its own partial is a one-line change to the
+walk above, and it must not be made: DESIGN 11.2 gives two
+independent reasons, the binding one being that the pair
+matrix would be `valeDim` squared.  The `QN_mLetter` naming
+tables that only an nlm-resolved printer would need are
+correspondingly absent.
+
+### 18.4 What the printer walks
+
+`printSpectrumPOPTC` must visit the partials in the same
+order this section lays them out, since the file's sequence
+numbers are the only thing tying a spectrum to its label.
+The nesting is therefore the same doubly-parameterized walk,
+run over the pair (initial partial, final partial):
+
+```
+for each initial partial p in layout order:
+   for each final partial q in layout order:
+      write SEQUENCE_NUM, the two labels, then the
+        TOTAL/x/y/z columns for that pair
+```
+
+Labels follow the grouping.  A type-grouped partial names its
+type; an atom-grouped one names its site.  An nl-resolved
+partial appends the QN_l letter and the radial function
+number.  The total spectrum is always written first, as
+sequence number 1, before any pair.

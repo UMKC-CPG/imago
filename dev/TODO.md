@@ -6477,6 +6477,102 @@ is not carried only in conversation.
   have landed, so the baseline being compared against is
   trustworthy.
 
+- [ ] O7. Settle the POPTC decomposition set and numbering on
+  DESIGN 11.  The scheme is specified; this entry is the work
+  of making the code match it.  PSEUDOCODE first -- 7a's guard
+  becomes a threshold, and the index construction for the new
+  cell has no section yet.
+
+  DESIGN 11 defines the offered set as a two by two grid,
+  grouping (type, atom) against resolution (total, nl),
+  numbered with grouping as the major key:
+
+  ```
+  0 = none      1 = type,total    2 = type,nl
+                3 = atom,total    4 = atom,nl
+  ```
+
+  Relative to what `optc.F90` implements today, cell by cell:
+
+  ```
+  cell            code now   code after
+  ---------------------------------------------
+  (type, total)      1          1     unchanged
+  (atom, total)      2          3     renumbered
+  (type, nl)         3          2     renumbered
+  (atom, nlm)        4          --    withdrawn
+  (atom, nl)        --          4     new code
+  ```
+
+  So codes 2 and 3 exchange numbers, code 4 is withdrawn and
+  its number reused for a cell that does not exist yet in any
+  form.  Renumbering is safe because POPTC is new enough that
+  no stored input file or script outside this repository
+  carries a detail code.
+
+  Note the reuse of 4 is the one hazard in the change: an old
+  input file naming code 4 would be silently reinterpreted
+  from an unaffordable request into an expensive but runnable
+  one, rather than failing.  That is acceptable only because
+  no such file exists outside this repository; check that
+  assumption still holds before starting.
+
+  The withdrawal is worth stating in one place, since it looks
+  like a loss and is not.  The nlm cell could not be run at
+  any size that mattered -- the partial count is the whole
+  valence dimension and the stored quantity is its square --
+  and it was also the only POPTC cell that needed the deferred
+  D^l(R) matrices.  Dropping it takes POPTC off that
+  dependency entirely, so after O3 the partial optical
+  properties are fully correct on a reduced mesh with nothing
+  outstanding.
+
+  The pieces, in chain order:
+    1. PSEUDOCODE: update 7a's guard from `== 2` to the
+       threshold `>= 3`, and add the index-construction
+       section covering all four cells including the new one.
+    2. `optc.F90`: renumber the branches, add the
+       `(atom, nl)` index construction, remove the nlm branch
+       and the now-dead `QN_mLetter` tables in both `optc.F90`
+       and `optcPrint.F90`.
+    3. `optcPrint.F90`: renumber the printing branches and
+       their labels.
+    4. Last, the user-facing legend, once it is only
+       describing what exists: the string `makeinput.py`
+       writes into every `imago.dat` and the comment in
+       `makeinputrc.py`.  Both currently disagree with the
+       code on the nlm cell, which is what prompted this
+       entry.  Note that changing `makeinput.py` requires a
+       reinstall before generated inputs pick it up.
+
+  Re-verify with the KNbO3 comparison in
+  `jobs/knbo3/o2_poptc_unfold`, whose `reduced` and `full`
+  runs used the atom-total decomposition -- code 2 under the
+  present numbering, code 3 under the new one.  The
+  comparison script keys on nothing but the file layout, so
+  it should need no change.
+
+- [ ] O8. Estimate the cost of a requested decomposition at
+  input parse time and refuse what cannot fit.  Deferred
+  deliberately on 2026-08-05 rather than built for POPTC
+  alone.
+
+  The immediate motivation is that POPTC stores a pair
+  matrix, so its `(atom, nl)` cell grows as the square of the
+  site count times the radial functions per site and reaches
+  tens of gigabytes at a few tens of atoms (DESIGN 11.4).  A
+  request that cannot fit is presently discovered when the
+  allocation fails, not when it is made.
+
+  It is shelved rather than done because the same question
+  applies to the partial DOS, to the transition pair storage,
+  and to the eigenvector matrices, and a facility built once
+  for one quantity would have to be rebuilt.  It belongs with
+  the resource and cost guidance of DESIGN 8, which already
+  models run cost against problem size.  Until then the user
+  is responsible for choosing an affordable decomposition,
+  and DESIGN 11.4 says so.
+
 - [ ] O3. Decide whether the x, y, and z resolved columns of
   the optical output are meaningful on a symmetry-reduced
   k-point mesh.  This is independent of POPTC and affects the
