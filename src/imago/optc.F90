@@ -1169,9 +1169,10 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    use O_Potential,   only: spin
    use O_SortSubs,    only: mergeSort
    use O_Populate,    only: electronPopulation
-   use O_KPoints,     only: kPointWeight, numKPoints
+   use O_KPoints,     only: kPointWeight, numKPoints, numFullMeshKP, &
+         & fullKPToIBZKPMap, fullKPToIBZOpMap
    use O_Constants,   only: pi, hartree, lAngMomCount, dim3
-   use O_AtomicSites, only: valeDim, numAtomSites, atomSites
+   use O_AtomicSites, only: valeDim, numAtomSites, atomSites, atomPerm
    use O_AtomicTypes, only: numAtomTypes, atomTypes
    use O_Input,       only: numStates, detailCodePOPTC
 
@@ -1210,6 +1211,19 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    integer :: pOptcKKCIndex
    integer :: newPartial
    integer, allocatable, dimension (:) :: numStatesAtom ! Vale states / atom
+
+   ! Variables for the IBZ star unfolding of the atom resolved pair
+   !   matrix (PSEUDOCODE 7a). These are used only for detail code 2.
+   integer :: starSize   ! Full-mesh k-points folding onto this IBZ point
+   integer :: fullIdx    ! Index of a full-mesh k-point in that star
+   integer :: opIdx      ! Point operation carrying the IBZ point to it
+   integer :: pairIndex  ! Transition pair within this k-point
+   integer :: component  ! Cartesian component of the momentum operator
+   integer :: atomA      ! Initial-state atom index of the pair
+   integer :: atomB      ! Final-state atom index of the pair
+   integer :: permAtomA  ! Image of atomA under the operation: perm(R,A)
+   integer :: permAtomB  ! Image of atomB under the operation: perm(R,B)
+   real (kind=double), allocatable, dimension (:,:) :: pairSlabSym
    real    (kind=double), allocatable, dimension (:)         :: partialsIndex
    real    (kind=double), allocatable, dimension (:,:,:,:) :: transitionProbTemp
 
@@ -1897,6 +1911,107 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    deallocate (conjWaveMomSumGamma)
    deallocate (valeValeXMomGamma)
 #endif
+
+   ! ----------------------------------------------------------------------
+   ! Unfold the atom resolved pair matrix over the star of this IBZ
+   !   k-point. (PSEUDOCODE 7a, DESIGN 2.5.)
+   !
+   ! Only detail code 2 needs this. Codes 1 and 3 group by TYPE, and every
+   !   operation that Imago reduces the mesh by carries each atom onto an
+   !   atom of the same type, so a type-level sum already maps onto itself
+   !   and is correct as computed. (That closure is enforced at startup by
+   !   buildAtomPerm rather than assumed from a type being a symmetry
+   !   orbit, which in an amorphous cell or a defect supercell it is not.
+   !   See DESIGN 2.3.) Code 4 resolves individual QN_nlm orbitals, which
+   !   mix under rotation via the D^l(R) representation matrices, and
+   !   permuting its indices without them would be worse than leaving it
+   !   alone; it waits on the same deferred matrices as PDOS mode 3.
+   !
+   ! For detail code 2 the two group indices are literally atom site
+   !   indices (pOptcIndex sends every basis function to the site that
+   !   carries it, and sumNumPartials is numAtomSites), so atomPerm
+   !   indexes the pair matrix directly.
+   !
+   ! What the star average is exact for. The momentum operator is a
+   !   vector, so an operation both relabels the atoms and mixes the
+   !   Cartesian components, P_c(Rk) = sum_d R_cd P_d(k). The permutation
+   !   below handles the relabeling and not the mixing. The mixing cancels
+   !   when the three components are summed, because R is orthogonal:
+   !   sum_c R_cd R_ce = delta_de kills every cross term, and the
+   !   component-summed pair matrix therefore transforms by pure index
+   !   permutation. So the isotropic column that printSpectrumPOPTC writes
+   !   becomes correct per atom pair on a reduced mesh, while the separate
+   !   x, y and z columns stay exactly as unverified as they already are
+   !   for the total spectra. Repairing those is a separate question that
+   !   cannot be answered on this quantity at all -- it has to be answered
+   !   on the complex matrix element before the probability is formed.
+   !
+   ! Note that the total spectra do not move by so much as a bit. The
+   !   total is the sum of this matrix over both indices, and permuting or
+   !   averaging permuted copies does not change a sum. That is also why
+   !   the identity that the partials sum to the total cannot be used to
+   !   check any of this: it holds equally whether the unfolding is
+   !   present, absent, or wrong. Check instead by running a structure
+   !   whose symmetry-equivalent atoms are inequivalently oriented on a
+   !   full mesh and on a reduced mesh, and requiring the two to agree per
+   !   atom pair.
+   ! ----------------------------------------------------------------------
+   if ((detailCodePOPTC == 2) .and. (allocated(atomPerm))) then
+
+      ! Count the star: the number of full-mesh k-points that fold onto
+      !   this IBZ representative. Counted the same way as in computeBond.
+      starSize = 0
+      do fullIdx = 1, numFullMeshKP
+         if (fullKPToIBZKPMap(fullIdx) == currentKPoint) then
+            starSize = starSize + 1
+         endif
+      enddo
+
+      ! Scratch space for one symmetrized slab. The averaging cannot be
+      !   done in place because each star member reads the whole original
+      !   slab while writing scattered elements of the result.
+      allocate (pairSlabSym(numAtomSites,numAtomSites))
+
+      ! The star sum is a fixed linear map on the pair matrix: it does not
+      !   depend on energy, and the Gaussian broadening applied later in
+      !   getOptcCondPOPTC is linear. So it is applied once per transition
+      !   per k-point, here, and the weighted accumulation over IBZ points
+      !   is left alone. Doing it inside the energy loop instead would
+      !   multiply the innermost work by the reduction factor of 4 to 48
+      !   for the very same answer.
+      do pairIndex = 1, transPairCount
+         do component = initComponent, finComponent
+
+            pairSlabSym(:,:) = 0.0_double
+
+            ! Walk the star. Each member contributes the IBZ slab with
+            !   both of its atom indices carried through that member's
+            !   operation, and the division by starSize turns the sum into
+            !   an average, so the totals are preserved exactly.
+            do fullIdx = 1, numFullMeshKP
+               if (fullKPToIBZKPMap(fullIdx) /= currentKPoint) cycle
+               opIdx = fullKPToIBZOpMap(fullIdx)
+
+               do atomA = 1, numAtomSites
+                  permAtomA = atomPerm(opIdx,atomA)
+
+                  do atomB = 1, numAtomSites
+                     permAtomB = atomPerm(opIdx,atomB)
+
+                     pairSlabSym(permAtomA,permAtomB) = &
+                           & pairSlabSym(permAtomA,permAtomB) &
+                           & + transitionProbTemp(atomA,atomB,component, &
+                           & pairIndex) / real(starSize,double)
+                  enddo ! atomB
+               enddo ! atomA
+            enddo ! fullIdx (star members)
+
+            transitionProbTemp(:,:,component,pairIndex) = pairSlabSym(:,:)
+         enddo ! component
+      enddo ! pairIndex
+
+      deallocate (pairSlabSym)
+   endif
 
    ! Determine if there was only one segment.  In this case we don't have to
    !   sort anything.

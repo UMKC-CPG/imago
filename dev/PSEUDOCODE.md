@@ -3031,6 +3031,230 @@ overall charge and bond order totals are preserved.
 
 ---
 
+## 7a. POPTC IBZ Unfolding (DESIGN 2.5)
+
+The partial optical properties decompose the momentum matrix
+element of a single transition between a *pair* of groups,
+so what each k-point carries is a matrix over group indices
+rather than a vector over them.  Section 7 already
+distributes a two-index quantity across the star; this
+section applies the same distribution to a quantity that
+additionally carries a Cartesian component and a
+transition-pair index.
+
+### Which detail codes this touches
+
+```
+code  grouping         analogue      action here
+-------------------------------------------------------
+1     type             PDOS mode 0   nothing
+3     type + QN_nl     PDOS mode 0   nothing
+2     atom             bond order    star average
+4     atom + QN_nlm    PDOS mode 3   deferred, needs D^l
+```
+
+Codes 1 and 3 both group by TYPE -- code 3 resolves a QN_nl
+pair of a type, not of an atom, despite sitting between the
+two atom-resolved codes.  Every operation Imago reduces by
+carries each atom onto an atom of the same type, which
+`buildAtomPerm` enforces at startup rather than infers from
+a type being a symmetry orbit (DESIGN 2.3), so a type-level
+sum maps onto itself and is already correct on a reduced
+mesh.  Code 4 resolves individual QN_nlm orbitals and is
+blocked behind the same D^l(R) representation matrices that
+block PDOS mode 3.
+
+Only code 2 is treated below.  For it the two group indices
+*are* atom site indices: `pOptcIndex(mu)` is the site
+carrying basis function mu and `sumNumPartials` equals
+`numAtomSites`, so `atomPerm` indexes the pair matrix
+directly with no translation layer in between.
+
+### The correction
+
+```
+# In computePOPTCPairs, after the transition double loop has
+#   filled transitionProbTemp(:,:,c,1..transPairCount) for
+#   IBZ k-point i, and BEFORE the mergeSort copy into
+#   transitionProbPOPTC.  Detail code 2 only.
+
+if (detailCodePOPTC /= 2)       skip
+if (.not. allocated(atomPerm))  skip, after the style code 0
+                                warning described below
+
+# The star of this IBZ k-point, counted exactly as in
+#   section 7.
+starSize = count(fullKPToIBZKPMap(:) == i)
+
+allocate pairSlabSym(numAtomSites, numAtomSites)
+
+for each transition pair p = 1, transPairCount:
+   for each Cartesian component c = initComponent,
+                                   finComponent:
+
+      pairSlabSym(:,:) = 0
+
+      for each full-mesh kpoint f with
+              fullKPToIBZKPMap(f) == i:
+         R = fullKPToIBZOpMap(f)
+         for a = 1, numAtomSites:
+            aRot = atomPerm(R,a)
+            for b = 1, numAtomSites:
+               bRot = atomPerm(R,b)
+               pairSlabSym(aRot,bRot) =
+                     pairSlabSym(aRot,bRot)
+                     + transitionProbTemp(a,b,c,p)
+                       / starSize
+
+      transitionProbTemp(:,:,c,p) = pairSlabSym(:,:)
+
+deallocate pairSlabSym
+```
+
+The deposit-forward shape (permute the source index and add
+into the destination) is written to match section 7 rather
+than the gather form `M(a,b) <- M(invAtomPerm(R,a),
+invAtomPerm(R,b))` that DESIGN 2.5 states.  The two are the
+same map read in opposite directions; one table suffices,
+and section 7's is the one already in the codebase.
+
+### Why the permutation alone is exact, and for what
+
+The momentum operator is a vector, so an operation does two
+things at once: it relabels the atoms, and it mixes the
+Cartesian components, P_c(Rk) = sum_d R_cd P_d(k).  The
+permutation above handles the first and not the second.
+What makes it exact anyway -- for the isotropic column, and
+only for that column -- is that the mixing cancels when the
+three components are summed.
+
+Write M^c_ab for the decomposed matrix element of one
+transition at the IBZ point and M^c_tot for its sum over all
+(a,b).  The stored quantity is
+
+    T^c_ab = Re(M^c_ab) Re(M^c_tot)
+           + Im(M^c_ab) Im(M^c_tot)
+
+whose sum over (a,b) is |M^c_tot|^2, which is the "sum
+squared to sum of squares" construction in the source.  At a
+star member Rk both factors pick up the mixing, so
+
+    T^c_ab(Rk) = sum_{d,e} R_cd R_ce
+                 [ Re(M^d_a'b') Re(M^e_tot)
+                 + Im(M^d_a'b') Im(M^e_tot) ]
+
+with a' = invAtomPerm(R,a) and b' = invAtomPerm(R,b).
+Summing over c and using the orthogonality of R,
+sum_c R_cd R_ce = delta_de, kills every cross term:
+
+    sum_c T^c_ab(Rk) = sum_d T^d_a'b'(k)
+
+So the component-summed pair matrix transforms by pure index
+permutation, exactly as bond order does.  Permuting each
+component slab separately -- which is what the block above
+does -- yields precisely this sum, because a relabeling of
+(a,b) commutes with summing over c.
+
+The per-component slabs it leaves behind are not the correct
+per-component slabs; they are wrong in the same way and to
+the same degree that the per-axis columns of the TOTAL
+spectra are already wrong on a reduced mesh, which is the
+open question recorded as TODO O3.  This change neither
+repairs that nor worsens it.
+
+Two consequences worth stating plainly:
+
+- The isotropic column that `printSpectrumPOPTC` writes (the
+  three components summed and divided by three) becomes
+  correct per atom pair on a symmetry-reduced mesh.
+- The per-axis POPTC columns remain unverified, exactly as
+  before, until O3 is settled.
+
+### Why the sum rule cannot check this
+
+`transitionProb`, the total that `getOptcCond` broadens, is
+formed as the sum of the pair matrix over (a,b).  A
+permutation of (a,b) does not change that sum, and neither
+does averaging permuted copies of it.  The total spectra are
+therefore bit-for-bit unchanged by this correction, and the
+identity that the partials sum to the total holds both
+before and after.  It is exactly blind to whether the
+unfolding is present, absent, or wrong.
+
+Verify instead by running one structure whose
+symmetry-equivalent atoms are inequivalently oriented, once
+on a full mesh (`applySymmetry` off) and once IBZ-reduced,
+and requiring the two isotropic per-atom-pair spectra to
+agree.
+
+Compare the broadened spectra rather than the probability of
+any single transition pair.  Within a degenerate multiplet
+the eigenvectors are fixed only up to a rotation among the
+degenerate bands, so the decomposition of one band taken on
+its own is basis dependent, and the diagonalizer at a full
+mesh point need not choose the same basis as at the IBZ
+representative.  The sum over the multiplet is invariant,
+and since its members land at the same energy under the same
+broadening, the spectra agree even where individual pairs do
+not.  This is a property of every per-band Mulliken
+decomposition in the codebase, not something introduced
+here, but it is the failure that a per-pair comparison would
+report as a bug.
+
+### Placement, and what O3 will do to it
+
+The star sum is a fixed linear map on the pair matrix.  It
+does not depend on energy, and Gaussian broadening is
+linear, so it is applied once per transition per k-point,
+before broadening, and the weighted accumulation over IBZ
+points in `getOptcCondPOPTC` is left exactly as it stands.
+Placing the star loop inside the energy loop instead would
+multiply the innermost work -- a numAtomSites by
+numAtomSites by three slab per transition per energy point
+-- by the reduction factor of 4 to 48 for the same answer.
+
+The cost as written is transPairCount * 3 * starSize *
+numAtomSites^2 additions per IBZ k-point, against a
+transition loop that is already valeDim * numAtomSites^2 per
+pair.  The scratch slab is one numAtomSites by numAtomSites
+double array.
+
+When O3 is taken up, this block moves.  Rotating the
+Cartesian components correctly cannot be done on T at all:
+the R_cd R_ce cross terms above do not factor through T^d,
+so the star average has to be formed from the complex
+M^c_ab, one star member at a time, with T built afterwards
+from the rotated copy.  That means lifting the star loop up
+into the transition double loop and splitting the component
+loop, since all three components of M must exist before any
+one of them can be rotated.  It is a restructuring rather
+than an insertion, and it is deliberately not attempted
+here: this block is self-contained and switchable, which is
+what makes the full-mesh comparison above interpretable.
+
+### Guards
+
+Detail codes 1, 3 and 4 skip the block entirely: 1 and 3
+because they need nothing, 4 because it is deferred and a
+permutation of QN_nlm indices without D^l(R) would be worse
+than leaving it alone.
+
+Style code 0 supplies an explicit k-point list, from which
+Imago cannot build the symmetry maps, so neither this
+unfolding nor the `buildAtomPerm` closure check runs.  The
+guard is `allocated(atomPerm)`, and the case is covered by
+the standing warning of DESIGN 2.6.  A hand-supplied,
+already-reduced k-point list is the one configuration where
+a wrong atom-level decomposition can pass silently, so the
+warning is the only protection available and must not be
+dropped.
+
+An unreduced mesh reaches the block with starSize = 1 and
+the identity operation, so it costs one extra copy of the
+slab and changes nothing.
+
+---
+
 ## 8. LAT PDOS (DESIGN 1.4)
 
 The LAT PDOS requires Mulliken projections at all four

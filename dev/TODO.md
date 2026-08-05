@@ -6281,6 +6281,87 @@ is not carried only in conversation.
   settled the governing rule for PDOS, and it carries over to
   POPTC once each detail code is matched to its PDOS analogue.
 
+  **Specified in PSEUDOCODE 7a**, which carries the detail
+  code table, the correction itself, the proof that the
+  component-summed pair matrix transforms by pure index
+  permutation, the guards, and the cost.  Code against that
+  section, not against the notes below; what follows is the
+  reasoning that produced it and the state of the task.
+
+  **State.** The isotropic half is CODED, in
+  `computePOPTCPairs` immediately after the transition double
+  loop, and VERIFIED live on 2026-08-05.  The style code 0
+  warning in `kpoints.f90` now names partial optical
+  properties among the decompositions it covers.  The entry
+  stays open for the per-axis half, which O3 governs.
+
+  **The verification, and why it is believable.**  Cubic
+  KNbO3 (Pm-3m, 5 atoms), whose three oxygens are one type on
+  the 3c site -- symmetry equivalent, so their isotropic
+  spectra must match, but each on a different Cartesian axis,
+  so the cubic operations permute them non-trivially.  K and
+  Nb are alone in their types and act as controls.  Two runs
+  of a 4x4x4 shifted mesh differing in one thing only: the
+  post-SCF k-points folded to 4 points against the same mesh
+  left whole at 64.  The unfolded reference was produced by
+  trimming the operation list in `kp-pscf.dat` to the
+  identity, which leaves the fold nothing to fold with and
+  keeps both runs on the same code path.  Both took the same
+  4-point SCF; the potential is expanded per type, so the
+  three oxygens share one by construction and no potential
+  asymmetry can leak into the comparison.  Job directory
+  `jobs/knbo3/o2_poptc_unfold` (gitignored), 83 and 86
+  seconds.
+
+  Isotropic eps2, worst relative disagreement over all 25
+  atom pairs: 1.2e-8, which is the print precision of the
+  `.raw` files -- agreement to the last written digit.
+
+  Three findings make that a pass rather than a coincidence:
+
+  1. **The comparison is demonstrably sensitive.**  The
+     per-axis columns of the same files, read by the same
+     parser, disagree by 1.08, 1.29 and 1.45 relative.  Those
+     columns are the ones the correction deliberately does
+     not repair, so a comparison that could not see a
+     difference would have shown agreement there too.
+  2. **The averaging did real work.**  In the reduced run the
+     three oxygens agree to 5.8e-17 -- exactly, because they
+     were averaged over their orbit.  In the full run they
+     agree only to 5.8e-10, the roundoff of summing 64
+     independent k-points.  Had the raw IBZ decomposition
+     already been permutation-symmetric, the correction would
+     have been a no-op and the reduced oxygens would agree at
+     the raw data's own level, not at machine epsilon.
+  3. **The totals did not move**, as predicted, so the sum
+     rule confirmed nothing -- which is the point.
+
+  Not done: a direct A/B against a binary with the block
+  disabled.  The three findings above make that redundant
+  rather than merely inconvenient, but it is the one check
+  that would settle it by construction rather than by
+  inference.
+
+  Incidental, found while setting this up and worth its own
+  fix: the user-facing POPTC legend disagrees with the code
+  on detail code 4.  `makeinput.py` writes
+  `0N;1t;2a;3enl;4enlm` into every `imago.dat` and
+  `makeinputrc.py` carries `0=NONE,1=elem,2=a tot,3=e nl,4=e
+  nlm`, both of which read as though code 4 were element or
+  type resolved.  It is atom resolved: `pOptcIndex(vdi) =
+  vdi` makes every basis function its own partial, and
+  `printSpectrumPOPTC` walks `numAtomSites`.  The labels also
+  hide the alternation that matters here -- type, atom,
+  type+nl, atom+nlm -- which is why it is codes 2 and 4 that
+  need the permutation rather than 3 and 4.  This is O5's
+  finding surviving in the strings a user actually reads;
+  O5 corrected only the comments inside the Fortran.
+
+  Scope is isotropic now, per-axis blocked behind O3.  The
+  atom permutation makes the per-atom-pair isotropic column
+  correct; the per-axis columns need the Cartesian rotation,
+  which is O3's.  O2 stays open with that half deferred.
+
   The decisive property is that a sum taken over all atoms of
   a type is invariant under the operations used for IBZ
   reduction, while anything resolving individual atoms is not.
