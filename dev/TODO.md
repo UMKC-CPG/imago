@@ -815,10 +815,50 @@
       comparison becomes symmetric and every declared key file
       exists for every unit.  This also dissolves the prepare step's
       asymmetry, which `build_initial_potentials.py:1896-1918`
-      spends a paragraph explaining.  Confirm first that no cleanup
-      path reclaims `inputs/`: no reference was found in
-      `tidy_scratch.py`, but the reclamation path was not traced end
-      to end.
+      spends a paragraph explaining.
+  **DECIDED: (1).  Its preconditions were CHECKED 2026-08-05, all
+  three clear.**
+  *Nothing reclaims a run directory's `inputs/`.*  The whole path
+  holds two deletion sites.  `tidy_scratch.py:703` removes
+  `scratch_target(run_dir, scratch_root)`, which must lie under
+  `$IMAGO_TEMP` -- the tree the `intermediate` symlink points at,
+  never the run directory; both `--clean-after` and `--tidy-run`
+  route here and both skip when `$IMAGO_TEMP` is unset.
+  `wingbeats.py:265` removes the flattened ROOT copies on every
+  commit, by design, so `imago.py` stays their only writer.  That
+  second site corroborates the defect rather than threatening the
+  fix: the root copies are cleared on each commit and refilled only
+  for names the unit's job reads.
+  *Every wingbeat stages an `inputs/`.*  `ImagoWingbeat` is the only
+  one registered (`wingbeats.py:361`); `Wingbeat` is a
+  documentation-only base class.  The suite's fakes build no
+  `inputs/`, but the generic cache tests pass names with no
+  directory component and are indifferent -- which confirms the
+  shape: `KeyFile.name` should carry a path RELATIVE to the run
+  directory, so `cache.py` only joins it and never learns about
+  `inputs/` or imports `makeinput`.
+  *No existing cache is invalidated.*  Over every run directory in
+  the workspace, comparing each key file's root copy against its
+  `inputs/` copy: 411 identical, 0 differing, 0 missing an
+  `inputs/` copy, and 13 missing a root copy -- exactly the
+  fingerprint units, ONE PER SOLID, all thirteen solids.  The
+  defect is universal, not a silicon quirk.  Forward-checking the
+  proposed rule for the one solid with prepare directories on disk:
+  22 of 22 units would hit, the fingerprint among them.  The
+  load-bearing row is `kpt-mesh-10-10-10`, whose prepare copy was
+  built under HEAD `76eff98` and whose run copy was staged a day
+  earlier under `9e5a936b` -- different campaigns, different builds,
+  byte-identical, which is the cross-build reuse the fix must
+  preserve.  Weaker for the fingerprint unit itself, whose two
+  copies are same-campaign: that shows the structural blocker is
+  removed, not that its inputs are reproducible across campaigns.
+  Only the live re-run closes that.
+  **Test impact, bounded:** `test_kpoint_convergence.py:184-186`
+  asserts the literal name pair and
+  `test_build_initial_potentials.py:4232-4301` stages copies at the
+  root, so both change; the generic cache tests
+  (`test_kaleidoscope.py:396-526`) and the C139 root-copy tests
+  (`1253-1361`) are untouched.
   (2) **Declare key files per job type**, so the fingerprint unit
       keys on `kp-pscf.dat`.  Correct, but it restores the
       hand-maintained list of "options that matter" that

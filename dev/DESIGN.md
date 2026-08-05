@@ -8285,6 +8285,21 @@ file abort a campaign that has already paid for hours of
 converged rungs -- Principle 10 inverted, a per-unit
 doubt failing the whole flight.
 
+*A key file must be one every unit has, whatever its job
+does.*  A miss is the right answer to a doubt, and the
+wrong answer to a file that was never going to be there:
+a name absent from every run of a given job kind makes
+that kind permanently uncacheable, missing forever at
+full price and never saying why.  So the declared names
+are drawn from `inputs/`, which makeinput writes for
+every unit, and never from a surface whose contents
+depend on what the unit's job reads.  TODO D23 records
+the case that established this: `kp-scf.dat` was declared
+against the run-directory root, which only carries the
+names a given job reads, so every fingerprint unit --
+which runs no SCF -- missed on every campaign from the
+day the name was added.
+
 Resuming a flight is therefore *nothing more than
 re-running it*: the hit-test over every unit naturally
 skips the completed ones and re-dispatches the rest.
@@ -8298,11 +8313,19 @@ existing `is_cached_v2` (DESIGN 5.7) and generalizing it:
   k-density is not among them -- each k-point grid is its own unit
   with its own calc tag and run directory, 6.2.4, so the run-dir
   path already keeps them distinct.
-- **Key files** -- declared by name in `key_fields`;
-  compared by **byte-comparison against the copy already
-  staged in the run directory**.  For the producer these
-  are `structure.dat` and `kp-scf.dat`, both the *resolved*
-  files makeinput writes rather than the raw skeleton.
+- **Key files** -- each declared in `key_fields` as a path
+  *relative to the unit's directory*, and compared by
+  **byte-comparison of the freshly built copy against the
+  staged copy at that same relative path**:
+  `<prepare_dir>/<path>` against `<wingbeat_dir>/<path>`.
+  For the producer these are `inputs/structure.dat` and
+  `inputs/kp-scf.dat`, both the *resolved* files makeinput
+  writes rather than the raw skeleton.  makeinput builds
+  into `inputs/` in every directory it builds, so a key
+  file named there exists for every unit whatever its job
+  does; see "Both sides of the compare are `inputs/`"
+  below for why that is the only surface the identity
+  compare may use.
   Keying on makeinput's output is deliberate: those files
   bake in the inputs that change the result, so changing
   one misses the cache on its own, with no hand-maintained
@@ -8350,11 +8373,16 @@ existing `is_cached_v2` (DESIGN 5.7) and generalizing it:
   `cache_key.toml` carries invalidates every cached unit in
   every surviving workspace at once -- a mass false miss,
   the failure this section otherwise works to avoid.  A key
-  *file* costs nothing: the comparison walks the files the
-  unit declares and byte-compares each against its staged
-  copy, and every run directory already stages `kp-scf.dat`,
-  so a same-scheme re-run still hits and only a genuine
-  scheme change misses.  It also keeps the diagnosis
+  *file* costs nothing **provided the name is one every
+  unit has**: the comparison walks the files the unit
+  declares and byte-compares each against its staged copy,
+  and every run directory stages `inputs/kp-scf.dat`
+  whatever its job reads, so a same-scheme re-run still
+  hits and only a genuine scheme change misses.  Read that
+  proviso as binding rather than incidental -- naming this
+  file against the run-directory root instead, where it is
+  present only for jobs that run an SCF, is what D23
+  records.  It also keeps the diagnosis
   legible -- two `kp-scf.dat` files diff to the single
   `KPOINT_INTG_CODE` line that differs.
 
@@ -8424,27 +8452,53 @@ Python and, when a solid's species/type assignment needs it,
 adds only a fast `imago -loen` run; the expensive
 ground-state SCF is never part of it.  It produces
 `structure.dat` and the staged inputs; the hit-test then
-byte-compares this freshly built `structure.dat` against the
-prior run's staged copy (the prepare step must not clobber
-that reference before the test -- a PSEUDOCODE detail) and,
-only on a miss, launches the expensive imago SCF.
+byte-compares this freshly built `inputs/structure.dat`
+against the prior run's copy at the same relative path (the
+prepare step must not clobber that reference before the test
+-- a PSEUDOCODE detail) and, only on a miss, launches the
+expensive imago SCF.
 
-**The two sides of the compare are not symmetric.**
-makeinput writes its outputs into an `inputs/`
-subdirectory of whatever directory it builds.  A *run*
-directory additionally carries them flattened at its own
-root, because that is where imago reads them when the unit
-actually runs.  A *prepare* directory is never run, so it
-is never flattened, and its `structure.dat` therefore
-exists only under `inputs/`.  The staged copy is thus
-`<wingbeat_dir>/<name>` while the freshly built source is
-`<prepare_dir>/inputs/<name>`, and a client pointing a
-KeyFile's source at a prepare directory must say so.
-Assuming the two look alike is a mistake that stays hidden
-until the *second* run over a surviving workspace: the
-byte-compare is only reached once a prior `cache_key.toml`
-exists, so a first run from a clean workspace never
-exercises it.
+**Both sides of the compare are `inputs/`.**  makeinput
+writes its outputs into an `inputs/` subdirectory of
+whatever directory it builds, prepare and run alike, so
+`inputs/` is the one surface both sides always have and
+the identity compare uses it on both:
+`<prepare_dir>/<path>` against `<wingbeat_dir>/<path>`,
+the same relative path each side.  A *run* directory
+additionally carries some of those files flattened at its
+own root, because that is where imago reads them when the
+unit actually runs -- but which names are flattened
+depends on what that unit's job reads, so the root is a
+job-dependent subset and is not a surface the identity
+compare may use.  A *prepare* directory is never run and
+so is never flattened at all.
+
+**And a root copy that exists must agree with its
+`inputs/` copy, or the unit misses.**  This is a second,
+separate test, and what makes it worth stating is the pair
+of cases it tells apart -- both of which one test asking
+only "is the root copy there and equal?" would answer with
+the same bare "miss":
+
+- *root copy absent* -- this unit's job does not read that
+  file.  Nothing is wrong and nothing is stale; the
+  identity compare has already been made on `inputs/`.
+- *root copy present and disagreeing* -- imago would read
+  a file the key does not describe.  Miss, and re-run.
+
+The second case is the failure "What a commit owes a
+surviving run directory" (below) exists to prevent, and
+that rule does prevent it at the source by clearing the
+root copies a commit supersedes.  This test is the
+backstop, held here rather than assumed away two
+subsections down: it keeps the property that *the key
+describes what the engine will read* local to the cache,
+where a reader checking the cache can see it, and it holds
+for a directory built before the clearing rule existed or
+by any future path that writes a root copy without going
+through a commit.  It costs one stat and one byte-compare
+per key file, only when the root copy is there to check.
+
 Deciding a hit in the driver, from local files, is what
 keeps a re-run cheap: a hit never
 reaches the scheduler, so the surviving misses are the only
@@ -8460,9 +8514,11 @@ unit skip the scheduler entirely; where the driver itself
 runs (a login node or its own batch job) is settled in
 6.2.11.
 
-**What a commit owes a surviving run directory.**  The asymmetry above
-has a mirror on the write side, and it is load-bearing.  The flattened
-root copies are not makeinput's doing: makeinput writes `inputs/` and
+**What a commit owes a surviving run directory.**  The root copies the
+compare above declines to read still have to be right, because they are
+what the engine reads, and keeping them so is the write side's job.
+The flattened root copies are not makeinput's doing: makeinput writes
+`inputs/` and
 nothing else.  It is `imago.py` that copies each file up to the
 run-directory root on the first run, when the root copy is absent, and
 that thereafter reads the root copy in preference to the staged one.
@@ -8479,14 +8535,21 @@ the OLD physics while the key file, the run's own `summary`, and the
 flight report all describe the new.
 
 This is not the false hit of the two-key-file correction above, and in
-one respect it is worse.  The hit-test byte-compares the *root* copy,
-which is the same file the engine reads, so the directory misses
-correctly, every time, forever: it pays the full price of a calculation
-on every re-run and returns the old answer on every one.  There is no
-`--force` escape, because `--force` only turns hits into misses and
-this is already a miss.  The only recovery is deleting the run
-directory -- which means the cache's whole purpose, deciding reuse from
-local files, is what a curator must give up to get a correct answer.
+one respect it is worse.  The root-copy agreement test above catches
+it, so the directory misses correctly, every time, forever: it pays the
+full price of a calculation on every re-run and returns the old answer
+on every one.  There is no `--force` escape, because `--force` only
+turns hits into misses and this is already a miss.  The only recovery
+is deleting the run directory -- which means the cache's whole purpose,
+deciding reuse from local files, is what a curator must give up to get
+a correct answer.
+
+Note which way that dependency runs.  The agreement test makes the
+stale directory *fail safe*; the rule below is what stops it arising,
+so a curator never meets the unrecoverable miss at all.  Neither
+substitutes for the other, and a later reader should not drop the test
+on the grounds that the rule prevents the case, nor relax the rule on
+the grounds that the test catches it.
 
 **The rule: a commit removes the run directory's root copy of every
 name it stages, and lets `imago.py` repopulate it.**  Delete, do not
