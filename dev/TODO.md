@@ -6225,6 +6225,103 @@ on the same data later with no schema change.  Built on P10.
   DESIGN 2; PSEUDOCODE 4b.1 plus the section-4 permutation table;
   then CODE.
 
+- [ ] C141. The Gaussian per-atom PDOS does not apply the atom
+  permutation, so it is wrong on any symmetry-reduced mesh.  **This
+  is a live defect in output the code produces today**, found
+  2026-08-06 while investigating something else, and it is
+  independent of the LAT work.
+
+  **The evidence is unusually clean because a control sits beside
+  it.**  In `jobs/knbo3/cubic` (gitignored), one run on the cubic
+  KNbO3 cell with `kPointIntgCode = 0` produced both quantities from
+  the same eigenvectors at the same reduced k-points:
+
+  ```
+  effective charge, 3 equivalent oxygens   6.70852906
+                                           6.70852906
+                                           6.70852906
+  per-atom PDOS, same 3 oxygens            spread 7.11e-01
+  ```
+
+  The charges agree to all eight printed digits because `computeBond`
+  applies the permutation, which Phase F added.  The PDOS disagrees by
+  seventy percent because `computeDOS` does not.  Nothing else differs
+  between them, so no argument about meshes or convergence can explain
+  the gap.  A fresh run reproduces it at 7.16e-01
+  (`jobs/knbo3/o9_pdos/gauss`).
+
+  **Cause, confirmed in the source rather than inferred.**
+  `buildChannelPermTable` is called only inside
+  `if (kPointIntgCode == 1)` (`dos.F90:535`), so the table exists only
+  for the tetrahedron path.  The Gaussian accumulation deposits
+  straight into `pdosAccum(pdosIndex(valeDimIndex))` weighted by
+  `kPointWeight(i)` and permutes nothing, which credits every member
+  of a star with the representative's projection.  DESIGN 2.5 lists
+  modes 1 and 2 as requiring the atom permutation; only the LAT path
+  ever got it.
+
+  The fix should reuse `buildChannelPermTable` rather than write a
+  second one -- it already handles modes 0, 1 and 2 and needs no
+  change -- and apply it in the Gaussian accumulation the way
+  `computeBond` applies `atomPerm`.  Mode 0 needs nothing, since a
+  type-level sum is already invariant.
+
+  **Test with the control that found it**: require the three oxygens
+  of cubic KNbO3 to agree, on a reduced mesh, to the precision the
+  effective charge already reaches.  Note that the partials-sum-to-
+  total identity cannot see this defect, for the same reason it
+  cannot see the POPTC unfolding (PSEUDOCODE 7a).
+
+- [ ] C142. Atom-resolved LAT quantities do not reproduce the
+  equivalence of symmetry-equivalent atoms, and it is not the
+  unfolding.  Opened 2026-08-06; **cause hypothesized, not
+  established.**
+
+  Two measurements, both on cubic KNbO3 at a 4x4x4 shifted mesh,
+  where the three oxygens are one orbit and must agree:
+
+  ```
+  LAT per-atom PDOS, reduced mesh          6.90e-02
+    (permutation applied via channelPermTbl)
+  LAT atom-resolved optical, UNREDUCED     1.06e-01
+    (identity operation only, so no
+     permutation is involved at all)
+  ```
+
+  The second is the informative one.  With `NUM_POINT_OPS` trimmed to
+  the identity there is no symmetry reduction and nothing to unfold,
+  yet equivalent atoms still differ by ten percent.  So this is not a
+  missing or wrong permutation, which is what it first looked like.
+
+  **Hypothesis.** The tetrahedron tiling is not point-group
+  symmetric.  DESIGN 1.2 fixes the standard Bloechl decomposition,
+  six tetrahedra per parallelepiped sharing the main diagonal
+  M1-M8, and that choice does not treat the three Cartesian axes
+  alike.  A k-point's effective weight is the sum of corner weights
+  over the tetrahedra containing it, so points related by a cubic
+  operation need not receive equal weight.  A scalar total is
+  unaffected because the asymmetry cancels in the sum, which is why
+  the total spectra and the TDOS look fine; an atom-resolved quantity
+  is not, and the three oxygens sit on the three different axes.
+
+  **What would settle it.**  Compare the effective per-k-point weight,
+  summed over tetrahedra, between k-points related by a symmetry
+  operation -- if those differ, the hypothesis is confirmed without
+  reference to any spectrum.  If confirmed, the question becomes
+  which remedy: choosing the main diagonal to minimize the asymmetry
+  (the usual recommendation, which reduces rather than removes it),
+  symmetrizing the atom-resolved result over the point group after
+  integration, or documenting the floor and scoping atom-resolved LAT
+  accordingly.
+
+  **Scope, and why this matters beyond the entry.**  It affects the
+  LAT PDOS of DESIGN 1.4, which is implemented and was validated
+  against Gaussian TOTALS rather than per-atom equivalence -- so this
+  would have been invisible to that check.  It also sets a floor that
+  any atom-resolved LAT validation has to be measured against,
+  including O9's.  Do not treat a residual of this size in new LAT
+  work as a defect of that work until this is settled.
+
 ---
 
 ## OPTICAL PROPERTIES (imported OLCAO code)
