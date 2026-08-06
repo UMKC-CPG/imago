@@ -185,16 +185,37 @@ Modules directly affected by the current development:
   O_OptcPrint smear each transition and weight it by
   `kPointWeight`, and this is the one consumer that does not
   branch on `kPointIntgCode`. It will gain a LAT pathway
-  alongside, dispatched by the caller in the
-  `computeTDOS_LAT` shape rather than branched internally,
-  because the LAT loop inverts the nesting (DESIGN 12.2).
-  That pathway adds two dependencies to this subtree: the
-  tetrahedra and `tetraVol` from O_KPoints, and
-  `bloechlCornerDOSWt` from O_MathSubs, which it feeds the
-  four corner values of the band-energy DIFFERENCE rather
-  than of a band. The transition pairs, matrix elements and
-  decomposition index are computed identically either way,
-  so only the accumulation is dispatched. DESIGN 12.
+  alongside, as a separate accumulation routine rather than
+  an internal branch, because the LAT loop inverts the
+  nesting (DESIGN 12.2).
+
+  Taking it on restructures this pair of modules to match
+  the DOS path rather than imitate it. `optcCond` and
+  `optcCondPOPTC` move to module scope in O_OptcPrint, the
+  house pattern that O_OptcTransitions already follows with
+  `transitionProb`; `printOptcResults` splits into
+  `computeOptcSpectra`, which sets up and selects the
+  pathway, and `printOptcSpectra`, which writes the files;
+  and `subroutine optc` in `imago.F90` calls the two in
+  turn, exactly where `subroutine dos` makes the same
+  choice. The accumulators are renamed to
+  `accumulateOptcCond` and `accumulateOptcCondPOPTC` with
+  `_LAT` counterparts, since they accumulate into an array
+  handed to them rather than getting anything.
+  That pathway adds two dependencies, and they land on
+  O_OptcPrint rather than on O_Optc, because the
+  accumulation routines live there: the tetrahedra and
+  `tetraVol` from O_KPoints, and `bloechlCornerDOSWt` from
+  O_MathSubs, which it feeds the four corner values of the
+  band-energy DIFFERENCE rather than of a band.
+
+  The two pathways share the momentum matrix elements and
+  the decomposition index, and diverge in how the resulting
+  transition strengths are indexed, filtered, ranged and
+  occupied. The shared part -- the `conjWaveMomSum`
+  construction, which is the expensive one -- is extracted
+  into a routine both producers call, so that neither
+  duplicates it. DESIGN 12.
 - **O_DOS** (`dos.F90`): Two DOS paths: `computeIterationTDOS`
   (in-SCF convergence monitoring) and `computeDOS` (full
   TDOS/PDOS post-processing). Will gain a LAT branch in
@@ -325,21 +346,24 @@ imago.F90 (top-level dispatcher)
   +-- O_Optc (optc.F90)
   |     +-- O_KPoints (fullKPToIBZKPMap,
   |     |     fullKPToIBZOpMap, numFullMeshKP,
-  |     |     kPointWeight, kPointIntgCode; plus
-  |     |     tetrahedra and tetraVol for the LAT
-  |     |     integration pathway)
+  |     |     kPointWeight, kPointIntgCode)
   |     +-- O_AtomicSites (atomPerm; also valeDim and
   |     |     atomSites for the decomposition index)
   |     +-- O_AtomicTypes (radial function counts per
   |     |     type, for the QN_nl resolved partials)
   |     +-- O_SecularEquation (eigenvectors, momentum
   |     |     matrix elements, eigenvalues)
-  |     +-- O_MathSubs (bloechlCornerDOSWt, fed the
-  |     |     corner values of the band-energy
-  |     |     difference: LAT pathway only)
   |     +-- O_OptcPrint (optcPrint.F90: broadening and
-  |           spectrum output, total and per partial pair;
-  |           carries both accumulation pathways)
+  |           spectrum output, total and per partial
+  |           pair; carries both accumulation pathways)
+  |           +-- O_KPoints (tetrahedra, tetraVol,
+  |           |     numFullMeshKP, fullKPToIBZKPMap,
+  |           |     fullKPToIBZOpMap: the LAT
+  |           |     accumulation walks tetrahedra over
+  |           |     the full mesh)
+  |           +-- O_MathSubs (bloechlCornerDOSWt, fed
+  |                 the corner values of the band
+  |                 energy DIFFERENCE: LAT only)
 ```
 
 ---

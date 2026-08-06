@@ -6777,17 +6777,49 @@ is not carried only in conversation.
        re-indexing pass producing `(component, i, j, kIBZ)`.
        That pass is new work, not a rename, and it is the
        largest single piece of this task.
-    3. `optcPrint.F90`: a `getOptcCond_LAT` and its POPTC
-       counterpart, selected by the caller in the
-       `computeTDOS_LAT` shape rather than branched
-       internally (DESIGN 12.2).  `computePairs` and
-       `computePOPTCPairs` are untouched -- only the
-       accumulation is dispatched.
-    4. Retire the PSEUDOCODE 7a star-average block on the LAT
-       path only.  It stays for the Gaussian path, which
-       still visits IBZ points and still needs it.  Both
-       pathways must remain correct under IBZ reduction, and
-       they reach that by different routes.
+    3. `optc.F90`: extract the `conjWaveMomSum`
+       construction from `computePairs` into its own routine
+       (and the same for the POPTC variant), unchanged, so
+       both pathways call it rather than duplicating the one
+       calculation whose errors are hardest to see.  Pure
+       refactor, no behaviour change; do it first and
+       confirm the KNbO3 outputs are unmoved before
+       anything else is built on it.
+    4. `optc.F90`: the band-pair producer of PSEUDOCODE
+       19.2, storing `(dim3, kIBZ, i, j)`.  **This is the
+       largest single piece of the task** and is easy to
+       miss, because the entry originally jumped straight to
+       the accumulators.  Three things inside it: the band
+       range must be the UNION over k-points, since a per-k
+       range leaves holes at exactly the k-points a Fermi
+       surface passes through; the transition-energy cutoff
+       must NOT filter here, because a pair can fail at one
+       corner and pass at three; and the pass must call
+       `computeElectronPopulation_LAT` itself, because that
+       array is built in `subroutine bond` and an
+       optics-only run never enters `bond` at all.
+
+       The index order is chosen against the loop that reads
+       it and is not free to tidy -- see DESIGN 12.4 and the
+       comment in PSEUDOCODE 19.2.
+    5. `optcPrint.F90` and `imago.F90`: the restructuring of
+       DESIGN 12.2.  Promote `optcCond` and `optcCondPOPTC`
+       to module scope; split `printOptcResults` into
+       `computeOptcSpectra` and `printOptcSpectra`; call
+       both from `subroutine optc`, where `subroutine dos`
+       makes the same choice; rename `getOptcCond` and its
+       partner to `accumulateOptcCond` and
+       `accumulateOptcCondPOPTC`, and add the `_LAT`
+       counterparts.  `computeOptcSpectra` is where the LAT
+       replacement for `kPointFactor` is built -- the
+       Gaussian factor carries a `sigma` the tetrahedron
+       pathway does not use (DESIGN 12.4).
+    6. Retire the PSEUDOCODE 7a star-average block on the LAT
+       path only, by guarding it on `kPointIntgCode == 0`.
+       It stays for the Gaussian path, which still visits IBZ
+       points and still needs it.  Both pathways must remain
+       correct under IBZ reduction, and they reach that by
+       different routes.
 
   **Scope: gapped systems first.**  DESIGN 12.4(c) is the
   reason.  Occupied versus unoccupied is a property of a

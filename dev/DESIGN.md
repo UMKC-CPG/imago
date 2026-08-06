@@ -1182,6 +1182,18 @@ with the partial count taken from the table in section
 11.3 -- by the IBZ reduction factor of 4 to 48, for the
 same answer.
 
+**This correction belongs to the Gaussian integration
+pathway.** Everything above assumes the spectrum is
+accumulated by visiting irreducible k-points and weighting
+them, which is what makes a star average necessary in the
+first place. Section 12 adds a tetrahedron pathway that
+visits full-mesh corners directly and applies the operation
+once per corner as it fetches each quantity. On that
+pathway the star average is not performed at all -- applying
+both would count the symmetry twice. Section 12.6 gives the
+argument. Both pathways are correct under reduction; they
+arrive there differently.
+
 **Resolution of D2.** The open question asked whether
 replacing electronPopulation with electronPopulation_LAT
 covers bond order accumulation correctly. The answer is
@@ -14407,11 +14419,79 @@ a separate accumulation routine, selected by the caller.**
 An internal branch would be a branch around the whole body,
 which is a separate routine wearing a disguise.
 
-Note what this does NOT change. Only the accumulation of the
-broadened spectrum is dispatched. The transition pairs, the
-matrix elements and the decomposition index are computed
-identically either way, so `computePairs` and
-`computePOPTCPairs` are untouched by the choice.
+**Where the selection sits, and the renaming it forces.**
+`computeTDOS_LAT` is selected in `subroutine dos` in
+`imago.F90`, the top level of the program. The optical
+counterpart is not currently reachable from the equivalent
+place: `subroutine optc` calls `printOptcResults`, and that
+routine builds the conversion factors, the energy grid and
+`kPointFactor`, allocates the spectrum arrays, calls the
+accumulators, calls the printers, and deallocates. Printing
+is the last third of it, so the name already describes a
+minority of what it does, and hanging a pathway choice on it
+would make that worse.
+
+The optical path is therefore restructured to match the DOS
+path rather than merely imitating it:
+
+- `optcCond` and `optcCondPOPTC` are promoted to module
+  scope in O_OptcPrint. This is the house pattern already --
+  `transitionProb` lives at module scope in
+  O_OptcTransitions -- and they are local today by habit
+  rather than by design.
+- `printOptcResults` splits into `computeOptcSpectra`, which
+  performs the setup and selects the pathway, and
+  `printOptcSpectra`, which writes the files.
+- `subroutine optc` in `imago.F90` calls the two in turn,
+  which is exactly where and how `subroutine dos` makes the
+  same choice.
+
+The accumulators are renamed with it, since the same
+principle applies: `getOptcCond` does not get anything, it
+accumulates a broadened spectrum into an array it is handed.
+They become `accumulateOptcCond` and
+`accumulateOptcCondPOPTC`, with `_LAT` suffixed counterparts
+following the convention of section 1.5 -- the suffix marks
+the integration method and the unsuffixed name is the
+Gaussian one, as with `electronPopulation` and
+`electronPopulation_LAT`. That the unsuffixed name means
+Gaussian is a convention worth knowing, since nothing in the
+name says so.
+
+**What the two pathways share, and where they diverge.** An
+earlier draft of this section claimed that only the
+accumulation differs and that `computePairs` and
+`computePOPTCPairs` were untouched. Section 12.4 shows that
+is not so: the array those routines produce cannot be
+consumed by a tetrahedron loop at all. The division is:
+
+- **Shared:** the momentum matrix elements themselves, which
+  are the expensive part, and the decomposition index of
+  section 11. Both pathways need the same physics from the
+  same eigenvectors.
+- **Divergent:** how the resulting transition strengths are
+  indexed, filtered, ranged and occupied. Five things differ
+  and only one of them is the energy sort. The others are
+  that the storage slot is a running counter over accepted
+  pairs rather than a band pair; that pairs failing the
+  transition-energy cutoff are dropped, per k-point, when a
+  tetrahedron may need a pair that fails at one corner and
+  passes at three; that the band range is per k-point where
+  the tetrahedron path needs the union; and that the
+  occupation factors come from `electronPopulation` rather
+  than `electronPopulation_LAT`.
+
+**So the shared physics is extracted rather than
+duplicated.** The construction of `conjWaveMomSum` -- the
+sum over basis functions of the conjugated wave function
+against the momentum matrix -- becomes its own routine,
+called by both pathways' producers. Each producer then
+carries only its own bookkeeping. Duplicating the momentum
+construction instead would put the one calculation whose
+errors are hardest to see in two places; threading five
+conditionals through a single producer instead would leave a
+routine that does two different jobs and can honestly be
+named for neither.
 
 ### 12.3 The Gaussian pathway, as it stands
 
@@ -14443,9 +14523,51 @@ and obtain the four corner densities from the existing
     dEps2(E) = (V_T / V_BZ) sum_{c=1..4}
                cornerDOSWt_LAT(c) * |M_ij(k_c)|^2
 
-with the same `sum(kPointWeight)` scale factor that section
-1.3 requires of every LAT accumulation, so that the result
-lands on the same scale as the Gaussian path.
+**The normalization, derived rather than asserted**, since
+the two pathways must land on one scale and the factors do
+not correspond one-to-one. The Gaussian path multiplies
+each transition by
+
+    kPointFactor(i) = kPointWeight(i) * 0.5
+                      / (sigma * sqrt(pi)) / hartree / spin
+
+and the LAT path replaces that with
+
+    tetraVol * sum(kPointWeight) * 0.5 / hartree / spin
+
+multiplying the corner density weight. Term by term:
+
+- `kPointWeight(i)`, summed over the irreducible points,
+  becomes `tetraVol` summed over tetrahedra. The first sums
+  to 2 by Imago's convention and the second to 1, so
+  `sum(kPointWeight)` restores the scale. This is the factor
+  section 1.3 requires of every LAT accumulation.
+- `1 / (sigma * sqrt(pi))` is the normalized Gaussian
+  standing in for a delta function. It is DROPPED, because
+  the corner density weight is that delta function evaluated
+  exactly and already carries units of inverse energy.
+- `0.5`, `1 / hartree` and `1 / spin` are properties of the
+  quantity rather than of the integration, so all three
+  survive unchanged. The `0.5` in particular is not a
+  geometric factor: the transition probabilities already
+  account for two electrons per state in the
+  spin-unpolarized case, and it prevents the k-point weights
+  from multiplying by two a second time. Dropping it on the
+  assumption that it belonged to the k-point sum would halve
+  every LAT spectrum.
+
+Note that `integratePDOS_LAT` uses
+`cornerDOSWt * tetraVol * kpWtSum / hartree` with no `0.5`
+and no `1 / spin`, and is NOT a template to copy here. Its
+spin division is folded into the projections upstream
+(section 1.4), and the partial DOS has no `0.5` to carry
+because its Gaussian counterpart has none either.
+
+Since `kPointFactor` is built by the caller and passed in,
+the caller builds the LAT factor instead when
+`kPointIntgCode` selects that pathway; the Gaussian factor
+is meaningless there, containing a `sigma` the pathway does
+not use.
 
 **The stored transition probabilities cannot be reused, and
 this is the structural precondition for everything else.**
@@ -14473,6 +14595,41 @@ This is the analogue of the two-pass requirement that
 section 1.4 imposes on the PDOS, and it is sharper: the PDOS
 needed its projections merely to survive to a second pass,
 while this needs them re-indexed.
+
+**The index ORDER is a performance decision and must be
+stated, not left to look arbitrary.** Fortran stores the
+leftmost index fastest, so a slice is contiguous only when
+the colons sit on the left. The existing arrays already
+respect this -- `transitionProb(dim3, pair, kpoint, spin)`
+is read as `(:, j, i, h)` -- and the obvious imitation for
+the banded store, `(dim3, i, j, kIBZ)`, would break it. The
+reason is the access pattern rather than the shape: with the
+band pair fixed, the tetrahedron loop fetches four different
+k-points per tetrahedron, so putting `kIBZ` last strides by
+`dim3 x nOcc x nUnocc` on every corner and misses cache on
+each one.
+
+The correct order is `(dim3, kIBZ, i, j)`. With the band
+pair fixed, the whole block `(:, :, i, j)` is contiguous:
+three components by the k-point count, a few tens of
+kilobytes for a typical mesh. It loads once and stays
+resident while every tetrahedron for that band pair is
+processed, which turns the innermost fetch from a strided
+miss into a cache hit.
+
+The partial array needs the same care and does not get the
+same result. It is far too large to hold one band pair's
+slice in cache, so the goal there is narrower: the pair
+matrix over partials, for one component at one corner, must
+be contiguous, and the loop over partials must run the
+leftmost index innermost. The destination remains scattered
+whatever is done, because the permutation of section 12.6 is
+the entire point of the operation.
+
+A later reader will be tempted to reorder these into
+something that looks tidier. The orders are chosen against
+the loops that consume them; changing one means changing the
+other.
 
 Note that the occupation factors are not a new problem. The
 Gaussian path already multiplies each transition by the
@@ -14529,6 +14686,22 @@ the same reason -- mixing the two leaves an error the
 calculation partly absorbs. It is a real extension and
 should be specified separately rather than assumed to fall
 out of this one.
+
+**`electronPopulation_LAT` is not available on the optical
+path, and this must be arranged rather than assumed.**
+`computeElectronPopulation_LAT` is called from `subroutine
+bond` in `imago.F90`, and `subroutine optc` is a sibling
+that never calls it. A run that asks only for optical
+properties never enters `bond` at all, so the array is
+simply absent. The optical path must therefore call
+`computeElectronPopulation_LAT` itself when
+`kPointIntgCode` selects the tetrahedron pathway, at the
+same point in its sequence that `bond` does -- after the
+eigenvalues have been shifted to put the Fermi level at
+zero, so that the energy argument is zero for the same
+reason it is there. Reading an unallocated array is the
+loud failure here; reading a stale one from an earlier
+`bond` call in a combined run would be the quiet one.
 
 **(d) Degenerate corners.** When `epsDiff_ij` is nearly
 constant over a tetrahedron the sorted values coincide and

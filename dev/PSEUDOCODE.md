@@ -3042,6 +3042,17 @@ section applies the same distribution to a quantity that
 additionally carries a Cartesian component and a
 transition-pair index.
 
+**This section is the GAUSSIAN pathway's correction.** It
+exists because that pathway visits only irreducible
+k-points and must spread each one's contribution over the
+members of its star.  Section 19 adds a tetrahedron pathway
+that visits full-mesh corners directly and permutes once per
+corner as it fetches, so this block does not run there at
+all -- doing both would count the symmetry twice (section
+19.5).  Guard it on `kPointIntgCode == 0` when that pathway
+lands.  Both pathways must be correct under reduction; they
+reach it by different routes.
+
 ### Which detail codes this touches
 
 ```
@@ -14618,29 +14629,58 @@ has a Mulliken projection.
 
 ### 19.1 What is dispatched, and what is not
 
+DESIGN 12.2 restructures the optical path to match the DOS
+path rather than imitate it.  `optcCond` and
+`optcCondPOPTC` move to module scope in O_OptcPrint,
+`printOptcResults` splits in two, and `subroutine optc`
+calls the halves in turn -- which is where and how
+`subroutine dos` already makes the same choice.
+
 ```
-# In the optical driver, mirroring the computeTDOS_LAT
-#   dispatch rather than branching inside the accumulator
-#   (DESIGN 12.2): the two pathways do not share a loop
-#   structure, so an internal branch would wrap the whole
-#   body.
+# subroutine optc, in imago.F90.  Compare subroutine dos
+#   immediately above it: same shape, same place.
+call computeOptcSpectra(doOPTC)
+call printOptcSpectra(doOPTC)
+
+
+# computeOptcSpectra, in O_OptcPrint.  Setup, then the
+#   pathway choice.  Both branches leave the same module
+#   arrays filled, so the printer never learns which ran.
+build energyScale
+allocate optcCond (and optcCondPOPTC if decomposing)
+
 if kPointIntgCode == 1:
-   call getOptcCond_LAT(...)
+   latFactor = the DESIGN 12.4 normalization
+   call accumulateOptcCond_LAT(latFactor)
    if detailCodePOPTC /= 0:
-      call getOptcCondPOPTC_LAT(...)
+      call accumulateOptcCondPOPTC_LAT(latFactor)
 else:
-   call getOptcCond(...)
+   kPointFactor = kPointWeight * 0.5 / sigmaSqrtPi
+                  / hartree / spin
+   call accumulateOptcCond(kPointFactor, sigma)
    if detailCodePOPTC /= 0:
-      call getOptcCondPOPTC(...)
+      call accumulateOptcCondPOPTC(kPointFactor, sigma)
 ```
 
-**Only the accumulation is dispatched.**  The transition
-pairs, the momentum matrix elements and the decomposition
-index of section 18 are computed identically either way.
-What the accumulator produces is the same `optcCond` and
-`optcCondPOPTC` the printer already consumes, so nothing
-downstream changes: the `1/E` scaling and the unit
-conversion stay in `printSpectrum` where they are.
+**On the names.**  `getOptcCond` does not get anything; it
+accumulates into an array handed to it, so it and its
+partner are renamed to say so.  The `_LAT` suffix marks the
+integration method and the unsuffixed name is the Gaussian
+one, following section 3's convention for
+`electronPopulation`.  Note that the Gaussian meaning of an
+unsuffixed name is a convention rather than something the
+name states.
+
+**What is shared and what is not.**  The momentum matrix
+elements and the decomposition index of section 18 are
+shared: both pathways need the same physics from the same
+eigenvectors.  What diverges is how the resulting transition
+strengths are indexed, filtered, ranged and occupied --
+section 19.2 -- so the producers differ even though the
+physics inside them does not.  Downstream nothing changes:
+the accumulators leave the same arrays the printer already
+consumes, and the `1/E` scaling and unit conversion stay in
+`printSpectrum` where they are.
 
 ### 19.2 Pass 1: re-index the matrix elements by band pair
 
@@ -14652,10 +14692,43 @@ the band ranges also vary per k-point.  A tetrahedron needs
 the same band pair at all four corners, so the LAT path
 stores under a band-pair index instead (DESIGN 12.4).
 
+**The physics is shared; only the bookkeeping differs.**
+Five things separate this producer from `computePairs`, and
+only one of them is the sort: the storage slot, the
+cutoff filtering, the band range, the occupation source, and
+the ordering.  None of them touches the momentum matrix
+element itself.  So the construction of `conjWaveMomSum` --
+the sum over basis functions of the conjugated wave function
+against the momentum matrix, which is the expensive part and
+the part where an error would be hardest to see -- is
+extracted into a routine both producers call.
+
 ```
+function buildConjWaveMomSum(kIBZ, h, firstFin, lastFin,
+                             initComponent, finComponent):
+    # Exactly the loop that computePairs runs today, lifted
+    #   unchanged.  Both pathways call it; neither owns it.
+    #   The POPTC counterpart, buildConjWaveMomSumPOPTC,
+    #   carries the extra partial index of section 18 and is
+    #   extracted the same way.
+    ...
+    return conjWaveMomSum
+
+
 function computeTransProbBanded(h, numKPoints,
         firstInitAll, lastInitAll,
         firstFinAll,  lastFinAll):
+
+    # PRECONDITION, and it is not met by the existing call
+    #   sequence.  computeElectronPopulation_LAT is invoked
+    #   from subroutine bond, which subroutine optc never
+    #   reaches; an optics-only run leaves the array
+    #   unallocated.  The optical path calls it here, after
+    #   the eigenvalues have been shifted so the Fermi level
+    #   sits at zero, which is why the argument is zero.
+    if kPointIntgCode == 1 and
+            .not. allocated(electronPopulation_LAT):
+       call computeElectronPopulation_LAT(0.0)
 
     # The band ranges are per k-point arrays.  The banded
     #   store must span the UNION over k-points, so that a
@@ -14668,26 +14741,45 @@ function computeTransProbBanded(h, numKPoints,
     finLo  = min over k of firstFinAll(k, h)
     finHi  = max over k of lastFinAll(k, h)
 
-    allocate transProbBanded(dim3,
-                             initLo:initHi, finLo:finHi,
-                             numKPoints)
+    # INDEX ORDER IS DELIBERATE (DESIGN 12.4).  Fortran
+    #   stores the leftmost index fastest.  Section 19.3
+    #   holds the band pair fixed and walks tetrahedra,
+    #   fetching four different k-points per tetrahedron,
+    #   so kIBZ belongs immediately after the component and
+    #   NOT last.  The whole block (:, :, i, j) is then
+    #   contiguous -- three components by the k-point count,
+    #   tens of kilobytes -- and stays cache resident across
+    #   every tetrahedron for that band pair.  Writing the
+    #   more obvious (dim3, i, j, kIBZ) instead strides by
+    #   dim3*nOcc*nUnocc on each corner and misses on every
+    #   one.  Do not reorder this without reordering 19.3.
+    allocate transProbBanded(dim3, numKPoints,
+                             initLo:initHi, finLo:finHi)
     transProbBanded = 0.0
 
     for kIBZ = 1 to numKPoints:
-       read eigenvectors and momentum matrices for kIBZ
+       conjWaveMomSum = buildConjWaveMomSum(kIBZ, h, ...)
+
        for i = initLo to initHi:
           for j = finLo to finHi:
 
-             # Same construction as computePairs: the
-             #   squared momentum matrix element times the
+             # The squared momentum matrix element times the
              #   initial state's occupancy and the final
              #   state's vacancy.  Occupancies come from
              #   electronPopulation_LAT on this path, not
              #   from the Gaussian electronPopulation, so
              #   that one scheme sets both the geometry and
              #   the filling (DESIGN 12.4c).
+             #
+             # No cutoff test here.  computePairs drops
+             #   pairs failing the transition-energy cutoff,
+             #   which is safe when each k-point stands
+             #   alone and unsafe here: a pair may fail at
+             #   one corner of a tetrahedron and pass at the
+             #   other three.  Pruning happens in 19.3
+             #   instead, against all four corners at once.
              for c = 1 to dim3:
-                transProbBanded(c, i, j, kIBZ) =
+                transProbBanded(c, kIBZ, i, j) =
                       |M_ij^c(kIBZ)|^2
                       * occ(i, kIBZ) * (1 - occ(j, kIBZ))
 
@@ -14707,17 +14799,26 @@ can be skipped.
 ### 19.3 Pass 2: tetrahedron accumulation, total spectra
 
 ```
-function getOptcCond_LAT(transProbBanded, eigenValues,
+function accumulateOptcCond_LAT(transProbBanded, eigenValues,
         tetrahedra, numTetrahedra, tetraVol,
         fullKPToIBZKPMap, fullKPToIBZOpMap,
         energyScale, numEnergyPoints, h):
 
     optcCond = 0.0
 
-    # The LAT scale factor of DESIGN 1.3: tetraVol sums to
-    #   1 while kPointWeight sums to 2, so this factor puts
-    #   the result on the Gaussian path's scale.
-    weightScale = sum(kPointWeight)
+    # The LAT replacement for kPointFactor, derived in
+    #   DESIGN 12.4.  tetraVol sums to 1 while kPointWeight
+    #   sums to 2, so sum(kPointWeight) restores the scale.
+    #   The Gaussian normalization 1/(sigma*sqrt(pi)) is
+    #   absent because the corner density weight IS the
+    #   delta function, evaluated exactly.  The other three
+    #   factors belong to the quantity rather than to the
+    #   integration and are carried over unchanged -- the
+    #   0.5 especially, which stops the k-point weights from
+    #   counting two electrons per state a second time.
+    #   Dropping it would halve every spectrum.
+    latFactor = sum(kPointWeight) * 0.5
+                / hartree / real(spin)
 
     for i = initLo to initHi:
        for j = finLo to finHi:
@@ -14760,10 +14861,13 @@ function getOptcCond_LAT(transProbBanded, eigenValues,
                    orig = sigma(c)
                    kIc  = kIBZ(orig)
 
+                   # kIc is the SECOND index, so this slice
+                   #   sits inside the block already held
+                   #   for this band pair (19.2).
                    optcCond(:, iE, h) +=
                          cornerDOSWt_LAT(c) * tetraVol
-                         * weightScale
-                         * transProbBanded(:, i, j, kIc)
+                         * latFactor
+                         * transProbBanded(:, kIc, i, j)
 
     return optcCond
 ```
@@ -14788,10 +14892,12 @@ Identical in structure, with the pair matrix carried through
 and both of its indices permuted at the corner.
 
 ```
-function getOptcCondPOPTC_LAT(transProbPOPTCBanded, ...):
+function accumulateOptcCondPOPTC_LAT(
+        transProbPOPTCBanded, ...):
 
     optcCondPOPTC = 0.0
-    weightScale   = sum(kPointWeight)
+    latFactor     = sum(kPointWeight) * 0.5
+                    / hartree / real(spin)
 
     ... same band, tetrahedron, corner and energy loops ...
 
@@ -14800,16 +14906,27 @@ function getOptcCondPOPTC_LAT(transProbPOPTCBanded, ...):
                    kIc  = kIBZ(orig)
                    R    = opIdx(orig)
 
-                   for a = 1 to sumNumPartials:
-                      aRot = partialPerm(R, a)
-                      for b = 1 to sumNumPartials:
-                         bRot = partialPerm(R, b)
+                   # b OUTER, a INNER.  The partial store is
+                   #   laid out (a, b, dim3, kIBZ, i, j), so
+                   #   a is the fastest index and must be
+                   #   the innermost loop.  This array is
+                   #   far too large to hold a band pair's
+                   #   slice in cache, so the aim here is
+                   #   narrower than in 19.3: keep the walk
+                   #   over the pair matrix sequential.  The
+                   #   destination stays scattered whatever
+                   #   is done, because the permutation is
+                   #   the whole point (DESIGN 12.4).
+                   for b = 1 to sumNumPartials:
+                      bRot = partialPerm(R, b)
+                      for a = 1 to sumNumPartials:
+                         aRot = partialPerm(R, a)
 
                          optcCondPOPTC(aRot, bRot, :, iE, h)
                             += cornerDOSWt_LAT(c) * tetraVol
-                               * weightScale
+                               * latFactor
                                * transProbPOPTCBanded(
-                                    a, b, :, i, j, kIc)
+                                    a, b, :, kIc, i, j)
 ```
 
 `partialPerm` is built by section 18 and is unchanged: the
