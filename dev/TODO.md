@@ -6777,14 +6777,50 @@ is not carried only in conversation.
        re-indexing pass producing `(component, i, j, kIBZ)`.
        That pass is new work, not a rename, and it is the
        largest single piece of this task.
-    3. `optc.F90`: extract the `conjWaveMomSum`
-       construction from `computePairs` into its own routine
-       (and the same for the POPTC variant), unchanged, so
-       both pathways call it rather than duplicating the one
-       calculation whose errors are hardest to see.  Pure
-       refactor, no behaviour change; do it first and
-       confirm the KNbO3 outputs are unmoved before
-       anything else is built on it.
+    3. **DONE 2026-08-06.**  `optc.F90`: extract the
+       `conjWaveMomSum` construction from `computePairs`
+       into its own routine, and the same for the POPTC
+       variant, so both pathways call it rather than
+       duplicating the one calculation whose errors are
+       hardest to see.  `buildConjWaveMomSum` and
+       `buildConjWaveMomSumPOPTC`.
+
+       Not quite a pure transcription, and the difference is
+       worth recording.  The POPTC build walked sites, then
+       states within a site, to arrive at each basis
+       function, rewriting `numStatesAtom` as it went.  That
+       nesting enumerates exactly `1..valeDim`, so it
+       collapses to a direct walk and the rewrites are
+       redundant with what the index construction already
+       stored.  The undecomposed build WAS transcribed
+       unchanged.
+
+       Both routines negate the upper triangle of
+       `valeValeMMGamma` in place on the Gamma build, so
+       each may be called only once per READ of that matrix.
+       The read is the unit, not the k-point: a Gamma build
+       has only the zone-centre point, yet a spin-polarized
+       run calls the routine twice, once per spin, and is
+       correct because `computeTransitions` re-reads the
+       momentum matrix at the top of every spin and k-point
+       iteration.  What would break it is a caller that
+       reads once and calls more than once -- a restored
+       serial-XYZ path looping the three Cartesian
+       components around one read would do exactly that, and
+       would negate the triangle back with no symptom.  Noted
+       at both routines, and a constraint the step 4 producer
+       has to respect, since it is a new caller.
+
+       **Verified by A/B against the pre-refactor binary.**
+       Detail codes 1 and 3 reproduce the stored O7 runs
+       byte for byte, all eleven output files each, which
+       covers `computePOPTCPairs` and therefore the loop
+       collapse above.  Nothing stored exercised
+       `computePairs`, since every earlier run was a POPTC
+       run, so detail code 0 was run twice against identical
+       inputs -- once on each binary -- and its ten total
+       spectrum files are byte identical.  Job directory
+       `jobs/knbo3/o9_refactor` (gitignored).
     4. `optc.F90`: the band-pair producer of PSEUDOCODE
        19.2, storing `(dim3, kIBZ, i, j)`.  **This is the
        largest single piece of the task** and is easy to

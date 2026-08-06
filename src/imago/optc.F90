@@ -889,6 +889,115 @@ integer :: k,l
 end subroutine computeTransitions
 
 
+! Build the sum, over all basis functions, of the conjugated wave function
+!   of each final state against the momentum matrix. This is the expensive
+!   part of forming a transition probability, and it is factored out here
+!   because it does not depend on the initial state: every initial state
+!   that pairs with a given final state reuses the same sum, so it is
+!   computed once per final state rather than once per pair.
+!
+! It lives on its own for a second reason that matters more as the code
+!   grows. The Brillouin-zone integration methods differ in how they
+!   INDEX and filter the transitions they store, not in the physics of
+!   the matrix element itself (DESIGN 12.2). Keeping that physics in one
+!   routine means the several producers that will consume it cannot drift
+!   apart in the one place where a discrepancy would be hardest to see.
+!
+! NOTE for the Gamma-point build: this routine MUTATES valeValeMMGamma,
+!   negating its upper triangle to restore Hermiticity. That is a side
+!   effect on a module array, and the invariant it needs is ONE CALL PER
+!   READ of that array -- not one call per k-point, which for a Gamma
+!   build would be vacuous since there is only the zone-centre point.
+!
+! It holds today because computeTransitions re-reads the momentum matrix
+!   through readDataSCF or readDataPSCF at the top of every spin and
+!   k-point iteration, and calls this routine exactly once afterwards. A
+!   spin-polarized Gamma run therefore calls it twice against two
+!   separate reads, which is correct. What would break it is a caller
+!   that reads once and then calls more than once -- for instance a
+!   restored serial-XYZ path looping the three Cartesian components
+!   around a single read. The triangle would be negated back and every
+!   transition probability after it would change, with no symptom.
+subroutine buildConjWaveMomSum (firstFin,lastFin,initComponent, &
+      & finComponent,conjWaveMomSum)
+
+   ! Import the necessary modules.
+   use O_Kinds
+   use O_AtomicSites, only: valeDim
+#ifndef GAMMA
+   use O_SecularEquation, only: valeVale, valeValeMM
+#else
+   use O_SecularEquation, only: valeValeGamma, valeValeMMGamma
+#endif
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define the dummy variables passed to this subroutine.
+   integer, intent(in) :: firstFin
+   integer, intent(in) :: lastFin
+   integer, intent(in) :: initComponent
+   integer, intent(in) :: finComponent
+#ifndef GAMMA
+   complex (kind=double), dimension (:,:,:), intent(out) :: conjWaveMomSum
+#else
+   real    (kind=double), dimension (:,:,:), intent(out) :: conjWaveMomSum
+#endif
+
+   ! Define local variables.
+   integer :: i,j,k ! Loop index variables.
+   integer :: finalStateIndex
+
+#ifndef GAMMA
+
+   ! Compute the sum over the final states. The 1 for the valeVale is for
+   !   the 1 kpoint. The finComponent is 3 for all three components at
+   !   once, and 1 for when X, Y, Z are done separately.
+   do i = initComponent, finComponent
+      finalStateIndex = 0
+      do j = firstFin, lastFin
+         ! Define the final index for conjWaveMomSum
+         finalStateIndex = finalStateIndex + 1
+         do k = 1, valeDim
+            conjWaveMomSum(k,finalStateIndex,i) = &
+                  & sum(conjg(valeVale(:,j,1)) * valeValeMM(:,k,i))
+         enddo
+      enddo
+   enddo
+
+#else
+
+   ! Documentation similar to the above non-gamma case.
+   do i = initComponent, finComponent
+
+      ! Make the upper triangle correct for Hermiticity.  Recall that for
+      !   the Gamma K Point all the matrices are real (except the momentum
+      !   matrix which was multiplied by a -i and is hence imaginary).
+      !   Since it must be Hermitian we need to apply that now. See the
+      !   note above this routine: this write is why it may be called only
+      !   once per k-point per component set.
+      do j = 1, valeDim
+         valeValeMMGamma(1:j,j,i) = -valeValeMMGamma(1:j,j,i)
+      enddo
+
+      finalStateIndex = 0
+      do j = firstFin, lastFin
+
+         ! Increment the finalStateIndex for conjWaveMomSum
+         finalStateIndex = finalStateIndex + 1
+
+         do k = 1, valeDim
+            conjWaveMomSum(k,finalStateIndex,i) = &
+                  & sum(valeValeGamma(:,j,1) * valeValeMMGamma(:,k,i))
+         enddo
+      enddo
+   enddo
+
+#endif
+
+end subroutine buildConjWaveMomSum
+
+
 
 subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
 
@@ -902,10 +1011,11 @@ subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
    use O_KPoints,     only: kPointWeight
    use O_Populate,    only: electronPopulation
 #ifndef GAMMA
-   use O_SecularEquation, only: energyEigenValues, valeVale, valeValeMM
+   ! The momentum matrix itself is read by buildConjWaveMomSum rather than
+   !   here, so only the wave functions are needed at this level.
+   use O_SecularEquation, only: energyEigenValues, valeVale
 #else
-   use O_SecularEquation, only: energyEigenValues, valeValeGamma, &
-         & valeValeMMGamma
+   use O_SecularEquation, only: energyEigenValues, valeValeGamma
 #endif
 
    ! Make sure that there are not accidental variable declarations.
@@ -962,57 +1072,23 @@ subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
    endif
 
 
-#ifndef GAMMA
-
    ! Allocate space to hold the sum(conjg(valeVale(:,j)) * valeVale_Mom(:,k,1))
    !   for each of the possible final states.  This is done since the values
-   !   are independent of the initial states.  The 1 for the valeVale is
-   !   for the 1 kpoint.  The finComponent is 3 for all three at once, and
-   !   1 for when X, Y, Z are done separately.
+   !   are independent of the initial states.  The finComponent is 3 for all
+   !   three at once, and 1 for when X, Y, Z are done separately.
+   !
+   ! The sum itself is built by buildConjWaveMomSum, which both Brillouin
+   !   -zone integration methods share (DESIGN 12.2).
+#ifndef GAMMA
    allocate (conjWaveMomSum (valeDim,lastFin-firstFin+1,finComponent))
 
-   ! Compute the sum over the final states.
-   do i = initComponent, finComponent
-      finalStateIndex = 0
-      do j = firstFin, lastFin
-         ! Define the final index for conjWaveMomSum
-         finalStateIndex = finalStateIndex + 1
-         do k = 1, valeDim
-            conjWaveMomSum(k,finalStateIndex,i) = &
-                  & sum(conjg(valeVale(:,j,1)) * valeValeMM(:,k,i))
-         enddo
-      enddo
-   enddo
-
+   call buildConjWaveMomSum (firstFin,lastFin,initComponent,finComponent, &
+         & conjWaveMomSum)
 #else
-   ! Documentation similar to the above non-gamma case.
    allocate (conjWaveMomSumGamma (valeDim,lastFin-firstFin+1,finComponent))
 
-
-   ! Compute the sum over the final states.
-   do i = initComponent, finComponent
-
-      ! Make the upper triangle correct for Hermiticity.  Recall that for
-      !   the Gamma K Point all the matrices are real (except the momentum
-      !   matrix which was multiplied by a -i and is hence imaginary).
-      !   Since it must be Hermitian we need to apply that now.
-      do j = 1, valeDim
-         valeValeMMGamma(1:j,j,i) = -valeValeMMGamma(1:j,j,i)
-      enddo
-
-      finalStateIndex = 0
-      do j = firstFin, lastFin
-
-         ! Increment the finalStateIndex for conjWaveMomSum
-         finalStateIndex = finalStateIndex + 1
-
-         do k = 1, valeDim
-            conjWaveMomSumGamma(k,finalStateIndex,i) = &
-                  & sum(valeValeGamma(:,j,1) * valeValeMMGamma(:,k,i))
-         enddo
-      enddo
-   enddo
-
+   call buildConjWaveMomSum (firstFin,lastFin,initComponent,finComponent, &
+         & conjWaveMomSumGamma)
 #endif
 
 
@@ -1180,6 +1256,127 @@ subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
 end subroutine computePairs
 
 
+! The decomposed counterpart of buildConjWaveMomSum. It answers the same
+!   question -- for each final state, the conjugated wave function summed
+!   against the momentum matrix -- but keeps the answer resolved by
+!   partial rather than collapsed to a single number, so that the pair
+!   matrix of DESIGN 11 can be formed from it afterwards.
+!
+! The extra index is supplied by pOptcIndex, which section 18 of the
+!   pseudocode fills: it sends each basis function to the partial it
+!   belongs to. Every basis function therefore ACCUMULATES into its
+!   partial's slot rather than assigning to its own, which is why this
+!   array is zeroed first and the undecomposed one is not.
+!
+! The same Gamma-point caution applies as for buildConjWaveMomSum: the
+!   Gamma build negates the upper triangle of valeValeMMGamma in place,
+!   so this routine may be called only once per READ of that matrix. See
+!   the note above that routine for why the read, rather than the
+!   k-point, is the unit that matters.
+subroutine buildConjWaveMomSumPOPTC (firstFin,lastFin,initComponent, &
+      & finComponent,conjWaveMomSum)
+
+   ! Import the necessary modules.
+   use O_Kinds
+   use O_AtomicSites, only: valeDim
+#ifndef GAMMA
+   use O_SecularEquation, only: valeVale, valeValeMM
+#else
+   use O_SecularEquation, only: valeValeGamma, valeValeMMGamma
+#endif
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define the dummy variables passed to this subroutine.
+   integer, intent(in) :: firstFin
+   integer, intent(in) :: lastFin
+   integer, intent(in) :: initComponent
+   integer, intent(in) :: finComponent
+#ifndef GAMMA
+   complex (kind=double), dimension (:,:,:,:), intent(out) :: conjWaveMomSum
+#else
+   real    (kind=double), dimension (:,:,:,:), intent(out) :: conjWaveMomSum
+#endif
+
+   ! Define local variables.
+   integer :: i,j,k ! Loop index variables.
+   integer :: basisFn ! The basis function currently being deposited.
+   integer :: finalStateIndex
+
+   ! Every basis function adds into the slot its partial owns, so the
+   !   destination must start empty.
+#ifndef GAMMA
+   conjWaveMomSum = cmplx(0.0_double,0.0_double,double)
+#else
+   conjWaveMomSum = 0.0_double
+#endif
+
+#ifndef GAMMA
+
+   ! Compute the sum over the final states.
+   do i = initComponent, finComponent
+      finalStateIndex = 0
+
+      do j = firstFin, lastFin
+         ! Define the final index for conjWaveMomSum
+         finalStateIndex = finalStateIndex + 1
+
+         do k = 1, valeDim
+
+            ! Walk every basis function and send its contribution to the
+            !   partial that pOptcIndex assigns it. The basis functions
+            !   are laid out site by site and, within a site, state by
+            !   state, so walking valeDim directly visits them in exactly
+            !   that order.
+            do basisFn = 1, valeDim
+               conjWaveMomSum(k,pOptcIndex(basisFn),finalStateIndex,i) = &
+                     & conjWaveMomSum(k,pOptcIndex(basisFn), &
+                     & finalStateIndex,i) &
+                     & + (conjg(valeVale(basisFn,j,1)) &
+                     & * valeValeMM(basisFn,k,i))
+            enddo
+         enddo
+      enddo
+   enddo
+
+#else
+
+   ! Documentation similar to the above non-gamma case.
+   do i = initComponent, finComponent
+
+      ! Make the upper triangle correct for Hermiticity.  Recall that for
+      !   the Gamma K Point all the matrices are real (except the momentum
+      !   matrix which was multiplied by a -i and is hence imaginary).
+      !   Since it must be Hermitian we need to apply that now.
+      do j = 1, valeDim
+         valeValeMMGamma(1:j,j,i) = -valeValeMMGamma(1:j,j,i)
+      enddo
+
+      finalStateIndex = 0
+      do j = firstFin, lastFin
+
+         ! Increment the finalStateIndex for conjWaveMomSum
+         finalStateIndex = finalStateIndex + 1
+
+         do k = 1, valeDim
+            do basisFn = 1, valeDim
+               conjWaveMomSum(k,pOptcIndex(basisFn),finalStateIndex,i) = &
+                     & conjWaveMomSum(k,pOptcIndex(basisFn), &
+                     & finalStateIndex,i) &
+                     & + (valeValeGamma(basisFn,j,1) &
+                     & * valeValeMMGamma(basisFn,k,i))
+            enddo
+         enddo
+      enddo
+   enddo
+
+#endif
+
+end subroutine buildConjWaveMomSumPOPTC
+
+
+
 subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
 
    ! Import the necessary modules.
@@ -1195,11 +1392,12 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    use O_AtomicTypes, only: numAtomTypes, atomTypes
    use O_Input,       only: numStates, detailCodePOPTC
 
+   ! The momentum matrix itself is read by buildConjWaveMomSumPOPTC rather
+   !   than here, so only the wave functions are needed at this level.
 #ifndef GAMMA
-   use O_SecularEquation, only: valeVale, valeValeMM, energyEigenValues
+   use O_SecularEquation, only: valeVale, energyEigenValues
 #else
-   use O_SecularEquation, only: valeValeGamma, valeValeMMGamma, &
-         & energyEigenValues
+   use O_SecularEquation, only: valeValeGamma, energyEigenValues
 #endif
 
 
@@ -1213,10 +1411,9 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    integer, intent(in) :: doOPTC
 
    ! Define local variables specific to POPTC.
-   integer :: i,j,k,l,m,n,o ! Loop index variables
+   integer :: i,j,k,l,n,o ! Loop index variables
    integer :: currentType
    integer :: valeDimIndex ! FIX Name
-   integer :: indexValeDim ! FIX Name
    integer, allocatable, dimension (:) :: numStatesAtom ! Vale states / atom
 
    ! Variables that resolve the decomposition request into the two
@@ -1507,100 +1704,26 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
       finComponent = 1
    endif
 
-#ifndef GAMMA
-
    ! Allocate space to hold the sum(conjg(valeVale(:,j)) * valeVale_Mom(:,k,1))
-   !   for each of the possible final states.  This is done since the values
-   !   are independent of the initial states.  The 1 for the valeVale is
-   !   for the 1 kpoint.  The finComponent is 3 for all three at once, and
-   !   1 for when X, Y, Z are done separately.
+   !   for each of the possible final states, resolved by partial.  This is
+   !   done since the values are independent of the initial states.  The
+   !   finComponent is 3 for all three at once, and 1 for when X, Y, Z are
+   !   done separately.
+   !
+   ! The sum itself is built by buildConjWaveMomSumPOPTC, which both
+   !   Brillouin-zone integration methods share (DESIGN 12.2).
+#ifndef GAMMA
    allocate (conjWaveMomSum (valeDim,sumNumPartials,lastFin-firstFin+1,&
                              & finComponent))
 
-   conjWaveMomSum = cmplx(0.0_double,0.0_double,double)
-
-   ! Compute the sum over the final states.
-   do i = initComponent, finComponent
-      finalStateIndex = 0
-
-      do j = firstFin, lastFin
-         ! Define the final index for conjWaveMomSum
-         finalStateIndex = finalStateIndex + 1
-
-         do k = 1, valeDim
-            indexValeDim = 0 
-
-            do l = 1, numAtomSites
-               ! Obtain the type of the current atom.
-               currentType = atomSites(l)%atomTypeAssn
-
-               ! ID and store the number of valence states for this atom.
-               numStatesAtom(l) = atomTypes(currentType)%numValeStates  
-
-               do m = 1, numStatesAtom(l)
-                  indexValeDim = indexValeDim + 1
-
-                  conjWaveMomSum(k,pOptcIndex(indexValeDim),finalStateIndex,i)&
-                     & = conjWaveMomSum(k,pOptcIndex(indexValeDim), &
-                     & finalStateIndex,i) &
-                     & + (conjg(valeVale(indexValeDim,j,1)) &
-                     & * valeValeMM(indexValeDim,k,i))
-               enddo ! m numStatesAtom
-            enddo ! l numAtomSites
-         enddo ! k valeDim
-      enddo ! j firstFin to lastFin
-   enddo ! i xyz components
-
+   call buildConjWaveMomSumPOPTC (firstFin,lastFin,initComponent, &
+         & finComponent,conjWaveMomSum)
 #else
-
-   ! Documentation similar to the above non-gamma case.
    allocate (conjWaveMomSumGamma (valeDim,sumNumPartials,lastFin-firstFin+1,&
                                   & finComponent))
 
-   conjWaveMomSumGamma = 0.0_double
-
-   ! Compute the sum over the final states.
-   do i = initComponent, finComponent
-
-
-      ! Make the upper triangle correct for Hermiticity.  Recall that for
-      !   the Gamma K Point all the matrices are real (except the momentum
-      !   matrix which was multiplied by a -i and is hence imaginary).
-      !   Since it must be Hermitian we need to apply that now.
-      do j = 1, valeDim
-         valeValeMMGamma(1:j,j,i) = -valeValeMMGamma(1:j,j,i)
-      enddo
-
-      finalStateIndex = 0
-      do j = firstFin, lastFin
-
-         ! Increment the finalStateIndex for conjWaveMomSum
-         finalStateIndex = finalStateIndex + 1
-
-         do k = 1, valeDim
-            indexValeDim = 0
-
-            do l = 1, numAtomSites
-
-               ! Obtain the type of the current atom.
-               currentType = atomSites(l)%atomTypeAssn
-
-               ! ID and store the number of valence states for this atom.
-               numStatesAtom(l) = atomTypes(currentType)%numValeStates
-
-               do m = 1, numStatesAtom(l)
-                  indexValeDim = indexValeDim + 1
-
-                  conjWaveMomSumGamma(k,pOptcIndex(indexValeDim),&
-                      & finalStateIndex,i) = conjWaveMomSumGamma(k,pOptcIndex(&
-                      & indexValeDim),finalStateIndex,i) + (valeValeGamma(&
-                      & indexValeDim,j,1) * valeValeMMGamma(indexValeDim,k,i))
-             enddo
-           enddo
-         enddo
-      enddo
-   enddo
-
+   call buildConjWaveMomSumPOPTC (firstFin,lastFin,initComponent, &
+         & finComponent,conjWaveMomSumGamma)
 #endif
 
 
