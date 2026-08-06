@@ -179,6 +179,22 @@ Modules directly affected by the current development:
   indices of the pair matrix instead of one. The offered
   decompositions and their numbering are DESIGN 11; the
   unfolding is DESIGN 2.5 and PSEUDOCODE 7a.
+
+  Brillouin-zone integration is presently Gaussian
+  unconditionally: `getOptcCond` and `getOptcCondPOPTC` in
+  O_OptcPrint smear each transition and weight it by
+  `kPointWeight`, and this is the one consumer that does not
+  branch on `kPointIntgCode`. It will gain a LAT pathway
+  alongside, dispatched by the caller in the
+  `computeTDOS_LAT` shape rather than branched internally,
+  because the LAT loop inverts the nesting (DESIGN 12.2).
+  That pathway adds two dependencies to this subtree: the
+  tetrahedra and `tetraVol` from O_KPoints, and
+  `bloechlCornerDOSWt` from O_MathSubs, which it feeds the
+  four corner values of the band-energy DIFFERENCE rather
+  than of a band. The transition pairs, matrix elements and
+  decomposition index are computed identically either way,
+  so only the accumulation is dispatched. DESIGN 12.
 - **O_DOS** (`dos.F90`): Two DOS paths: `computeIterationTDOS`
   (in-SCF convergence monitoring) and `computeDOS` (full
   TDOS/PDOS post-processing). Will gain a LAT branch in
@@ -309,15 +325,21 @@ imago.F90 (top-level dispatcher)
   +-- O_Optc (optc.F90)
   |     +-- O_KPoints (fullKPToIBZKPMap,
   |     |     fullKPToIBZOpMap, numFullMeshKP,
-  |     |     kPointWeight)
+  |     |     kPointWeight, kPointIntgCode; plus
+  |     |     tetrahedra and tetraVol for the LAT
+  |     |     integration pathway)
   |     +-- O_AtomicSites (atomPerm; also valeDim and
   |     |     atomSites for the decomposition index)
   |     +-- O_AtomicTypes (radial function counts per
   |     |     type, for the QN_nl resolved partials)
   |     +-- O_SecularEquation (eigenvectors, momentum
   |     |     matrix elements, eigenvalues)
+  |     +-- O_MathSubs (bloechlCornerDOSWt, fed the
+  |     |     corner values of the band-energy
+  |     |     difference: LAT pathway only)
   |     +-- O_OptcPrint (optcPrint.F90: broadening and
-  |           spectrum output, total and per partial pair)
+  |           spectrum output, total and per partial pair;
+  |           carries both accumulation pathways)
 ```
 
 ---

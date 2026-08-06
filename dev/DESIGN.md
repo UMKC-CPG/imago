@@ -14329,3 +14329,279 @@ atom-grouped cell**, and wants it for a reason that has
 nothing to do with symmetry: the decomposition must be able
 to separate atoms that the type assignment deliberately does
 not.
+
+---
+
+## 12. Optical Properties: Brillouin-Zone Integration
+
+Section 11 specifies how the optical properties are
+DECOMPOSED. This section specifies how they are INTEGRATED
+over the Brillouin zone, which until now had no design-level
+home at all: the optical properties arrived from OLCAO with
+Gaussian broadening wired in and no alternative.
+
+The section covers the total spectra and the partial ones
+together, because they share one integration and differ only
+in what is carried through it. Everything here applies to
+both unless it says otherwise.
+
+### 12.1 What is being integrated, and why it is not a DOS
+
+For each pair of an occupied state i and an unoccupied state
+j, the calculation forms the momentum matrix element between
+them and accumulates its squared magnitude at the transition
+energy. The quantity wanted is
+
+    eps2(E) ~ (1/E^2) sum_{i,j} Int_BZ dk |M_ij(k)|^2
+              delta( e_j(k) - e_i(k) - E )
+
+This is a JOINT density of states weighted by the matrix
+element. The distinction from section 1 is the whole of the
+design problem and is worth stating before anything else:
+the LAT machinery of section 1 finds the surface where ONE
+band takes the value E, while this needs the surface where
+the DIFFERENCE of two bands takes the value E.
+
+That difference is what makes the extension tractable. Write
+
+    epsDiff_ij(k) = e_j(k) - e_i(k)
+
+and the integral above is exactly the section 1.4 problem
+with `epsDiff_ij` in place of the band energy and
+`|M_ij|^2` in place of the Mulliken projection. No new
+analytic geometry is required. The existing corner-weight
+routines apply unchanged, because they are functions of four
+corner VALUES and do not care what quantity produced them.
+
+### 12.2 Two pathways, and how one is chosen
+
+Gaussian broadening is retained as a full alternative rather
+than replaced. This follows the DOS precedent exactly, and
+the reason is not only backward compatibility: the two
+schemes fail differently, so a disagreement between them is
+diagnostic, and losing one would lose that.
+
+**The switch already exists.** `kPointIntgCode` in O_KPoints
+is 0 for the histogram/Gaussian method and 1 for LAT. It is
+already exposed to the user as `-scfkpint`, `-pscfkpint` and
+`-kpint`, already read from the k-point file, and already
+consumed by `computeDOS`, `computeBond`, `valeCharge` and
+the SCF occupation path. What is new here is only that the
+optical properties begin to honour it; today they ignore it
+entirely and are Gaussian unconditionally. **No new input
+option is introduced**, which keeps this clear of the
+option-contract and cache-key consequences that a new switch
+would carry.
+
+**Which dispatch shape.** The DOS path uses both shapes and
+they are not interchangeable. `computeTDOS_LAT` is a
+separate routine that the caller selects with an explicit
+`if (kPointIntgCode == 1)`; `computeDOS` instead branches
+internally. The difference is whether the two methods share
+the surrounding loop structure. They do not here: section
+1.3 records that the LAT loop INVERTS relative to Gaussian
+-- outer over bands and tetrahedra rather than over k-points
+-- and the same inversion applies to the transition pairs.
+**So the optical path follows the `computeTDOS_LAT` shape:
+a separate accumulation routine, selected by the caller.**
+An internal branch would be a branch around the whole body,
+which is a separate routine wearing a disguise.
+
+Note what this does NOT change. Only the accumulation of the
+broadened spectrum is dispatched. The transition pairs, the
+matrix elements and the decomposition index are computed
+identically either way, so `computePairs` and
+`computePOPTCPairs` are untouched by the choice.
+
+### 12.3 The Gaussian pathway, as it stands
+
+Recorded here because it has never been written down, and
+because the LAT pathway is specified as a departure from it.
+
+`getOptcCond` walks spin, then IBZ k-points, then the
+transitions at that k-point, then energy points. Each
+transition deposits `transitionProb` into every energy bin,
+scaled by a Gaussian in the distance from the transition
+energy to the bin, and by `kPointFactor(i)`, which carries
+`kPointWeight(i)` and the normalization. `getOptcCondPOPTC`
+is the same loop over the pair matrix instead of the total.
+
+Two properties of this arrangement matter later. The k-point
+weight is the ONLY place Brillouin-zone geometry enters, so
+the star multiplicity is applied as a scalar; and the
+broadening width `sigmaOPTC` is a user input that controls
+both the numerical convergence and the appearance of the
+result at once. Section 12.5 returns to that conflation.
+
+### 12.4 The LAT pathway
+
+For each transition pair (i, j) and each tetrahedron T,
+gather the four corner values of `epsDiff_ij`, sort them,
+and obtain the four corner densities from the existing
+`bloechlCornerDOSWt` in O_MathSubs. The contribution is
+
+    dEps2(E) = (V_T / V_BZ) sum_{c=1..4}
+               cornerDOSWt_LAT(c) * |M_ij(k_c)|^2
+
+with the same `sum(kPointWeight)` scale factor that section
+1.3 requires of every LAT accumulation, so that the result
+lands on the same scale as the Gaussian path.
+
+Four things must be got right, and each is a silent wrong
+answer rather than a failure.
+
+**(a) The sort permutation applies to the matrix element
+too.** `bloechlCornerDOSWt` returns its four weights in
+SORTED corner order. The matrix elements must be carried
+through the same permutation before they are paired with
+those weights. Pairing a sorted weight with an unsorted
+matrix element is the single easiest mistake here, and it
+produces a plausible spectrum rather than an obviously
+broken one. Section 1.4 states the same requirement for the
+Mulliken projections and is the model to follow.
+
+**(b) The corners are FULL-mesh points; the matrix elements
+are stored at IBZ points.** This is section 1.4's
+"fundamental constraint" again. The resolution is the same:
+store per IBZ k-point and map at corner assembly through
+`fullKPToIBZKPMap`, applying the operation in
+`fullKPToIBZOpMap`. For the partial properties the
+decomposition index must be permuted at the same moment --
+which is precisely what `partialPerm` already does (section
+2.5, PSEUDOCODE 7a). See 12.6.
+
+**(c) Occupied and unoccupied are properties of a corner,
+not of a tetrahedron.** The Gaussian path classifies bands
+per k-point, through `firstOccupiedState` and its
+companions, and never has to reconcile two k-points. A
+tetrahedron spans four, and near a Fermi surface a band may
+be occupied at some corners and empty at others, so the
+transition pair (i, j) is not well defined across the
+tetrahedron. **For a gapped system this never arises**, and
+that is the case to implement and validate first. For a
+metal the contribution must be weighted by the corner
+occupations, f_i(1 - f_j), which the LAT machinery can
+already supply through `cornerIntgWt_LAT` at the Fermi
+level. This is a real extension and not a detail; it should
+be specified separately rather than assumed to fall out.
+
+**(d) Degenerate corners.** When `epsDiff_ij` is nearly
+constant over a tetrahedron the sorted values coincide and
+the analytic denominators vanish. Section 1.3 already
+requires guards for this in the band case, and they carry
+over -- but the frequency is different and the difference is
+worth flagging. Parallel bands make `epsDiff` flat by
+construction, and parallel bands are exactly what produce
+the sharp critical-point structure that optical spectra are
+computed to show. The degenerate branch is therefore not a
+rare edge case here but the physically interesting one, and
+its guards deserve direct testing rather than inheritance.
+
+### 12.5 What the broadening parameter means under each path
+
+A reader who knows section 1.6(e) will expect the LAT path
+to ignore the broadening input, as the SCF occupation path
+ignores `thermalSigma`. **That expectation is wrong here,
+and the difference is worth being explicit about.**
+
+Under Gaussian broadening `sigmaOPTC` does two jobs at once.
+It is the numerical device that turns a sum over discrete
+k-points into a continuous spectrum, and it is also the
+physical broadening that a measured spectrum genuinely has,
+from finite lifetimes and instrumental resolution. The two
+are indistinguishable in the output, which is why a
+converged Gaussian result is a surface over (sigma, N_k)
+rather than a number.
+
+LAT removes the first job and leaves the second untouched.
+The tetrahedron integration produces the spectrum without
+any smearing parameter, but almost nobody wants to LOOK at
+that spectrum: an unbroadened joint density of states is a
+spiky object that no measurement resembles. So the LAT path
+does not ignore `sigmaOPTC`; it changes what the parameter
+means, from a numerical requirement to a physical model
+applied afterwards, and one the user may legitimately set to
+zero to see the raw result.
+
+Two consequences follow. A LAT run and a Gaussian run at the
+same `sigmaOPTC` are NOT the same calculation broadened two
+ways, and should not be compared as though the parameter had
+one meaning. And the convergence question changes shape: the
+LAT answer converges in mesh density alone, which is the
+whole point of adopting it.
+
+### 12.6 Where this leaves the IBZ correction
+
+The partial optical properties currently correct for IBZ
+reduction by averaging the pair matrix over the star of each
+IBZ k-point (section 2.5, PSEUDOCODE 7a). Under LAT that
+correction does not move -- it DISAPPEARS, and is replaced
+by the corner assembly of 12.4(b).
+
+The reason is structural. The star average exists because
+the Gaussian path visits only IBZ points and must
+redistribute each one's contribution over the members of its
+star. LAT visits full-mesh corners directly, so there is
+nothing to redistribute; the permutation is applied once per
+corner as the matrix element is fetched, which is the same
+arithmetic arriving at the same answer by a shorter route.
+
+**This is the sequencing argument, and it is the reason this
+section is being written before TODO O3.** O3 must rotate
+the Cartesian components of the momentum operator, and
+PSEUDOCODE 7a already records that doing so requires lifting
+the star average up to the complex matrix element. Under LAT
+that rotation belongs at corner assembly instead. Both
+changes therefore land in the same place, and settling the
+integration question first means writing that code once. It
+does NOT mean LAT solves O3: the components mix under a
+point operation however the zone is integrated. LAT decides
+only where the rotation is applied.
+
+### 12.7 Cost
+
+The Gaussian accumulation is O(numKPoints x pairs x
+energyPoints) over IBZ points. The LAT accumulation is
+O(numTetrahedra x pairs x energyPoints), and
+`numTetrahedra` is `6 x numFullMeshKP`. So the inner work
+grows by six times the IBZ reduction factor, which is the
+same full-mesh scaling section 1.6(b) notes for the SCF
+occupation path, and it is a real increase rather than a
+rounding error.
+
+Set against it: LAT is expected to reach a converged answer
+at a lower mesh density, which is the reason to accept the
+per-mesh cost. Whether the trade is favourable for the
+optical properties specifically is a measurement, not a
+prediction, and the comparison should be made at equal
+converged accuracy rather than at equal mesh.
+
+Note also that the transition pair count already dominates
+both expressions and is quadratic in the band count, so
+neither path is cheap and the decomposition cost of section
+11.4 sits on top of whichever is chosen.
+
+### 12.8 Open questions
+
+  1. **Metals**, per 12.4(c). The corner-occupation
+     weighting is sketched, not specified. A gapped system
+     should be implemented and validated first, with metals
+     as a separate increment.
+  2. **Whether the Kramers-Kronig path needs anything.**
+     `imagoKKc` consumes eps2 and produces eps1 and the
+     derived spectra. It should be indifferent to how eps2
+     was integrated, but this has not been checked, and
+     section 12.5 changes the spectrum's character near
+     sharp features, which is where a quadrature is most
+     easily embarrassed. See TODO O6 for what that routine's
+     integration is already known to do.
+  3. **The per-axis columns.** These are unverified on a
+     reduced mesh today (TODO O3) and this section does not
+     repair them. It only relocates where the repair goes.
+  4. **Validation target.** The natural first check is a
+     gapped cubic system where the two pathways must agree
+     in the converged limit, run against the same mesh
+     ladder. A disagreement that persists with mesh density
+     is the informative outcome, and per 12.5 the comparison
+     must hold the meaning of `sigmaOPTC` fixed rather than
+     its value.

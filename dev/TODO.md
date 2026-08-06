@@ -6722,10 +6722,96 @@ is not carried only in conversation.
   is responsible for choosing an affordable decomposition,
   and DESIGN 11.4 says so.
 
+- [ ] O9. Give the optical properties a LAT integration
+  pathway alongside the existing Gaussian one.  **Specified
+  in DESIGN 12**, written 2026-08-06; ARCHITECTURE's O_Optc
+  entry and dependency subtree were updated with it.  Code
+  against that section rather than against this entry.
+
+  **Do this before O3.**  That is the whole reason the design
+  section was written now rather than later.  O3 has to
+  rotate the Cartesian components of the momentum operator,
+  and PSEUDOCODE 7a already records that doing so means
+  lifting the star average up to the complex matrix element.
+  Under LAT the star average does not move, it disappears --
+  the corner assembly visits full-mesh points directly, so
+  there is nothing to redistribute -- and the rotation
+  belongs at that same corner assembly.  Settling the
+  integration question first means writing that code once
+  instead of writing it, then rewriting it.  LAT does not
+  SOLVE O3; the components mix under a point operation
+  however the zone is integrated.  It decides only where the
+  rotation goes.
+
+  **No new input option.**  `kPointIntgCode` already exists,
+  is already exposed as `-scfkpint` / `-pscfkpint` /
+  `-kpint`, and is already honoured by `computeDOS`,
+  `computeBond`, `valeCharge` and the SCF occupation path.
+  The optical properties are simply the one consumer that
+  ignores it.  Keeping it that way avoids an option-contract
+  change and its reach into the cache key.
+
+  The pieces, in chain order:
+    1. **DONE.**  DESIGN 12 (this section) and the
+       ARCHITECTURE entries above it.
+    2. PSEUDOCODE: not written.  It needs the corner
+       assembly for a transition pair, which is section 1.4's
+       two-pass PDOS structure with the band-energy
+       DIFFERENCE in place of the band energy and the squared
+       matrix element in place of the Mulliken projection.
+       The sort permutation must be shown carrying the matrix
+       element with it (DESIGN 12.4a) -- that is the mistake
+       that yields a plausible wrong spectrum rather than an
+       obviously broken one.
+    3. `optcPrint.F90`: a `getOptcCond_LAT` and its POPTC
+       counterpart, selected by the caller in the
+       `computeTDOS_LAT` shape rather than branched
+       internally (DESIGN 12.2).  `computePairs` and
+       `computePOPTCPairs` are untouched -- only the
+       accumulation is dispatched.
+    4. Retire the PSEUDOCODE 7a star-average block on the LAT
+       path only.  It stays for the Gaussian path, which
+       still visits IBZ points and still needs it.  Both
+       pathways must remain correct under IBZ reduction, and
+       they reach that by different routes.
+
+  **Scope: gapped systems first.**  DESIGN 12.4(c) is the
+  reason.  Occupied versus unoccupied is a property of a
+  CORNER, not of a tetrahedron, so near a Fermi surface the
+  transition pair is not well defined across the tetrahedron
+  and the contribution needs an `f_i (1 - f_j)` corner
+  weighting.  That is sketched in the design, not specified.
+  Implement and validate a gapped system, then take metals as
+  a separate increment.
+
+  **Two things to test directly rather than assume.**  The
+  degenerate-corner guards, because parallel bands make the
+  energy difference flat by construction and parallel bands
+  are exactly what produce the sharp structure optical
+  spectra are computed to show -- so the degenerate branch is
+  the physically interesting case here rather than a rare
+  edge (DESIGN 12.4d).  And whether `imagoKKc` is indifferent
+  to how eps2 was integrated; it should be, but its
+  quadrature already has known faults near sharp features
+  (O6), which is where LAT output differs most from Gaussian.
+
+  **Validation target.**  A gapped cubic system where the two
+  pathways must agree in the converged limit, run against the
+  same mesh ladder.  Hold the MEANING of `sigmaOPTC` fixed
+  rather than its value: DESIGN 12.5 explains that the
+  parameter does two jobs under Gaussian broadening and only
+  one under LAT, so equal sigma is not equal comparison.  A
+  disagreement that persists with mesh density is the
+  informative outcome.
+
 - [ ] O3. Decide whether the x, y, and z resolved columns of
   the optical output are meaningful on a symmetry-reduced
   k-point mesh.  This is independent of POPTC and affects the
   *total* spectra that Imago already produces.
+  **Sequencing: do O9 first** -- under a LAT integration
+  pathway the fix below lands at tetrahedron corner assembly
+  rather than in the star-average block, so settling that
+  first means writing this once.  See O9 and DESIGN 12.6.
   The momentum operator is a vector: under a point group
   operation its Cartesian components mix, P_i(Rk) = sum_j
   R_ij P_j(k).  `getOptcCond` accumulates

@@ -32,13 +32,23 @@ flight instead of an exhaustive grid search.
 
 ## Goals
 
-1. **Implement LAT k-point integration.** Replace the current
-   Gaussian-broadening approach for Brillouin-zone integration with
-   the Linear Analytic Tetrahedral method (Bloechl, Jepsen, &
-   Andersen, PRB 49, 16223, 1994). This provides exact analytic
+1. **Implement LAT k-point integration.** Offer the Linear
+   Analytic Tetrahedral method (Bloechl, Jepsen, & Andersen, PRB
+   49, 16223, 1994) for Brillouin-zone integration alongside the
+   existing Gaussian-broadening approach, selected per calculation
+   rather than replacing it. LAT provides exact analytic
    integration within each tetrahedron, eliminating the arbitrary
    broadening parameter and improving accuracy at lower k-point
    densities.
+
+   **Both methods are kept, deliberately.** Every quantity that
+   has gained a LAT path retains its Gaussian one, and the choice
+   is a user input. Two reasons, and the second is the one that is
+   easy to lose sight of: existing work stays reproducible, and
+   the two schemes fail differently, so a disagreement between
+   them at the same mesh is diagnostic. Retiring the Gaussian path
+   would discard that check. Where a quantity has no LAT path yet,
+   that is unfinished work rather than a decision against it.
 2. **Correct partial properties under IBZ reduction.** Ensure that
    eigenvector-dependent quantities (PDOS, bond order, effective
    charge, and the partial optical properties) are computed
@@ -246,8 +256,10 @@ flight instead of an exhaustive grid search.
 3. **Phased implementation.** Implement LAT TDOS first (eigenvalues
    only), validate against Gaussian-broadened results at high
    k-point density, then extend to integrated partial properties
-   via electronPopulation_LAT, and finally to energy-resolved
-   PDOS with cornerIntgWt_LAT. Each
+   via electronPopulation_LAT, then to energy-resolved
+   PDOS with cornerIntgWt_LAT, and then to the optical
+   properties, whose integrand is a joint density of states over
+   band PAIRS rather than a density of states over bands. Each
    phase must be validated before proceeding to the next.
 4. **Stable potential representation, flexible container.** The
    per-potential numerical representation (the existing radial /
