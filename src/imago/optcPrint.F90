@@ -213,7 +213,7 @@ subroutine computeOptcSpectra(doOPTC)
    ! What is wrong. On a reduced mesh the atom-resolved partials of
    !   symmetry-equivalent atoms disagree by about 0.7 relative, where
    !   they must be identical. Roughly 0.1 of that is a floor shared
-   !   with the existing LAT partial DOS and is TODO C142's to explain;
+   !   with the existing LAT partial DOS and is TODO C149's to explain;
    !   the rest is a defect in the corner permutation here and is O9's.
    !   Either way the numbers are not usable, and they look entirely
    !   plausible, which is what makes writing them out worse than

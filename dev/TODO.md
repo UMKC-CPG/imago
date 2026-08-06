@@ -6225,7 +6225,7 @@ on the same data later with no schema change.  Built on P10.
   DESIGN 2; PSEUDOCODE 4b.1 plus the section-4 permutation table;
   then CODE.
 
-- [ ] C141. The Gaussian per-atom PDOS does not apply the atom
+- [ ] C148. The Gaussian per-atom PDOS does not apply the atom
   permutation, so it is wrong on any symmetry-reduced mesh.  **This
   is a live defect in output the code produces today**, found
   2026-08-06 while investigating something else, and it is
@@ -6272,7 +6272,7 @@ on the same data later with no schema change.  Built on P10.
   total identity cannot see this defect, for the same reason it
   cannot see the POPTC unfolding (PSEUDOCODE 7a).
 
-- [ ] C142. Atom-resolved LAT quantities do not reproduce the
+- [ ] C149. Atom-resolved LAT quantities do not reproduce the
   equivalence of symmetry-equivalent atoms, and it is not the
   unfolding.  Opened 2026-08-06; **cause hypothesized, not
   established.**
@@ -6293,26 +6293,72 @@ on the same data later with no schema change.  Built on P10.
   yet equivalent atoms still differ by ten percent.  So this is not a
   missing or wrong permutation, which is what it first looked like.
 
-  **Hypothesis.** The tetrahedron tiling is not point-group
-  symmetric.  DESIGN 1.2 fixes the standard Bloechl decomposition,
-  six tetrahedra per parallelepiped sharing the main diagonal
-  M1-M8, and that choice does not treat the three Cartesian axes
-  alike.  A k-point's effective weight is the sum of corner weights
-  over the tetrahedra containing it, so points related by a cubic
-  operation need not receive equal weight.  A scalar total is
-  unaffected because the asymmetry cancels in the sum, which is why
-  the total spectra and the TDOS look fine; an atom-resolved quantity
-  is not, and the three oxygens sit on the three different axes.
+  **Cause, CONFIRMED 2026-08-06 and not merely consistent.**  The
+  tetrahedron decomposition is not carried onto itself by the crystal
+  point group.  `generateTetrahedra` cuts every grid box into six
+  tetrahedra that all share one long diagonal of the box, and it picks
+  the SAME diagonal in every box.  A box has four such diagonals, so
+  an operation that carries the chosen one onto a different one
+  produces a decomposition with nothing in common with the original.
 
-  **What would settle it.**  Compare the effective per-k-point weight,
-  summed over tetrahedra, between k-points related by a symmetry
-  operation -- if those differ, the hypothesis is confirmed without
-  reference to any spectrum.  If confirmed, the question becomes
-  which remedy: choosing the main diagonal to minimize the asymmetry
-  (the usual recommendation, which reduces rather than removes it),
-  symmetrizing the atom-resolved result over the point group after
-  integration, or documenting the floor and scoping atom-resolved LAT
-  accordingly.
+  Tested directly, on the combinatorics alone -- no eigenvalues, no
+  spectra, no Bloechl weight expressions, so there is no parallel
+  re-derivation to be wrong.  `jobs/knbo3/o9_pdos/tetra_symmetry.py`
+  rebuilds the decomposition exactly as `generateTetrahedra` does,
+  applies each of the 48 cubic operations, and asks whether the same
+  set of tetrahedra comes back.  On the 4x4x4 mesh these runs use:
+
+  ```
+  operations leaving the decomposition unchanged   12 of 48
+  worst case, fraction of tetrahedra landing on a
+    tetrahedron that is in the decomposition       0.000
+  ```
+
+  The worst case is the striking number.  It is not a near miss: for
+  those operations NOT ONE of the 384 tetrahedra lands on a
+  tetrahedron that exists in the original set.  The 12 survivors are
+  the operations that leave the chosen diagonal alone.  The script
+  self-checks its own transcription first -- 384 tetrahedra, four
+  distinct corners each, every mesh point in exactly 24 of them -- so
+  a mis-built model cannot be mistaken for a physics result.
+
+  What follows is that k-points related by 36 of the 48 operations do
+  not receive related integration weights.  A quantity resolved onto
+  individual atoms therefore cannot come out equal for
+  symmetry-equivalent atoms.  A total is unaffected because it sums
+  over exactly the set the asymmetry permutes, which is why the TDOS
+  and the total spectra have always looked correct and why this went
+  unnoticed.
+
+  **What is NOT established** is the size.  This proves the mechanism
+  exists; it does not prove that the 6.9e-02 and 1.06e-01 above are
+  wholly attributable to it.  They are consistent with it and no
+  competing explanation is in hand, which is where the evidence stops.
+
+  **Three remedies, none obviously right.**
+
+  1. *Choose the diagonal per box rather than globally.*  The usual
+     advice in the literature is to take the SHORTEST diagonal, and
+     that advice is about interpolation accuracy rather than about
+     symmetry.  Note what it does here: on a cubic cell with a cubic
+     mesh all four diagonals are the same length, so the rule gives no
+     guidance and the asymmetry survives untouched.  It helps the
+     low-symmetry cells and does nothing for the high-symmetry ones,
+     which is the opposite of what is wanted.
+  2. *Symmetrize the finished result over the point group.*  Average
+     each atom-resolved quantity over the orbit its atom belongs to
+     after integrating.  This forces the equality rather than earning
+     it, and it needs the same atom permutation machinery section 2.4
+     already provides.  It is the common practical remedy and it is
+     honest provided the documentation says the equality is imposed.
+  3. *Document the limitation and scope around it.*  Record that
+     atom-resolved LAT carries an error of this order, keep the LAT
+     path for totals, and require the Gaussian path where per-atom
+     equality matters.  Cheapest, and it leaves a known-wrong number
+     reachable, which this project's own standard argues against.
+
+  Settle which before either C148 or O9's remaining work is finished,
+  because both are measured against the floor this sets.
 
   **Scope, and why this matters beyond the entry.**  It affects the
   LAT PDOS of DESIGN 1.4, which is implemented and was validated
