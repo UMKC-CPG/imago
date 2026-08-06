@@ -267,13 +267,10 @@ subroutine computeDOS(inSCF)
    !   a clear error (DESIGN 1.4).
    if (kPointIntgCode == 1 .and. &
          & detailCodePDOS == 3) then
-      write (20, *) 'ERROR: LAT PDOS (kPointIntg'
-      write (20, *) '  Code=1) with per-atom per-'
-      write (20, *) '  lm detail (detailCodePDOS='
-      write (20, *) '  3) requires D^l rotation'
-      write (20, *) '  matrices that are not'
-      write (20, *) '  available. Use mode 0, 1,'
-      write (20, *) '  or 2 with LAT integration.'
+      write (20, *) 'ERROR: LAT PDOS (kPointIntg Code=1) with per-atom'
+      write (20, *) 'per-lm detail (detailCodePDOS= 3) requires D^l rotation'
+      write (20, *) 'matrices that are not available. Use mode 0, 1, or 2'
+      write (20, *) 'with LAT integration.'
       stop 'computeDOS: mode 3 + LAT unsupported'
    endif
 
@@ -568,8 +565,7 @@ subroutine computeDOS(inSCF)
       !   that follows is shared.
       if (kPointIntgCode == 1) then
 
-         ! ----------------------------------------- LAT two-pass PDOS (DESIGN
-         ! 1.4). -----------------------------------------
+         ! - LAT two-pass PDOS (DESIGN 1.4). -
 
          ! Pass 1: stream IBZ k-points, compute Mulliken projections, store in
          !   projArray. Also accumulates electronNumber and localizationIndex
