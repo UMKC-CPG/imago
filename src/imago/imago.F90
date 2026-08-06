@@ -1187,8 +1187,9 @@ subroutine optc(inSCF,doOPTC)
    use O_TimeStamps
    use O_Potential,       only: spin
    use O_OptcPrint,       only: printOptcResults
-   use O_KPoints,         only: numKPoints
-   use O_Populate,        only: occupiedEnergy, populateStates
+   use O_KPoints,         only: numKPoints, kPointIntgCode
+   use O_Populate,        only: occupiedEnergy, populateStates, &
+         & computeElectronPopulation_LAT
    use O_Lattice,         only: initializeLattice, initializeFindVec
    use O_Input,           only: numStates, lastInitStatePACS, &
          & detailCodePOPTC
@@ -1222,6 +1223,31 @@ subroutine optc(inSCF,doOPTC)
       open (unit=51,file='fort.51',status='new',form='formatted')
    endif
 
+   ! Refuse the tetrahedron pathway until its accumulation exists.
+   !
+   ! The band-pair producer is in place and fills transProbBanded, but
+   !   nothing reads that array yet: the accumulation that turns it into
+   !   a spectrum is still to be written (DESIGN 12, TODO O9). The
+   !   producer deliberately does not fill transitionProb or
+   !   transCounter, so the Gaussian accumulator would find zero
+   !   transitions at every k-point and write a spectrum that is
+   !   identically zero.
+   !
+   ! Stopping is the only acceptable response to that. A run that
+   !   quietly returns zeros is worse than one that fails, because the
+   !   zeros are indistinguishable from a material that does not absorb
+   !   and they survive into whatever is plotted from them. The partial
+   !   DOS refuses its own unsupported combination the same way, in
+   !   computeDOS. Remove this guard when the accumulation lands.
+   if (kPointIntgCode == 1) then
+      write (20,*) 'ERROR: LAT k-point integration (kPointIntgCode=1)'
+      write (20,*) 'is not yet supported for optical properties. The'
+      write (20,*) 'tetrahedron accumulation is not implemented, so the'
+      write (20,*) 'run would produce an identically zero spectrum.'
+      write (20,*) 'Use kPointIntgCode=0 for optical calculations.'
+      call flush (20)
+      stop 'optc: LAT integration not yet implemented'
+   endif
 
    ! Populate the electron states to find the highest occupied state (Fermi
    !   energy for metals).
@@ -1235,6 +1261,21 @@ subroutine optc(inSCF,doOPTC)
 
    ! Shift the energy eigen values according to the highest occupied state.
    call shiftEnergyEigenValues(occupiedEnergy)
+
+   ! When the tetrahedron integration method is active, precompute the
+   !   occupation weights it uses in place of the Gaussian-broadened
+   !   electronPopulation. This mirrors the call in subroutine bond
+   !   above, including the zero energy argument: the shift just applied
+   !   has already moved the Fermi level to exactly zero in this
+   !   spectrum, so there is no separate level to search for.
+   !
+   ! It has to be done here rather than left to the bond path. An
+   !   optics-only run never enters subroutine bond at all, so without
+   !   this the array the transition producer reads would be unallocated
+   !   (DESIGN 12.4).
+   if (kPointIntgCode == 1) then
+      call computeElectronPopulation_LAT (0.0_double)
+   endif
 
    ! Compute some statistics and variables concerning the energy values.
    call getEnergyStatistics(doOPTC)

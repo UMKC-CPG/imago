@@ -53,6 +53,49 @@ module O_OptcTransitions
          & dimension (:,:,:,:,:,:) :: transitionProbPOPTC
    real (kind=double), allocatable, dimension (:,:,:)   :: energyDiff
 
+   ! Tetrahedron (LAT) integration pathway. DESIGN 12, PSEUDOCODE 19.
+   !
+   ! The Gaussian pathway stores each transition at a position in a list
+   !   that has been SORTED BY TRANSITION ENERGY, which discards the band
+   !   pair that produced it. A tetrahedron needs the same band pair at
+   !   all four of its corners, and sorted position p is a different pair
+   !   at each corner, so that storage cannot be reused. These arrays are
+   !   the same strengths held under a band-pair index instead.
+   real (kind=double), allocatable, &
+         & dimension (:,:,:,:,:) :: transProbBanded
+         !   (component, kPoint, initial band, final band, spin).
+         !
+         ! INDEX ORDER IS A PERFORMANCE DECISION, not an accident, and it
+         !   is chosen against the loop that reads it rather than the one
+         !   that fills it. Fortran stores the leftmost index fastest.
+         !   The accumulation holds a band pair fixed and walks every
+         !   tetrahedron, fetching four different k-points per
+         !   tetrahedron, so the k-point index sits immediately after the
+         !   component. The block (:,:,i,j,h) is then contiguous -- three
+         !   components by the k-point count, tens of kilobytes -- and
+         !   stays cache resident across every tetrahedron for that pair.
+         !   The more obvious (component, i, j, kPoint) would stride by
+         !   the component count times the two band counts on each corner
+         !   fetch, and miss on every one. Do not reorder this without
+         !   reordering the accumulation with it.
+
+   ! The band ranges spanned by transProbBanded. These are the UNION over
+   !   k-points and spins of the per-k-point occupied and unoccupied
+   !   ranges, not any single k-point's range. A tetrahedron corner may
+   !   need a band pair that another corner does not enumerate, so a
+   !   store built from one k-point's range would leave holes at exactly
+   !   the k-points a Fermi surface passes through.
+   integer :: bandedInitLo, bandedInitHi ! Occupied band range.
+   integer :: bandedFinLo,  bandedFinHi  ! Unoccupied band range.
+
+   ! Which band pairs are worth storing at all. The Gaussian producer
+   !   drops pairs failing the transition-energy cutoff as it goes, which
+   !   is safe when each k-point stands alone and unsafe here, since a
+   !   pair may fail at one tetrahedron corner and pass at three. The
+   !   mask below is therefore taken over ALL k-points at once: a pair is
+   !   kept if it is in range anywhere. Sized (initial, final, spin).
+   logical, allocatable, dimension (:,:,:) :: pairIsWanted
+
    ! POPTC specific variables. The decomposition these describe is the
    !   two by two grid of DESIGN 11: a grouping (by type or by atomic
    !   site) crossed with a resolution (the whole group in one partial,
@@ -599,7 +642,8 @@ subroutine computeTransitions(inSCF,doOPTC)
    use O_Kinds
    use O_TimeStamps
    use O_Potential,     only: spin
-   use O_KPoints,       only: numKPoints
+   use O_Constants,     only: dim3
+   use O_KPoints,       only: numKPoints, kPointIntgCode
    use O_AtomicSites,   only: coreDim, valeDim
    use O_CommandLine,   only: serialXYZ
    use O_Input,         only: numStates, totalEnergyDiffPACS, detailCodePOPTC
@@ -648,6 +692,23 @@ integer :: k,l
    allocate (valeValeMMGamma (valeDim,valeDim,3))
    valeValeMMGamma(:,:,:) = 0.0_double
 #endif
+
+   ! For the tetrahedron pathway, decide the band-pair store's shape and
+   !   allocate it before the loop below begins. It cannot be a per-call
+   !   array the way the Gaussian temporaries are: the accumulation reads
+   !   four k-points at a time, so the whole store has to be resident at
+   !   once (DESIGN 12.4, PSEUDOCODE 19.2).
+   if (kPointIntgCode == 1) then
+      call selectBandedPairs
+
+      allocate (transProbBanded (dim3,numKPoints, &
+            & bandedInitLo:bandedInitHi,bandedFinLo:bandedFinHi,spin))
+
+      ! Zeroed because the pair mask leaves gaps: a pair no tetrahedron
+      !   wants is never written, and the accumulation must read a zero
+      !   there rather than whatever the allocation happened to contain.
+      transProbBanded(:,:,:,:,:) = 0.0_double
+   endif
 
 
    do h = 1, spin
@@ -796,7 +857,16 @@ integer :: k,l
 !#endif
 
             if (doOPTC /= 3) then  ! Not doing a Sigma(E) calculation.
-               if (detailCodePOPTC == 0) then ! Doing standard OPTC calc.
+
+               ! The two Brillouin-zone integration methods need the
+               !   transition strengths held under different indices, so
+               !   the producer is chosen here rather than inside one
+               !   (DESIGN 12.2). Both are called at the same point in
+               !   the loop, immediately after the read that loaded this
+               !   k-point's wave functions and momentum matrix.
+               if (kPointIntgCode == 1) then
+                  call computeTransProbBanded (i,0,h)
+               elseif (detailCodePOPTC == 0) then ! Standard OPTC calc.
                   call computePairs (i,0,h,doOPTC)
                else ! Doing pOptc calculation
                   call computePOPTCPairs (i,0,h,doOPTC)
@@ -887,6 +957,83 @@ integer :: k,l
    call timeStampEnd (23)
 
 end subroutine computeTransitions
+
+
+! Decide the shape of the band-pair store before any of it is filled.
+!
+! Two jobs, both of which need only eigenvalues and so are essentially
+!   free beside the matrix element work that follows. The first is to
+!   find the band ranges the store must span. The second is to decide
+!   which band pairs inside those ranges are worth storing at all.
+!
+! Why the pruning has to be redone rather than inherited. The Gaussian
+!   producer drops a pair the moment its transition energy exceeds the
+!   requested maximum, and does so k-point by k-point. That is correct
+!   when each k-point is integrated on its own. It is wrong here: the
+!   tetrahedron that owns a k-point also owns three others, and a pair
+!   that is out of range at one corner may be in range at the other
+!   three. Dropping it at the first corner would leave the tetrahedron
+!   unable to form its energy difference. So the test below asks whether
+!   a pair is in range at ANY k-point, and keeps it everywhere if so.
+!
+! Why prune at all, given that the expensive work is unpruned anyway.
+!   The dominant cost of the producer is building conjWaveMomSum, which
+!   runs over the whole final-state range before any cutoff applies and
+!   is therefore identical in both pathways. What pruning saves is not
+!   time but STORAGE, and that is worth having: every retained pair
+!   costs three doubles per k-point here, and three times the square of
+!   the partial count in the decomposed case.
+subroutine selectBandedPairs
+
+   ! Import the necessary modules.
+   use O_Kinds
+   use O_Potential,       only: spin
+   use O_KPoints,         only: numKPoints
+   use O_SecularEquation, only: energyEigenValues
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define local variables.
+   integer :: h,j,k ! Loop indices: spin, initial band, final band.
+   real (kind=double) :: smallestEnergyDiff
+
+   ! The union of the per-k-point ranges over every k-point and spin.
+   !   getEnergyStatistics has already filled these arrays, one entry per
+   !   k-point and spin, so this is a scan rather than a computation.
+   bandedInitLo = minval(firstOccupiedState  (:numKPoints,:spin))
+   bandedInitHi = maxval(lastOccupiedState   (:numKPoints,:spin))
+   bandedFinLo  = minval(firstUnoccupiedState(:numKPoints,:spin))
+   bandedFinHi  = maxval(lastUnoccupiedState (:numKPoints,:spin))
+
+   allocate (pairIsWanted(bandedInitLo:bandedInitHi, &
+         & bandedFinLo:bandedFinHi, spin))
+   pairIsWanted(:,:,:) = .false.
+
+   do h = 1, spin
+      do j = bandedInitLo, bandedInitHi
+         do k = bandedFinLo, bandedFinHi
+
+            ! A final state below an initial state is not a transition.
+            !   The Gaussian producer applies the same rule.
+            if (j >= k) cycle
+
+            ! The smallest transition energy this pair reaches anywhere
+            !   in the zone. If even that exceeds the requested maximum
+            !   then the pair is out of range at every k-point and no
+            !   tetrahedron can want it.
+            smallestEnergyDiff = minval( &
+                  & energyEigenValues(k,:numKPoints,h) &
+                  & - energyEigenValues(j,:numKPoints,h))
+
+            if (smallestEnergyDiff <= maxTransEnergy) then
+               pairIsWanted(j,k,h) = .true.
+            endif
+         enddo
+      enddo
+   enddo
+
+end subroutine selectBandedPairs
 
 
 ! Build the sum, over all basis functions, of the conjugated wave function
@@ -1254,6 +1401,171 @@ subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
    deallocate (sortOrder)
 
 end subroutine computePairs
+
+
+! Fill one k-point's slice of the band-pair transition store, for the
+!   tetrahedron integration pathway. PSEUDOCODE 19.2.
+!
+! This is the counterpart of computePairs, and the physics inside the
+!   two is the same: both build conjWaveMomSum through the shared
+!   routine and both form the squared momentum matrix element weighted
+!   by the initial state's occupancy and the final state's vacancy. What
+!   differs is entirely bookkeeping, and in five ways. This routine
+!   indexes by band pair rather than by position in a list; it does not
+!   sort; it spans the union of the band ranges rather than this
+!   k-point's own; it prunes from a mask taken over all k-points at once
+!   rather than dropping pairs as it meets them; and it takes its
+!   occupancies from the tetrahedron scheme rather than the Gaussian
+!   one.
+!
+! Why it is called per k-point rather than owning a k-point loop. The
+!   wave functions and the momentum matrix are module arrays holding ONE
+!   k-point: readDataSCF and readDataPSCF overwrite them on every pass,
+!   and valeValeMM has no k-point dimension at all. A routine that
+!   looped over k-points itself would see only whichever k-point was
+!   read last, so it would have to perform the reads too -- duplicating
+!   the logic that chooses between the SCF and post-SCF sources and
+!   between the regular and PACS matrix codes. Sitting inside the
+!   existing loop avoids that second copy, and satisfies for free the
+!   rule that buildConjWaveMomSum is called exactly once per read.
+subroutine computeTransProbBanded (currentKPoint,xyzComponents, &
+      & spinDirection)
+
+   ! Import the necessary modules.
+   use O_Kinds
+   use O_AtomicSites, only: valeDim
+   use O_KPoints,     only: kPointWeight
+   use O_Populate,    only: electronPopulation_LAT
+#ifndef GAMMA
+   use O_SecularEquation, only: valeVale
+#else
+   use O_SecularEquation, only: valeValeGamma
+#endif
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define the dummy variables passed to this subroutine.
+   integer, intent(in) :: currentKPoint
+   integer, intent(in) :: xyzComponents ! 0=all, 1=x, 2=y, 3=z
+   integer, intent(in) :: spinDirection
+
+   ! Define local variables.
+   integer :: i,j,k ! Loop indices: initial band, final band, component.
+   integer :: initComponent
+   integer :: finComponent
+   integer :: storeComponent  ! Where in dim3 this component belongs.
+   integer :: finalStateIndex ! Position of band j within conjWaveMomSum.
+   real (kind=double) :: initStateFactor
+   real (kind=double) :: finStateFactor
+   real (kind=double) :: fullOccupancy
+#ifndef GAMMA
+   complex (kind=double), allocatable, dimension (:,:,:) :: conjWaveMomSum
+   complex (kind=double) :: valeValeXMom
+#else
+   real (kind=double), allocatable, dimension (:,:,:) :: conjWaveMomSum
+   real (kind=double) :: valeValeXMom
+#endif
+
+   ! Determine the range of components (xyz) that should be considered.
+   if (xyzComponents == 0) then
+      initComponent = 1
+      finComponent = 3
+   else
+      initComponent = 1
+      finComponent = 1
+   endif
+
+   ! The occupancy denominator. electronPopulation_LAT holds a
+   !   Brillouin-zone VOLUME FRACTION rather than an occupancy: summed
+   !   over every k-point it reaches one for a fully occupied band. The
+   !   share belonging to a single k-point is that point's own volume
+   !   fraction, which is half its weight because the weights sum to two
+   !   by Imago's convention. Dividing by it leaves the pure zero-to-one
+   !   occupancy the transition probability needs.
+   !
+   ! The zone measure must be removed here rather than carried along,
+   !   because on this pathway it re-enters through tetraVol during the
+   !   accumulation. Leaving it in would apply the measure twice. The
+   !   Gaussian producer performs the matching division by
+   !   kPointWeight/spin for the same reason, against its own array's
+   !   convention (DESIGN 1.6d, and the conversion in computeBond).
+   fullOccupancy = kPointWeight(currentKPoint) * 0.5_double
+
+   ! Build the shared momentum sum over the FULL final-state range. It is
+   !   deliberately not restricted to the wanted pairs: the cost is set
+   !   by the range rather than by the pairs, and every wanted pair needs
+   !   a final state somewhere in it.
+   allocate (conjWaveMomSum (valeDim,bandedFinHi-bandedFinLo+1, &
+         & finComponent))
+
+#ifndef GAMMA
+   call buildConjWaveMomSum (bandedFinLo,bandedFinHi,initComponent, &
+         & finComponent,conjWaveMomSum)
+#else
+   call buildConjWaveMomSum (bandedFinLo,bandedFinHi,initComponent, &
+         & finComponent,conjWaveMomSum)
+#endif
+
+   do i = bandedInitLo, bandedInitHi
+
+      ! The occupancy of the initial state at this k-point.
+      initStateFactor = electronPopulation_LAT(i,currentKPoint, &
+            & spinDirection) / fullOccupancy
+
+      do j = bandedFinLo, bandedFinHi
+
+         ! Skip pairs that no tetrahedron anywhere in the zone can want.
+         !   The mask already excludes the case of a final state below an
+         !   initial one.
+         if (.not. pairIsWanted(i,j,spinDirection)) cycle
+
+         ! Where band j sits within conjWaveMomSum. Derived from the band
+         !   index rather than counted, so that skipping a pair cannot
+         !   put this out of step with the array it addresses.
+         finalStateIndex = j - bandedFinLo + 1
+
+         ! The vacancy of the final state at this k-point.
+         finStateFactor = 1.0_double - electronPopulation_LAT(j, &
+               & currentKPoint,spinDirection) / fullOccupancy
+
+         do k = initComponent, finComponent
+
+            ! When the components are done one at a time the computed
+            !   component always lands in slot 1 of conjWaveMomSum but
+            !   belongs in slot xyzComponents of the store.
+            if (xyzComponents == 0) then
+               storeComponent = k
+            else
+               storeComponent = xyzComponents
+            endif
+
+#ifndef GAMMA
+            valeValeXMom = sum(valeVale(:,i,1) &
+                  & * conjWaveMomSum(:,finalStateIndex,k))
+
+            ! The squared magnitude. It is stored as a real number but
+            !   represents the y in (x+iy), because the momentum matrix
+            !   carries a factor of -i applied in getIntgResults.
+            transProbBanded(storeComponent,currentKPoint,i,j, &
+                  & spinDirection) = (real(valeValeXMom,double)**2 &
+                  & + aimag(valeValeXMom)**2) &
+                  & * initStateFactor * finStateFactor
+#else
+            valeValeXMom = sum(valeValeGamma(:,i,1) &
+                  & * conjWaveMomSum(:,finalStateIndex,k))
+
+            transProbBanded(storeComponent,currentKPoint,i,j, &
+                  & spinDirection) = valeValeXMom**2 &
+                  & * initStateFactor * finStateFactor
+#endif
+         enddo
+      enddo
+   enddo
+
+   deallocate (conjWaveMomSum)
+
+end subroutine computeTransProbBanded
 
 
 ! The decomposed counterpart of buildConjWaveMomSum. It answers the same

@@ -6821,11 +6821,47 @@ is not carried only in conversation.
        inputs -- once on each binary -- and its ten total
        spectrum files are byte identical.  Job directory
        `jobs/knbo3/o9_refactor` (gitignored).
-    4. `optc.F90`: the band-pair producer of PSEUDOCODE
-       19.2, storing `(dim3, kIBZ, i, j)`.  **This is the
-       largest single piece of the task** and is easy to
-       miss, because the entry originally jumped straight to
-       the accumulators.  Three things inside it: the band
+    4. **HALF DONE 2026-08-06.**  `optc.F90`: the band-pair
+       producer of PSEUDOCODE 19.2, storing
+       `(dim3, kIBZ, i, j, spin)`.  The TOTAL-spectra
+       producer is written -- `selectBandedPairs` for the
+       union ranges and the pair mask,
+       `computeTransProbBanded` for one k-point's slice,
+       both wired into `computeTransitions` under
+       `kPointIntgCode`, with `computeElectronPopulation_LAT`
+       now called from `subroutine optc` because an
+       optics-only run never enters `subroutine bond` where
+       it was built.  **The POPTC counterpart is the
+       remaining half**: same shape with the pair-matrix
+       index, consuming `buildConjWaveMomSumPOPTC`.
+
+       **A guard was added and must be removed at step 5.**
+       Selecting the tetrahedron pathway now stops the run
+       with a message.  Until the accumulation exists the
+       producer fills `transProbBanded` while the Gaussian
+       accumulator still reads `transitionProb` and
+       `transCounter`, which this producer deliberately does
+       not fill -- so the run completed normally and wrote a
+       spectrum that was identically zero.  That was measured,
+       not predicted.  Silently returning zeros is the O4
+       failure mode and is worse than failing, because zeros
+       are indistinguishable from a material that does not
+       absorb.  `computeDOS` refuses its own unsupported
+       combination the same way.
+
+       The verification scripts were hardened at the same
+       time and for the same reason.  Both divided by a peak
+       height, so a zero spectrum would have reported perfect
+       agreement rather than no agreement:
+       `compare_poptc.py` now exits if a total spectrum is
+       zero and returns NaN rather than 0.0 for a dead pair,
+       and `check_cells.py` fails on a zero total.  Both now
+       print the peak and the count of dead pairs before
+       quoting any agreement figure.  Re-run against the
+       stored evidence: peaks 4.85e+01, zero dead pairs, so
+       none of the earlier claims rested on empty data.
+
+       Three things inside it: the band
        range must be the UNION over k-points, since a per-k
        range leaves holes at exactly the k-points a Fermi
        surface passes through; the transition-energy cutoff
