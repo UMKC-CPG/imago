@@ -7125,6 +7125,59 @@ is not carried only in conversation.
   default integer, so a valence basis above about 46000
   functions overflows it.  Remote, but silent if reached.
 
+- [ ] O10. Settle whether the eigenvector readers can write
+  past the end of `valeVale` on a spin-polarized run.
+  **Observed while tracing the O9 seams, NOT verified either
+  way, and the expectation on the day it was raised was that
+  it does not happen.**  Recorded because the reasoning that
+  makes it safe is not written anywhere, so the next reader
+  has to re-derive it.
+
+  What was seen.  Both readers write the spin index into the
+  third dimension of the eigenvector array:
+  `readDataSCF` at `secularEqn.F90:1143` and `readDataPSCF`
+  at `1282` (and `1293` for Gamma) both target
+  `valeVale(:,:numStates,h)`, with `h` running `1..spin`.
+  Three callers allocate that array with a third extent of
+  exactly ONE rather than `spin`:
+
+    - `optc.F90:638` and `:645`, in `computeTransitions`
+    - `bond.F90:154` and `:160`
+    - `bond3C.F90:142` and `:148`
+
+  Read literally, a run with `spin == 2` reaches `h = 2`
+  against an extent of 1.  Note that the secular equation
+  itself allocates the same array as
+  `(valeDim, valeDim, spin)` (`secularEqn.F90:105`, `:405`),
+  so the array is reshaped between stages, which is what
+  makes this hard to see by inspection.
+
+  Why it may well be fine.  There may be a guard, or a
+  reallocation, or the spin-polarized post-SCF path may not
+  reach these callers at all.  Any of those would settle it.
+  The point of the entry is that none of them is written
+  down at the allocation, so the safety is currently
+  inferred rather than stated.
+
+  How to settle it cheaply.  Run one spin-polarized post-SCF
+  optical calculation under the existing `gfortran-asan` or
+  `_0d_asan` build.  Bounds checking answers it in one run
+  and needs no reasoning.  Every KNbO3 run in `jobs/` is
+  `spin == 1`, which is why nothing so far would have shown
+  it.
+
+  If it turns out to be safe, say so AT the three
+  allocations, naming what makes it safe.  If it is not,
+  the fix is presumably to allocate with `spin`, but check
+  first whether the callers actually want per-spin
+  residency or whether the reader should be writing to slot
+  1 -- the arrays are read one k-point at a time and
+  consumed immediately, so a single slot may be the
+  intent and the reader's `h` the mistake.
+
+  Touches the same call path as O9 step 4, which adds
+  another consumer to it.
+
 ## TOOLING (lint helpers)
 
 - [ ] T1. Improve `.claude/commands/scripts/rewrap_prose.py`

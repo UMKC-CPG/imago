@@ -14714,16 +14714,81 @@ against the momentum matrix, which is the expensive part and
 the part where an error would be hardest to see -- is
 extracted into a routine both producers call.
 
+### 19.2.1 What this pass consumes, and from where
+
+This producer attaches to a running program rather than
+standing alone, so its inputs are listed before its
+algorithm.  Each row is the answer to "who fills this, and
+when": the rows are what the code below is entitled to
+assume, and a later reader checks them against the source
+rather than trusting the prose.
+
 ```
-function buildConjWaveMomSum(kIBZ, h, firstFin, lastFin,
-                             initComponent, finComponent):
+quantity            supplied by                 when
+--------------------------------------------------------
+valeVale,           readDataSCF / readDataPSCF, once per
+valeValeMM            called in                 (spin,
+                      computeTransitions          k-point)
+energyEigenValues   the secular solution,       resident
+                      dimensioned (numStates,     for ALL
+                      numKPoints, spin)           k-points
+firstOccupiedState  getEnergyStatistics,        before the
+  and companions      per (k-point, spin)         loop
+electronPopulation  computeElectronPopulation   NOT on the
+  _LAT                _LAT, called only from      optical
+                      subroutine bond             path
+tetrahedra,         generateTetrahedra, from    before optc
+  tetraVol            initializeKPoints when      runs
+                      kPointIntgCode == 1
+fullKPToIBZKPMap,   the IBZ fold in             before optc
+  fullKPToIBZOpMap    initializeKPointMesh        runs
+pOptcIndex,         the section 18 index        per call,
+  sumNumPartials      construction                today
+```
+
+Two of these rows decide the structure, and they are the
+reason this section can no longer be written as a routine
+that owns a loop over k-points.
+
+**The momentum matrix is loaded per k-point, inside a loop
+this pass does not own.** `computeTransitions` reads it and
+then calls a producer once, and `buildConjWaveMomSum`
+consumes what was read rather than reading anything itself.
+A producer owning its own k-point loop would have to
+duplicate that read, including its SCF and post-SCF variants
+and its PACS matrix codes -- two copies of the logic that
+decides what to read, free to drift apart.  **So the banded
+producer is called once per k-point from inside the existing
+loop, exactly where `computePairs` is called today**, and
+the array it fills is allocated before the loop because it
+spans every k-point.  This also satisfies for free the
+one-call-per-read rule that the Gamma build needs, since the
+in-place Hermiticity fix runs once per read either way.
+
+**`electronPopulation_LAT` is absent on this path.** It is
+built inside `subroutine bond`, which `subroutine optc` never
+reaches, so an optics-only run finds it unallocated. The
+optical path calls it once, before the k-point loop, after
+the eigenvalues have been shifted to put the Fermi level at
+zero -- which is why the energy argument is zero.
+
+```
+function buildConjWaveMomSum(firstFin, lastFin,
+                             initComponent, finComponent,
+                             conjWaveMomSum):
     # Exactly the loop that computePairs runs today, lifted
     #   unchanged.  Both pathways call it; neither owns it.
-    #   The POPTC counterpart, buildConjWaveMomSumPOPTC,
+    #
+    # It takes NO k-point or spin argument. The wave
+    #   functions and the momentum matrix are module arrays
+    #   that the caller has already loaded for the k-point
+    #   in hand, so passing an index would imply a lookup
+    #   this routine does not perform.
+    #
+    # The POPTC counterpart, buildConjWaveMomSumPOPTC,
     #   carries the extra partial index of section 18 and is
     #   extracted the same way.
     ...
-    return conjWaveMomSum
 
 
 function computeTransProbBanded(h, numKPoints,
@@ -14797,15 +14862,95 @@ function computeTransProbBanded(h, numKPoints,
     return transProbBanded
 ```
 
-**On cost.**  This is the same order of storage as
-`transitionProb`, which is `dim3 x maxPairs x numKPoints x
-spin` with `maxPairs` the largest per-k pair count.  The
-banded store is `dim3 x nOcc x nUnocc x numKPoints`, which
-is at least as large because the transition-energy cutoff
-can no longer prune what is STORED.  It still prunes work:
-a pair whose energy difference exceeds the cutoff at all
-four corners contributes nothing and its tetrahedron loop
-can be skipped.
+### 19.2.2 Cost, measured against the Gaussian producer
+
+**Pass 1 costs almost exactly what the Gaussian pass costs,
+which is not obvious and is worth showing.**  The dominant
+term is building `conjWaveMomSum`: three components by the
+final-state count by `valeDim` squared, per k-point.  That
+term is IDENTICAL in both pathways, because the array is
+built for the whole final-state range BEFORE any cutoff is
+applied.  `computePairs` prunes with two `exit` statements
+inside the pair loop, so what the cutoff actually saves is
+the per-pair dot product, three components by `valeDim`
+each -- not the expensive part.
+
+Putting numbers on it, for the KNbO3 case where `valeDim` is
+90 with roughly 20 occupied and 50 unoccupied states in
+range: the shared build is about 1.2 million multiply-adds
+per k-point, while the complete unpruned set of pairs costs
+about 270 thousand.  **So a producer that prunes nothing at
+all pays at most about twenty percent more than one that
+prunes perfectly.**
+
+Where pruning does matter is STORAGE, and there it matters a
+great deal for the decomposed case.  Each retained pair
+costs three doubles per k-point for the total spectra, but
+three times `sumNumPartials` squared for the pair matrix --
+about 31 kilobytes per pair per k-point at 36 partials.
+
+So the pruning is worth keeping, and it can be recovered
+without touching a single matrix element:
+
+```
+# Cheap pre-pass, eigenvalues only.  Cost is one subtraction
+#   per (i, j, k), which is nothing beside a valeDim squared
+#   build, and it runs before any matrix element is formed.
+#
+# A band pair is worth storing if its transition energy
+#   falls within the cutoff at ANY k-point.  Taking the
+#   minimum over k is what makes this safe for tetrahedra: a
+#   pair that is out of range at one corner and in range at
+#   another must still be present at both.
+for i, j in the union band ranges:
+   pairIsWanted(i,j) = ( min over k of
+                         (eigen(j,k,h) - eigen(i,k,h)) )
+                       <= maxTransEnergy
+```
+
+**Pass 2 is where the real cost sits, and it hinges on one
+implementation choice.**  The Gaussian accumulation is
+`numKPoints x pairs x W_gauss`, where `W_gauss` is the
+number of energy bins a single transition actually reaches
+before the exponent cuts it off.  The LAT accumulation is
+`numTetrahedra x pairs x W_tetra`, where `numTetrahedra` is
+six times the FULL mesh count and `W_tetra` is the number of
+bins spanned by the four corner values of the energy
+difference.
+
+Those widths are only real if the energy loop is BOUNDED.
+As written today, `getOptcCond` loops over every energy
+point and tests inside the loop, so with the 5001-point
+grid these runs use and a Gaussian reaching about 140 bins,
+roughly thirty-five evaluations in thirty-six are discarded.
+That is tolerable at `numKPoints` of four.  It would not be
+tolerable here: the same mesh gives 384 tetrahedra against
+those four k-points, so the unbounded form would do about
+ninety-six times the outer iterations, each sweeping all
+5001 points.  **Compute the first and last energy index from
+`sortedDiff(1)` and `sortedDiff(4)` and loop only that
+range.  This is not an optimization to add later; the
+unbounded form is not viable.**
+
+With the loop bounded, the ratio of LAT to Gaussian work is
+six times the IBZ reduction factor times `W_tetra` over
+`W_gauss`.  For the KNbO3 mesh that is roughly seventy.
+
+**But the scaling favours LAT, and that is the argument for
+paying the constant.**  `W_gauss` is fixed by the broadening
+width, so the Gaussian cost grows as the k-point count, or
+as the cube of the points per axis.  `W_tetra` is set by how
+much the energy difference varies between ADJACENT mesh
+points, which falls off as the mesh is refined, so the
+tetrahedron count rising as the cube is partly cancelled and
+the LAT cost grows roughly as the square.  LAT is the more
+expensive method on a coarse mesh and the cheaper one on a
+fine mesh, with a crossover that is a measurement rather
+than a prediction.  The caveat is that this assumes the
+energy difference is roughly linear between adjacent points,
+which is the same assumption the tetrahedron method itself
+rests on -- so where the assumption fails, the accuracy
+argument fails with the cost argument.
 
 ### 19.3 Pass 2: tetrahedron accumulation, total spectra
 

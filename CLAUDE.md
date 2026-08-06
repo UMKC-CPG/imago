@@ -63,6 +63,32 @@ disagreement between pseudocode and code means the *code* is
 wrong. Never edit the pseudocode to match code merely because
 the code is already written.
 
+**New work grafted onto existing code needs a seam inventory.**
+Writing a level from the level above is sufficient only when the
+new work is a new subsystem. When it must attach to a running
+program, the lower levels take that program as a SECOND input,
+and a graft point specified without reading the code on the
+other side of it is specified from imagination.
+
+So a DESIGN or PSEUDOCODE section that modifies existing code is
+not finished until it names, for every quantity the new code
+consumes or produces: where it comes from, who allocates it, who
+loads it, and when. Write that inventory into the section. It is
+what a later reader checks the prose against, and it is where
+this project's specification errors have actually occurred --
+every one of them at a boundary with a routine nobody had read,
+none of them in the algorithm itself.
+
+The inventory also settles structure that would otherwise look
+like taste. If a quantity is loaded per k-point inside an
+existing loop, a new consumer of it has to sit in that loop; that
+is a consequence of the seam, not a preference.
+
+**Verify the section you are copying from.** Modelling new
+pseudocode on an existing section propagates that section's
+defects sideways into work that then looks independently
+derived. Check the model section against its own code first.
+
 ## Level Awareness
 
 During development conversations, the programmer may shift
