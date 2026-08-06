@@ -14447,8 +14447,42 @@ with the same `sum(kPointWeight)` scale factor that section
 1.3 requires of every LAT accumulation, so that the result
 lands on the same scale as the Gaussian path.
 
-Four things must be got right, and each is a silent wrong
-answer rather than a failure.
+**The stored transition probabilities cannot be reused, and
+this is the structural precondition for everything else.**
+`transitionProb` is indexed `(component, pair, kpoint,
+spin)`, where `pair` is a position in a list that
+`computePairs` sorts by transition ENERGY before storing.
+The band identity (i, j) is discarded by that sort. Worse,
+the list is built from `firstOccupiedState` and its
+companions, which are dimensioned `(numKPoints, spin)`, so
+both the number of pairs and the range of bands entering
+them vary from one k-point to the next.
+
+A tetrahedron needs the SAME band pair at all four of its
+corners. A sorted pair index cannot supply it: position p is
+a different (i, j) at each corner, and at a metal's Fermi
+surface a pair present at one corner may not be enumerated
+at another at all. So the LAT pathway requires the matrix
+elements stored under a band-pair index, `(component, i, j,
+kIBZ, spin)`, rather than the energy-sorted index the
+Gaussian pathway uses. The transition energy is then
+`e_j - e_i` recomputed from the eigenvalues rather than
+looked up, which is what the corner values need in any case.
+
+This is the analogue of the two-pass requirement that
+section 1.4 imposes on the PDOS, and it is sharper: the PDOS
+needed its projections merely to survive to a second pass,
+while this needs them re-indexed.
+
+Note that the occupation factors are not a new problem. The
+Gaussian path already multiplies each transition by the
+initial state's occupancy and the final state's vacancy, so
+the f_i(1 - f_j) structure exists; a band-pair index simply
+lets it be evaluated per corner. That is most of what
+item (c) below asks for.
+
+Beyond that, four things must be got right, and each is a
+silent wrong answer rather than a failure.
 
 **(a) The sort permutation applies to the matrix element
 too.** `bloechlCornerDOSWt` returns its four weights in
@@ -14475,15 +14509,26 @@ not of a tetrahedron.** The Gaussian path classifies bands
 per k-point, through `firstOccupiedState` and its
 companions, and never has to reconcile two k-points. A
 tetrahedron spans four, and near a Fermi surface a band may
-be occupied at some corners and empty at others, so the
-transition pair (i, j) is not well defined across the
-tetrahedron. **For a gapped system this never arises**, and
-that is the case to implement and validate first. For a
-metal the contribution must be weighted by the corner
-occupations, f_i(1 - f_j), which the LAT machinery can
-already supply through `cornerIntgWt_LAT` at the Fermi
-level. This is a real extension and not a detail; it should
-be specified separately rather than assumed to fall out.
+be occupied at some corners and empty at others. Once the
+matrix elements are stored per band pair the enumeration
+problem goes away -- every (i, j) in range is present at
+every corner -- and what remains is that the occupation
+factors must be evaluated corner by corner rather than
+carried in from the pair's own k-point.
+
+**For a gapped system the distinction is inert**, since
+every corner classifies the same way, and that is the case
+to implement and validate first. For a metal two things
+change together: the factors vary across the tetrahedron,
+and the occupations themselves should come from
+`electronPopulation_LAT` rather than from the Gaussian
+path's `electronPopulation`, so that one scheme determines
+both the geometry and the filling. That pairing is the same
+argument section 1.6(a) makes for the Fermi level, and for
+the same reason -- mixing the two leaves an error the
+calculation partly absorbs. It is a real extension and
+should be specified separately rather than assumed to fall
+out of this one.
 
 **(d) Degenerate corners.** When `epsDiff_ij` is nearly
 constant over a tetrahedron the sorted values coincide and

@@ -6754,15 +6754,29 @@ is not carried only in conversation.
   The pieces, in chain order:
     1. **DONE.**  DESIGN 12 (this section) and the
        ARCHITECTURE entries above it.
-    2. PSEUDOCODE: not written.  It needs the corner
-       assembly for a transition pair, which is section 1.4's
+    2. **DONE.**  PSEUDOCODE 19, which follows section 8's
        two-pass PDOS structure with the band-energy
        DIFFERENCE in place of the band energy and the squared
        matrix element in place of the Mulliken projection.
-       The sort permutation must be shown carrying the matrix
-       element with it (DESIGN 12.4a) -- that is the mistake
-       that yields a plausible wrong spectrum rather than an
+       The sort permutation is shown carrying the matrix
+       element with it (DESIGN 12.4a) -- the mistake that
+       yields a plausible wrong spectrum rather than an
        obviously broken one.
+
+       Writing it turned up a structural requirement DESIGN
+       12 had missed, and DESIGN 12.4 was corrected before
+       the pseudocode was written against it.  The Gaussian
+       path stores `transitionProb` under a pair index that
+       `computePairs` has SORTED BY TRANSITION ENERGY, which
+       discards the band identity; the pair count and band
+       ranges also vary per k-point, since
+       `firstOccupiedState` and its companions are
+       dimensioned `(numKPoints, spin)`.  A tetrahedron needs
+       the same band pair at all four corners, so the LAT
+       path cannot reuse that array at all.  It needs a
+       re-indexing pass producing `(component, i, j, kIBZ)`.
+       That pass is new work, not a rename, and it is the
+       largest single piece of this task.
     3. `optcPrint.F90`: a `getOptcCond_LAT` and its POPTC
        counterpart, selected by the caller in the
        `computeTDOS_LAT` shape rather than branched

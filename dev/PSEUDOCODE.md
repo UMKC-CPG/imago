@@ -14596,3 +14596,282 @@ type; an atom-grouped one names its site.  An nl-resolved
 partial appends the QN_l letter and the radial function
 number.  The total spectrum is always written first, as
 sequence number 1, before any pair.
+
+---
+
+## 19. LAT Optical Integration (DESIGN 12)
+
+The optical properties accumulate their broadened spectrum
+by Gaussian smearing over IBZ k-points.  This section
+specifies the tetrahedron alternative that DESIGN 12 adds
+alongside it.  Both pathways remain, selected by
+`kPointIntgCode`, and neither replaces the other.
+
+The quantity integrated is a joint density of states over
+band PAIRS: the surface where `e_j(k) - e_i(k)` equals the
+output energy, weighted by the squared momentum matrix
+element.  Section 8 solves the same shape of problem for the
+partial DOS, and this section follows its two-pass
+structure, with the band-energy DIFFERENCE where section 8
+has a band energy and the squared matrix element where it
+has a Mulliken projection.
+
+### 19.1 What is dispatched, and what is not
+
+```
+# In the optical driver, mirroring the computeTDOS_LAT
+#   dispatch rather than branching inside the accumulator
+#   (DESIGN 12.2): the two pathways do not share a loop
+#   structure, so an internal branch would wrap the whole
+#   body.
+if kPointIntgCode == 1:
+   call getOptcCond_LAT(...)
+   if detailCodePOPTC /= 0:
+      call getOptcCondPOPTC_LAT(...)
+else:
+   call getOptcCond(...)
+   if detailCodePOPTC /= 0:
+      call getOptcCondPOPTC(...)
+```
+
+**Only the accumulation is dispatched.**  The transition
+pairs, the momentum matrix elements and the decomposition
+index of section 18 are computed identically either way.
+What the accumulator produces is the same `optcCond` and
+`optcCondPOPTC` the printer already consumes, so nothing
+downstream changes: the `1/E` scaling and the unit
+conversion stay in `printSpectrum` where they are.
+
+### 19.2 Pass 1: re-index the matrix elements by band pair
+
+**This pass exists because the Gaussian path's storage
+cannot be reused.**  `transitionProb` is indexed by a
+position in a list sorted by transition energy, and the
+band identity is discarded by that sort; the pair count and
+the band ranges also vary per k-point.  A tetrahedron needs
+the same band pair at all four corners, so the LAT path
+stores under a band-pair index instead (DESIGN 12.4).
+
+```
+function computeTransProbBanded(h, numKPoints,
+        firstInitAll, lastInitAll,
+        firstFinAll,  lastFinAll):
+
+    # The band ranges are per k-point arrays.  The banded
+    #   store must span the UNION over k-points, so that a
+    #   band pair present at any corner has a slot at every
+    #   corner.  Taking the per-k range here is the error
+    #   that would leave holes at exactly the k-points a
+    #   metal's Fermi surface passes through.
+    initLo = min over k of firstInitAll(k, h)
+    initHi = max over k of lastInitAll(k, h)
+    finLo  = min over k of firstFinAll(k, h)
+    finHi  = max over k of lastFinAll(k, h)
+
+    allocate transProbBanded(dim3,
+                             initLo:initHi, finLo:finHi,
+                             numKPoints)
+    transProbBanded = 0.0
+
+    for kIBZ = 1 to numKPoints:
+       read eigenvectors and momentum matrices for kIBZ
+       for i = initLo to initHi:
+          for j = finLo to finHi:
+
+             # Same construction as computePairs: the
+             #   squared momentum matrix element times the
+             #   initial state's occupancy and the final
+             #   state's vacancy.  Occupancies come from
+             #   electronPopulation_LAT on this path, not
+             #   from the Gaussian electronPopulation, so
+             #   that one scheme sets both the geometry and
+             #   the filling (DESIGN 12.4c).
+             for c = 1 to dim3:
+                transProbBanded(c, i, j, kIBZ) =
+                      |M_ij^c(kIBZ)|^2
+                      * occ(i, kIBZ) * (1 - occ(j, kIBZ))
+
+    return transProbBanded
+```
+
+**On cost.**  This is the same order of storage as
+`transitionProb`, which is `dim3 x maxPairs x numKPoints x
+spin` with `maxPairs` the largest per-k pair count.  The
+banded store is `dim3 x nOcc x nUnocc x numKPoints`, which
+is at least as large because the transition-energy cutoff
+can no longer prune what is STORED.  It still prunes work:
+a pair whose energy difference exceeds the cutoff at all
+four corners contributes nothing and its tetrahedron loop
+can be skipped.
+
+### 19.3 Pass 2: tetrahedron accumulation, total spectra
+
+```
+function getOptcCond_LAT(transProbBanded, eigenValues,
+        tetrahedra, numTetrahedra, tetraVol,
+        fullKPToIBZKPMap, fullKPToIBZOpMap,
+        energyScale, numEnergyPoints, h):
+
+    optcCond = 0.0
+
+    # The LAT scale factor of DESIGN 1.3: tetraVol sums to
+    #   1 while kPointWeight sums to 2, so this factor puts
+    #   the result on the Gaussian path's scale.
+    weightScale = sum(kPointWeight)
+
+    for i = initLo to initHi:
+       for j = finLo to finHi:
+          for T = 1 to numTetrahedra:
+
+             for c = 1 to 4:
+                kFull(c) = tetrahedra(c, T)
+                kIBZ(c)  = fullKPToIBZKPMap(kFull(c))
+                opIdx(c) = fullKPToIBZOpMap(kFull(c))
+
+                # The DIFFERENCE band is what the corner
+                #   weights are built from.  Both
+                #   eigenvalues are read at the same IBZ
+                #   representative, and e(Rk) = e(k), so no
+                #   permutation enters here.
+                epsDiff(c) = eigenValues(j, kIBZ(c), h)
+                           - eigenValues(i, kIBZ(c), h)
+
+             sigma      = argsort(epsDiff)
+             sortedDiff = epsDiff(sigma)
+
+             for iE = 1 to numEnergyPoints:
+                E = energyScale(iE)
+                if E < sortedDiff(1) or E >= sortedDiff(4):
+                   cycle
+
+                cornerDOSWt_LAT(1:4) =
+                      bloechlCornerDOSWt(E, sortedDiff)
+
+                for c = 1 to 4:
+                   # The weights come back in SORTED corner
+                   #   order.  sigma(c) carries each one
+                   #   back to the corner it belongs to, and
+                   #   the matrix element must be fetched
+                   #   for THAT corner.  Fetching for corner
+                   #   c instead pairs a weight with the
+                   #   wrong k-point and yields a plausible
+                   #   spectrum rather than a broken one
+                   #   (DESIGN 12.4a).
+                   orig = sigma(c)
+                   kIc  = kIBZ(orig)
+
+                   optcCond(:, iE, h) +=
+                         cornerDOSWt_LAT(c) * tetraVol
+                         * weightScale
+                         * transProbBanded(:, i, j, kIc)
+
+    return optcCond
+```
+
+**What is deliberately absent: the Cartesian rotation.**
+The momentum operator is a vector, so the components at a
+full-mesh corner are mixed by the operation `opIdx(orig)`
+relative to the IBZ representative.  The loop above does not
+apply that mixing, exactly as the Gaussian path does not.
+The isotropic column is unaffected, because summing the
+three components is a trace and the mixing cancels
+(PSEUDOCODE 7a proves this for the pair matrix and the
+argument is the same here); the per-axis columns remain
+unverified.  **This is TODO O3, and this loop is where its
+fix belongs** -- rotate `transProbBanded(:, i, j, kIc)` by
+`opIdx(orig)` at the fetch.  It is not attempted here so
+that the integration change can be validated on its own.
+
+### 19.4 The partial counterpart
+
+Identical in structure, with the pair matrix carried through
+and both of its indices permuted at the corner.
+
+```
+function getOptcCondPOPTC_LAT(transProbPOPTCBanded, ...):
+
+    optcCondPOPTC = 0.0
+    weightScale   = sum(kPointWeight)
+
+    ... same band, tetrahedron, corner and energy loops ...
+
+                for c = 1 to 4:
+                   orig = sigma(c)
+                   kIc  = kIBZ(orig)
+                   R    = opIdx(orig)
+
+                   for a = 1 to sumNumPartials:
+                      aRot = partialPerm(R, a)
+                      for b = 1 to sumNumPartials:
+                         bRot = partialPerm(R, b)
+
+                         optcCondPOPTC(aRot, bRot, :, iE, h)
+                            += cornerDOSWt_LAT(c) * tetraVol
+                               * weightScale
+                               * transProbPOPTCBanded(
+                                    a, b, :, i, j, kIc)
+```
+
+`partialPerm` is built by section 18 and is unchanged: the
+same table that the star average used serves here.  The
+deposit-forward direction matches section 7a -- the partial
+that IBZ index `a` represents AT THIS CORNER is
+`partialPerm(R, a)` -- so the two blocks express one map and
+a reader can check them against each other.
+
+For the type-grouped detail codes 1 and 2 no permutation is
+needed, exactly as in 7a, and `partialPerm` is not built.
+Guard the two inner lines with the same
+`detailCodePOPTC >= 3` threshold and use `a` and `b`
+directly otherwise.
+
+### 19.5 What happens to the star average
+
+**The section 7a block is not called on this path.**  It is
+not moved and not modified; it simply does not run.
+
+The reason is worth stating where a reader will look for the
+block and fail to find it.  7a exists because the Gaussian
+path visits only IBZ representatives and must spread each
+one's contribution over the members of its star.  The loop
+above visits full-mesh corners directly, and applies the
+operation once per corner as the matrix element is fetched.
+That is the same arithmetic reaching the same answer by a
+shorter route, so applying both would double-count the
+symmetry.
+
+7a remains live and necessary on the Gaussian path.  Both
+pathways must be correct under IBZ reduction; they reach it
+differently.
+
+### 19.6 Guards and checks
+
+**Degenerate corners.**  When the four `epsDiff` values
+coincide the analytic denominators vanish.  Section 2a's
+guards apply unchanged, but the case is not rare here:
+parallel bands make `epsDiff` flat by construction, and
+parallel bands are what produce the sharp structure an
+optical spectrum is computed to show (DESIGN 12.4d).  Test
+this branch directly rather than assuming it is inherited.
+
+**The band-pair union, not the per-k range.**  Stated in
+19.2 and repeated because it fails silently: a store built
+from one k-point's `firstOccupiedState` leaves holes at
+other corners.
+
+**Cross-checks available.**
+
+- The partials must still sum to the total, since the
+  accumulation is linear in the pair matrix.  This holds
+  under any permutation of the two indices and so proves
+  nothing about the unfolding -- the same blindness section
+  7a records.
+- The two pathways must converge to the same spectrum as
+  the mesh is refined.  This is the real check, and DESIGN
+  12.5 governs how to run it: `sigmaOPTC` means different
+  things on the two paths, so hold its MEANING fixed rather
+  than its value.
+- A gapped system must give a spectrum that is identically
+  zero below the gap on both paths.  Under LAT this is
+  exact rather than approximate, since no broadening leaks
+  weight below `sortedDiff(1)`.
