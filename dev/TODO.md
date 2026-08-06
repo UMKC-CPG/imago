@@ -6360,6 +6360,36 @@ on the same data later with no schema change.  Built on P10.
   Settle which before either C148 or O9's remaining work is finished,
   because both are measured against the floor this sets.
 
+  **Check the literature before choosing a remedy.**  This is a long
+  established method and the ground has been walked before, so the
+  choice above should not be made from first principles when it may
+  already be settled practice.  What is believed, and what should be
+  verified rather than trusted:
+
+  - The diagonal choice IS discussed in the standard references,
+    including Bloechl, Jepsen and Andersen (1994), the paper this
+    implementation follows.  The recommendation there is the shortest
+    diagonal, and it is offered as an ACCURACY measure -- more compact
+    tetrahedra interpolate the bands better -- rather than as a
+    symmetry fix.  Confirm whether those authors connect it to
+    point-group symmetry at all.
+  - Symmetrizing the result over the point group after integration is
+    believed to be common practice in production codes.  If that is
+    right, remedy 2 is a well-trodden path rather than something being
+    invented here, which should weigh heavily in choosing it.
+  - The specific consequence seen here -- quantities projected onto
+    individual atoms coming out unequal for atoms that must be
+    equivalent -- appears to be under-discussed, and there is a likely
+    reason.  The classic treatments concentrate on total densities of
+    states, Fermi surface integrals and total energies, which are
+    exactly the quantities in which this cancels.  So silence in the
+    literature is not evidence that it does not happen; it may be the
+    same blind spot that let it survive here.
+
+  The above is from general knowledge of the method rather than from
+  the papers in hand, and the third point in particular is an
+  inference.  Read the references before relying on any of it.
+
   **Scope, and why this matters beyond the entry.**  It affects the
   LAT PDOS of DESIGN 1.4, which is implemented and was validated
   against Gaussian TOTALS rather than per-atom equivalence -- so this
@@ -7039,24 +7069,66 @@ is not carried only in conversation.
        The index order is chosen against the loop that reads
        it and is not free to tidy -- see DESIGN 12.4 and the
        comment in PSEUDOCODE 19.2.
-    5. `optcPrint.F90` and `imago.F90`: the restructuring of
-       DESIGN 12.2.  Promote `optcCond` and `optcCondPOPTC`
-       to module scope; split `printOptcResults` into
-       `computeOptcSpectra` and `printOptcSpectra`; call
-       both from `subroutine optc`, where `subroutine dos`
-       makes the same choice; rename `getOptcCond` and its
-       partner to `accumulateOptcCond` and
-       `accumulateOptcCondPOPTC`, and add the `_LAT`
-       counterparts.  `computeOptcSpectra` is where the LAT
-       replacement for `kPointFactor` is built -- the
-       Gaussian factor carries a `sigma` the tetrahedron
-       pathway does not use (DESIGN 12.4).
-    6. Retire the PSEUDOCODE 7a star-average block on the LAT
-       path only, by guarding it on `kPointIntgCode == 0`.
-       It stays for the Gaussian path, which still visits IBZ
-       points and still needs it.  Both pathways must remain
-       correct under IBZ reduction, and they reach that by
-       different routes.
+    5. **DONE 2026-08-06** (`70eea90`).  `optcPrint.F90` and
+       `imago.F90`: the restructuring of DESIGN 12.2, plus
+       both LAT accumulators.  `optcCond` and
+       `optcCondPOPTC` are at module scope,
+       `printOptcResults` split into `computeOptcSpectra`
+       and `printOptcSpectra`, `subroutine optc` calls both
+       where `subroutine dos` makes the same choice, and
+       `getOptcCond` and its partner became
+       `accumulateOptcCond` and `accumulateOptcCondPOPTC`
+       with `_LAT` counterparts.  The LAT factor is built in
+       `computeOptcSpectra`.  The energy loop is bounded by
+       index range from the sorted corner differences, which
+       PSEUDOCODE 19.2.2 requires rather than suggests.
+
+       Two lifetime bugs were found by running it, both
+       mine.  `pairIsWanted` was released by
+       `computeTransitions` although the accumulation runs
+       after that returns and reads it.  And
+       `transitionProbPOPTC` was released on the detail code
+       alone, which stopped being equivalent to "was it
+       allocated" the moment a second pathway existed.  Both
+       are now owned by `subroutine optc` and guarded on the
+       allocation.
+    6. **DONE 2026-08-06.**  The PSEUDOCODE 7a star-average
+       block is guarded on `kPointIntgCode == 0`.  It stays
+       for the Gaussian path, which still visits IBZ points
+       and still needs it.
+
+  **WHERE THIS STOPS, and what to pick up next.**  The total
+  spectra work on the tetrahedron pathway end to end.  The
+  DECOMPOSED tetrahedron combination is REFUSED by a guard in
+  `computeOptcSpectra`: it runs and writes a plausible
+  spectrum whose per-atom partials disagree by about 0.7
+  relative where symmetry-equivalent atoms must be identical,
+  and plausible wrong numbers are worse than a refusal.
+  Remove that guard when the number below is fixed.
+
+  **The remaining defect, and the target to aim at.**  About
+  0.1 of that 0.7 is the tetrahedron symmetry floor of C149
+  and is NOT O9's to fix.  The rest appears only when the
+  mesh is symmetry reduced, which points at the corner
+  permutation in `accumulateOptcCondPOPTC_LAT`.
+
+  The debugging target is therefore **not zero**.  It is to
+  make the reduced run reproduce the UNREDUCED run, which
+  scores 1.06e-01 on the same test.  That comparison is
+  nearly controlled: both build the same 384 tetrahedra from
+  the same full mesh with the same corner weights and the
+  same energy grid, and differ only in whether the matrix
+  elements are read directly at 64 k-points or through
+  `partialPerm` from 4.  Driving the number to zero instead
+  would mean cancelling a real asymmetry with a compensating
+  error tuned to this one cubic cell, which would pass here
+  and fail on the next material.
+
+  Evidence for all of this is in `jobs/knbo3/o9_step5`
+  (gitignored): `g0`/`g1`/`g3` are the Gaussian regression,
+  `lat0` and `lat3` the tetrahedron runs, `lat3_full` the
+  unreduced control, and `lat0_g`/`lat3_g` confirm the guard
+  admits totals and refuses decompositions.
 
   **Scope: gapped systems first.**  DESIGN 12.4(c) is the
   reason.  Occupied versus unoccupied is a property of a
