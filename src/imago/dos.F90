@@ -565,7 +565,7 @@ subroutine computeDOS(inSCF)
       !   that follows is shared.
       if (kPointIntgCode == 1) then
 
-         ! - LAT two-pass PDOS (DESIGN 1.4). -
+         !! - LAT two-pass PDOS (DESIGN 1.4). -
 
          ! Pass 1: stream IBZ k-points, compute Mulliken projections, store in
          !   projArray. Also accumulates electronNumber and localizationIndex
