@@ -14238,14 +14238,40 @@ limit of one type per environment it approaches the cost of
 the atom-grouped cell it was chosen instead of. See section
 2.3 for what types do and do not mean.
 
-**Imago does not currently estimate this at input parse
-time.** A request that cannot fit is discovered when the
-allocation fails rather than when it is made. Choosing an
-affordable decomposition is presently the user's
-responsibility. A general facility for projecting the
-resource cost of a requested calculation before running it
-belongs with the resource and cost guidance of section 8
-rather than being built once here for one quantity.
+**Storage is not the only cost, and on the cells that
+matter it is not the binding one.** The Fortran calculation
+produces the pair matrix; `processPOPTC.py` then turns each
+pair into its derived spectra, and it does that by invoking
+`makePDOS.py` and `imagoKKc` once per pair. Each call to
+`makePDOS.py` re-reads the whole raw spectrum file, and that
+file is itself quadratic in the partial count. So the
+post-processing is quartic in a quantity the calculation is
+only quadratic in, and it overtakes the calculation quickly.
+
+Measured on a five atom cell with an extended basis: the
+(type, nl) cell has 24 partials and spent 56 minutes in
+post-processing, while the (atom, nl) cell has 36 and needs
+roughly three hours. The Fortran stage of the latter took
+two minutes in 300 MB.
+
+That asymmetry is worth stating plainly, because it inverts
+the obvious reading of the storage formula above. A request
+can fit in memory comfortably and still be impractical, and
+the user who chose it will watch a job that appears to hang
+long after the calculation itself has finished. Reducing it
+is a question about the post-processor rather than about the
+decomposition, so it is not settled here.
+
+**Imago does not currently estimate either cost at input
+parse time.** A request that cannot fit is discovered when
+the allocation fails rather than when it is made, and a
+request that cannot finish in reasonable time is discovered
+by waiting for it. Choosing an affordable decomposition is
+presently the user's responsibility. A general facility for
+projecting the resource cost of a requested calculation
+before running it belongs with the resource and cost
+guidance of section 8 rather than being built once here for
+one quantity.
 
 ### 11.5 Relation to IBZ correctness
 

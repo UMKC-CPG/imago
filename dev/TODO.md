@@ -6693,6 +6693,26 @@ is not carried only in conversation.
   request that cannot fit is presently discovered when the
   allocation fails, not when it is made.
 
+  **Storage is not the binding cost, though, which O7 found
+  by running the cell.**  `processPOPTC.py` invokes
+  `makePDOS.py` and `imagoKKc` once per partial PAIR, and
+  each `makePDOS.py` re-reads the whole raw file, which is
+  itself quadratic in the partial count -- so post-processing
+  is quartic where the calculation is quadratic.  On the five
+  atom KNbO3 cell the `(atom, nl)` Fortran stage took two
+  minutes in 300 MB while its post-processing needs about
+  three hours, and `(type, nl)` took 56 minutes.  So a
+  parse-time projection that models only memory would pass
+  exactly the requests that are in practice unrunnable.
+  DESIGN 11.4 now records both costs.
+
+  Note these are two different fixes wearing one entry.
+  Projecting the cost is this task.  Making the
+  post-processing not quartic is a separate change to
+  `processPOPTC.py` -- one pass over the raw file that
+  extracts every pair, rather than one pass per pair -- and
+  it is worth doing whether or not the projection is built.
+
   It is shelved rather than done because the same question
   applies to the partial DOS, to the transition pair storage,
   and to the eigenvector matrices, and a facility built once
