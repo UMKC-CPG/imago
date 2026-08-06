@@ -3,9 +3,35 @@
 
 module O_OptcPrint
 
+   use O_Kinds
+
+   implicit none
+
+   ! The accumulated spectra, held at module scope because accumulating
+   !   them and writing them are now separate routines, called in turn
+   !   from subroutine optc exactly as subroutine dos calls its own pair
+   !   (DESIGN 12.2). This is the pattern O_OptcTransitions already
+   !   follows with transitionProb; these were local only by habit.
+   real (kind=double), allocatable, dimension (:,:,:) :: optcCond
+   real (kind=double), allocatable, &
+         & dimension (:,:,:,:,:) :: optcCondPOPTC
+
+   ! Set while the spectra are computed and read again while they are
+   !   written, so they travel with the arrays rather than being derived
+   !   twice from the input.
+   integer :: numEnergyPoints
+   real (kind=double) :: conversionFactor
+   real (kind=double) :: conversionFactorEps2
+
 contains
 
-subroutine printOptcResults(doOPTC)
+! Compute the broadened spectra and leave them in the module arrays
+!   above. The Brillouin-zone integration method is selected here, at
+!   the top of the work rather than inside it, because the two methods
+!   do not share a loop structure: the Gaussian accumulation walks
+!   k-points and the tetrahedron accumulation walks tetrahedra, so an
+!   internal branch would be a branch around the entire body.
+subroutine computeOptcSpectra(doOPTC)
 
    ! Import necessary data modules.
    use O_Kinds
@@ -17,6 +43,7 @@ subroutine printOptcResults(doOPTC)
    use O_Input,           only: sigmaOPTC, deltaOPTC, sigmaPACS, deltaPACS,&
                                 & detailCodePOPTC
    use O_Constants,       only: dim3, pi, auTime, eCharge, hPlanck, hartree
+   use O_KPoints,         only: kPointIntgCode
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
@@ -26,15 +53,11 @@ subroutine printOptcResults(doOPTC)
 
    ! Define local variables
    integer :: i ! Loop index variables
-   integer :: numEnergyPoints
    real (kind=double) :: sigma
    real (kind=double) :: energyDelta
-   real (kind=double) :: conversionFactor
-   real (kind=double) :: conversionFactorEps2
    real (kind=double) :: sigmaSqrtPi
    real (kind=double), allocatable, dimension (:)     :: kPointFactor
-   real (kind=double), allocatable, dimension (:,:,:) :: optcCond
-   real (kind=double), allocatable, dimension (:,:,:,:,:) :: optcCondPOPTC
+   real (kind=double) :: latFactor ! Tetrahedron pathway scale factor.
 
 
    ! Initialize variables.
@@ -162,12 +185,90 @@ subroutine printOptcResults(doOPTC)
    kPointFactor(:) = kPointWeight(:) * 0.5_double / sigmaSqrtPi / hartree / &
          & real(spin,double)
 
+   ! The tetrahedron pathway's scale factor, which replaces
+   !   kPointFactor rather than adjusting it. Derived term by term in
+   !   DESIGN 12.4 against the expression just above:
+   !
+   !   - kPointWeight summed over the irreducible points becomes tetraVol
+   !     summed over tetrahedra. The first sums to 2 and the second to 1,
+   !     so sum(kPointWeight) restores the scale.
+   !   - 1/sigmaSqrtPi is DROPPED. It normalizes a Gaussian standing in
+   !     for a delta function, and the corner density weight is that
+   !     delta function evaluated exactly, already carrying units of
+   !     inverse energy.
+   !   - the 0.5, the 1/hartree and the 1/spin belong to the quantity
+   !     rather than to the integration, so all three survive. The 0.5 in
+   !     particular is not geometric: the transition probabilities
+   !     already account for two electrons per state in the
+   !     spin-unpolarized case, and it stops the weights from counting
+   !     them a second time. Dropping it would halve every spectrum.
+   latFactor = sum(kPointWeight(:)) * 0.5_double / hartree &
+         & / real(spin,double)
 
-   ! Output the computed results for either regular or POPTC.
+   ! Refuse the DECOMPOSED tetrahedron combination, which is not yet
+   !   trustworthy. The total spectra on this pathway are fine and are
+   !   allowed through: a total is a sum over partial pairs, so the
+   !   per-atom error below cancels in it exactly.
+   !
+   ! What is wrong. On a reduced mesh the atom-resolved partials of
+   !   symmetry-equivalent atoms disagree by about 0.7 relative, where
+   !   they must be identical. Roughly 0.1 of that is a floor shared
+   !   with the existing LAT partial DOS and is TODO C142's to explain;
+   !   the rest is a defect in the corner permutation here and is O9's.
+   !   Either way the numbers are not usable, and they look entirely
+   !   plausible, which is what makes writing them out worse than
+   !   refusing to.
+   if ((kPointIntgCode == 1) .and. (detailCodePOPTC /= 0)) then
+      write (20,*) 'ERROR: partial optical properties are not yet'
+      write (20,*) 'supported with LAT k-point integration. The'
+      write (20,*) 'per-atom decomposition does not reproduce the'
+      write (20,*) 'equivalence of symmetry-equivalent atoms. Use'
+      write (20,*) 'kPointIntgCode=0 for a decomposition, or ask for'
+      write (20,*) 'the total spectra only.'
+      call flush (20)
+      stop 'optc: LAT with a POPTC decomposition is not yet valid'
+   endif
+
+   ! Accumulate the spectra by whichever method was requested. Both
+   !   leave the same module arrays filled, so nothing downstream learns
+   !   which one ran.
+   if (kPointIntgCode == 1) then
+      call accumulateOptcCond_LAT (latFactor)
+      if (detailCodePOPTC /= 0) then
+         call accumulateOptcCondPOPTC_LAT (latFactor)
+      endif
+   else
+      call accumulateOptcCond (kPointFactor,sigma)
+      if (detailCodePOPTC /= 0) then
+         call accumulateOptcCondPOPTC (kPointFactor,sigma)
+      endif
+   endif
+
+   deallocate (kPointFactor)
+
+end subroutine computeOptcSpectra
+
+
+! Write the spectra that computeOptcSpectra left in the module arrays,
+!   and release them. Kept apart from the computation so that each
+!   routine can be named for the one job it does, and so that the
+!   integration method is invisible here: by this point the two
+!   pathways have produced the same arrays and differ in nothing the
+!   printer can see.
+subroutine printOptcSpectra(doOPTC)
+
+   ! Import necessary data modules.
+   use O_Kinds
+   use O_OptcTransitions, only: energyScale
+   use O_Input,           only: detailCodePOPTC
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define passed parameters.
+   integer, intent(in) :: doOPTC
+
    if (detailCodePOPTC == 0) then ! Regular total optical properties.
-
-      ! Compute the optical conductivity broadened appropriately
-      call getOptcCond (numEnergyPoints,optcCond,kPointFactor,sigma)
 
       if (doOPTC == 2) then ! Doing PACS calculation.
          call printSpectrum(0,numEnergyPoints,optcCond,conversionFactor)
@@ -177,10 +278,6 @@ subroutine printOptcResults(doOPTC)
       endif
 
    else ! Partial optical properties
-
-      ! Compute total and POPTC optical conductivity, broadened appropriately
-      call getOptcCond (numEnergyPoints,optcCond,kPointFactor,sigma)
-      call getOptcCondPOPTC (numEnergyPoints,optcCondPOPTC,kPointFactor,sigma)
 
       if (doOPTC == 2) then ! Doing PACS calculation.
          call printSpectrum(0,numEnergyPoints,optcCond,conversionFactor)
@@ -198,18 +295,22 @@ subroutine printOptcResults(doOPTC)
 
    ! Deallocate arrays.
    deallocate (energyScale)
-   deallocate (kPointFactor)
-   if (detailCodePOPTC == 0) then
-      deallocate (optcCond)
-   else
-      deallocate (optcCond)
+   deallocate (optcCond)
+   if (detailCodePOPTC /= 0) then
       deallocate (optcCondPOPTC)
    endif
 
-end subroutine printOptcResults
+end subroutine printOptcSpectra
 
 
-subroutine getOptcCond (numEnergyPoints, optcCond, kPointFactor, sigma)
+! Accumulate the broadened total spectrum by Gaussian smearing over the
+!   irreducible k-points. Named for what it does: it adds into an array
+!   rather than returning anything, and the unsuffixed name marks it as
+!   the Gaussian member of the pair, following the convention DESIGN 1.5
+!   sets with electronPopulation and electronPopulation_LAT. That the
+!   plain name means Gaussian is a convention rather than something the
+!   name states.
+subroutine accumulateOptcCond (kPointFactor, sigma)
 
    ! Import the necessary data modules.
    use O_Kinds
@@ -222,8 +323,6 @@ subroutine getOptcCond (numEnergyPoints, optcCond, kPointFactor, sigma)
    implicit none
 
    ! Define the dummy variables passed to this subroutine.
-   integer :: numEnergyPoints
-   real (kind=double), dimension (:,:,:) :: optcCond
    real (kind=double), dimension (:)     :: kPointFactor
    real (kind=double) :: sigma
 
@@ -258,11 +357,12 @@ subroutine getOptcCond (numEnergyPoints, optcCond, kPointFactor, sigma)
       enddo
    enddo
 
-end subroutine getOptcCond
+end subroutine accumulateOptcCond
 
 
-subroutine getOptcCondPOPTC (numEnergyPoints, optcCondPOPTC, &
-      & kPointFactor, sigma)
+! The decomposed counterpart, identical in structure and looping over
+!   the pair matrix instead of the single total.
+subroutine accumulateOptcCondPOPTC (kPointFactor, sigma)
 
    ! Import the necessary data modules.
    use O_Kinds
@@ -275,8 +375,6 @@ subroutine getOptcCondPOPTC (numEnergyPoints, optcCondPOPTC, &
    implicit none
 
    ! Define the dummy variables passed to this subroutine.
-   integer :: numEnergyPoints
-   real (kind=double), dimension (:,:,:,:,:) :: optcCondPOPTC
    real (kind=double), dimension (:)     :: kPointFactor
    real (kind=double) :: sigma
 
@@ -312,7 +410,301 @@ subroutine getOptcCondPOPTC (numEnergyPoints, optcCondPOPTC, &
       enddo
    enddo
 
-end subroutine getOptcCondPOPTC
+end subroutine accumulateOptcCondPOPTC
+
+
+! Accumulate the broadened total spectrum by tetrahedron integration.
+!   PSEUDOCODE 19.3.
+!
+! The loop structure inverts relative to the Gaussian routine above:
+!   outer over band pairs and tetrahedra rather than over k-points and
+!   the transitions found at each. What is integrated is a JOINT density
+!   of states -- the surface where the difference of two bands equals
+!   the output energy -- so the corner values fed to the Bloechl weights
+!   are differences of eigenvalues rather than eigenvalues, and the
+!   weight routine is reused untouched because it is a function of four
+!   corner values and does not care what produced them.
+subroutine accumulateOptcCond_LAT (latFactor)
+
+   ! Import the necessary data modules.
+   use O_Kinds
+   use O_Potential,       only: spin
+   use O_MathSubs,        only: bloechlCornerDOSWt
+   use O_SecularEquation, only: energyEigenValues
+   use O_KPoints,         only: numTetrahedra, tetraVol, tetrahedra, &
+         & fullKPToIBZKPMap
+   use O_OptcTransitions, only: energyScale, transProbBanded, &
+         & bandedInitLo, bandedInitHi, bandedFinLo, bandedFinHi, &
+         & pairIsWanted
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define the dummy variables passed to this subroutine.
+   real (kind=double) :: latFactor
+
+   ! Define local variables.
+   integer :: h,i,j    ! Spin, initial band, final band.
+   integer :: t        ! Tetrahedron.
+   integer :: c,iE     ! Corner, energy point.
+   integer :: minIdx, tempInt, orig
+   integer :: firstPoint, lastPoint ! Energy range this tetrahedron spans.
+   integer, dimension (4) :: sortOrder ! Sorted corner to original corner.
+   integer, dimension (4) :: cornerKP  ! IBZ k-point of each corner.
+   real (kind=double), dimension (4) :: epsDiff
+   real (kind=double), dimension (4) :: cornerDOSWt
+   real (kind=double) :: tempVal
+   real (kind=double) :: energyStep
+   real (kind=double) :: energy
+
+   ! The grid is uniform, so its step can be recovered from it rather
+   !   than passed in. Taking it from the scale itself means the bounds
+   !   computed below cannot disagree with the points they index.
+   if (size(energyScale) > 1) then
+      energyStep = energyScale(2) - energyScale(1)
+   else
+      energyStep = 1.0_double
+   endif
+
+   do h = 1, spin
+      do i = bandedInitLo, bandedInitHi
+         do j = bandedFinLo, bandedFinHi
+
+            ! Pairs no tetrahedron can want were dropped when the store
+            !   was built and hold nothing but zeros.
+            if (.not. pairIsWanted(i,j,h)) cycle
+
+            do t = 1, numTetrahedra
+
+               ! Gather the four corner values of the band-energy
+               !   DIFFERENCE. Both eigenvalues are read at the same IBZ
+               !   representative, and e(Rk) = e(k), so no permutation
+               !   enters here.
+               do c = 1, 4
+                  cornerKP(c) = fullKPToIBZKPMap(tetrahedra(c,t))
+                  epsDiff(c) = energyEigenValues(j,cornerKP(c),h) &
+                        & - energyEigenValues(i,cornerKP(c),h)
+                  sortOrder(c) = c
+               enddo
+
+               ! Sort ascending, tracking the permutation so that a
+               !   sorted corner can be mapped back to the k-point it
+               !   came from. Same selection sort as integratePDOS_LAT.
+               do c = 1, 3
+                  minIdx = c
+                  do iE = c + 1, 4
+                     if (epsDiff(iE) < epsDiff(minIdx)) then
+                        minIdx = iE
+                     endif
+                  enddo
+                  if (minIdx /= c) then
+                     tempVal = epsDiff(c)
+                     epsDiff(c) = epsDiff(minIdx)
+                     epsDiff(minIdx) = tempVal
+                     tempInt = sortOrder(c)
+                     sortOrder(c) = sortOrder(minIdx)
+                     sortOrder(minIdx) = tempInt
+                  endif
+               enddo
+
+               ! Bound the energy loop instead of sweeping the whole
+               !   grid and testing inside it. This is not an
+               !   optimization to leave for later: a tetrahedron spans
+               !   only the few energy points between its lowest and
+               !   highest corner difference, there are six tetrahedra
+               !   per full-mesh k-point against one pass per
+               !   irreducible k-point on the Gaussian side, and the
+               !   grid is thousands of points long. Sweeping it all
+               !   would multiply work that is already the largest term
+               !   by the ratio of the two (PSEUDOCODE 19.2.2).
+               !
+               ! The range tests are KEPT inside the loop even so. They
+               ! cost almost nothing and they mean the bound arithmetic
+               ! can be off by one at either end without changing the
+               ! answer, only the speed.
+               firstPoint = int((epsDiff(1) - energyScale(1)) &
+                     & / energyStep) + 1
+               lastPoint  = int((epsDiff(4) - energyScale(1)) &
+                     & / energyStep) + 2
+               if (firstPoint < 1) firstPoint = 1
+               if (lastPoint > size(energyScale)) then
+                  lastPoint = size(energyScale)
+               endif
+
+               do iE = firstPoint, lastPoint
+                  energy = energyScale(iE)
+                  if (energy < epsDiff(1)) cycle
+                  if (energy >= epsDiff(4)) cycle
+
+                  call bloechlCornerDOSWt (energy,epsDiff,cornerDOSWt)
+
+                  ! Each sorted corner carries its weight back to the
+                  !   corner it belongs to, whose k-point supplies the
+                  !   matrix element. Pairing a sorted weight with an
+                  !   unsorted corner is the mistake that yields a
+                  !   plausible spectrum rather than a broken one.
+                  do c = 1, 4
+                     if (abs(cornerDOSWt(c)) < 1.0d-30) cycle
+                     orig = sortOrder(c)
+
+                     optcCond(:,iE,h) = optcCond(:,iE,h) &
+                           & + cornerDOSWt(c) * tetraVol * latFactor &
+                           & * transProbBanded(:,cornerKP(orig),i,j,h)
+                  enddo
+               enddo
+            enddo
+         enddo
+      enddo
+   enddo
+
+end subroutine accumulateOptcCond_LAT
+
+
+! The decomposed counterpart. Identical in structure, with the pair
+!   matrix carried through and BOTH of its partial indices permuted at
+!   the corner. This is where the IBZ unfolding happens on this pathway:
+!   the star average of PSEUDOCODE 7a does not run here, because corner
+!   assembly visits full-mesh points directly and applying both would
+!   count the symmetry twice (PSEUDOCODE 19.5).
+subroutine accumulateOptcCondPOPTC_LAT (latFactor)
+
+   ! Import the necessary data modules.
+   use O_Kinds
+   use O_Potential,       only: spin
+   use O_MathSubs,        only: bloechlCornerDOSWt
+   use O_SecularEquation, only: energyEigenValues
+   use O_Input,           only: detailCodePOPTC
+   use O_KPoints,         only: numTetrahedra, tetraVol, tetrahedra, &
+         & fullKPToIBZKPMap, fullKPToIBZOpMap
+   use O_OptcTransitions, only: energyScale, transProbPOPTCBanded, &
+         & bandedInitLo, bandedInitHi, bandedFinLo, bandedFinHi, &
+         & pairIsWanted, sumNumPartials, partialPerm
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define the dummy variables passed to this subroutine.
+   real (kind=double) :: latFactor
+
+   ! Define local variables.
+   integer :: h,i,j
+   integer :: t
+   integer :: c,iE
+   integer :: minIdx, tempInt, orig, opR
+   integer :: firstPoint, lastPoint
+   integer :: a,b          ! Initial and final partial of the pair.
+   integer :: aRot, bRot   ! Their images under the corner's operation.
+   integer, dimension (4) :: sortOrder
+   integer, dimension (4) :: cornerKP
+   integer, dimension (4) :: cornerOp ! Operation reaching each corner.
+   real (kind=double), dimension (4) :: epsDiff
+   real (kind=double), dimension (4) :: cornerDOSWt
+   real (kind=double) :: tempVal
+   real (kind=double) :: energyStep
+   real (kind=double) :: energy
+   real (kind=double) :: weight ! The full per-corner scale factor.
+
+   if (size(energyScale) > 1) then
+      energyStep = energyScale(2) - energyScale(1)
+   else
+      energyStep = 1.0_double
+   endif
+
+   do h = 1, spin
+      do i = bandedInitLo, bandedInitHi
+         do j = bandedFinLo, bandedFinHi
+
+            if (.not. pairIsWanted(i,j,h)) cycle
+
+            do t = 1, numTetrahedra
+
+               do c = 1, 4
+                  cornerKP(c) = fullKPToIBZKPMap(tetrahedra(c,t))
+                  cornerOp(c) = fullKPToIBZOpMap(tetrahedra(c,t))
+                  epsDiff(c) = energyEigenValues(j,cornerKP(c),h) &
+                        & - energyEigenValues(i,cornerKP(c),h)
+                  sortOrder(c) = c
+               enddo
+
+               do c = 1, 3
+                  minIdx = c
+                  do iE = c + 1, 4
+                     if (epsDiff(iE) < epsDiff(minIdx)) then
+                        minIdx = iE
+                     endif
+                  enddo
+                  if (minIdx /= c) then
+                     tempVal = epsDiff(c)
+                     epsDiff(c) = epsDiff(minIdx)
+                     epsDiff(minIdx) = tempVal
+                     tempInt = sortOrder(c)
+                     sortOrder(c) = sortOrder(minIdx)
+                     sortOrder(minIdx) = tempInt
+                  endif
+               enddo
+
+               firstPoint = int((epsDiff(1) - energyScale(1)) &
+                     & / energyStep) + 1
+               lastPoint  = int((epsDiff(4) - energyScale(1)) &
+                     & / energyStep) + 2
+               if (firstPoint < 1) firstPoint = 1
+               if (lastPoint > size(energyScale)) then
+                  lastPoint = size(energyScale)
+               endif
+
+               do iE = firstPoint, lastPoint
+                  energy = energyScale(iE)
+                  if (energy < epsDiff(1)) cycle
+                  if (energy >= epsDiff(4)) cycle
+
+                  call bloechlCornerDOSWt (energy,epsDiff,cornerDOSWt)
+
+                  do c = 1, 4
+                     if (abs(cornerDOSWt(c)) < 1.0d-30) cycle
+                     orig = sortOrder(c)
+                     opR  = cornerOp(orig)
+                     weight = cornerDOSWt(c) * tetraVol * latFactor
+
+                     ! The type grouped codes need no permutation: every
+                     !   operation carries an atom onto an atom of the
+                     !   same type, so a type level sum maps onto itself
+                     !   (DESIGN 2.5). partialPerm is not even built for
+                     !   them, so it must not be indexed here.
+                     if ((detailCodePOPTC >= 3) .and. &
+                           & (allocated(partialPerm))) then
+
+                        ! b outer, a inner: a is the leftmost index of
+                        !   the store and must run innermost.
+                        do b = 1, sumNumPartials
+                           bRot = partialPerm(opR,b)
+                           do a = 1, sumNumPartials
+                              aRot = partialPerm(opR,a)
+                              optcCondPOPTC(aRot,bRot,:,iE,h) = &
+                                    & optcCondPOPTC(aRot,bRot,:,iE,h) &
+                                    & + weight &
+                                    & * transProbPOPTCBanded(a,b,:, &
+                                    & cornerKP(orig),i,j,h)
+                           enddo
+                        enddo
+                     else
+                        do b = 1, sumNumPartials
+                           do a = 1, sumNumPartials
+                              optcCondPOPTC(a,b,:,iE,h) = &
+                                    & optcCondPOPTC(a,b,:,iE,h) &
+                                    & + weight &
+                                    & * transProbPOPTCBanded(a,b,:, &
+                                    & cornerKP(orig),i,j,h)
+                           enddo
+                        enddo
+                     endif
+                  enddo
+               enddo
+            enddo
+         enddo
+      enddo
+   enddo
+
+end subroutine accumulateOptcCondPOPTC_LAT
 
 
 subroutine printSpectrum (specType,numEnergyPoints,spectrum,conversionFactor)

@@ -1186,7 +1186,7 @@ subroutine optc(inSCF,doOPTC)
    ! Use necessary modules.
    use O_TimeStamps
    use O_Potential,       only: spin
-   use O_OptcPrint,       only: printOptcResults
+   use O_OptcPrint,       only: computeOptcSpectra, printOptcSpectra
    use O_KPoints,         only: numKPoints, kPointIntgCode
    use O_Populate,        only: occupiedEnergy, populateStates, &
          & computeElectronPopulation_LAT
@@ -1195,7 +1195,7 @@ subroutine optc(inSCF,doOPTC)
          & detailCodePOPTC
    use O_OptcTransitions, only: transCounter, energyDiff, transitionProb, &
          & transitionProbPOPTC, getEnergyStatistics, computeTransitions, &
-         & transProbBanded, transProbPOPTCBanded
+         & transProbBanded, transProbPOPTCBanded, pairIsWanted
    use O_SecularEquation, only: energyEigenValues, &
          & shiftEnergyEigenValues
 
@@ -1222,32 +1222,6 @@ subroutine optc(inSCF,doOPTC)
          open (unit=41,file='fort.41',status='new',form='formatted')
       endif
       open (unit=51,file='fort.51',status='new',form='formatted')
-   endif
-
-   ! Refuse the tetrahedron pathway until its accumulation exists.
-   !
-   ! The band-pair producer is in place and fills transProbBanded, but
-   !   nothing reads that array yet: the accumulation that turns it into
-   !   a spectrum is still to be written (DESIGN 12, TODO O9). The
-   !   producer deliberately does not fill transitionProb or
-   !   transCounter, so the Gaussian accumulator would find zero
-   !   transitions at every k-point and write a spectrum that is
-   !   identically zero.
-   !
-   ! Stopping is the only acceptable response to that. A run that
-   !   quietly returns zeros is worse than one that fails, because the
-   !   zeros are indistinguishable from a material that does not absorb
-   !   and they survive into whatever is plotted from them. The partial
-   !   DOS refuses its own unsupported combination the same way, in
-   !   computeDOS. Remove this guard when the accumulation lands.
-   if (kPointIntgCode == 1) then
-      write (20,*) 'ERROR: LAT k-point integration (kPointIntgCode=1)'
-      write (20,*) 'is not yet supported for optical properties. The'
-      write (20,*) 'tetrahedron accumulation is not implemented, so the'
-      write (20,*) 'run would produce an identically zero spectrum.'
-      write (20,*) 'Use kPointIntgCode=0 for optical calculations.'
-      call flush (20)
-      stop 'optc: LAT integration not yet implemented'
    endif
 
    ! Populate the electron states to find the highest occupied state (Fermi
@@ -1284,9 +1258,13 @@ subroutine optc(inSCF,doOPTC)
    ! Compute the transition pairs and energy values of those transitions.
    call computeTransitions(inSCF,doOPTC)
 
-   ! Print the output if necessary.
+   ! Accumulate the spectra, then write them. Two calls rather than one
+   !   so that each routine is named for the single job it does, and so
+   !   that the integration method is selected at the same level of the
+   !   program where subroutine dos selects it (DESIGN 12.2).
    if (doOPTC /= 3) then  ! Not doing a Sigma(E) calculation.
-      call printOptcResults(doOPTC) ! Internally distinguishes optc, poptc.
+      call computeOptcSpectra(doOPTC) ! Distinguishes optc from poptc.
+      call printOptcSpectra(doOPTC)
    endif
 
    ! Deallocate unused matrices.
@@ -1304,8 +1282,15 @@ subroutine optc(inSCF,doOPTC)
       deallocate (transitionProb)
 
       ! The pair-resolved probability, by contrast, is created only when
-      !   a decomposition was requested, so it is released only then.
-      if (detailCodePOPTC /= 0) then
+      !   a decomposition was requested AND the Gaussian pathway ran:
+      !   computePOPTCPairs allocates it, and the tetrahedron pathway
+      !   does not call that routine, filling transProbPOPTCBanded
+      !   instead. So the release is guarded on the allocation itself.
+      !   Guarding on the detail code alone was wrong for exactly the
+      !   reason given below -- it made this a second place that had to
+      !   agree with the first about when the array is created, and it
+      !   stopped agreeing the moment a second pathway appeared.
+      if (allocated(transitionProbPOPTC)) then
          deallocate (transitionProbPOPTC)
       endif
    endif
@@ -1320,6 +1305,13 @@ subroutine optc(inSCF,doOPTC)
    endif
    if (allocated(transProbPOPTCBanded)) then
       deallocate (transProbPOPTCBanded)
+   endif
+
+   ! The pruning mask describes those stores and is read by the
+   !   accumulation that consumes them, so it is released with them
+   !   rather than by computeTransitions, which merely built it.
+   if (allocated(pairIsWanted)) then
+      deallocate (pairIsWanted)
    endif
 
 end subroutine optc

@@ -1005,11 +1005,12 @@ integer :: k,l
       call cleanUpPOPTCIndex
    endif
 
-   ! The band-pair pruning mask has the same lifetime as the store it
-   !   describes, and is not needed once every k-point has been filled.
-   if (allocated(pairIsWanted)) then
-      deallocate (pairIsWanted)
-   endif
+   ! NOTE that pairIsWanted is NOT released here, even though this
+   !   routine allocated it. The accumulation runs after this routine
+   !   returns and reads the mask to skip the pairs that were never
+   !   filled, so its lifetime matches the stores it describes rather
+   !   than the loop that filled them. It is released in subroutine optc
+   !   alongside them.
 
    ! Log the date and time we end.
    call timeStampEnd (23)
@@ -2181,7 +2182,7 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    use O_SortSubs,    only: mergeSort
    use O_Populate,    only: electronPopulation
    use O_KPoints,     only: kPointWeight, numKPoints, numFullMeshKP, &
-         & fullKPToIBZKPMap, fullKPToIBZOpMap
+         & fullKPToIBZKPMap, fullKPToIBZOpMap, kPointIntgCode
    use O_Constants,   only: pi, hartree, dim3
    use O_AtomicSites, only: valeDim, atomPerm
    use O_Input,       only: numStates, detailCodePOPTC
@@ -2553,8 +2554,18 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    !   whose symmetry-equivalent atoms are inequivalently oriented on a
    !   full mesh and on a reduced mesh, and requiring the two to agree per
    !   atom pair.
+   !
+   ! This belongs to the GAUSSIAN pathway alone, which is why the guard
+   !   below tests the integration code. That pathway visits only
+   !   irreducible k-points and must spread each one's contribution over
+   !   the members of its star. The tetrahedron pathway visits full-mesh
+   !   corners directly and permutes once per corner as it fetches, so
+   !   this block does not run there at all -- doing both would count the
+   !   symmetry twice. Both pathways are correct under reduction; they
+   !   reach it by different routes (PSEUDOCODE 19.5, DESIGN 12.6).
    ! ----------------------------------------------------------------------
-   if ((detailCodePOPTC >= 3) .and. (allocated(atomPerm))) then
+   if ((kPointIntgCode == 0) .and. (detailCodePOPTC >= 3) .and. &
+         & (allocated(atomPerm))) then
 
       ! Count the star: the number of full-mesh k-points that fold onto
       !   this IBZ representative. Counted the same way as in computeBond.
