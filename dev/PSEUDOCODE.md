@@ -3498,12 +3498,23 @@ function integratePDOS_LAT(projArray,
                                 R, alpha)
                         pdosComplete(alpha, iE) +=
                             cornerDOSWt_LAT(c)
-                            * tetraVol / hartree
+                            * tetraVol * kpWtSum
+                            / hartree
                             * projArray(
                                 permA, n, kIc)
 
     return pdosComplete
 ```
+
+`kpWtSum` is `sum(kPointWeight)`, and it is not optional.
+DESIGN 1.3 requires it of every LAT accumulation, for the
+reason given there: `tetraVol` sums to 1 while
+`kPointWeight` sums to 2, so without it the LAT result sits
+at half the Gaussian one and the two paths cannot be
+compared. It is easy to leave out, because unlike the
+`/hartree` conversion it corrects no unit -- both paths are
+dimensionally correct without it and simply disagree by a
+factor of two.
 
 ### 8.4 Normalization
 
