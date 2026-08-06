@@ -14852,8 +14852,9 @@ function computeTransProbBanded(h, numKPoints,
              #   which is safe when each k-point stands
              #   alone and unsafe here: a pair may fail at
              #   one corner of a tetrahedron and pass at the
-             #   other three.  Pruning happens in 19.3
-             #   instead, against all four corners at once.
+             #   other three.  The pruning is done instead by
+             #   the pre-pass of 19.2.2, over all k-points at
+             #   once, and reaches this loop as pairIsWanted.
              for c = 1 to dim3:
                 transProbBanded(c, kIBZ, i, j) =
                       |M_ij^c(kIBZ)|^2
@@ -14861,6 +14862,74 @@ function computeTransProbBanded(h, numKPoints,
 
     return transProbBanded
 ```
+
+### 19.2.1a The decomposed producer
+
+Everything above describes the undecomposed store.  A partial run
+needs both: the total spectra are wanted whether or not a
+decomposition was requested, exactly as on the Gaussian side, so
+the undecomposed producer runs in both cases and the decomposed
+one runs in addition.
+
+```
+function computeTransProbPOPTCBanded(kIBZ, h):
+    # Same loops, same occupancies, same pruning mask.  What
+    #   changes is that the matrix element is resolved by partial
+    #   instead of collapsed, so conjWaveMomSum comes from
+    #   buildConjWaveMomSumPOPTC and carries the final-state
+    #   partial as an extra index.
+    for i, j in the wanted band pairs:
+       for c = 1 to dim3:
+
+          # Resolve by the partial the INITIAL basis function
+          #   belongs to.  The final-state partial is already
+          #   carried by conjWaveMomSum.
+          pairMatrix(:,:) = 0
+          for basisFn = 1, valeDim:
+             for n = 1, sumNumPartials:
+                pairMatrix(pOptcIndex(basisFn), n) +=
+                      wavefn(basisFn, i)
+                      * conjWaveMomSum(basisFn, n, jSlot, c)
+
+          # The totals that turn a sum of squares back into a
+          #   squared sum, which is what makes the partials add
+          #   up to the undecomposed transition probability.
+          sumRe = sum of the real parts of pairMatrix
+          sumIm = sum of the imaginary parts of pairMatrix
+
+          # n OUTER, o INNER.  o is the leftmost index of both
+          #   the scratch matrix and the store, so it runs
+          #   innermost.
+          for n = 1, sumNumPartials:
+             for o = 1, sumNumPartials:
+                transProbPOPTCBanded(o, n, c, kIBZ, i, j) =
+                      (Re(pairMatrix(o,n)) * sumRe
+                       + Im(pairMatrix(o,n)) * sumIm)
+                      * occ(i, kIBZ) * (1 - occ(j, kIBZ))
+```
+
+**Store layout, and why its rule is weaker than 19.2's.**  The
+order is `(o, n, dim3, kIBZ, i, j, spin)`.  The same reasoning
+applies -- leftmost is fastest, choose against the consuming loop
+-- but it cannot reach the same conclusion, because this array is
+far too large to hold one band pair's slice in cache.  So the aim
+narrows to keeping the pair matrix for one component at one
+corner contiguous, and running the partial loops leftmost-index
+innermost.  The accumulation's destination stays scattered
+whatever is done, since permuting the two partial indices is the
+entire purpose of the operation (DESIGN 12.4).
+
+**The decomposition index is built once, before the loop.**
+Section 18 describes it as a standalone construction and it now
+is one: `buildPOPTCIndex` fills `pOptcIndex`, `segmentBase`,
+`slotsPerSegment`, `sumNumPartials` and `partialPerm`, and
+`cleanUpPOPTCIndex` releases them after the k-point loop ends.
+Two reasons it cannot stay inside a producer.  The tetrahedron
+store is sized from `sumNumPartials`, which is therefore needed
+before the loop begins; and both producers read the index while
+neither owns it, so a producer that freed it would be guessing
+whether it was the last to run.  The routine that owns the loop
+owns the lifetime.
 
 ### 19.2.2 Cost, measured against the Gaussian producer
 
