@@ -41,10 +41,11 @@ flight instead of an exhaustive grid search.
    densities.
 2. **Correct partial properties under IBZ reduction.** Ensure that
    eigenvector-dependent quantities (PDOS, bond order, effective
-   charge) are computed correctly when the k-point mesh is reduced
-   to the irreducible Brillouin zone. The current approach of
-   multiplying IBZ contributions by star multiplicity is incorrect
-   for these quantities.
+   charge, and the partial optical properties) are computed
+   correctly when the k-point mesh is reduced to the irreducible
+   Brillouin zone. The current approach of multiplying IBZ
+   contributions by star multiplicity is incorrect for these
+   quantities.
 3. **Augment the initial SCF potential database.** Extend today's
    isolated-atom potential database with potentials taken from
    converged Imago calculations on a curated set of real solids

@@ -145,14 +145,40 @@ Modules directly affected by the current development:
   `numTetrahedra`, `tetraVol`, `tetrahedra(:,:)`,
   `fullKPToIBZKPMap(:)`, `generateTetrahedra`,
   `computeTetraVol`, `initializeKPointMesh` (with IBZ
-  folding). Phase F additions for correct IBZ unfolding
-  of eigenvector-dependent quantities:
-  `fullKPToIBZOpMap(:)` (which point group operation
-  mapped each full-mesh k-point to its IBZ
-  representative), `atomPerm(:,:)` (atom permutation
-  table under each point group operation), and
-  `buildAtomPerm` (builds the table from point ops and
-  fractional atom positions).
+  folding). Phase F addition for correct IBZ unfolding of
+  eigenvector-dependent quantities: `fullKPToIBZOpMap(:)`,
+  recording which point group operation mapped each
+  full-mesh k-point to its IBZ representative.
+- **O_AtomicSites** (`atomicSites.f90`): Holds the atomic
+  site list and, as the other half of the Phase F IBZ
+  unfolding infrastructure, the atom permutation tables:
+  `atomPerm(:,:)` (the image atom of each site under each
+  point group operation), `invAtomPerm(:,:)` (its inverse),
+  and the `buildAtomPerm` / `buildInvAtomPerm` routines that
+  construct them from the point operations and the
+  fractional atom positions. The tables live here rather
+  than with the k-points because they are a property of the
+  structure; the k-point side supplies only the operation
+  index. `buildAtomPerm` additionally enforces the closure
+  that every type-level sum depends on -- it accepts an
+  image atom only within the source atom's type and stops
+  fatally otherwise -- so that closure is verified at
+  startup rather than assumed (DESIGN 2.3).
+- **O_Optc / O_OptcPrint** (`optc.F90`, `optcPrint.F90`):
+  Compute and write the optical properties, both the total
+  spectra and the partial (POPTC) decomposition of the
+  momentum matrix element between a *pair* of groups.
+  `computePOPTCPairs` builds the decomposition index that
+  assigns every basis function to a partial, accumulates
+  the pair matrix per transition per k-point, and applies
+  the IBZ star average to it; `printSpectrumPOPTC` writes
+  the resulting spectra in the same partial ordering. The
+  star average consumes `atomPerm` from O_AtomicSites and
+  `fullKPToIBZOpMap` / `fullKPToIBZKPMap` from O_KPoints --
+  the same pair of inputs `bond.F90` uses, applied to both
+  indices of the pair matrix instead of one. The offered
+  decompositions and their numbering are DESIGN 11; the
+  unfolding is DESIGN 2.5 and PSEUDOCODE 7a.
 - **O_DOS** (`dos.F90`): Two DOS paths: `computeIterationTDOS`
   (in-SCF convergence monitoring) and `computeDOS` (full
   TDOS/PDOS post-processing). Will gain a LAT branch in
@@ -202,10 +228,10 @@ Modules directly affected by the current development:
      directly by Imago with no internal mesh construction.
      Supported for special cases (e.g., hand-crafted
      k-point sets), but Imago emits a prominent warning
-     that decomposition properties (effective charge,
-     bond order, PDOS) will not be correct unless the
-     user has taken extreme care to provide a symmetric
-     mesh. Not produced by makeinput.
+     that decomposition properties (effective charge, bond
+     order, partial DOS, partial optical properties) will
+     not be correct unless the user has taken extreme care
+     to provide a symmetric mesh. Not produced by makeinput.
 - **makegroups.py** (`src/scripts/makegroups.py`): the
   bispectrum type-grouping helper (8.9, DESIGN 5.10).  A
   Fortran-side descriptor can only come from a completed
@@ -275,9 +301,23 @@ imago.F90 (top-level dispatcher)
   |     +-- O_Populate (electronPopulation or
   |     |     electronPopulation_LAT)
   |     +-- O_KPoints (fullKPToIBZKPMap,
-  |     |     fullKPToIBZOpMap, atomPerm,
-  |     |     numFullMeshKP for star distribution)
+  |     |     fullKPToIBZOpMap, numFullMeshKP:
+  |     |     which star each IBZ point owns)
+  |     +-- O_AtomicSites (atomPerm, invAtomPerm:
+  |     |     where each atom lands under an operation)
   |     +-- O_PSCFIntg (eigenvectors via HDF5)
+  +-- O_Optc (optc.F90)
+  |     +-- O_KPoints (fullKPToIBZKPMap,
+  |     |     fullKPToIBZOpMap, numFullMeshKP,
+  |     |     kPointWeight)
+  |     +-- O_AtomicSites (atomPerm; also valeDim and
+  |     |     atomSites for the decomposition index)
+  |     +-- O_AtomicTypes (radial function counts per
+  |     |     type, for the QN_nl resolved partials)
+  |     +-- O_SecularEquation (eigenvectors, momentum
+  |     |     matrix elements, eigenvalues)
+  |     +-- O_OptcPrint (optcPrint.F90: broadening and
+  |           spectrum output, total and per partial pair)
 ```
 
 ---

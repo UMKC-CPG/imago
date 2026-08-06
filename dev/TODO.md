@@ -6393,9 +6393,10 @@ is not carried only in conversation.
   environments with no symmetry content at all, and in a point
   defect supercell types are deliberately assigned from the
   *pre-defect* symmetry to keep the cost down even though the
-  defect has destroyed that symmetry.  DESIGN 2.3 states the
-  rule as though species implied equivalence; that premise is
-  false in general and should be corrected there.
+  defect has destroyed that symmetry.  DESIGN 2.3 once stated
+  the rule as though species implied equivalence; that has
+  since been corrected there, and 2.3 now carries the full
+  argument including which direction of mis-typing is caught.
 
   What actually guarantees the invariance is a runtime check.
   `buildAtomPerm` in `atomicSites.f90` requires every point
@@ -6422,7 +6423,14 @@ is not carried only in conversation.
   configuration where a wrong type-level decomposition can
   pass silently.  Worth restating in the O2 write-up.
 
-  Mapping the four detail codes onto the rule:
+  Mapping the four detail codes onto the rule.  **These are
+  the numbers as `optc.F90` implements them today, which
+  DESIGN 11.3 supersedes** -- codes 2 and 3 exchange places
+  there and code 4 becomes a different cell entirely.  O7 is
+  the entry that closes that gap; for the offered set and the
+  numbering to write new work against, read DESIGN 11.3 and
+  not this table.  It is kept because it is what the code
+  under discussion here actually does.
 
   ```
   code  grouping        PDOS analogue   needs
@@ -6435,10 +6443,14 @@ is not carried only in conversation.
 
   So codes 1 and 3 are already correct on a symmetry-reduced
   mesh and need no work.  Code 2 needs the same treatment bond
-  order and Q* received in Phase F.  Code 4 is blocked behind
+  order and Q* received in Phase F.  Code 4 was blocked behind
   the same deferred D^l(R) representation matrices that block
-  PDOS mode 3, and is in any case unaffordable at present (see
-  the scaling note below).
+  PDOS mode 3, and was in any case unaffordable (see the
+  scaling note below) -- which is why DESIGN 11.2 has since
+  withdrawn that cell rather than leaving it deferred.  With
+  it gone, no offered POPTC decomposition depends on D^l(R) at
+  all, so after O3 the partial optical properties have nothing
+  outstanding against a reduced mesh.
 
   Code 3 is grouped by *type*, not by atom, and every comment
   that said otherwise has been corrected (see O5).  Three
@@ -6528,22 +6540,62 @@ is not carried only in conversation.
   outstanding.
 
   The pieces, in chain order:
-    1. PSEUDOCODE: update 7a's guard from `== 2` to the
-       threshold `>= 3`, and add the index-construction
-       section covering all four cells including the new one.
+    1. **DONE** (`ff6c1f0`, extended by the 2026-08-05
+       `/refine`).  PSEUDOCODE 7a's guard is now the
+       threshold `>= 3`, and PSEUDOCODE 18 specifies the
+       index construction for all four cells including the
+       new one.  18.1 also names `segmentBase` and
+       `slotsPerSegment` as outputs that outlive the routine,
+       because 7a's `partialPerm` cannot be built without
+       them.  Everything from step 2 down is untouched.
     2. `optc.F90`: renumber the branches, add the
        `(atom, nl)` index construction, remove the nlm branch
        and the now-dead `QN_mLetter` tables in both `optc.F90`
-       and `optcPrint.F90`.
+       and `optcPrint.F90`.  Four things inside this step are
+       easy to renumber past without noticing, and each is a
+       silent wrong answer rather than a compile error:
+
+       a. The star-average scratch slab is allocated
+          `pairSlabSym(numAtomSites,numAtomSites)`.  It must
+          become `sumNumPartials` squared, as PSEUDOCODE 7a
+          says.  The two are equal only for the atom-total
+          cell, which is the only corrected cell today; under
+          the new code 4 the current bound is too small.
+       b. The code-1 `partialsIndex` count is a run-length
+          walk over `pOptcIndex` after the site loop.
+          PSEUDOCODE 18.2 replaces it with an increment per
+          assigned basis function, which drops the walk's
+          unstated dependence on all atoms of a type being
+          contiguous in the basis ordering.  Delete the walk;
+          do not merely renumber the branch it sits in.
+       c. `cumulNumPartials` is what PSEUDOCODE 18 calls
+          `segmentBase`.  Rename it, and add the companion
+          `slotsPerSegment`, so that the two levels can be
+          read side by side.  Both must survive to wherever
+          `partialPerm` is built.
+       d. `partialPerm` itself does not exist yet in any
+          form.  It is new work, not a rename of `atomPerm`;
+          PSEUDOCODE 7a gives the build.
     3. `optcPrint.F90`: renumber the printing branches and
        their labels.
     4. Last, the user-facing legend, once it is only
-       describing what exists: the string `makeinput.py`
-       writes into every `imago.dat` and the comment in
-       `makeinputrc.py`.  Both currently disagree with the
-       code on the nlm cell, which is what prompted this
-       entry.  Note that changing `makeinput.py` requires a
-       reinstall before generated inputs pick it up.
+       describing what exists.  Four places carry it, not the
+       two that this entry originally listed, and all four
+       currently disagree with the code on the nlm cell:
+
+       - `src/scripts/makeinput.py`, the string written into
+         every `imago.dat` (`POPTC 0N;1t;2a;3enl;4enlm`).
+       - `src/scripts/makeinputrc.py`, the comment on
+         `detail_code_poptc`.
+       - `src/imago/input.f90`, the declaration comment on
+         `detailCodePOPTC`, which carries the same legend on
+         the Fortran side.
+       - `.imago/makeinputrc.py`, the installed resource
+         control copy, which is what a live run actually
+         reads.
+
+       Note that changing `makeinput.py` requires a reinstall
+       before generated inputs pick it up.
 
   Re-verify with the KNbO3 comparison in
   `jobs/knbo3/o2_poptc_unfold`, whose `reduced` and `full`

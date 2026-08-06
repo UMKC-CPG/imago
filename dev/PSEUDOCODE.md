@@ -14418,7 +14418,10 @@ The IBZ correction applied afterwards is section 7a.
 
 ### 18.1 What is built
 
-Three things, all sized from the decomposition request:
+Five things, all sized from the decomposition request.  The
+first three are what the accumulation and the output need; the
+last two describe the *layout* and exist so that section 7a can
+carry a partial through a symmetry operation.
 
 - `sumNumPartials` -- how many partials this run produces.
   The stored pair matrix is this squared, so it is also the
@@ -14436,6 +14439,23 @@ Three things, all sized from the decomposition request:
   normalize, since a complete set of partials must carry the
   additive constant of `eps1 = 1 + (2/pi) Int[...]` exactly
   once between them rather than once each.
+- `segmentBase(numSegments + 1)` -- where each segment's block
+  of partials begins, as a zero-based offset, with the extra
+  final entry holding `sumNumPartials`.  A segment is a type
+  for the type-grouped cells and a site for the atom-grouped
+  ones.
+- `slotsPerSegment(numSegments)` -- how many partials each
+  segment owns, which is `segmentBase(s+1) - segmentBase(s)`.
+  Stored rather than recomputed because section 7a walks it
+  directly.
+
+**The last two must outlive this routine**, which is the only
+reason they are listed here at all.  Section 7a builds its
+`partialPerm` table by taking each site's block of partials and
+re-basing it onto the block of the site's image under a
+symmetry operation, and that re-basing is expressible only in
+terms of these two arrays.  A version of this walk that treated
+them as scratch would leave 7a with nothing to build from.
 
 ### 18.2 One walk, two parameters
 
@@ -14476,7 +14496,9 @@ if grouping == TYPE: numSegments = numAtomTypes
 else:                numSegments = numAtomSites
 
 # Lay out the partials: each segment owns a contiguous block,
-#   and segmentBase records where each block starts.
+#   segmentBase records where each block starts, and
+#   slotsPerSegment records how long it is.  Both are kept
+#   past the end of this routine for section 7a.
 segmentBase(1) = 0
 for s = 1, numSegments:
    typeOfSegment = (grouping == TYPE) ? s
@@ -14486,7 +14508,8 @@ for s = 1, numSegments:
    else:
       slots = sum over l of
               atomTypes(typeOfSegment)%numQN_lValeRadialFns(l)
-   segmentBase(s+1) = segmentBase(s) + slots
+   slotsPerSegment(s) = slots
+   segmentBase(s+1)   = segmentBase(s) + slots
 
 sumNumPartials = segmentBase(numSegments + 1)
 
@@ -14530,6 +14553,18 @@ type for reasons that have nothing to do with this code --
 but depending on it means an unrelated change to site
 ordering breaks the normalization silently.  The increment
 does not care.
+
+**What the segment index means, and why 7a can assume it.**
+The walk assigns `segment = currentType` for the type-grouped
+cells and `segment = site` for the atom-grouped ones, so for
+codes 3 and 4 the segment index *is* the atomic site index and
+`segmentBase` and `slotsPerSegment` are indexed by site
+directly.  Section 7a relies on exactly that when it writes
+`segmentBase(site)`, and it is entitled to: the correction runs
+only for `detailCodePOPTC >= 3`, which is the atom-grouped
+half.  For codes 1 and 2 those two arrays are indexed by type
+instead and no correction is applied, so the two readings never
+have to coexist.
 
 ### 18.3 The withdrawn cell
 

@@ -1310,8 +1310,9 @@ passed in from O_KPoints as arguments.
   cannot construct `fullKPToIBZKPMap`, `fullKPToIBZOpMap`,
   or `atomPerm`. Emit a prominent warning at initialization
   that decomposition properties (effective charge, bond
-  order, PDOS) will not be correct unless the user has
-  taken extreme care to provide a symmetric k-point mesh.
+  order, partial DOS, partial optical properties) will not
+  be correct unless the user has taken extreme care to
+  provide a symmetric k-point mesh.
   For style codes 1 and 2, Imago builds the full mesh
   and all symmetry maps internally, so the atom permutation
   fix works for both Gaussian and LAT integration paths.
