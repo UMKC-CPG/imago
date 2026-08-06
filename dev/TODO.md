@@ -6821,19 +6821,41 @@ is not carried only in conversation.
        inputs -- once on each binary -- and its ten total
        spectrum files are byte identical.  Job directory
        `jobs/knbo3/o9_refactor` (gitignored).
-    4. **HALF DONE 2026-08-06.**  `optc.F90`: the band-pair
-       producer of PSEUDOCODE 19.2, storing
-       `(dim3, kIBZ, i, j, spin)`.  The TOTAL-spectra
-       producer is written -- `selectBandedPairs` for the
-       union ranges and the pair mask,
-       `computeTransProbBanded` for one k-point's slice,
-       both wired into `computeTransitions` under
-       `kPointIntgCode`, with `computeElectronPopulation_LAT`
-       now called from `subroutine optc` because an
-       optics-only run never enters `subroutine bond` where
-       it was built.  **The POPTC counterpart is the
-       remaining half**: same shape with the pair-matrix
-       index, consuming `buildConjWaveMomSumPOPTC`.
+    4. **DONE 2026-08-06.**  `optc.F90`: the band-pair
+       producers of PSEUDOCODE 19.2.  `selectBandedPairs`
+       fixes the union ranges and the pruning mask;
+       `computeTransProbBanded` fills one k-point's slice of
+       `(dim3, kIBZ, i, j, spin)`; and
+       `computeTransProbPOPTCBanded` fills the decomposed
+       store, which carries the partial pair ahead of all of
+       that.  Both are dispatched from `computeTransitions`
+       on `kPointIntgCode`, and
+       `computeElectronPopulation_LAT` is now called from
+       `subroutine optc`, because an optics-only run never
+       enters `subroutine bond` where it was built.
+
+       **A prerequisite refactor came with it.**  The
+       decomposition index of PSEUDOCODE 18 was constructed
+       inside `computePOPTCPairs`, once per k-point, and the
+       tetrahedron store cannot be sized without the partial
+       count it yields -- which is needed BEFORE the k-point
+       loop starts.  So the construction moved out to
+       `buildPOPTCIndex`, called once, with
+       `cleanUpPOPTCIndex` releasing it after the loop: the
+       routine that owns the loop owns the lifetime, rather
+       than a producer inside it having to guess whether it
+       is the last to run.  This also stopped rebuilding an
+       invariant index at every k-point, and let
+       `numStatesAtom` go, which step 3 had already left
+       written but never read.  The KKC factor write moved
+       with it and no longer needs its `currentKPoint == 1`
+       test, since being written once is now a consequence
+       of the caller rather than something a test arranges.
+
+       The hoist was regression-tested on its own before the
+       new producer was added, and again afterwards: detail
+       codes 0, 1 and 3 are byte identical across all output
+       files both times, the KKC control file included.
 
        **A guard was added and must be removed at step 5.**
        Selecting the tetrahedron pathway now stops the run

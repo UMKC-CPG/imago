@@ -79,6 +79,21 @@ module O_OptcTransitions
          !   fetch, and miss on every one. Do not reorder this without
          !   reordering the accumulation with it.
 
+   ! The decomposed counterpart, carrying the pair matrix over partials
+   !   alongside the band pair. Indexed (initial partial, final partial,
+   !   component, kPoint, initial band, final band, spin).
+   real (kind=double), allocatable, &
+         & dimension (:,:,:,:,:,:,:) :: transProbPOPTCBanded
+         !
+         ! The same ordering argument applies but reaches a weaker
+         !   conclusion, because this array is far too large to hold one
+         !   band pair's slice in cache. The aim here is only that the
+         !   pair matrix for one component at one corner be contiguous,
+         !   and that the partial loops run the leftmost index innermost.
+         !   The destination of the accumulation stays scattered whatever
+         !   is done, because permuting the two partial indices is the
+         !   entire purpose of the operation (DESIGN 12.4).
+
    ! The band ranges spanned by transProbBanded. These are the UNION over
    !   k-points and spins of the per-k-point occupied and unoccupied
    !   ranges, not any single k-point's range. A tetrahedron corner may
@@ -693,6 +708,14 @@ integer :: k,l
    valeValeMMGamma(:,:,:) = 0.0_double
 #endif
 
+   ! Build the decomposition index once, before any producer runs. It is
+   !   fixed by the structure and the detail code, so it does not vary
+   !   over the loop below, and the tetrahedron store cannot even be
+   !   sized without the partial count it yields (PSEUDOCODE 18).
+   if (detailCodePOPTC /= 0) then
+      call buildPOPTCIndex
+   endif
+
    ! For the tetrahedron pathway, decide the band-pair store's shape and
    !   allocate it before the loop below begins. It cannot be a per-call
    !   array the way the Gaussian temporaries are: the accumulation reads
@@ -708,6 +731,18 @@ integer :: k,l
       !   wants is never written, and the accumulation must read a zero
       !   there rather than whatever the allocation happened to contain.
       transProbBanded(:,:,:,:,:) = 0.0_double
+
+      ! The decomposed store, when a decomposition was requested. This
+      !   is the array whose size DESIGN 11.4 warns about: it carries
+      !   the partial count SQUARED on top of everything the total store
+      !   holds, so the atom-nl cell reaches tens of gigabytes on a cell
+      !   of a few tens of atoms.
+      if (detailCodePOPTC /= 0) then
+         allocate (transProbPOPTCBanded (sumNumPartials,sumNumPartials, &
+               & dim3,numKPoints,bandedInitLo:bandedInitHi, &
+               & bandedFinLo:bandedFinHi,spin))
+         transProbPOPTCBanded(:,:,:,:,:,:,:) = 0.0_double
+      endif
    endif
 
 
@@ -865,7 +900,15 @@ integer :: k,l
                !   the loop, immediately after the read that loaded this
                !   k-point's wave functions and momentum matrix.
                if (kPointIntgCode == 1) then
+
+                  ! The total spectra are needed whether or not a
+                  !   decomposition was asked for, exactly as on the
+                  !   Gaussian side, so the undecomposed store is filled
+                  !   in both cases and the decomposed one in addition.
                   call computeTransProbBanded (i,0,h)
+                  if (detailCodePOPTC /= 0) then
+                     call computeTransProbPOPTCBanded (i,0,h)
+                  endif
                elseif (detailCodePOPTC == 0) then ! Standard OPTC calc.
                   call computePairs (i,0,h,doOPTC)
                else ! Doing pOptc calculation
@@ -952,6 +995,21 @@ integer :: k,l
    deallocate (directGap)
    deallocate (indirectGapEnergies)
    deallocate (indirectGap)
+
+   ! The decomposition index was built by this routine before the loop,
+   !   so this routine releases it. The producers inside the loop read it
+   !   and do not own it, which is what lets the same index serve both
+   !   integration pathways without either one guessing whether it is the
+   !   last caller.
+   if (detailCodePOPTC /= 0) then
+      call cleanUpPOPTCIndex
+   endif
+
+   ! The band-pair pruning mask has the same lifetime as the store it
+   !   describes, and is not needed once every k-point has been filled.
+   if (allocated(pairIsWanted)) then
+      deallocate (pairIsWanted)
+   endif
 
    ! Log the date and time we end.
    call timeStampEnd (23)
@@ -1568,6 +1626,178 @@ subroutine computeTransProbBanded (currentKPoint,xyzComponents, &
 end subroutine computeTransProbBanded
 
 
+! Fill one k-point's slice of the DECOMPOSED band-pair store, for the
+!   tetrahedron pathway. The counterpart of computeTransProbBanded, and
+!   the same relationship to computePOPTCPairs that that routine has to
+!   computePairs: identical physics, different bookkeeping.
+!
+! What the extra work here is. Instead of collapsing the momentum matrix
+!   element to a single number per transition, the element is resolved
+!   into a matrix over partial pairs, and the transition probability is
+!   distributed over that matrix so that summing it reproduces the
+!   total. The construction is the "sum squared to sum of squares"
+!   arrangement: each entry is multiplied by the SUM over all entries,
+!   separately for the real and imaginary parts, which is what makes the
+!   partials add up to the undecomposed answer.
+subroutine computeTransProbPOPTCBanded (currentKPoint,xyzComponents, &
+      & spinDirection)
+
+   ! Import the necessary modules.
+   use O_Kinds
+   use O_Constants,   only: dim3
+   use O_AtomicSites, only: valeDim
+   use O_KPoints,     only: kPointWeight
+   use O_Populate,    only: electronPopulation_LAT
+#ifndef GAMMA
+   use O_SecularEquation, only: valeVale
+#else
+   use O_SecularEquation, only: valeValeGamma
+#endif
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define the dummy variables passed to this subroutine.
+   integer, intent(in) :: currentKPoint
+   integer, intent(in) :: xyzComponents ! 0=all, 1=x, 2=y, 3=z
+   integer, intent(in) :: spinDirection
+
+   ! Define local variables.
+   integer :: i,j,k ! Loop indices: initial band, final band, component.
+   integer :: l,n,o ! Loop indices: basis function, final and initial
+         !   partial. The pair matrix is addressed (o,n) so that the
+         !   initial partial is leftmost and therefore fastest.
+   integer :: initComponent
+   integer :: finComponent
+   integer :: storeComponent  ! Where in dim3 this component belongs.
+   integer :: finalStateIndex ! Position of band j within conjWaveMomSum.
+   real (kind=double) :: initStateFactor
+   real (kind=double) :: finStateFactor
+   real (kind=double) :: fullOccupancy
+#ifndef GAMMA
+   complex (kind=double), allocatable, dimension (:,:,:,:) :: conjWaveMomSum
+   complex (kind=double), allocatable, dimension (:,:,:) :: valeValeXMom
+   real (kind=double) :: valeValeXMomSumReal
+   real (kind=double) :: valeValeXMomSumImag
+#else
+   real (kind=double), allocatable, dimension (:,:,:,:) :: conjWaveMomSum
+   real (kind=double), allocatable, dimension (:,:,:) :: valeValeXMom
+   real (kind=double) :: valeValeXMomSum
+#endif
+
+   ! Determine the range of components (xyz) that should be considered.
+   if (xyzComponents == 0) then
+      initComponent = 1
+      finComponent = 3
+   else
+      initComponent = 1
+      finComponent = 1
+   endif
+
+   ! See computeTransProbBanded for why the zone measure is divided out
+   !   here: it re-enters through tetraVol during the accumulation, and
+   !   applying it twice would be silent.
+   fullOccupancy = kPointWeight(currentKPoint) * 0.5_double
+
+   allocate (conjWaveMomSum (valeDim,sumNumPartials, &
+         & bandedFinHi-bandedFinLo+1,finComponent))
+   allocate (valeValeXMom (sumNumPartials,sumNumPartials,dim3))
+
+   call buildConjWaveMomSumPOPTC (bandedFinLo,bandedFinHi,initComponent, &
+         & finComponent,conjWaveMomSum)
+
+   do i = bandedInitLo, bandedInitHi
+
+      initStateFactor = electronPopulation_LAT(i,currentKPoint, &
+            & spinDirection) / fullOccupancy
+
+      do j = bandedFinLo, bandedFinHi
+
+         ! Skip pairs that no tetrahedron anywhere in the zone can want.
+         if (.not. pairIsWanted(i,j,spinDirection)) cycle
+
+         ! Derived rather than counted, so that a skipped pair cannot put
+         !   this out of step with the array it addresses.
+         finalStateIndex = j - bandedFinLo + 1
+
+         finStateFactor = 1.0_double - electronPopulation_LAT(j, &
+               & currentKPoint,spinDirection) / fullOccupancy
+
+         do k = initComponent, finComponent
+
+            if (xyzComponents == 0) then
+               storeComponent = k
+            else
+               storeComponent = xyzComponents
+            endif
+
+#ifndef GAMMA
+            valeValeXMom(:,:,k) = cmplx(0.0_double,0.0_double,double)
+
+            ! Resolve the matrix element by the partial its initial-state
+            !   basis function belongs to. The final-state partial is
+            !   already carried by conjWaveMomSum's second index.
+            do l = 1, valeDim
+               do n = 1, sumNumPartials
+                  valeValeXMom(pOptcIndex(l),n,k) = &
+                        & valeValeXMom(pOptcIndex(l),n,k) &
+                        & + valeVale(l,i,1) &
+                        & * conjWaveMomSum(l,n,finalStateIndex,k)
+               enddo
+            enddo
+
+            ! The totals that turn a sum of squares back into a squared
+            !   sum, so that the partials reproduce the undecomposed
+            !   transition probability when added together.
+            valeValeXMomSumReal = sum(real(valeValeXMom(:,:,k),double))
+            valeValeXMomSumImag = sum(aimag(valeValeXMom(:,:,k)))
+
+            ! n outer, o inner: o is the leftmost index of both the
+            !   scratch matrix and the store, so it must run innermost.
+            do n = 1, sumNumPartials
+               do o = 1, sumNumPartials
+                  transProbPOPTCBanded(o,n,storeComponent,currentKPoint, &
+                        & i,j,spinDirection) = &
+                        & ((real(valeValeXMom(o,n,k),double) &
+                        & * valeValeXMomSumReal) &
+                        & + (aimag(valeValeXMom(o,n,k)) &
+                        & * valeValeXMomSumImag)) &
+                        & * initStateFactor * finStateFactor
+               enddo
+            enddo
+#else
+            valeValeXMom(:,:,k) = 0.0_double
+
+            do l = 1, valeDim
+               do n = 1, sumNumPartials
+                  valeValeXMom(pOptcIndex(l),n,k) = &
+                        & valeValeXMom(pOptcIndex(l),n,k) &
+                        & + valeValeGamma(l,i,1) &
+                        & * conjWaveMomSum(l,n,finalStateIndex,k)
+               enddo
+            enddo
+
+            valeValeXMomSum = sum(valeValeXMom(:,:,k))
+
+            do n = 1, sumNumPartials
+               do o = 1, sumNumPartials
+                  transProbPOPTCBanded(o,n,storeComponent,currentKPoint, &
+                        & i,j,spinDirection) = &
+                        & valeValeXMom(o,n,k) * valeValeXMomSum &
+                        & * initStateFactor * finStateFactor
+               enddo
+            enddo
+#endif
+         enddo
+      enddo
+   enddo
+
+   deallocate (conjWaveMomSum)
+   deallocate (valeValeXMom)
+
+end subroutine computeTransProbPOPTCBanded
+
+
 ! The decomposed counterpart of buildConjWaveMomSum. It answers the same
 !   question -- for each final state, the conjugated wave function summed
 !   against the momentum matrix -- but keeps the answer resolved by
@@ -1689,44 +1919,37 @@ end subroutine buildConjWaveMomSumPOPTC
 
 
 
-subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
+! Build the decomposition index that assigns every basis function to a
+!   partial, and the tables that describe the resulting layout.
+!   PSEUDOCODE 18, DESIGN 11.
+!
+! The answer does not depend on the k-point, the spin, or anything else
+!   that varies during a run: it is fixed by the structure and the
+!   requested detail code. So this is called ONCE, before the k-point
+!   loop, and the arrays it fills are read by whichever transition
+!   producer the integration method selected. It used to be rebuilt on
+!   every call of computePOPTCPairs, which was wasted work even then and
+!   is not available at all to the tetrahedron pathway, whose store must
+!   be sized from sumNumPartials before the loop begins.
+subroutine buildPOPTCIndex
 
    ! Import the necessary modules.
    use O_Kinds
-   use O_TimeStamps
-   use O_Potential,   only: spin
-   use O_SortSubs,    only: mergeSort
-   use O_Populate,    only: electronPopulation
-   use O_KPoints,     only: kPointWeight, numKPoints, numFullMeshKP, &
-         & fullKPToIBZKPMap, fullKPToIBZOpMap, numPointOps
-   use O_Constants,   only: pi, hartree, lAngMomCount, dim3
+   use O_Constants,   only: lAngMomCount
+   use O_KPoints,     only: numPointOps
    use O_AtomicSites, only: valeDim, numAtomSites, atomSites, atomPerm
    use O_AtomicTypes, only: numAtomTypes, atomTypes
-   use O_Input,       only: numStates, detailCodePOPTC
+   use O_Input,       only: detailCodePOPTC
 
-   ! The momentum matrix itself is read by buildConjWaveMomSumPOPTC rather
-   !   than here, so only the wave functions are needed at this level.
-#ifndef GAMMA
-   use O_SecularEquation, only: valeVale, energyEigenValues
-#else
-   use O_SecularEquation, only: valeValeGamma, energyEigenValues
-#endif
-
-
-   ! Make sure that no funny variables.
+   ! Make sure that there are not accidental variable declarations.
    implicit none
 
-   ! Define the dummy variables passed to this subroutine.
-   integer :: currentKPoint
-   integer :: xyzComponents ! 0=all, 1=x, 2=y, 3=z
-   integer :: spinDirection
-   integer, intent(in) :: doOPTC
-
-   ! Define local variables specific to POPTC.
-   integer :: i,j,k,l,n,o ! Loop index variables
+   ! Define local variables.
+   integer :: i,j,k,l ! Loop index variables.
    integer :: currentType
-   integer :: valeDimIndex ! FIX Name
-   integer, allocatable, dimension (:) :: numStatesAtom ! Vale states / atom
+   integer :: valeDimIndex
+   integer :: opIdx  ! Point operation being tabulated.
+   integer :: siteRot ! Image of a site under that operation.
 
    ! Variables that resolve the decomposition request into the two
    !   independent parameters of DESIGN 11.2 and then lay the partials
@@ -1744,58 +1967,9 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    integer :: currentSlot      ! Slot within that segment
    integer :: currentPartial   ! The partial those two resolve to
 
-   ! Variables for the IBZ star unfolding of the atom grouped pair
-   !   matrix (PSEUDOCODE 7a). These are used only for detail codes 3
-   !   and 4, and the indices they carry are PARTIALS rather than atoms:
-   !   for code 3 a partial is exactly an atomic site, but for code 4 a
-   !   partial is one QN_nl slot within a site, so the permutation that
-   !   acts on the pair matrix is partialPerm and not atomPerm.
-   integer :: starSize   ! Full-mesh k-points folding onto this IBZ point
-   integer :: fullIdx    ! Index of a full-mesh k-point in that star
-   integer :: opIdx      ! Point operation carrying the IBZ point to it
-   integer :: siteRot    ! Image of a site under that operation
-   integer :: pairIndex  ! Transition pair within this k-point
-   integer :: component  ! Cartesian component of the momentum operator
-   integer :: partialA   ! Initial-state partial index of the pair
-   integer :: partialB   ! Final-state partial index of the pair
-   integer :: permPartialA ! Image of partialA under the operation
-   integer :: permPartialB ! Image of partialB under the operation
-   real (kind=double), allocatable, dimension (:,:) :: pairSlabSym
-   real    (kind=double), allocatable, dimension (:)         :: partialsIndex
-   real    (kind=double), allocatable, dimension (:,:,:,:) :: transitionProbTemp
-
-   ! Define local variables that are the same as computePairs.
-   integer :: initComponent
-   integer :: finComponent
-   integer :: transPairCount
-   integer :: firstInit
-   integer :: lastInit
-   integer :: firstFin
-   integer :: lastFin
-   integer :: finalStateIndex
-   integer :: orderedIndex
-   integer, allocatable, dimension (:) :: sortOrder
-   integer, allocatable, dimension (:) :: segmentBorders
-   real    (kind=double) :: initStateFactor
-   real    (kind=double) :: finStatefactor
-   real    (kind=double) :: currentEnergyDiff
-   real    (kind=double), allocatable, dimension (:)       :: energyDiffTemp
-#ifndef GAMMA
-   real    (kind=double) :: valeValeXMomSumReal
-   real    (kind=double) :: valeValeXMomSumImag
-   complex (kind=double), allocatable, dimension (:,:,:,:) :: conjWaveMomSum
-   complex (kind=double), allocatable, dimension (:,:,:)   :: valeValeXMom
-#else
-   real    (kind=double) :: valeValeXMomGammaSum
-   real  (kind=double), allocatable, dimension (:,:,:,:) :: conjWaveMomSumGamma
-   real    (kind=double), allocatable, dimension (:,:,:)   :: valeValeXMomGamma
-#endif
-
-
-   ! Indexing for partial optical properties (pOptc)
-
-   ! Allocate arrays and matrices for this computation.
-   allocate (numStatesAtom  (numAtomSites))
+   ! How many basis functions feed each partial. Local because only the
+   !   Kramers-Kronig factor written below consumes it.
+   real (kind=double), allocatable, dimension (:) :: partialsIndex
 
    ! Resolve the requested decomposition into the two independent
    !   parameters that DESIGN 11.2 defines a cell by. (Detail code 0
@@ -1824,9 +1998,9 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    ! Lay the partials out. Each segment owns a contiguous block of them:
    !   segmentBase records where that block starts as a zero based
    !   offset, and slotsPerSegment records how long it is. Both outlive
-   !   this walk because the star unfolding further below needs them to
-   !   carry a partial from one site onto the block of the site's image
-   !   under a symmetry operation.
+   !   this walk because the star unfolding needs them to carry a partial
+   !   from one site onto the block of the site's image under a symmetry
+   !   operation.
    segmentBase(1) = 0
    do i = 1, numSegments
 
@@ -1860,41 +2034,26 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    ! The final base sits one past the last block, so it is the count.
    sumNumPartials = segmentBase(numSegments + 1)
 
-   ! Now that the sum of the number of partials is known, we can allocate
-   !   space to hold accumulated data.
-
-   ! For each sub-group, we will need to record the number of basis functions
-   !   that contribute to it so that we can properly normalize the KKC.
+   ! For each sub-group, record the number of basis functions that
+   !   contribute to it so that we can properly normalize the KKC.
    allocate (partialsIndex(sumNumPartials))
+   partialsIndex(:) = 0
 
-   ! We also need to store the transition probabilities for all partials.
-   if (.not. allocated(transitionProbPOPTC)) then
-      allocate(transitionProbPOPTC(sumNumPartials,sumNumPartials,dim3,&
-            & maxPairs,numKPoints,spin))
-      transitionProbPOPTC (:,:,:,:,:,:) = 0.0_double
-   endif
-
-   ! Allocate storage for pOptcIndex so that each basis function can be "sent"
-   !   (or indexed) to the correct accumulation group.
+   ! Allocate storage for pOptcIndex so that each basis function can be
+   !   "sent" (or indexed) to the correct accumulation group.
    allocate (pOptcIndex (valeDim))
 
-   partialsIndex(:) = 0 ! Set counting array to zero.
-
-   ! Initialize valeDimIndex. This is used in the loop below to track
-   !   which basis function is currently under consideration for the mapping
-   !   into pOptcIndex. The valeDim is "valence dimension", one for each
-   !   basis function (orbital).
+   ! Track which basis function is currently under consideration for the
+   !   mapping into pOptcIndex. The valeDim is "valence dimension", one
+   !   for each basis function (orbital).
    valeDimIndex = 0
 
-   ! Loop over every atom in the system to index where the pOptc values for
-   !   each atom should be stored.
+   ! Loop over every atom in the system to index where the pOptc values
+   !   for each atom should be stored.
    do i = 1, numAtomSites
 
       ! Obtain the type of the current atom.
       currentType = atomSites(i)%atomTypeAssn
-
-      ! Identify and store the number of valence states for this atom.
-      numStatesAtom(i) = atomTypes(currentType)%numValeStates
 
       ! Identify the segment that this site feeds. Grouping by type
       !   sends every atom of a type to one segment; grouping by site
@@ -1962,14 +2121,8 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    !   the image site's slots stand in one to one correspondence with the
    !   original's and carry the same QN_nl meaning. For detail code 3
    !   there is exactly one slot per segment and the table reduces to
-   !   atomPerm itself, which is why the star average below is written
-   !   once for both codes rather than special cased.
-   !
-   ! The table depends only on the permutation and on the layout above,
-   !   so its contents are the same at every k-point. It is rebuilt here
-   !   per call because the whole decomposition index is rebuilt per
-   !   call, and its cost (one entry per operation per partial) is
-   !   negligible beside the transition loop that follows.
+   !   atomPerm itself, which is why the star average is written once for
+   !   both codes rather than special cased.
    if ((detailCodePOPTC >= 3) .and. (allocated(atomPerm))) then
       allocate (partialPerm (numPointOps, sumNumPartials))
 
@@ -1984,19 +2137,139 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
       enddo
    endif
 
-   ! Write KKC factor to file for use in OCLAOkkc one time (use KP=1 as the
-   !   trigger to write).
-   if (currentKPoint == 1) then
-      write (209,fmt="(a17,a5)") 'POPTC_KKC_FACTOR ', '    1'
-      do j = 1, sumNumPartials
-         do  k = 1, sumNumPartials
-         write (209,fmt="(a17,1e15.7)") 'POPTC_KKC_FACTOR ', &
-               & (partialsIndex(j) * partialsIndex(k) / (valeDimIndex**2))
-         enddo
+   ! Write the KKC factor to file for use in imagoKKc. Written once,
+   !   which is now simply a consequence of this routine being called
+   !   once rather than something a k-point test has to arrange.
+   write (209,fmt="(a17,a5)") 'POPTC_KKC_FACTOR ', '    1'
+   do j = 1, sumNumPartials
+      do  k = 1, sumNumPartials
+      write (209,fmt="(a17,1e15.7)") 'POPTC_KKC_FACTOR ', &
+            & (partialsIndex(j) * partialsIndex(k) / (valeDimIndex**2))
       enddo
-   endif
+   enddo
 
    deallocate (partialsIndex)
+
+end subroutine buildPOPTCIndex
+
+
+! Release what buildPOPTCIndex allocated. Separate from the build so
+!   that the caller owning the k-point loop owns the lifetime, rather
+!   than a producer inside the loop having to guess whether it is the
+!   last one to run.
+subroutine cleanUpPOPTCIndex
+
+   implicit none
+
+   if (allocated(segmentBase))     deallocate (segmentBase)
+   if (allocated(slotsPerSegment)) deallocate (slotsPerSegment)
+   if (allocated(pOptcIndex))      deallocate (pOptcIndex)
+
+   ! Built only for the atom grouped codes, and only when the symmetry
+   !   maps exist, so its release is guarded the same way.
+   if (allocated(partialPerm))     deallocate (partialPerm)
+
+end subroutine cleanUpPOPTCIndex
+
+
+subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
+
+   ! Import the necessary modules.
+   use O_Kinds
+   use O_TimeStamps
+   use O_Potential,   only: spin
+   use O_SortSubs,    only: mergeSort
+   use O_Populate,    only: electronPopulation
+   use O_KPoints,     only: kPointWeight, numKPoints, numFullMeshKP, &
+         & fullKPToIBZKPMap, fullKPToIBZOpMap
+   use O_Constants,   only: pi, hartree, dim3
+   use O_AtomicSites, only: valeDim, atomPerm
+   use O_Input,       only: numStates, detailCodePOPTC
+
+   ! The momentum matrix itself is read by buildConjWaveMomSumPOPTC rather
+   !   than here, so only the wave functions are needed at this level.
+#ifndef GAMMA
+   use O_SecularEquation, only: valeVale, energyEigenValues
+#else
+   use O_SecularEquation, only: valeValeGamma, energyEigenValues
+#endif
+
+
+   ! Make sure that no funny variables.
+   implicit none
+
+   ! Define the dummy variables passed to this subroutine.
+   integer :: currentKPoint
+   integer :: xyzComponents ! 0=all, 1=x, 2=y, 3=z
+   integer :: spinDirection
+   integer, intent(in) :: doOPTC
+
+   ! Define local variables specific to POPTC. The decomposition index
+   !   and its layout tables are built by buildPOPTCIndex before the
+   !   k-point loop, so none of the variables that construct them appear
+   !   here any more.
+   integer :: i,j,k,l,n,o ! Loop index variables
+
+   ! Variables for the IBZ star unfolding of the atom grouped pair
+   !   matrix (PSEUDOCODE 7a). These are used only for detail codes 3
+   !   and 4, and the indices they carry are PARTIALS rather than atoms:
+   !   for code 3 a partial is exactly an atomic site, but for code 4 a
+   !   partial is one QN_nl slot within a site, so the permutation that
+   !   acts on the pair matrix is partialPerm and not atomPerm.
+   integer :: starSize   ! Full-mesh k-points folding onto this IBZ point
+   integer :: fullIdx    ! Index of a full-mesh k-point in that star
+   integer :: opIdx      ! Point operation carrying the IBZ point to it
+   integer :: pairIndex  ! Transition pair within this k-point
+   integer :: component  ! Cartesian component of the momentum operator
+   integer :: partialA   ! Initial-state partial index of the pair
+   integer :: partialB   ! Final-state partial index of the pair
+   integer :: permPartialA ! Image of partialA under the operation
+   integer :: permPartialB ! Image of partialB under the operation
+   real (kind=double), allocatable, dimension (:,:) :: pairSlabSym
+   real (kind=double), allocatable, &
+         & dimension (:,:,:,:) :: transitionProbTemp
+
+   ! Define local variables that are the same as computePairs.
+   integer :: initComponent
+   integer :: finComponent
+   integer :: transPairCount
+   integer :: firstInit
+   integer :: lastInit
+   integer :: firstFin
+   integer :: lastFin
+   integer :: finalStateIndex
+   integer :: orderedIndex
+   integer, allocatable, dimension (:) :: sortOrder
+   integer, allocatable, dimension (:) :: segmentBorders
+   real    (kind=double) :: initStateFactor
+   real    (kind=double) :: finStatefactor
+   real    (kind=double) :: currentEnergyDiff
+   real    (kind=double), allocatable, dimension (:)       :: energyDiffTemp
+#ifndef GAMMA
+   real    (kind=double) :: valeValeXMomSumReal
+   real    (kind=double) :: valeValeXMomSumImag
+   complex (kind=double), allocatable, dimension (:,:,:,:) :: conjWaveMomSum
+   complex (kind=double), allocatable, dimension (:,:,:)   :: valeValeXMom
+#else
+   real    (kind=double) :: valeValeXMomGammaSum
+   real  (kind=double), allocatable, dimension (:,:,:,:) :: conjWaveMomSumGamma
+   real    (kind=double), allocatable, dimension (:,:,:)   :: valeValeXMomGamma
+#endif
+
+
+   ! The decomposition index is built once before the k-point loop, by
+   !   buildPOPTCIndex, so this routine reads pOptcIndex, segmentBase,
+   !   slotsPerSegment, sumNumPartials and partialPerm rather than
+   !   constructing them. It does not own them and must not free them.
+
+   ! Storage for the transition probabilities of all partial pairs. This
+   !   is the GAUSSIAN pathway's store; the tetrahedron pathway fills
+   !   transProbPOPTCBanded instead, under a band-pair index.
+   if (.not. allocated(transitionProbPOPTC)) then
+      allocate(transitionProbPOPTC(sumNumPartials,sumNumPartials,dim3,&
+            & maxPairs,numKPoints,spin))
+      transitionProbPOPTC (:,:,:,:,:,:) = 0.0_double
+   endif
 
    ! Make shorthand for the state indices.
    firstInit = firstOccupiedState(currentKPoint,spinDirection)
@@ -2377,22 +2650,14 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
       enddo
    endif
 
-   ! Deallocate unnecessary arrays and matrices
+   ! Deallocate unnecessary arrays and matrices. The decomposition index
+   !   is NOT among them: it is built once before the k-point loop and
+   !   released after it, because both this routine and the tetrahedron
+   !   producer read it and neither owns it.
    deallocate (energyDiffTemp)
    deallocate (transitionProbTemp)
    deallocate (segmentBorders)
    deallocate (sortOrder)
-   deallocate (numStatesAtom)
-   deallocate (segmentBase)
-   deallocate (slotsPerSegment)
-   deallocate (pOptcIndex)
-
-   ! The partial permutation table is built only for the atom grouped
-   !   codes and only when the symmetry maps exist, so its release is
-   !   guarded the same way its allocation was.
-   if (allocated(partialPerm)) then
-      deallocate (partialPerm)
-   endif
 
 end subroutine computePOPTCPairs
 

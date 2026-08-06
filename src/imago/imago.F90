@@ -1194,7 +1194,8 @@ subroutine optc(inSCF,doOPTC)
    use O_Input,           only: numStates, lastInitStatePACS, &
          & detailCodePOPTC
    use O_OptcTransitions, only: transCounter, energyDiff, transitionProb, &
-         & transitionProbPOPTC, getEnergyStatistics, computeTransitions
+         & transitionProbPOPTC, getEnergyStatistics, computeTransitions, &
+         & transProbBanded, transProbPOPTCBanded
    use O_SecularEquation, only: energyEigenValues, &
          & shiftEnergyEigenValues
 
@@ -1307,6 +1308,18 @@ subroutine optc(inSCF,doOPTC)
       if (detailCodePOPTC /= 0) then
          deallocate (transitionProbPOPTC)
       endif
+   endif
+
+   ! The band-pair stores belong to the tetrahedron pathway and exist
+   !   only when it ran, so each release is guarded on the allocation
+   !   rather than on the integration code. Guarding on the code instead
+   !   would be a second place that has to agree with the first about
+   !   when these were created.
+   if (allocated(transProbBanded)) then
+      deallocate (transProbBanded)
+   endif
+   if (allocated(transProbPOPTCBanded)) then
+      deallocate (transProbPOPTCBanded)
    endif
 
 end subroutine optc
