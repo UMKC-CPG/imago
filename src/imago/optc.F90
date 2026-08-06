@@ -53,14 +53,33 @@ module O_OptcTransitions
          & dimension (:,:,:,:,:,:) :: transitionProbPOPTC
    real (kind=double), allocatable, dimension (:,:,:)   :: energyDiff
 
-   ! POPTC specific variables.
-   integer, allocatable, dimension (:) :: pOptcIndex ! Decomp. group index
-   integer, allocatable, dimension (:) :: cumulNumPartials ! For each type of
-         !   major division (e.g., types or atoms), record the number of sub-
-         !   groups that must be accumulated. (The "segments" in the output
-         !   file are either types or atoms as this is.) Record as an
-         !   accumulation.
-   integer :: sumNumPartials ! Total number of POPTC groups
+   ! POPTC specific variables. The decomposition these describe is the
+   !   two by two grid of DESIGN 11: a grouping (by type or by atomic
+   !   site) crossed with a resolution (the whole group in one partial,
+   !   or one partial per QN_nl radial function). A "segment" is one
+   !   member of the grouping, so it is a type for detail codes 1 and 2
+   !   and a site for codes 3 and 4, and each segment owns a contiguous
+   !   block of partials.
+   integer, allocatable, dimension (:) :: pOptcIndex ! For each valence
+         !   basis function, the partial it contributes to. This array is
+         !   the whole of the decomposition; everything downstream simply
+         !   accumulates through it.
+   integer, allocatable, dimension (:) :: segmentBase ! Where each
+         !   segment's block of partials begins, as a zero based offset,
+         !   with one extra final entry holding sumNumPartials. Sized
+         !   (numSegments + 1).
+   integer, allocatable, dimension (:) :: slotsPerSegment ! How many
+         !   partials each segment owns, which is the difference of
+         !   consecutive segmentBase entries. Stored rather than
+         !   recomputed because the star unfolding walks it directly.
+   integer, allocatable, dimension (:,:) :: partialPerm ! The image of
+         !   each partial under each point operation, indexed
+         !   (numPointOps, sumNumPartials). Built from atomPerm and the
+         !   partial layout, and used only by the atom grouped codes to
+         !   carry the pair matrix across the star of an IBZ k-point.
+   integer :: sumNumPartials ! Total number of POPTC partials. The stored
+         !   pair matrix is this squared, so it is also the cost driver
+         !   described in DESIGN 11.4.
    integer :: initVDBI ! Index for initial state valeDim basis fns
    integer :: finVDBI  ! Index for final state valeDim basis fns
 
@@ -1170,7 +1189,7 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    use O_SortSubs,    only: mergeSort
    use O_Populate,    only: electronPopulation
    use O_KPoints,     only: kPointWeight, numKPoints, numFullMeshKP, &
-         & fullKPToIBZKPMap, fullKPToIBZOpMap
+         & fullKPToIBZKPMap, fullKPToIBZOpMap, numPointOps
    use O_Constants,   only: pi, hartree, lAngMomCount, dim3
    use O_AtomicSites, only: valeDim, numAtomSites, atomSites, atomPerm
    use O_AtomicTypes, only: numAtomTypes, atomTypes
@@ -1195,34 +1214,43 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
 
    ! Define local variables specific to POPTC.
    integer :: i,j,k,l,m,n,o ! Loop index variables
-   character*1, dimension (lAngMomCount) :: QN_lLetter
-   character*14, dimension (4,7) :: QN_mLetter
-   integer :: numSQN_l
-   integer :: numPQN_l
-   integer :: numDQN_l
-   integer :: numFQN_l
-   integer :: initSIndex
-   integer :: initPIndex
-   integer :: initDIndex
-   integer :: initFIndex
    integer :: currentType
    integer :: valeDimIndex ! FIX Name
    integer :: indexValeDim ! FIX Name
-   integer :: pOptcKKCIndex
-   integer :: newPartial
    integer, allocatable, dimension (:) :: numStatesAtom ! Vale states / atom
 
-   ! Variables for the IBZ star unfolding of the atom resolved pair
-   !   matrix (PSEUDOCODE 7a). These are used only for detail code 2.
+   ! Variables that resolve the decomposition request into the two
+   !   independent parameters of DESIGN 11.2 and then lay the partials
+   !   out. Writing the assignment as one parameterized walk rather than
+   !   one branch per detail code keeps the grid of DESIGN 11 visible in
+   !   the code, so that a cell added later is a new parameter value
+   !   rather than a new branch that has to remember to do everything
+   !   the other branches do.
+   logical :: groupByType  ! Codes 1,2 group by type; codes 3,4 by site
+   logical :: resolveTotal ! Codes 1,3 give a segment one shared slot
+   integer :: numSegments  ! Type count when grouping by type, else sites
+   integer :: typeOfSegment    ! The type whose basis a segment carries
+   integer :: slotsThisSegment ! Partials the segment being laid out owns
+   integer :: currentSegment   ! The segment that the current site feeds
+   integer :: currentSlot      ! Slot within that segment
+   integer :: currentPartial   ! The partial those two resolve to
+
+   ! Variables for the IBZ star unfolding of the atom grouped pair
+   !   matrix (PSEUDOCODE 7a). These are used only for detail codes 3
+   !   and 4, and the indices they carry are PARTIALS rather than atoms:
+   !   for code 3 a partial is exactly an atomic site, but for code 4 a
+   !   partial is one QN_nl slot within a site, so the permutation that
+   !   acts on the pair matrix is partialPerm and not atomPerm.
    integer :: starSize   ! Full-mesh k-points folding onto this IBZ point
    integer :: fullIdx    ! Index of a full-mesh k-point in that star
    integer :: opIdx      ! Point operation carrying the IBZ point to it
+   integer :: siteRot    ! Image of a site under that operation
    integer :: pairIndex  ! Transition pair within this k-point
    integer :: component  ! Cartesian component of the momentum operator
-   integer :: atomA      ! Initial-state atom index of the pair
-   integer :: atomB      ! Final-state atom index of the pair
-   integer :: permAtomA  ! Image of atomA under the operation: perm(R,A)
-   integer :: permAtomB  ! Image of atomB under the operation: perm(R,B)
+   integer :: partialA   ! Initial-state partial index of the pair
+   integer :: partialB   ! Final-state partial index of the pair
+   integer :: permPartialA ! Image of partialA under the operation
+   integer :: permPartialB ! Image of partialB under the operation
    real (kind=double), allocatable, dimension (:,:) :: pairSlabSym
    real    (kind=double), allocatable, dimension (:)         :: partialsIndex
    real    (kind=double), allocatable, dimension (:,:,:,:) :: transitionProbTemp
@@ -1259,137 +1287,69 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
 
    ! Allocate arrays and matrices for this computation.
    allocate (numStatesAtom  (numAtomSites))
-   
-   ! Store pOptc for each type.
-   !   (A sum over all orbitals of all atoms of a given type.)
-   if (detailCodePOPTC == 1) then
-      allocate (cumulNumPartials (numAtomTypes + 1))
 
-   ! Store pOptc for each atom.
-   !   (A sum over all orbitals of a given atom.)
-   elseif (detailCodePOPTC == 2) then
-      allocate (cumulNumPartials (1)) ! Unused for this detailCodePOPTC.
-
-   ! Store pOptc for each QN_nl resolved TYPE.
-   !   (A sum over all m QN orbitals of a given nl orbital, taken over
-   !   every atom of the type.) Note that this code groups by type even
-   !   though it sits between the two atom resolved codes: the index
-   !   built below comes from cumulNumPartials(currentType), so two
-   !   atoms of one type share a partial, and printSpectrumPOPTC walks
-   !   types to match. The distinction is not cosmetic. A sum over all
-   !   atoms of a type is invariant under the point operations used to
-   !   reduce the k-point mesh, while an atom resolved quantity is not,
-   !   so a reader who mistakes this for atom resolution would think it
-   !   needed an unfolding correction that it does not.
-   elseif (detailCodePOPTC == 3) then
-      ! Only the first numAtomTypes+1 entries are ever used. The bound
-      !   here is the site count, which is always at least as large.
-      allocate (cumulNumPartials (numAtomSites + 1))
-
-   ! Store pOptc for each QN_nlm resolved atom.
-   !   (Every distinct basis function.)
-   elseif (detailCodePOPTC == 4) then
-      allocate (cumulNumPartials (numAtomSites + 1))
+   ! Resolve the requested decomposition into the two independent
+   !   parameters that DESIGN 11.2 defines a cell by. (Detail code 0
+   !   means no decomposition at all and never reaches this routine.)
+   if (detailCodePOPTC <= 2) then
+      groupByType = .true.  ! Codes 1 and 2: a segment is an atomic type.
+   else
+      groupByType = .false. ! Codes 3 and 4: a segment is an atomic site.
+   endif
+   if ((detailCodePOPTC == 1) .or. (detailCodePOPTC == 3)) then
+      resolveTotal = .true.  ! Codes 1 and 3: one partial per segment.
+   else
+      resolveTotal = .false. ! Codes 2 and 4: one per radial function.
    endif
 
-
-   ! Define the QN_l letters.
-   QN_lLetter(1) = 's'
-   QN_lLetter(2) = 'p'
-   QN_lLetter(3) = 'd'
-   QN_lLetter(4) = 'f'
-
-   ! Define the QN_m resolved letters.
-   QN_mLetter(1,1) = 'r'
-   QN_mLetter(2,1) = 'x'
-   QN_mLetter(2,2) = 'y'
-   QN_mLetter(2,3) = 'z'
-   QN_mLetter(3,1) = 'xy'
-   QN_mLetter(3,2) = 'xz'
-   QN_mLetter(3,3) = 'yz'
-   QN_mLetter(3,4) = 'xx~yy'
-   QN_mLetter(3,5) = '2zz~xx~yy'
-   QN_mLetter(4,1) = 'xyz'
-   QN_mLetter(4,2) = 'xxz~yyz'
-   QN_mLetter(4,3) = 'xxx~3yyx'
-   QN_mLetter(4,4) = '3xxy~yyy'
-   QN_mLetter(4,5) = '2zzz~3xxz~3yyz'
-   QN_mLetter(4,6) = '4zzx~xxx~yyx'
-   QN_mLetter(4,7) = '4zzy~xxy~yyy'
-
-   ! Initialize other variables.
-   cumulNumPartials(:) = 0
-   sumNumPartials  = 0
-
-   ! For each detail code we need to compute the number of sub-groups that
-   !   this detail code will produce for each "segment". A "segment" can be
-   !   either types or atoms (at present).
-   if (detailCodePOPTC == 1) then
-      ! Store the total for each type.
-
-      ! Nothing reads cumulNumPartials for this detail code: the group
-      !   index assigned below is simply the type number itself, and the
-      !   partial count is set directly on the next line. The running
-      !   sum is therefore inert, and its summand does not mean what the
-      !   name suggests. Do not build on it without first deciding what
-      !   it ought to hold.
-      cumulNumPartials(1) = 0
-
-      do i = 1,numAtomTypes
-         cumulNumPartials(i+1) = cumulNumPartials(i) + i
-      enddo
-
-
-      ! Record number of Atom Types
-      sumNumPartials = numAtomTypes
-
-   elseif (detailCodePOPTC == 2) then
-      ! Store the total for each atom. (Managed easily without cumulNumPar.)
-
-      ! Total number of Atom Sites.
-      sumNumPartials = numAtomSites
-
-   elseif (detailCodePOPTC == 3) then
-      ! Store the nl orbital totals for each type. (Sum over m, and over
-      !   every atom that carries the type.)
-
-      ! Initialize the counter that indexes the cumulative sum of QN_nl
-      !   orbitals over types. (Make a plot for each QN_nl pair of each
-      !   type.) Each type occupies a contiguous block of partials, and
-      !   this array records where each block begins.
-      cumulNumPartials(1) = 0
-
-      ! Loop to record the number of orbitals that each type contributes.
-      !   (An orbital is just a QN_nl pair.) Because every atom of a type
-      !   shares one basis, this count is a property of the type and is
-      !   taken once rather than once per atom.
-      do i = 1, numAtomTypes
-         cumulNumPartials(i+1) = cumulNumPartials(i) + sum( &
-               & atomTypes(i)%numQN_lValeRadialFns(:))
-      enddo
-
-      ! Record the total number of orbitals summed over all types.
-      sumNumPartials = cumulNumPartials(numAtomTypes + 1)
-
-   elseif (detailCodePOPTC == 4) then
-      ! Store the nlm for each atom.
-
-      ! Initialize counter to index the cumulative sum of QN_l orbitals for
-      !   all atoms.  (Make a plot for each QN_nlm set for each atom.)
-      cumulNumPartials(1) = 0
-
-      ! Loop to record the index number for each atomic orbital.
-      do i = 1, numAtomSites
-         cumulNumPartials(i+1) = cumulNumPartials(i) + &
-            & atomTypes(atomSites(i)%atomTypeAssn)%numQN_lValeRadialFns(1)*1 +&
-            & atomTypes(atomSites(i)%atomTypeAssn)%numQN_lValeRadialFns(2)*3 +&
-            & atomTypes(atomSites(i)%atomTypeAssn)%numQN_lValeRadialFns(3)*5 +&
-            & atomTypes(atomSites(i)%atomTypeAssn)%numQN_lValeRadialFns(4)*7 
-      enddo
-
-      ! Record the total number of QN_m resolved orbitals summed over all atoms.
-      sumNumPartials = cumulNumPartials(numAtomSites+1)
+   ! The number of segments follows from the grouping alone.
+   if (groupByType) then
+      numSegments = numAtomTypes
+   else
+      numSegments = numAtomSites
    endif
+
+   allocate (segmentBase     (numSegments + 1))
+   allocate (slotsPerSegment (numSegments))
+
+   ! Lay the partials out. Each segment owns a contiguous block of them:
+   !   segmentBase records where that block starts as a zero based
+   !   offset, and slotsPerSegment records how long it is. Both outlive
+   !   this walk because the star unfolding further below needs them to
+   !   carry a partial from one site onto the block of the site's image
+   !   under a symmetry operation.
+   segmentBase(1) = 0
+   do i = 1, numSegments
+
+      ! When grouping by type the segment index already is a type index.
+      !   When grouping by site it is a site index, and the basis that
+      !   site carries is determined by its type.
+      if (groupByType) then
+         typeOfSegment = i
+      else
+         typeOfSegment = atomSites(i)%atomTypeAssn
+      endif
+
+      ! A total resolved segment holds a single partial that everything
+      !   in the segment shares. An nl resolved one holds a partial per
+      !   radial function, summed over the s, p, d and f shells. Note
+      !   that this counts QN_nl pairs and not basis functions: all m
+      !   components of a shell feed one partial, which is exactly the
+      !   property that lets the result be unfolded from an irreducible
+      !   wedge with the atom permutation alone (DESIGN 2.5).
+      if (resolveTotal) then
+         slotsThisSegment = 1
+      else
+         slotsThisSegment = &
+               & sum(atomTypes(typeOfSegment)%numQN_lValeRadialFns(:))
+      endif
+
+      slotsPerSegment(i) = slotsThisSegment
+      segmentBase(i+1)   = segmentBase(i) + slotsThisSegment
+   enddo
+
+   ! The final base sits one past the last block, so it is the count.
+   sumNumPartials = segmentBase(numSegments + 1)
 
    ! Now that the sum of the number of partials is known, we can allocate
    !   space to hold accumulated data.
@@ -1409,8 +1369,6 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    !   (or indexed) to the correct accumulation group.
    allocate (pOptcIndex (valeDim))
 
-   pOptcKKCIndex = 0 ! Counts how many basis functions come from that partial
-   newPartial = 1 ! Counts the number of partials as we go along. (At least 1)
    partialsIndex(:) = 0 ! Set counting array to zero.
 
    ! Initialize valeDimIndex. This is used in the loop below to track
@@ -1429,163 +1387,92 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
       ! Identify and store the number of valence states for this atom.
       numStatesAtom(i) = atomTypes(currentType)%numValeStates
 
-      ! In the case where the pOptc should be collected by types(1) we loop
-      !   through each QN_nl pair for this atom and record the index where its
-      !   pOptc should be recorded according to its type. 
-      if (detailCodePOPTC == 1) then
-
-         numSQN_l = atomTypes(currentType)%numQN_lValeRadialFns(1)
-         numPQN_l = atomTypes(currentType)%numQN_lValeRadialFns(2)
-         numDQN_l = atomTypes(currentType)%numQN_lValeRadialFns(3)
-         numFQN_l = atomTypes(currentType)%numQN_lValeRadialFns(4)
-
-         do j = 1, numSQN_l
-            valeDimIndex = valeDimIndex + 1
-            pOptcIndex(valeDimIndex) = currentType
-         enddo
-         do j = 1, numPQN_l
-            do k = 1,3
-               valeDimIndex = valeDimIndex + 1
-               pOptcIndex(valeDimIndex) = currentType
-            enddo
-         enddo
-         do j = 1, numDQN_l
-            do k = 1,5
-               valeDimIndex = valeDimIndex + 1
-               pOptcIndex(valeDimIndex) = currentType
-            enddo
-         enddo
-         do j = 1, numFQN_l
-            do k = 1,7
-               valeDimIndex = valeDimIndex + 1
-               pOptcIndex(valeDimIndex) = currentType
-            enddo
-         enddo
-
-      ! In the case where the pOptc is collected by atoms (2) we link each QN_nl
-      !   pair of this atom with the index of this atom.
-      elseif (detailCodePOPTC == 2) then
-
-         pOptcKKCIndex = 0
-         do j = 1, numStatesAtom(i)
-            valeDimIndex = valeDimIndex + 1
-            pOptcIndex(valeDimIndex) = i  ! NOTE THAT THIS IS 'i', NOT 'j'.
-            
-            ! Count the total number of basis functions for this atom.
-            pOptcKKCIndex = pOptcKKCIndex + 1
-         enddo
-
-         ! Record how many basis functions contribute to this partial for KKC.
-         partialsIndex(i) = pOptcKKCIndex
-
-      ! In the case where the pOptc is collected by type orbital (3) we
-      !   send each basis function to the slot its type reserved for that
-      !   QN_nl pair. The walk is over sites because the basis functions
-      !   are laid out per site, but the destination depends only on the
-      !   site's type, so every atom of a type accumulates into the same
-      !   partial.
-      elseif (detailCodePOPTC == 3) then ! Consider spdf for each type.
-
-         numSQN_l = atomTypes(currentType)%numQN_lValeRadialFns(1)
-         numPQN_l = atomTypes(currentType)%numQN_lValeRadialFns(2)
-         numDQN_l = atomTypes(currentType)%numQN_lValeRadialFns(3)
-         numFQN_l = atomTypes(currentType)%numQN_lValeRadialFns(4)
-
-         initSIndex = cumulNumPartials(currentType)
-         initPIndex = cumulNumPartials(currentType) + numSQN_l
-         initDIndex = cumulNumPartials(currentType) + numSQN_l + numPQN_l
-         initFIndex = cumulNumPartials(currentType) + numSQN_l + numPQN_l &
-               & + numDQN_l
-
-         do j = 1, numSQN_l
-            valeDimIndex = valeDimIndex + 1
-            pOptcIndex(valeDimIndex) = initSIndex + j
-            ! Record how many valeDim contribute to this partial for imagoKKc
-            partialsIndex(initSIndex + j) = partialsIndex(initSIndex + j) + 1
-         enddo
-         do j = 1, numPQN_l
-            do k = 1,3
-               valeDimIndex = valeDimIndex + 1
-               pOptcIndex(valeDimIndex) = initPIndex + j
-               ! Record how many valeDim contribute to this partial for imagoKKc
-               partialsIndex(initPIndex + j) = partialsIndex(initPIndex + j) + 1
-            enddo
-         enddo
-         do j = 1, numDQN_l
-            do k = 1,5
-               valeDimIndex = valeDimIndex + 1
-               pOptcIndex(valeDimIndex) = initDIndex + j
-               ! Record how many valeDim contribute to this partial for imagoKKc
-               partialsIndex(initDIndex + j) = partialsIndex(initDIndex + j) + 1
-            enddo
-         enddo
-         do j = 1, numFQN_l
-            do k = 1,7
-               valeDimIndex = valeDimIndex + 1
-               pOptcIndex(valeDimIndex) = initFIndex + j
-               ! Record how many valeDim contribute to this partial for imagoKKc
-               partialsIndex(initFIndex + j) = partialsIndex(initFIndex + j) + 1
-            enddo
-         enddo
-
-      ! In the case where pOptc is collected for each orbital (4).
-      elseif (detailCodePOPTC == 4) then
-         do j = 1, lAngMomCount
-            do k = 1, atomTypes(currentType)%numQN_lValeRadialFns(j)
-              do l = 1, (j-1)*2+1
-
-                valeDimIndex = valeDimIndex + 1
-                pOptcIndex(valeDimIndex) = valeDimIndex ! Each QN_nlm is saved.
-                ! Record how many valeDim contribute to this partial for
-                ! imagoKKc because this detailCode is decomposed by QN_nlm each
-                ! valeDim will have a value of one.
-                partialsIndex(valeDimIndex) = 1
-              enddo
-            enddo
-          enddo
+      ! Identify the segment that this site feeds. Grouping by type
+      !   sends every atom of a type to one segment; grouping by site
+      !   gives each atom its own. The walk is over sites either way,
+      !   because that is the order the basis functions are laid out in,
+      !   so only the destination changes between the two.
+      if (groupByType) then
+         currentSegment = currentType
+      else
+         currentSegment = i
       endif
+
+      ! One loop over the angular momentum shells covers s, p, d and f
+      !   together: the number of m components of shell l is (l-1)*2+1,
+      !   which gives 1, 3, 5 and 7 for l = 1 through 4. A total
+      !   resolved segment holds every radial function on its one shared
+      !   slot, while an nl resolved one advances the slot per radial
+      !   function, so its slots run in s, p, d, f order. That ordering
+      !   matters beyond tidiness: printSpectrumPOPTC walks the partials
+      !   in this same layout order, and the sequence numbers written
+      !   into the output file are the only thing tying a spectrum to
+      !   its label.
+      currentSlot = 0
+      do j = 1, lAngMomCount ! 1=s; 2=p; 3=d; 4=f
+         do k = 1, atomTypes(currentType)%numQN_lValeRadialFns(j)
+
+            if (resolveTotal) then
+               currentSlot = 1
+            else
+               currentSlot = currentSlot + 1
+            endif
+
+            currentPartial = segmentBase(currentSegment) + currentSlot
+
+            do l = 1, (j-1)*2 + 1
+               valeDimIndex = valeDimIndex + 1
+               pOptcIndex(valeDimIndex) = currentPartial
+
+               ! Record how many basis functions feed this partial, which
+               !   is what imagoKKc normalizes the additive constant of
+               !   eps1 with. Counting by an increment per assigned basis
+               !   function is correct for every cell, including the type
+               !   grouped ones where many sites feed one partial.
+               partialsIndex(currentPartial) = &
+                     & partialsIndex(currentPartial) + 1.0_double
+            enddo
+         enddo
+      enddo
    enddo ! i = 1, numAtomSites
 
-   ! The kkc index information for detailCode 2, 3, and 4 was computed in
-   !   the site loop above. Detail code 1 (group by type) is counted here
-   !   instead because its groups span whole runs of atoms rather than
-   !   individual atoms, so the count is a property of the finished basis
-   !   ordering rather than of any one site.
-   ! This walk counts the length of each run of identical pOptcIndex values
-   !   and therefore relies on all atoms of a given type being adjacent in
-   !   the basis ordering. That holds: Imago sorts atomic sites by type, a
-   !   requirement that comes from elsewhere in the method (interleaved
-   !   types would badly damage the efficiency of the integral and matrix
-   !   routines), so the basis functions of one type are always one
-   !   contiguous run and each run corresponds to exactly one partial.
-   if (detailCodePOPTC == 1) then
-      do j = 1, valeDimIndex
+   ! Build the table that carries each partial onto its image under each
+   !   point operation (PSEUDOCODE 7a). Only the atom grouped codes need
+   !   it. The type grouped codes are already correct on a reduced mesh,
+   !   because every operation carries an atom onto an atom of the same
+   !   type and a type level sum therefore maps onto itself. The guard on
+   !   atomPerm covers style code 0, where an explicit k-point list
+   !   leaves Imago no symmetry from which to build the maps at all.
+   !
+   ! A partial is a slot within a segment, and for these codes a segment
+   !   is an atomic site, so carrying a partial through an operation
+   !   means re-basing its slot onto the block that belongs to the
+   !   site's image. The slot number itself survives unchanged, and that
+   !   is what makes this work: buildAtomPerm only ever maps an atom onto
+   !   an atom of the same type, and atoms of one type share a basis, so
+   !   the image site's slots stand in one to one correspondence with the
+   !   original's and carry the same QN_nl meaning. For detail code 3
+   !   there is exactly one slot per segment and the table reduces to
+   !   atomPerm itself, which is why the star average below is written
+   !   once for both codes rather than special cased.
+   !
+   ! The table depends only on the permutation and on the layout above,
+   !   so its contents are the same at every k-point. It is rebuilt here
+   !   per call because the whole decomposition index is rebuilt per
+   !   call, and its cost (one entry per operation per partial) is
+   !   negligible beside the transition loop that follows.
+   if ((detailCodePOPTC >= 3) .and. (allocated(atomPerm))) then
+      allocate (partialPerm (numPointOps, sumNumPartials))
 
-         ! The first basis function opens the first run. It is treated on
-         !   its own rather than folded into the comparison below because
-         !   the comparison would have to look at element j-1, and Fortran
-         !   does not promise to skip the second operand of an .or. whose
-         !   first operand is already true. Written as a separate branch,
-         !   the out of range subscript is never formed at all.
-         if (j == 1) then
-            pOptcKKCIndex = 1
-
-         ! Still inside the same type: extend the current run.
-         elseif (pOptcIndex(j) == pOptcIndex(j-1)) then
-            pOptcKKCIndex = pOptcKKCIndex + 1
-
-         ! The type changed, so the run that just ended is a completed
-         !   partial. Record its length and start counting the next one.
-         else
-            partialsIndex(newPartial) = pOptcKKCIndex
-            pOptcKKCIndex = 1
-            newPartial = newPartial + 1
-         endif
+      do opIdx = 1, numPointOps
+         do i = 1, numAtomSites
+            siteRot = atomPerm(opIdx,i)
+            do j = 1, slotsPerSegment(i)
+               partialPerm(opIdx, segmentBase(i) + j) = &
+                     & segmentBase(siteRot) + j
+            enddo
+         enddo
       enddo
-
-      ! The final run is closed by the end of the basis, not by a change
-      !   of type, so it has to be recorded after the loop.
-      partialsIndex(newPartial) = pOptcKKCIndex
    endif
 
    ! Write KKC factor to file for use in OCLAOkkc one time (use KP=1 as the
@@ -1913,24 +1800,27 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
 #endif
 
    ! ----------------------------------------------------------------------
-   ! Unfold the atom resolved pair matrix over the star of this IBZ
+   ! Unfold the atom grouped pair matrix over the star of this IBZ
    !   k-point. (PSEUDOCODE 7a, DESIGN 2.5.)
    !
-   ! Only detail code 2 needs this. Codes 1 and 3 group by TYPE, and every
-   !   operation that Imago reduces the mesh by carries each atom onto an
-   !   atom of the same type, so a type-level sum already maps onto itself
-   !   and is correct as computed. (That closure is enforced at startup by
-   !   buildAtomPerm rather than assumed from a type being a symmetry
-   !   orbit, which in an amorphous cell or a defect supercell it is not.
-   !   See DESIGN 2.3.) Code 4 resolves individual QN_nlm orbitals, which
-   !   mix under rotation via the D^l(R) representation matrices, and
-   !   permuting its indices without them would be worse than leaving it
-   !   alone; it waits on the same deferred matrices as PDOS mode 3.
+   ! Detail codes 3 and 4 need this and codes 1 and 2 do not. The
+   !   numbering of DESIGN 11.3 puts grouping ahead of resolution, so the
+   !   test is a threshold rather than a memorized set of cases: the low
+   !   codes group by TYPE, and every operation that Imago reduces the
+   !   mesh by carries each atom onto an atom of the same type, so a type
+   !   level sum already maps onto itself and is correct as computed.
+   !   (That closure is enforced at startup by buildAtomPerm rather than
+   !   assumed from a type being a symmetry orbit, which in an amorphous
+   !   cell or a defect supercell it is not. See DESIGN 2.3.)
    !
-   ! For detail code 2 the two group indices are literally atom site
-   !   indices (pOptcIndex sends every basis function to the site that
-   !   carries it, and sumNumPartials is numAtomSites), so atomPerm
-   !   indexes the pair matrix directly.
+   ! The resolution axis does not enter. Both offered resolutions sum
+   !   over complete shells -- a whole group, or a QN_nl radial function
+   !   summed over its m components -- and that is exactly the condition
+   !   the invariance argument of DESIGN 2.3 needs. A QN_nlm resolution
+   !   would break it and require the deferred D^l(R) representation
+   !   matrices, which is one of the two reasons DESIGN 11.2 does not
+   !   offer it. So nothing here is deferred: every offered cell is
+   !   either correct as computed or made correct in this block.
    !
    ! What the star average is exact for. The momentum operator is a
    !   vector, so an operation both relabels the atoms and mixes the
@@ -1956,7 +1846,7 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    !   full mesh and on a reduced mesh, and requiring the two to agree per
    !   atom pair.
    ! ----------------------------------------------------------------------
-   if ((detailCodePOPTC == 2) .and. (allocated(atomPerm))) then
+   if ((detailCodePOPTC >= 3) .and. (allocated(atomPerm))) then
 
       ! Count the star: the number of full-mesh k-points that fold onto
       !   this IBZ representative. Counted the same way as in computeBond.
@@ -1969,8 +1859,12 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
 
       ! Scratch space for one symmetrized slab. The averaging cannot be
       !   done in place because each star member reads the whole original
-      !   slab while writing scattered elements of the result.
-      allocate (pairSlabSym(numAtomSites,numAtomSites))
+      !   slab while writing scattered elements of the result. The slab
+      !   is indexed by PARTIAL rather than by site: the two coincide for
+      !   detail code 3, where each site owns one partial, but for code 4
+      !   a site owns one partial per radial function and a slab bounded
+      !   by the site count would be far too small.
+      allocate (pairSlabSym(sumNumPartials,sumNumPartials))
 
       ! The star sum is a fixed linear map on the pair matrix: it does not
       !   depend on energy, and the Gaussian broadening applied later in
@@ -1985,25 +1879,25 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
             pairSlabSym(:,:) = 0.0_double
 
             ! Walk the star. Each member contributes the IBZ slab with
-            !   both of its atom indices carried through that member's
+            !   both of its partial indices carried through that member's
             !   operation, and the division by starSize turns the sum into
             !   an average, so the totals are preserved exactly.
             do fullIdx = 1, numFullMeshKP
                if (fullKPToIBZKPMap(fullIdx) /= currentKPoint) cycle
                opIdx = fullKPToIBZOpMap(fullIdx)
 
-               do atomA = 1, numAtomSites
-                  permAtomA = atomPerm(opIdx,atomA)
+               do partialA = 1, sumNumPartials
+                  permPartialA = partialPerm(opIdx,partialA)
 
-                  do atomB = 1, numAtomSites
-                     permAtomB = atomPerm(opIdx,atomB)
+                  do partialB = 1, sumNumPartials
+                     permPartialB = partialPerm(opIdx,partialB)
 
-                     pairSlabSym(permAtomA,permAtomB) = &
-                           & pairSlabSym(permAtomA,permAtomB) &
-                           & + transitionProbTemp(atomA,atomB,component, &
-                           & pairIndex) / real(starSize,double)
-                  enddo ! atomB
-               enddo ! atomA
+                     pairSlabSym(permPartialA,permPartialB) = &
+                           & pairSlabSym(permPartialA,permPartialB) &
+                           & + transitionProbTemp(partialA,partialB, &
+                           & component,pairIndex) / real(starSize,double)
+                  enddo ! partialB
+               enddo ! partialA
             enddo ! fullIdx (star members)
 
             transitionProbTemp(:,:,component,pairIndex) = pairSlabSym(:,:)
@@ -2054,8 +1948,16 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    deallocate (segmentBorders)
    deallocate (sortOrder)
    deallocate (numStatesAtom)
-   deallocate (cumulNumPartials)
+   deallocate (segmentBase)
+   deallocate (slotsPerSegment)
    deallocate (pOptcIndex)
+
+   ! The partial permutation table is built only for the atom grouped
+   !   codes and only when the symmetry maps exist, so its release is
+   !   guarded the same way its allocation was.
+   if (allocated(partialPerm)) then
+      deallocate (partialPerm)
+   endif
 
 end subroutine computePOPTCPairs
 

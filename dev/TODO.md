@@ -6489,11 +6489,12 @@ is not carried only in conversation.
   have landed, so the baseline being compared against is
   trustworthy.
 
-- [ ] O7. Settle the POPTC decomposition set and numbering on
-  DESIGN 11.  The scheme is specified; this entry is the work
-  of making the code match it.  PSEUDOCODE first -- 7a's guard
-  becomes a threshold, and the index construction for the new
-  cell has no section yet.
+- [x] O7. Settle the POPTC decomposition set and numbering on
+  DESIGN 11.  DONE 2026-08-06.  The scheme was specified first;
+  this entry was the work of making the code match it, and all
+  four steps below have landed.  Verified live on KNbO3: every
+  offered cell was run, and the renumbering was shown to move no
+  numbers.  See "How this was verified" at the end of the entry.
 
   DESIGN 11 defines the offered set as a two by two grid,
   grouping (type, atom) against resolution (total, nl),
@@ -6548,12 +6549,16 @@ is not carried only in conversation.
        `slotsPerSegment` as outputs that outlive the routine,
        because 7a's `partialPerm` cannot be built without
        them.  Everything from step 2 down is untouched.
-    2. `optc.F90`: renumber the branches, add the
+    2. **DONE**.  `optc.F90`: renumber the branches, add the
        `(atom, nl)` index construction, remove the nlm branch
        and the now-dead `QN_mLetter` tables in both `optc.F90`
-       and `optcPrint.F90`.  Four things inside this step are
-       easy to renumber past without noticing, and each is a
-       silent wrong answer rather than a compile error:
+       and `optcPrint.F90`.  The four per-code branches became
+       the single parameterized walk of PSEUDOCODE 18.2, so the
+       grid of DESIGN 11 is now visible in the code as two
+       parameters rather than four blocks.  All four of the
+       traps below were handled; each is recorded with what it
+       became.  They are, as warned, silent wrong answers
+       rather than compile errors:
 
        a. The star-average scratch slab is allocated
           `pairSlabSym(numAtomSites,numAtomSites)`.  It must
@@ -6575,13 +6580,33 @@ is not carried only in conversation.
           `partialPerm` is built.
        d. `partialPerm` itself does not exist yet in any
           form.  It is new work, not a rename of `atomPerm`;
-          PSEUDOCODE 7a gives the build.
-    3. `optcPrint.F90`: renumber the printing branches and
-       their labels.
-    4. Last, the user-facing legend, once it is only
+          PSEUDOCODE 7a gives the build.  Built as specified,
+          with one placement difference worth knowing: 7a notes
+          the table could be built once per run, and it is
+          instead rebuilt per call alongside the rest of the
+          decomposition index, which is itself rebuilt per
+          call.  Making this one table persistent would have
+          been an odd asymmetry and would have needed a release
+          site in `imago.F90`.  The cost is one entry per
+          operation per partial.
+    3. **DONE**.  `optcPrint.F90`: renumber the printing
+       branches and their labels.  The branches are also
+       reordered in the file to read 1, 2, 3, 4, since the
+       whole point of the numbering is that a reader can see
+       the threshold.  One thing this step turned up that the
+       entry did not anticipate: the atom-grouped branch named
+       only the element, so three oxygens all printed
+       `ELEMENT_1_NAME O` and were distinguishable only by
+       sequence number.  PSEUDOCODE 18.4 says an atom-grouped
+       partial names its site, so the site number now goes into
+       the existing name field (`o3`, and `o3_2p` for the nl
+       resolved cell).  No header line was added, so the
+       positional read in `processPOPTC.py` -- which takes the
+       three lines following `ELEMENT_1_NAME` -- is unaffected.
+    4. **DONE**.  Last, the user-facing legend, once it is only
        describing what exists.  Four places carry it, not the
        two that this entry originally listed, and all four
-       currently disagree with the code on the nlm cell:
+       disagreed with the code on the nlm cell:
 
        - `src/scripts/makeinput.py`, the string written into
          every `imago.dat` (`POPTC 0N;1t;2a;3enl;4enlm`).
@@ -6597,12 +6622,64 @@ is not carried only in conversation.
        Note that changing `makeinput.py` requires a reinstall
        before generated inputs pick it up.
 
-  Re-verify with the KNbO3 comparison in
-  `jobs/knbo3/o2_poptc_unfold`, whose `reduced` and `full`
-  runs used the atom-total decomposition -- code 2 under the
-  present numbering, code 3 under the new one.  The
-  comparison script keys on nothing but the file layout, so
-  it should need no change.
+  **How this was verified**, 2026-08-06, in
+  `jobs/knbo3/o7_poptc_renumber` (gitignored).  Inputs were
+  regenerated from the same skeleton and the same `makeinput.py`
+  arguments as the O2 runs, and checked byte-for-byte against
+  them: every input file is identical except the one changed
+  POPTC line.  The `full` run again takes its unfolded reference
+  from an operation list trimmed to the identity.
+
+  1. **The renumbering moves no numbers.**  The atom-total cell
+     was run under its new number 3 and compared against the
+     stored O2 run under its old number 2.  All nine `.raw`
+     spectra and the KKC control file are byte-identical, on
+     both the reduced and the full mesh -- 130026 data rows
+     each.  This is the check that matters most, because a
+     renumbering that quietly changed an index would otherwise
+     look like a successful run.
+  2. **The IBZ unfolding still holds under the new number.**
+     `compare_poptc.py` reproduces the O2 result to every digit
+     that entry recorded: worst relative disagreement over the
+     25 atom pairs 1.22e-08, the per-axis sensitivity controls
+     at 1.08, 1.29 and 1.45, and the oxygen orbit spread
+     5.79e-17 reduced against 5.79e-10 full.
+  3. **Every offered cell was run**, by `check_cells.py`.  Codes
+     1, 2 and 4 give 10, 577 and 1297 units, which are 3, 24 and
+     36 partials squared plus the total; their KKC factors sum
+     to 1 to within the seven digit print precision; and their
+     partials reconstruct the total.  The KKC sum is the direct
+     test of the counting in trap (b) above, since it is one
+     exactly when every basis function landed in one partial.
+  4. **`partialPerm` is right, not just present.**  Under code 4
+     the three symmetry-equivalent oxygens must carry identical
+     spectra for each of their six QN_nl partials, and they
+     agree to between 1e-38 and 5e-10 relative.  That is the
+     code 4 analogue of the oxygen check that made the O2 result
+     believable, and it is the only check here that would fail
+     if the slot re-basing were wrong.  The partials involved
+     peak at 0.002 to 0.5 percent of the total, so they are
+     small but genuinely nonzero -- the agreement is not a
+     zero-against-zero pass.
+
+  **A cost finding, and it is not where DESIGN 11.4 looks.**  The
+  Fortran stage of the code 4 run finished in about two minutes
+  in 300 MB.  The job then spent an hour in post-processing and
+  hit its wall clock limit.  `processPOPTC.py` invokes
+  `makePDOS.py` and `imagoKKc` once per partial PAIR, and each
+  `makePDOS.py` re-reads the whole raw file, which is itself
+  quadratic in the partial count -- so the post-processing is
+  quartic where the calculation is quadratic.  Code 2 took 56
+  minutes for 576 pairs; code 4 needs about three hours for
+  1296.  This is pre-existing and untouched by O7, but the new
+  atom-nl cell is what makes it acute, and DESIGN 11.4 discusses
+  storage only.  The code 4 verification above used the
+  completed Fortran outputs recovered from scratch (`fort.250`
+  is the eps2 raw file, `fort.209` the KKC control file), since
+  the derived spectra come from `imagoKKc`, which O7 did not
+  touch.  A full code 4 run with its post-processing has still
+  never completed.  Worth folding into O8, which is the entry
+  for projecting cost before a run starts.
 
 - [ ] O8. Estimate the cost of a requested decomposition at
   input parse time and refuse what cannot fit.  Deferred

@@ -68,7 +68,12 @@ module O_Input
    real (kind=double) :: sigmaOPTC      ! Given in eV, stored in a.u.
    real (kind=double) :: maxTransEnOPTC ! Given in eV, stored in a.u.
    real (kind=double) :: cutoffEnOPTC   ! Given in eV, stored in a.u.
-   integer :: detailCodePOPTC           ! 0=NONE;1=elem;2=a tot;3=e nl;4=e nlm
+   ! The partial optical properties decomposition. A code is a grouping
+   !   (by atomic type, or by atomic site) crossed with a resolution (the
+   !   whole group together, or one partial per QN_nl radial function).
+   !   The type grouped codes come first so that the code number rises
+   !   with how finely the decomposition resolves position.
+   integer :: detailCodePOPTC ! 0=NONE;1=type;2=type nl;3=atom;4=atom nl
 
    ! Define control variables that apply to the NLOP use of the optc program.
    real (kind=double) :: deltaNLOP      ! Given in eV, stored in a.u.

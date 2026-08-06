@@ -5399,7 +5399,7 @@ def _print_imago_input(settings, sc, file_set,
     imago_fh.write(f"{settings.sigma_optc}"
                    f"                      ! OPTC broadening\n")
     imago_fh.write(f"{settings.detail_code_poptc}"
-                   f"                ! POPTC 0N;1t;2a;3enl;4enlm\n")
+                   f"                ! POPTC 0N;1t;2tnl;3a;4anl\n")
 
     # Nonlinear optical properties.
     imago_fh.write("NLOP_INPUT_DATA\n")

@@ -399,7 +399,7 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
    real (kind=double) :: conversionFactor
 
    ! Define the local variables
-   integer :: h,i,j,k,l,m,n,o,p,q
+   integer :: h,i,j,k,l,m,n,o
    integer :: unitBase
    integer :: sequenceNum
    integer :: currentTypeI ! Initial
@@ -407,7 +407,6 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
    integer :: poptcI ! pOptc initial
    integer :: poptcF ! pOptc final
    character*1, dimension (lAngMomCount) :: QN_lLetter
-   character*14, dimension (4,7) :: QN_mLetter
 
    ! Customize the output for the current spectrum type.
    if (specType == 0) then ! XANES/ELNES
@@ -425,24 +424,6 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
    QN_lLetter(2) = 'p'
    QN_lLetter(3) = 'd'
    QN_lLetter(4) = 'f'
-
-   ! Define the QN_m resolved letters.
-   QN_mLetter(1,1) = 'r'
-   QN_mLetter(2,1) = 'x'
-   QN_mLetter(2,2) = 'y'
-   QN_mLetter(2,3) = 'z'
-   QN_mLetter(3,1) = 'xy'
-   QN_mLetter(3,2) = 'xz'
-   QN_mLetter(3,3) = 'yz'
-   QN_mLetter(3,4) = 'xx~yy'
-   QN_mLetter(3,5) = '2zz~xx~yy'
-   QN_mLetter(4,1) = 'xyz'
-   QN_mLetter(4,2) = 'xxz~yyz'
-   QN_mLetter(4,3) = 'xxx~3yyx'
-   QN_mLetter(4,4) = '3xxy~yyy'
-   QN_mLetter(4,5) = '2zzz~3xxz~3yyz'
-   QN_mLetter(4,6) = '4zzx~xxx~yyx'
-   QN_mLetter(4,7) = '4zzy~xxy~yyy'
 
 
    ! Print the total (if spin == 1) or spin up and spin down (if spin == 2).
@@ -517,43 +498,6 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
             enddo
          enddo
 
-      elseif (detailCodePOPTC == 2) then ! Decompose by atom.
-
-         ! Print the partial contributions.
-         do i = 1, numAtomSites
-
-            ! Obtain the type of the current initial state atom.
-            currentTypeI = atomSites(i)%atomTypeAssn
-
-            do k  = 1, numAtomSites
-
-               ! Obtain the type of the current final state atom.
-               currentTypeF = atomSites(k)%atomTypeAssn
-
-               sequenceNum = sequenceNum + 1
-
-               ! Print the total for each pair.
-               write (unitBase+h,fmt="(a13,i5)") 'SEQUENCE_NUM ',sequenceNum
-               write (unitBase+h,fmt="(a15,a3)") 'ELEMENT_1_NAME ',&
-                     & atomTypes(currentTypeI)%elementName
-               write (unitBase+h,fmt="(a15,a3)") 'ELEMENT_2_NAME ',&
-                     & atomTypes(currentTypeF)%elementName
-               write (unitBase+h,fmt="(a7,i6)") 'TYPE_1 ',currentTypeI
-               write (unitBase+h,fmt="(a7,i6)") 'TYPE_2 ',currentTypeF
-               write (unitBase+h,fmt="(a12)") 'COL_LABELS 4'
-               write (unitBase+h,fmt="(a11)") 'TOTAL x y z'
-
-
-               do l = 1, numEnergyPoints
-
-                  ! Record the spectrum to disk.
-                  write (unitBase+h,fmt="(4e15.7)") &
-                        & sum(spectrumPOPTC(i,k,:,l,h)) / 3.0_double,&
-                        & spectrumPOPTC(i,k,:,l,h)
-               enddo
-            enddo
-         enddo
-
       ! Decompose by type and QN_nl. The pair of loop nests below walks
       !   types, then l shells, then the radial functions of that shell,
       !   which reproduces exactly the ordering that the pOptcIndex
@@ -561,7 +505,7 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
       !   the partial that was accumulated for the same (type, QN_nl)
       !   pair. Every atom carrying a type has already been summed into
       !   it, which is why no site loop appears here.
-      elseif (detailCodePOPTC == 3) then
+      elseif (detailCodePOPTC == 2) then
 
          ! Print the partial contributions to the spectrum.
          poptcI = 0
@@ -611,11 +555,63 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
             enddo
          enddo
 
-      elseif (detailCodePOPTC == 4) then ! Decompose by atom and QN_nlm
+      ! Decompose by atom. Each atomic site owns one partial, so the
+      !   loops walk sites directly and the partial index is the site
+      !   index. The label carries the site number as well as the
+      !   element, because two atoms of one element are separate
+      !   partials here and would otherwise be indistinguishable in the
+      !   output.
+      elseif (detailCodePOPTC == 3) then
 
-         ! Print the Partial contributions to the optical conductivity.
+         ! Print the partial contributions.
+         do i = 1, numAtomSites
+
+            ! Obtain the type of the current initial state atom.
+            currentTypeI = atomSites(i)%atomTypeAssn
+
+            do k  = 1, numAtomSites
+
+               ! Obtain the type of the current final state atom.
+               currentTypeF = atomSites(k)%atomTypeAssn
+
+               sequenceNum = sequenceNum + 1
+
+               ! Print the total for each pair.
+               write (unitBase+h,fmt="(a13,i5)") 'SEQUENCE_NUM ',sequenceNum
+               write (unitBase+h,fmt="(a15,a,i0)") 'ELEMENT_1_NAME ',&
+                     & trim(atomTypes(currentTypeI)%elementName), i
+               write (unitBase+h,fmt="(a15,a,i0)") 'ELEMENT_2_NAME ',&
+                     & trim(atomTypes(currentTypeF)%elementName), k
+               write (unitBase+h,fmt="(a7,i6)") 'TYPE_1 ',currentTypeI
+               write (unitBase+h,fmt="(a7,i6)") 'TYPE_2 ',currentTypeF
+               write (unitBase+h,fmt="(a12)") 'COL_LABELS 4'
+               write (unitBase+h,fmt="(a11)") 'TOTAL x y z'
+
+
+               do l = 1, numEnergyPoints
+
+                  ! Record the spectrum to disk.
+                  write (unitBase+h,fmt="(4e15.7)") &
+                        & sum(spectrumPOPTC(i,k,:,l,h)) / 3.0_double,&
+                        & spectrumPOPTC(i,k,:,l,h)
+               enddo
+            enddo
+         enddo
+
+      ! Decompose by atom and QN_nl. This is the finest decomposition on
+      !   offer: a partial is one radial function of one site, summed
+      !   over the m components of its shell. The loop nests walk sites,
+      !   then l shells, then the radial functions of that shell, which
+      !   is exactly the order the index construction in O_Optc laid the
+      !   partials down in, so poptcI and poptcF address the partial
+      !   that was accumulated for the same (site, QN_nl) pair. Note
+      !   that the pair count here is the square of the total radial
+      !   function count over all sites, so this cell grows quickly with
+      !   the cell size (DESIGN 11.4).
+      elseif (detailCodePOPTC == 4) then
+
+         ! Print the partial contributions to the spectrum.
          poptcI = 0
-
          do i = 1, numAtomSites
 
             ! Obtain the type of the current initial state atom.
@@ -623,54 +619,53 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
 
             do j = 1, lAngMomCount  ! 1=s; 2=p; 3=d; 4=f
                do k = 1, atomTypes(currentTypeI)%numQN_lValeRadialFns(j)
-                  do l = 1, (j-1)*2+1
-                     poptcI = poptcI +1
-                     poptcF = 0
-                     do m = 1, numAtomSites
+                  poptcI = poptcI + 1
+                  poptcF = 0
+                  do l = 1, numAtomSites
 
-                        ! Obtain the type of the current final state atom.
-                        currentTypeF = atomSites(m)%atomTypeAssn
-                        do n = 1,lAngMomCount  ! 1=s; 2=p; 3=d; 4=f
-                           do o = 1,&
-                              & atomTypes(currentTypeF)%numQN_lValeRadialFns(n)
-                              do p = 1, (n-1)*2+1
+                     ! Obtain the type of the current final state atom.
+                     currentTypeF = atomSites(l)%atomTypeAssn
 
-                                 poptcF = poptcF + 1
-                                 sequenceNum = sequenceNum + 1
- 
-                                 ! Print the total for each pair
-                                 write (unitBase+h,fmt="(a13,i5)") &
-                                      & 'SEQUENCE_NUM ', sequenceNum
-                                 write (unitBase+h,fmt="(a15,a,i1,a1,a1,a)") &
-                                      & 'ELEMENT_1_NAME ', trim(&
-                                      & atomTypes(currentTypeI)%elementName),&
-                                      & atomTypes(currentTypeI)%&
-                                      & numQN_lCoreRadialFns(j)+k+j-1, &
-                                      & QN_lLetter(j),"_",QN_mLetter(j,l)
-                                 write (unitBase+h,fmt="(a15,a,i1,a1,a1,a)")&
-                                      & 'ELEMENT_2_NAME ', trim(&
-                                      & atomTypes(currentTypeF)%elementName),&
-                                      & atomTypes(currentTypeF)%&
-                                      & numQN_lCoreRadialFns(n)+o+n-1, &
-                                      & QN_lLetter(n),"_",QN_mLetter(n,p)
-                                 write (unitBase+h,fmt="(a7,i6)") 'TYPE_1 ',&
-                                       & currentTypeI
-                                 write (unitBase+h,fmt="(a7,i6)") 'TYPE_2 ',&
-                                       & currentTypeF
-                                 write (unitBase+h,fmt="(a12)") 'COL_LABELS 4'
-                                 write (unitBase+h,fmt="(a11)") 'TOTAL x y z'
+                     do m = 1, lAngMomCount  ! 1=s; 2=p; 3=d; 4=f
+                        do n = 1, atomTypes(currentTypeF)% &
+                              & numQN_lValeRadialFns(m)
+                           poptcF = poptcF + 1
 
+                           sequenceNum = sequenceNum + 1
 
-                                 do q = 1, numEnergyPoints
+                           ! Print the total for each pair. The label
+                           !   names the element and the site, then the
+                           !   principal quantum number and QN_l letter
+                           !   of the radial function, giving names such
+                           !   as O3_2p.
+                           write (unitBase+h,fmt="(a13,i5)") 'SEQUENCE_NUM ',&
+                                 & sequenceNum
+                           write (unitBase+h,fmt="(a15,a,i0,a1,i1,a1)") &
+                                 & 'ELEMENT_1_NAME ', &
+                                 & trim(atomTypes(currentTypeI)%elementName), &
+                                 & i, "_", atomTypes(currentTypeI)% &
+                                 & numQN_lCoreRadialFns(j) + k + j - 1, &
+                                 & QN_lLetter(j)
+                           write (unitBase+h,fmt="(a15,a,i0,a1,i1,a1)") &
+                                 & 'ELEMENT_2_NAME ', &
+                                 & trim(atomTypes(currentTypeF)%elementName), &
+                                 & l, "_", atomTypes(currentTypeF)% &
+                                 & numQN_lCoreRadialFns(m) + n + m - 1, &
+                                 & QN_lLetter(m)
+                           write (unitBase+h,fmt="(a7,i6)") 'TYPE_1 ',&
+                                 & currentTypeI
+                           write (unitBase+h,fmt="(a7,i6)") 'TYPE_2 ',&
+                                 & currentTypeF
+                           write (unitBase+h,fmt="(a12)") 'COL_LABELS 4'
+                           write (unitBase+h,fmt="(a11)") 'TOTAL x y z'
 
-                                    ! Record the spectrum to disk.
-                                    write (unitBase+h,fmt="(4e15.7)") &
-                                           & sum(spectrumPOPTC(poptcI, &
-                                           & poptcF,:,q,h)) / 3.0_double, &
-                                           & spectrumPOPTC(poptcI, &
-                                           & poptcF,:,q,h)
-                                 enddo ! q
-                              enddo ! p
+                           do o = 1, numEnergyPoints
+
+                              ! Record the spectrum to disk.
+                              write (unitBase+h,fmt="(4e15.7)") &
+                                    & sum(spectrumPOPTC(poptcI,poptcF,:,o,h))&
+                                    & / 3.0_double, &
+                                    & spectrumPOPTC(poptcI,poptcF,:,o,h)
                            enddo ! o
                         enddo ! n
                      enddo ! m

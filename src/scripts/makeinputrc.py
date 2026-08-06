@@ -89,7 +89,7 @@ def parameters_and_defaults():
         "e_cutoff_optc":    45,
         "e_cutoff_nlop":    45,
         "e_cutoff_sige":    5,
-        "detail_code_poptc": 0,      # 0=NONE,1=elem,2=a tot,3=e nl,4=e nlm
+        "detail_code_poptc": 0,   # 0=NONE,1=type,2=type nl,3=atom,4=atom nl
 
         # ---- MAIN (SCF) defaults ----
         "num_iter_main":    50,
