@@ -6457,17 +6457,64 @@ on the same data later with no schema change.  Built on P10.
   over the star -- it is an integration setting wearing an output
   setting's clothes.
 
-  **What is NOT yet done.**  No code.  The input-format change reaches
-  `makeinput.py` and the `skl/` examples, and any other producer of
-  k-point files must be checked -- `makeKPoints` declares
-  `numTetrahedra` and `tetrahedralKPointMap` but never uses them, so
-  confirm it does not write this format before assuming it is clear.
+  **CODED and VERIFIED 2026-08-07.**  Evidence in
+  `jobs/knbo3/c149` (gitignored).  Four checks, in the order they
+  were run, because each one had to pass before the next meant
+  anything.
 
-  **Test first, before any spectrum.**  With `NUM_TETRA_DIAGONALS 1`
-  the rewritten generator must reproduce the historical decomposition
-  tetrahedron for tetrahedron.  That separates a mistake in the
-  general diagonal walk from a change of physics, and no four-diagonal
-  result means anything until it passes (PSEUDOCODE 1).
+  ```
+  1 diagonal reproduces the historical decomposition   0.00e+00
+  construction check, mesh points per tetrahedron      96 = 24 x 4
+  symmetrization drives the oxygen orbit spread to     0.00e+00
+    with the total spectrum preserved exactly          0.00e+00
+  ```
+
+  **The measurement that shows the decomposition change working.**
+  It is NOT the oxygen spread, and understanding why matters more
+  than the number.  Cutting four ways instead of one leaves the
+  per-atom values on this cell byte-identical, and that is correct:
+  the four body diagonals of a cube are carried onto each other by
+  the three two-fold axes, and every atom in cubic KNbO3 sits on a
+  site those axes map to itself.  An oxygen at (0, 1/2, 1/2) under a
+  180 degree turn about x goes to (0, -1/2, -1/2), the same site one
+  lattice vector away.  So the average is over four copies of one
+  number and the cell is BLIND to this remedy in its atom-resolved
+  output.  Do not conclude from that the remedy does nothing.
+
+  The quantity that does see it is the equality of the three
+  Cartesian columns of the TOTAL spectrum, which the axes are
+  precisely what the diagonals distinguish.  Measured on the
+  unreduced mesh, so that no unfolding is involved:
+
+  ```
+                              x/y/z spread, total eps2
+  Gaussian, unreduced           0.00000    exact, the reference
+  tetrahedron, 1 diagonal       0.07913    1.70e-03
+  tetrahedron, 4 diagonals      0.01006    2.16e-04
+  ```
+
+  Seven eighths of the anisotropy removed.  The reduced mesh cannot
+  show this because O3's missing Cartesian rotation throws the same
+  three columns to 52 / 64 / 65, an error that swamps this one and
+  is independent of it.
+
+  **Momentum matrix elements verified symmetric**, which had been
+  assumed rather than checked and is what makes the table above
+  trustworthy: on the unreduced Gaussian run the x, y and z columns
+  are equal to every printed digit (4.846996e+01 at 3.09 eV).  The
+  per-axis breakage seen on reduced meshes is therefore a defect of
+  the unfolding, not of the matrix elements.
+
+  **Two residuals survive and are NOT this entry's**, recorded as
+  C150: 2.16e-04 of anisotropy with four diagonals, and 6.5e-02 of
+  oxygen orbit spread.  Their sizes differ by 300x so they probably
+  do not share a cause.  Neither is the decomposition, which is now
+  measured rather than assumed.
+
+  **Still open in the plumbing.**  The `skl/` examples were not
+  touched, and `makeKPoints` declares `numTetrahedra` and
+  `tetrahedralKPointMap` but never uses them -- confirm it does not
+  write this file format before assuming it is clear.
 
   **Literature CHECKED 2026-08-06.**  Searched rather than assumed.
   What the three earlier beliefs came to:
@@ -6510,6 +6557,62 @@ on the same data later with no schema change.  Built on P10.
   work as a defect of that work until this is settled.
 
 ---
+
+- [ ] C150. Find what is left of the atom-resolved tetrahedron
+  asymmetry once the decomposition is point-group invariant.
+  Opened 2026-08-07 out of C149, whose remedy works and does not
+  account for these.
+
+  Two residuals, both on cubic KNbO3 at a 4x4x4 shifted mesh, both
+  measured with the four-diagonal decomposition in place:
+
+  ```
+  x/y/z spread of the TOTAL spectrum, unreduced mesh    2.16e-04
+  oxygen orbit spread, per-atom partials                6.50e-02
+  ```
+
+  **What is already ruled out**, each by measurement rather than
+  argument, which is what makes this entry worth opening rather than
+  guessing at:
+
+  - The calculation itself.  Gaussian integration on an unreduced
+    mesh gives an oxygen orbit spread of 5.79e-10 and Cartesian
+    columns equal to every printed digit.  The potential, the
+    eigenvectors and the momentum matrix elements are symmetric.
+  - The IBZ unfolding.  The unreduced mesh carries the same spread
+    as the reduced one, and unfolding plays no part there.
+  - The decomposition geometry.  Making it invariant removed seven
+    eighths of the anisotropy and left both figures above.
+
+  So it is something else in the tetrahedron pathway.
+
+  **Hunt it with the anisotropy, not the oxygens.**  The 2.16e-04
+  figure is a property of the TOTAL spectrum on an unreduced mesh:
+  no atom decomposition, no permutation tables, no unfolding, no
+  star.  Just the integration and matrix elements already proven
+  symmetric.  The oxygen spread has all of that machinery standing
+  between the cause and the number, which is how three sessions were
+  spent attributing it to two different wrong causes.
+
+  **One hypothesis, untested.**  The tetrahedron method links four
+  k-points through a band INDEX, and inside a degenerate subspace
+  the basis the diagonalizer returns is arbitrary and chosen
+  independently at each k-point, so band n need not mean the same
+  state at all four corners.  Gaussian broadening never links bands
+  across k-points, which would explain why it is clean.  Cubic
+  KNbO3 is heavily degenerate.  This also sits next to the
+  degenerate-corner item already open under O9.  Treat it as a lead,
+  not a finding: it predicts the effect should shrink on a system
+  with the degeneracies lifted, and that is the test.
+
+  **Why this matters even though it is hidden.**  The symmetrization
+  of DESIGN 1.7 drives the oxygen spread to zero, so shipped output
+  looks right.  But it IMPOSES the equality, and whatever produces
+  these residuals is presumably also moving quantities that no
+  symmetry constrains -- spectrum shape, and per-atom values in
+  low-symmetry cells where each atom is alone in its orbit and there
+  is nothing to average over.  Hiding it on KNbO3 does not make it
+  absent elsewhere.
 
 ## OPTICAL PROPERTIES (imported OLCAO code)
 

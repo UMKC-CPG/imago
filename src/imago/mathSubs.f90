@@ -986,4 +986,242 @@ subroutine bloechlCornerCorrection(energy, sortedEps, &
 
 end subroutine bloechlCornerCorrection
 
+
+! Average an atom-resolved spectrum over the crystal point group
+!   (DESIGN 1.7; PSEUDOCODE 20).
+!
+! Why this is needed at all. The tetrahedron decomposition of DESIGN 1.2 is
+!   carried onto itself by the point group for lattices whose operations
+!   permute the mesh axes up to sign -- cubic, tetragonal, orthorhombic --
+!   and not for hexagonal or rhombohedral ones, where a six-fold rotation
+!   sends one mesh axis onto the SUM of two and so does not map a grid box
+!   onto a grid box at all. Wherever the decomposition is not invariant,
+!   k-points related by symmetry receive unrelated integration weights, and a
+!   quantity resolved onto individual atoms inherits the difference: atoms
+!   that must be equivalent come out unequal. Averaging the finished result
+!   over the group removes exactly that part of the error.
+!
+! Why it is not a cosmetic patch. Averaging an atom-resolved result over the
+!   orbit its atom belongs to is EXACTLY equal to replacing each integration
+!   weight by its average over the star of its k-point. It is therefore the
+!   projection of the quadrature onto the symmetric subspace rather than an
+!   adjustment applied to a finished number, and two useful things follow.
+!   Totals do not move at all, because summing the averaged weights over
+!   k-points returns the original sum. And it is exact on every lattice,
+!   including the ones the decomposition alone cannot fix, because it
+!   averages over the star that actually exists.
+!
+! No orbit is enumerated here, and none needs to be. Summing over EVERY
+!   operation of the group is the orbit average, because the operations
+!   carrying a channel onto a given orbit member form a coset and therefore
+!   contribute that member equally often. For the same reason the direction
+!   of the permutation does not matter: a table built from the forward atom
+!   map and one built from its inverse give the same average, since the
+!   operation index runs over the whole group either way.
+!
+! The channel index is whatever the caller resolves by -- one channel per
+!   atom, or per atom and radial function. The permutation table says which
+!   channel each one becomes under each operation, and the caller owns it.
+! The routine also reports how much it changed. An imposed equality that
+!   leaves no trace cannot be told apart from an earned one, so the caller is
+!   handed the largest disagreement found within any group of channels the
+!   averaging merged, along with the largest value in the spectrum to measure
+!   it against. Measuring it here rather than in a separate pass keeps the
+!   reported number describing the averaging that actually happened.
+subroutine symmetrizeChannels(values, permTable, numOps, &
+      & numChannels, numEnergyPoints, largestSpread, &
+      & largestValue)
+
+   use O_Kinds
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension(:,:), intent(inout) :: values
+         !   (numChannels, numEnergyPoints). Modified in place.
+   integer, dimension(:,:), intent(in) :: permTable
+         !   (numOps, numChannels). permTable(R, alpha) is the channel that
+         !   alpha becomes under operation R.
+   integer, intent(in) :: numOps
+   integer, intent(in) :: numChannels
+   integer, intent(in) :: numEnergyPoints
+   real (kind=double), intent(out) :: largestSpread
+         !   The largest gap between channels that had to be made equal.
+   real (kind=double), intent(out) :: largestValue
+         !   The largest magnitude anywhere in the spectrum, so the caller can
+         !   report the spread as a fraction of something meaningful.
+
+   ! Define local variables.
+   integer :: energyPoint  ! Energy grid loop index.
+   integer :: opIndex      ! Point group operation loop index.
+   integer :: channel      ! Channel loop index.
+   real (kind=double) :: thisValue ! The value being folded in.
+   real (kind=double), allocatable, dimension(:) :: averaged
+         !   One energy point's averaged channels, built separately because
+         !   the average must be formed from the UNSYMMETRIZED values: writing
+         !   into `values` as we go would feed already-averaged numbers back
+         !   into later operations. One energy point at a time keeps this to a
+         !   single channel vector rather than a copy of the whole spectrum.
+   real (kind=double), allocatable, dimension(:) :: smallestSeen
+   real (kind=double), allocatable, dimension(:) :: largestSeen
+         !   The extremes within each channel's group, tracked alongside the
+         !   sum so that the disagreement being averaged away is measured in
+         !   the same pass that averages it.
+
+   allocate (averaged(numChannels))
+   allocate (smallestSeen(numChannels))
+   allocate (largestSeen(numChannels))
+
+   largestSpread = 0.0_double
+   largestValue = 0.0_double
+
+   do energyPoint = 1, numEnergyPoints
+      averaged(:) = 0.0_double
+      smallestSeen(:) = huge(1.0_double)
+      largestSeen(:) = -huge(1.0_double)
+
+      do opIndex = 1, numOps
+         do channel = 1, numChannels
+            thisValue = values(permTable(opIndex, channel), &
+                  & energyPoint)
+            averaged(channel) = averaged(channel) + thisValue
+            if (thisValue < smallestSeen(channel)) then
+               smallestSeen(channel) = thisValue
+            endif
+            if (thisValue > largestSeen(channel)) then
+               largestSeen(channel) = thisValue
+            endif
+         enddo
+      enddo
+
+      largestSpread = max(largestSpread, &
+            & maxval(largestSeen(:) - smallestSeen(:)))
+      largestValue = max(largestValue, &
+            & maxval(abs(values(:, energyPoint))))
+
+      values(:, energyPoint) = averaged(:) &
+            & / real(numOps, double)
+   enddo
+
+   deallocate (averaged)
+   deallocate (smallestSeen)
+   deallocate (largestSeen)
+
+end subroutine symmetrizeChannels
+
+
+! Average a PAIR-resolved spectrum over the crystal point group
+!   (DESIGN 1.7; PSEUDOCODE 20).
+!
+! The partial optical properties resolve each transition by the partial the
+!   initial state belongs to AND the partial the final state belongs to, so
+!   the quantity carries two channel indices rather than one. Both are
+!   permuted by the same operation, which is what preserves the meaning of a
+!   pair: the partials at one end of a transition and at the other are
+!   carried to their images together, exactly as the atoms they sit on are.
+!
+! Everything said about symmetrizeChannels above applies unchanged --
+!   why the averaging is needed, why it is equivalent to symmetrizing the
+!   integration weights, and why no orbit has to be enumerated.
+subroutine symmetrizePairs(values, permTable, numOps, &
+      & numPartials, numComponents, numEnergyPoints, &
+      & largestSpread, largestValue)
+
+   use O_Kinds
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension(:,:,:,:), intent(inout) :: values
+         !   (numPartials, numPartials, numComponents, numEnergyPoints).
+         !   Modified in place.
+   integer, dimension(:,:), intent(in) :: permTable
+         !   (numOps, numPartials).
+   integer, intent(in) :: numOps
+   integer, intent(in) :: numPartials
+   integer, intent(in) :: numComponents
+   integer, intent(in) :: numEnergyPoints
+   real (kind=double), intent(out) :: largestSpread
+         !   The largest gap between pairs that had to be made equal.
+   real (kind=double), intent(out) :: largestValue
+         !   The largest magnitude anywhere in the spectra.
+
+   ! Define local variables.
+   integer :: energyPoint  ! Energy grid loop index.
+   integer :: opIndex      ! Point group operation loop index.
+   integer :: initPartial  ! Initial-state partial loop index.
+   integer :: finPartial   ! Final-state partial loop index.
+   integer :: initRotated  ! Image of initPartial under this operation.
+   integer :: finRotated   ! Image of finPartial under this operation.
+   real (kind=double), allocatable, dimension(:,:,:) :: averaged
+         !   One energy point's averaged pair matrix, built separately for the
+         !   same reason as in symmetrizeChannels. One energy point at a time
+         !   matters more here: a copy of the whole array would be the pair
+         !   count squared times the component count times the energy grid.
+   real (kind=double), allocatable, dimension(:,:,:) :: smallestSeen
+   real (kind=double), allocatable, dimension(:,:,:) :: largestSeen
+         !   The extremes within each pair's group, tracked in the same pass
+         !   that averages them, so the reported disagreement describes the
+         !   averaging that actually happened.
+
+   allocate (averaged(numPartials, numPartials, numComponents))
+   allocate (smallestSeen(numPartials, numPartials, &
+         & numComponents))
+   allocate (largestSeen(numPartials, numPartials, &
+         & numComponents))
+
+   largestSpread = 0.0_double
+   largestValue = 0.0_double
+
+   do energyPoint = 1, numEnergyPoints
+      averaged(:,:,:) = 0.0_double
+      smallestSeen(:,:,:) = huge(1.0_double)
+      largestSeen(:,:,:) = -huge(1.0_double)
+
+      do opIndex = 1, numOps
+
+         ! Final-state partial outer, initial-state partial inner. The
+         !   initial-state partial is the leftmost index of both arrays and
+         !   so is the one that must run innermost: Fortran stores the
+         !   leftmost index fastest, and this keeps both the read and the
+         !   write walking memory in order.
+         do finPartial = 1, numPartials
+            finRotated = permTable(opIndex, finPartial)
+            do initPartial = 1, numPartials
+               initRotated = permTable(opIndex, initPartial)
+
+               averaged(initPartial, finPartial, :) = &
+                     & averaged(initPartial, finPartial, :) &
+                     & + values(initRotated, finRotated, :, &
+                     & energyPoint)
+               smallestSeen(initPartial, finPartial, :) = &
+                     & min(smallestSeen(initPartial, &
+                     & finPartial, :), &
+                     & values(initRotated, finRotated, :, &
+                     & energyPoint))
+               largestSeen(initPartial, finPartial, :) = &
+                     & max(largestSeen(initPartial, &
+                     & finPartial, :), &
+                     & values(initRotated, finRotated, :, &
+                     & energyPoint))
+            enddo
+         enddo
+      enddo
+
+      largestSpread = max(largestSpread, &
+            & maxval(largestSeen(:,:,:) &
+            & - smallestSeen(:,:,:)))
+      largestValue = max(largestValue, &
+            & maxval(abs(values(:,:,:,energyPoint))))
+
+      values(:,:,:,energyPoint) = averaged(:,:,:) &
+            & / real(numOps, double)
+   enddo
+
+   deallocate (averaged)
+   deallocate (smallestSeen)
+   deallocate (largestSeen)
+
+end subroutine symmetrizePairs
+
 end module O_MathSubs

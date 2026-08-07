@@ -168,7 +168,8 @@ subroutine computeDOS(inSCF)
    use O_Potential,   only: spin
    use O_Populate,    only: electronPopulation
    use O_KPoints, only: numKPoints, kPointWeight, &
-         & kPointIntgCode, numPointOps
+         & kPointIntgCode, numPointOps, &
+         & symmetrizeLATPartials
    use O_Constants, only: pi, hartree, lAngMomCount
    use O_AtomicSites, only: valeDim, &
          & numAtomSites, atomSites, invAtomPerm
@@ -588,6 +589,26 @@ subroutine computeDOS(inSCF)
 
          ! Free the projection array (large memory).
          deallocate (projArray)
+
+         ! Pass 3: average the atom-resolved result over the point group
+         !   (DESIGN 1.7). The tetrahedron decomposition is not carried onto
+         !   itself by every operation of every point group, so k-points
+         !   related by symmetry can receive unrelated weights and atoms that
+         !   must be equivalent come out unequal. Averaging over the group
+         !   removes precisely that part of the error, and leaves the total
+         !   DOS untouched because it is the same operation as averaging each
+         !   k-point's weight over its star.
+         !
+         ! Detail code 0 needs nothing: a type-level sum is already invariant,
+         !   since every operation carries an atom onto an atom of the same
+         !   type. Detail code 3 never reaches here, being refused on this
+         !   pathway earlier.
+         if ((symmetrizeLATPartials == 1) .and. &
+               & (detailCodePDOS >= 1)) then
+            call symmetrizePDOS_LAT(pdosComplete, &
+                  & channelPermTbl, cumulDOSTotal, &
+                  & numEnergyPoints)
+         endif
 
       else
 
@@ -1891,6 +1912,84 @@ subroutine integratePDOS_LAT(projArr, &
    write (20, *) ""
 
 end subroutine integratePDOS_LAT
+
+
+! Average the atom-resolved partial DOS over the crystal point group and say
+!   in the log what that did (DESIGN 1.7; PSEUDOCODE 20).
+!
+!   The averaging itself is generic and lives in O_MathSubs. What belongs here
+!   is everything specific to this consumer: whether the permutation table
+!   exists at all, and reporting the result in terms a reader of fort.20 can
+!   act on.
+!
+!   The equality this imposes must be visible. A run whose equivalent atoms
+!   agree because they were averaged and a run whose equivalent atoms agree
+!   because the integration was sound produce identical output files, and only
+!   the log can tell them apart. The spread reported here is also a free
+!   measurement of the residual asymmetry, which is why turning the averaging
+!   off is a rarely-needed diagnostic rather than the only way to see it.
+subroutine symmetrizePDOS_LAT(pdosComp, channelPermTbl, &
+      & cumDOSTotal, numEPts)
+
+   use O_Kinds
+   use O_MathSubs, only: symmetrizeChannels
+   use O_KPoints, only: numPointOps
+
+   implicit none
+
+   ! Passed parameters.
+   real (kind=double), dimension(:,:), &
+         & intent(inout) :: pdosComp
+   integer, allocatable, dimension(:,:), &
+         & intent(in) :: channelPermTbl
+   integer, intent(in) :: cumDOSTotal
+   integer, intent(in) :: numEPts
+
+   ! Local variables.
+   real (kind=double) :: largestSpread ! Biggest gap made equal.
+   real (kind=double) :: largestValue  ! Peak of the spectrum.
+   real (kind=double) :: relativeSpread
+
+   ! Without the symmetry maps there is nothing to average over. That happens
+   !   for kpoint style code 0, an explicit list of kpoints, where Imago never
+   !   builds the full mesh and so cannot construct atomPerm or anything
+   !   derived from it. Say so rather than returning quietly: a silent skip
+   !   looks exactly like a completed job in every output file.
+   if (.not. allocated(channelPermTbl)) then
+      write (20,*) "PDOS symmetrization SKIPPED: no point group maps are"
+      write (20,*) "available. This happens with an explicit kpoint list"
+      write (20,*) "(style code 0). Symmetry-equivalent atoms may not"
+      write (20,*) "agree in the partial DOS below."
+      call flush (20)
+      return
+   endif
+
+   call symmetrizeChannels(pdosComp, channelPermTbl, &
+         & numPointOps, cumDOSTotal, numEPts, &
+         & largestSpread, largestValue)
+
+   ! Report the disagreement that was averaged away, as a fraction of the
+   !   spectrum it sits in. An absolute number alone says nothing: the same
+   !   gap is negligible under a tall peak and damning under a small one.
+   if (largestValue > 0.0_double) then
+      relativeSpread = largestSpread / largestValue
+   else
+      relativeSpread = 0.0_double
+   endif
+
+   write (20,*) "PDOS averaged over ",numPointOps," point group operations."
+   write (20,fmt="(a,e12.5,a,e12.5)") &
+         & " Largest disagreement made equal: ",largestSpread, &
+         & " of peak ",largestValue
+   write (20,fmt="(a,e12.5)") &
+         & " That is a relative spread of: ",relativeSpread
+   write (20,*) "This equality is IMPOSED by averaging, not earned by the"
+   write (20,*) "integration. A large value means the tetrahedron"
+   write (20,*) "decomposition is far from point-group invariant on this"
+   write (20,*) "lattice (DESIGN 1.2 and 1.7)."
+   call flush (20)
+
+end subroutine symmetrizePDOS_LAT
 
 
 end module O_DOS

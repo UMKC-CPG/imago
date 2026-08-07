@@ -388,6 +388,27 @@ class ScriptSettings:
         # [0]=unused, [1]=SCF, [2]=PSCF.
         self.kp_intg_code = [0, 0, 0]
 
+        # How many of each grid box's four long diagonals
+        # the tetrahedron decomposition cuts along, per
+        # group.  Six tetrahedra sharing any one diagonal
+        # tile a box, but a single choice is not carried
+        # onto itself by the crystal point group, so
+        # cutting along all four and averaging is what
+        # makes atom-resolved results come out equal for
+        # equivalent atoms.  4 by default; 1 selects the
+        # cheaper single-cut form, which is sound when
+        # only totals are wanted.  See DESIGN 1.2.
+        self.tetra_diagonals = [4, 4, 4]
+
+        # Whether to average atom-resolved tetrahedron
+        # results over the point group before writing
+        # them, per group.  On by default.  This is what
+        # reaches the lattices the decomposition alone
+        # cannot -- hexagonal and rhombohedral -- where a
+        # six-fold rotation does not carry a grid box
+        # onto a grid box at all.  See DESIGN 1.7.
+        self.symmetrize_lat_partials = [1, 1, 1]
+
         # Basis / potential substitution lists (populated by CLI).
         self.basis_sub_out = []
         self.basis_sub_in = []
@@ -931,6 +952,41 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             help="K-point integration method for both "
                  "SCF and post-SCF.  0 = Gaussian "
                  "(default), 1 = LAT.")
+        # How many of a grid box's four long diagonals the tetrahedron
+        # decomposition cuts along.  Only meaningful with -kpint 1.
+        parser.add_argument(
+            "-scftetradiag", dest="scftetradiag", type=int,
+            metavar="N", default=None,
+            help="Tetrahedron diagonals per grid box for "
+                 "the SCF k-point mesh.  4 = cut every "
+                 "box all four ways and average (default), "
+                 "1 = cut one way only, which is cheaper "
+                 "and sound when only totals are wanted.  "
+                 "Used only with LAT integration.")
+        parser.add_argument(
+            "-pscftetradiag", dest="pscftetradiag", type=int,
+            metavar="N", default=None,
+            help="Tetrahedron diagonals per grid box for "
+                 "the post-SCF k-point mesh.  4 = all four "
+                 "and average (default), 1 = one only.  "
+                 "Used only with LAT integration.")
+        parser.add_argument(
+            "-tetradiag", dest="tetradiag", type=int,
+            metavar="N", default=None,
+            help="Tetrahedron diagonals per grid box for "
+                 "both SCF and post-SCF.  4 = all four and "
+                 "average (default), 1 = one only.  Used "
+                 "only with LAT integration.")
+        # Turn off the point-group averaging of atom-resolved LAT results.
+        parser.add_argument(
+            "-nolatsym", dest="nolatsym", action="store_true",
+            default=False,
+            help="Do not average atom-resolved LAT results "
+                 "over the point group.  The averaging is "
+                 "on by default and is what makes "
+                 "symmetry-equivalent atoms come out equal; "
+                 "turning it off exposes the residual "
+                 "asymmetry and is meant for diagnosis.")
         # The -kpshift option forces a specific fractional shift on the
         # k-point mesh.
         parser.add_argument("-kpshift", dest="kpshift", nargs=3, type=float,
@@ -1327,6 +1383,32 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             self.kp_intg_code[1] = args.scfkpint
         if args.pscfkpint is not None:
             self.kp_intg_code[2] = args.pscfkpint
+
+        # Tetrahedron diagonal count, same combined-then-
+        # per-group pattern.  Independent per group on
+        # purpose: the SCF occupation path is immune to
+        # the asymmetry a single diagonal introduces,
+        # because its weights are pooled onto each
+        # k-point's irreducible representative before
+        # anything reads them, so a run may economize
+        # there while keeping all four for the post-SCF
+        # spectra.  See DESIGN 1.2.
+        if args.tetradiag is not None:
+            self.tetra_diagonals[1] = args.tetradiag
+            self.tetra_diagonals[2] = args.tetradiag
+        if args.scftetradiag is not None:
+            self.tetra_diagonals[1] = args.scftetradiag
+        if args.pscftetradiag is not None:
+            self.tetra_diagonals[2] = args.pscftetradiag
+
+        # Symmetrization of atom-resolved results.  The
+        # flag turns it OFF, since it is on by default,
+        # and it exists for diagnosis: with it off, the
+        # residual asymmetry becomes visible rather than
+        # being averaged away.  See DESIGN 1.7.
+        if args.nolatsym:
+            self.symmetrize_lat_partials[1] = 0
+            self.symmetrize_lat_partials[2] = 0
 
         # Shift applies to both mesh and density modes.
         if args.kpshift is not None:
@@ -3839,14 +3921,18 @@ def _make_kp(settings, sc):
             _write_mesh_kp_file(
                 dest, [None, 1, 1, 1], "0 0 0",
                 point_ops, frac_trans, conv_lattice, cell_mode,
-                settings.kp_intg_code[kp_group])
+                settings.kp_intg_code[kp_group],
+                settings.tetra_diagonals[kp_group],
+                settings.symmetrize_lat_partials[kp_group])
         elif settings.use_kp_density:
             # Style-code-2: a volume density; imago derives the axial
             # counts at runtime from the reciprocal cell geometry.
             _write_density_kp_file(
                 dest, settings.kp_density[kp_group], settings.kp_shift,
                 point_ops, frac_trans, conv_lattice, cell_mode,
-                settings.kp_intg_code[kp_group])
+                settings.kp_intg_code[kp_group],
+                settings.tetra_diagonals[kp_group],
+                settings.symmetrize_lat_partials[kp_group])
         else:
             # Style-code-1: explicit axial counts plus the shift.  A
             # "1 1 1" mesh here is a single *shifted* point (a mean-
@@ -3855,7 +3941,9 @@ def _make_kp(settings, sc):
             _write_mesh_kp_file(
                 dest, kp_mesh[kp_group], settings.kp_shift,
                 point_ops, frac_trans, conv_lattice, cell_mode,
-                settings.kp_intg_code[kp_group])
+                settings.kp_intg_code[kp_group],
+                settings.tetra_diagonals[kp_group],
+                settings.symmetrize_lat_partials[kp_group])
     # No kpSpecs.dat is produced (the legacy makeKPoints path is gone).
 
 
@@ -3913,7 +4001,9 @@ def _extract_point_ops(settings):
 def _write_mesh_kp_file(dest_path, kp_mesh,
                         kp_shift, point_ops,
                         frac_trans, conv_lattice,
-                        cell_mode, intg_code=0):
+                        cell_mode, intg_code=0,
+                        tetra_diagonals=4,
+                        symmetrize_partials=1):
     """Write a style-code-1 k-point file for mesh
     mode.
 
@@ -4006,6 +4096,8 @@ def _write_mesh_kp_file(dest_path, kp_mesh,
         f.write("1\n")
         f.write("KPOINT_INTG_CODE\n")
         f.write(f"{intg_code}\n")
+        _write_tetra_settings_block(
+            f, tetra_diagonals, symmetrize_partials)
         f.write("NUM_KP_A_B_C\n")
         f.write(f"{kp_mesh[1]} {kp_mesh[2]}"
                 f" {kp_mesh[3]}\n")
@@ -4020,7 +4112,9 @@ def _write_density_kp_file(dest_path, density,
                            kp_shift, point_ops,
                            frac_trans, conv_lattice,
                            cell_mode,
-                           intg_code=0):
+                           intg_code=0,
+                           tetra_diagonals=4,
+                           symmetrize_partials=1):
     """Write a style-code-2 k-point file for density
     mode.
 
@@ -4101,6 +4195,8 @@ def _write_density_kp_file(dest_path, density,
         f.write("2\n")
         f.write("KPOINT_INTG_CODE\n")
         f.write(f"{intg_code}\n")
+        _write_tetra_settings_block(
+            f, tetra_diagonals, symmetrize_partials)
         f.write("MIN_KP_LINE_DENSITY\n")
         f.write(f"{density}\n")
         f.write("KP_SHIFT_A_B_C\n")
@@ -4108,6 +4204,52 @@ def _write_density_kp_file(dest_path, density,
         _write_point_ops_block(
             f, point_ops, frac_trans,
             conv_lattice, cell_mode)
+
+
+def _write_tetra_settings_block(f, tetra_diagonals,
+                                symmetrize_partials):
+    """Write the two tetrahedron-integration settings to
+    an open kp file, immediately after
+    ``KPOINT_INTG_CODE``.
+
+    Both are written for every k-point file regardless of
+    the integration method, so that there is one file
+    format rather than one per method; imago reads them
+    unconditionally and ignores them when Gaussian
+    integration was requested.
+
+    ``NUM_TETRA_DIAGONALS`` says how many of a grid box's
+    four long diagonals the decomposition cuts along.  Six
+    tetrahedra sharing any one diagonal tile the box, but
+    all six share that diagonal and a box has four, so a
+    symmetry operation carrying the chosen one onto
+    another produces a decomposition with nothing in
+    common with the original.  Cutting all four ways and
+    giving each tetrahedron a quarter weight averages four
+    valid decompositions into one the point group carries
+    onto itself.  See DESIGN 1.2.
+
+    ``SYMMETRIZE_LAT_PARTIALS`` says whether to average
+    atom-resolved results over the point group before
+    writing them.  This reaches the lattices the
+    decomposition alone cannot, hexagonal and rhombohedral
+    among them, where a six-fold rotation does not map a
+    grid box onto a grid box at all.  See DESIGN 1.7.
+
+    Parameters
+    ----------
+    f : file object
+        Open k-point file, positioned after the
+        integration code.
+    tetra_diagonals : int
+        4 (default) or 1.
+    symmetrize_partials : int
+        1 = on (default), 0 = off.
+    """
+    f.write("NUM_TETRA_DIAGONALS\n")
+    f.write(f"{tetra_diagonals}\n")
+    f.write("SYMMETRIZE_LAT_PARTIALS\n")
+    f.write(f"{symmetrize_partials}\n")
 
 
 def _write_point_ops_block(f, point_ops, frac_trans,

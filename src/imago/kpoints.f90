@@ -186,9 +186,30 @@ module O_KPoints
          !   eigenvector-dependent properties (Q*, bond order) across the star
          !   of each IBZ kpoint. Only allocated for style codes 1 and 2.
    integer :: numTetrahedra ! The total number of tetrahedra tiling the
-         !   reciprocal cell. Equal to 6 * nA * nB * nC.
+         !   reciprocal cell. Equal to 6 * numTetraDiagonals * nA * nB * nC.
+   integer :: numTetraDiagonals ! How many of a grid box's four long diagonals
+         !   the box is cut along. Each diagonal yields six tetrahedra that
+         !   tile the box, so cutting along all four and giving every
+         !   tetrahedron a quarter weight averages four valid decompositions.
+         !   That average is what the crystal point group carries onto itself;
+         !   a single diagonal is not, because an operation can send the chosen
+         !   diagonal to one of the other three (DESIGN 1.2). Read from the
+         !   kpoint file, so the SCF and PSCF phases each carry their own
+         !   value. 4 by default; 1 selects the cheaper single-cut form, which
+         !   is sound for a totals-only run and for the SCF occupation path.
+   integer :: symmetrizeLATPartials ! 1 = average atom-resolved tetrahedron
+         !   results over the point group before writing them; 0 = leave them
+         !   as integrated. On by default. This is what makes symmetry-
+         !   equivalent atoms come out equal on lattices where the
+         !   decomposition alone cannot manage it, hexagonal and rhombohedral
+         !   among them, and it is an integration setting rather than an
+         !   output one: averaging the result over the group is the same
+         !   operation as averaging each k-point's weight over its star
+         !   (DESIGN 1.7). Read from the kpoint file beside the two above.
    real (kind=double) :: tetraVol ! The BZ fraction for each tetrahedron: 1 /
-         !   numTetrahedra.
+         !   numTetrahedra. Note this needs no separate factor for the
+         !   diagonal count: more tetrahedra make it proportionally smaller,
+         !   which is exactly the share each decomposition should carry.
    integer, allocatable, dimension (:,:) :: tetrahedra
          !   The four corner kpoint indices for each tetrahedron. Dimensions:
          !   (4, numTetrahedra). Indices reference the full uniform mesh
@@ -230,6 +251,37 @@ subroutine readKPoints(readUnit, writeUnit)
    !   I.e., Weighted sums, tetrahedral, etc.
    call readData(readUnit,writeUnit,kPointIntgCode,len('KPOINT_INTG_CODE'),&
          & 'KPOINT_INTG_CODE')
+
+   ! Read how many of each grid box's four long diagonals to cut along when
+   !   building tetrahedra, and whether to average atom-resolved tetrahedron
+   !   results over the point group before writing them. Both are properties
+   !   of the kpoint integration and both are read here rather than from the
+   !   main input file so that the SCF and PSCF phases, which read separate
+   !   kpoint files, can choose independently. They are read unconditionally
+   !   to keep one file format, and simply go unused when the Gaussian
+   !   integration method was requested.
+   call readData(readUnit,writeUnit,numTetraDiagonals,&
+         & len('NUM_TETRA_DIAGONALS'),'NUM_TETRA_DIAGONALS')
+   call readData(readUnit,writeUnit,symmetrizeLATPartials,&
+         & len('SYMMETRIZE_LAT_PARTIALS'),'SYMMETRIZE_LAT_PARTIALS')
+
+   ! Refuse a diagonal count that the decomposition has no meaning for. Only
+   !   1 and 4 are sensible: 4 averages every distinct way of cutting a box
+   !   and is what makes the decomposition point-group invariant, while 1 is
+   !   the historical single-cut form. Values of 2 or 3 would average an
+   !   arbitrary subset of the diagonals, which is neither cheaper in any
+   !   useful sense nor symmetric, so they are rejected rather than quietly
+   !   accepted (DESIGN 1.2).
+   if ((kPointIntgCode == 1) .and. (numTetraDiagonals /= 1) .and. &
+         & (numTetraDiagonals /= 4)) then
+      write (writeUnit,*) 'NUM_TETRA_DIAGONALS must be 1 or 4, not ',&
+            & numTetraDiagonals
+      write (writeUnit,*) 'Use 4 (the default) for a decomposition that the'
+      write (writeUnit,*) 'crystal point group carries onto itself, or 1 for'
+      write (writeUnit,*) 'the cheaper single-cut form.'
+      call flush (writeUnit)
+      stop 'readKPoints: invalid NUM_TETRA_DIAGONALS'
+   endif
 
    ! Depending on kPointStyleCode we will read the associated relevant data.
    if (kPointStyleCode == 0) then ! Read an explicit list of kpoints.
@@ -1735,18 +1787,43 @@ end function getIndexFromIndices
 
 
 ! Generate the tetrahedra that tile the reciprocal cell. The uniform
-!   Monkhorst-Pack mesh defines a grid of nA x nB x nC parallelepipeds. Each
-!   parallelepiped has 8 corners and is decomposed into exactly 6 tetrahedra
-!   that share the main diagonal M1-M8 (Bloechl 1994). The mesh is periodic, so
-!   indices wrap with modular arithmetic.
+!   Monkhorst-Pack mesh defines a grid of nA x nB x nC parallelepipeds, each
+!   with 8 corners. Six tetrahedra sharing any one of the box's four long
+!   diagonals tile that box exactly (Bloechl 1994), and which diagonal is
+!   chosen is free. The mesh is periodic, so indices wrap with modular
+!   arithmetic.
 !
-!   Parallelepiped corners at grid position (a, b, c): M1 = (a, b, c ) M5 =
-!     (a+1, b+1, c ) M2 = (a+1, b, c ) M6 = (a+1, b, c+1) M3 = (a, b+1, c ) M7 =
-!     (a, b+1, c+1) M4 = (a, b, c+1) M8 = (a+1, b+1, c+1)
+!   A box corner is a triple of zeros and ones saying whether to step one grid
+!   cell along each axis. A long diagonal runs from some corner to its
+!   opposite, reached by changing all three coordinates. Walk from one end to
+!   the other changing ONE coordinate at a time: the four corners visited are
+!   a tetrahedron, and the six orders in which the three coordinates can be
+!   changed give the six tetrahedra of that diagonal, each containing both
+!   ends. That is the rule this routine implements, and starting the walk at
+!   (0,0,0) reproduces the classic table exactly:
 !
-!   Six tetrahedra sharing diagonal M1-M8: T1: M1, M2, M5, M8 T4: M1, M4, M7, M8
-!     T2: M1, M3, M5, M8 T5: M1, M4, M6, M8 T3: M1, M3, M7, M8 T6: M1, M2, M6,
-!     M8
+!!   corners of the box at grid position (a, b, c)
+!!     M1 = (a,   b,   c  )   M5 = (a+1, b+1, c  )
+!!     M2 = (a+1, b,   c  )   M6 = (a+1, b,   c+1)
+!!     M3 = (a,   b+1, c  )   M7 = (a,   b+1, c+1)
+!!     M4 = (a,   b,   c+1)   M8 = (a+1, b+1, c+1)
+!!
+!!   the six tetrahedra sharing diagonal M1-M8
+!!     T1: M1, M2, M5, M8     T4: M1, M4, M7, M8
+!!     T2: M1, M3, M5, M8     T5: M1, M4, M6, M8
+!!     T3: M1, M3, M7, M8     T6: M1, M2, M6, M8
+!
+!   Why every box is cut FOUR ways by default. All six tetrahedra of a box
+!   share one diagonal, and a box has four of them. A symmetry operation that
+!   carries the chosen diagonal onto a different one therefore produces a
+!   decomposition with nothing in common with the original, so the crystal
+!   point group does not carry the decomposition onto itself. Quantities
+!   summed over the whole mesh do not notice, because they sum over exactly
+!   the set the asymmetry permutes; quantities resolved onto individual atoms
+!   do, and come out unequal for atoms that must be equivalent. Cutting each
+!   box along every diagonal and giving each tetrahedron a quarter weight
+!   averages four valid decompositions into one that IS invariant. See
+!   DESIGN 1.2, and note the caller controls this through numTetraDiagonals.
 !
 !   The tetrahedra indices reference the full uniform mesh (1..numFullMeshKP),
 !   not the IBZ-reduced list.
@@ -1757,71 +1834,194 @@ subroutine generateTetrahedra
    ! Define local variables.
    integer :: a, b, c, t
    integer :: nA, nB, nC
-   integer :: M1, M2, M3, M4, M5, M6, M7, M8
+   integer :: whichDiagonal ! Which of the box's long diagonals is being cut
+         !   along, 1 to numTetraDiagonals.
+   integer :: firstAxis, secondAxis ! The two axes changed, in order, on the
+         !   walk from one end of the diagonal to the other. The third axis
+         !   is whichever remains and is changed last, which is what lands the
+         !   walk on the opposite corner.
+   integer, dimension(3) :: startCorner    ! The end of the diagonal the walk
+         !   begins from.
+   integer, dimension(3) :: oppositeCorner ! The far end of that diagonal.
+   integer, dimension(3) :: secondCorner   ! After changing firstAxis.
+   integer, dimension(3) :: thirdCorner    ! After also changing secondAxis.
+   integer, allocatable, dimension(:) :: tetraPerPoint
+         !   How many tetrahedra each mesh point belongs to, used by the
+         !   construction check at the end of this routine.
+   integer :: corner    ! Corner loop index for that check.
+   integer :: expectedPerPoint
+
+   ! The four long diagonals of a box, named by the corner each one starts
+   !   from. Their opposite ends are (1,1,1), (0,1,1), (1,0,1) and (1,1,0), so
+   !   these four cover every diagonal exactly once. Taking the FIRST
+   !   numTetraDiagonals of them means that asking for a single diagonal
+   !   reproduces the historical decomposition tetrahedron for tetrahedron,
+   !   which is what makes such a run comparable with results computed before
+   !   this routine cut boxes more than one way.
+   integer, dimension(3,4), parameter :: diagonalStarts = reshape( &
+         & (/ 0, 0, 0,   1, 0, 0,   0, 1, 0,   0, 0, 1 /), (/3, 4/))
 
    ! Local shorthand for the axial kpoint counts.
    nA = numAxialKPoints(1)
    nB = numAxialKPoints(2)
    nC = numAxialKPoints(3)
 
-   ! Compute the total number of tetrahedra: 6 per parallelepiped, one
-   !   parallelepiped per grid cell.
-   numTetrahedra = 6 * nA * nB * nC
+   ! Compute the total number of tetrahedra: six per diagonal cut along, one
+   !   set of cuts per grid cell.
+   numTetrahedra = 6 * numTetraDiagonals * nA * nB * nC
+
+   ! Record what was built. Which decomposition is in use changes every
+   !   tetrahedron-integrated number in the run, so it belongs in the log
+   !   beside the mesh it was built from rather than being inferred later
+   !   from the input file.
+   write (20,fmt="(a,i2,a,i10,a)") &
+         & " Tetrahedra: cutting each grid box along ",numTetraDiagonals,&
+         & " diagonal(s) gives ",numTetrahedra," tetrahedra."
+   call flush (20)
+
+   ! Allocate the membership counter used by the construction check at the
+   !   end of this routine. See there for what it is for.
+   allocate (tetraPerPoint(numFullMeshKP))
+   tetraPerPoint(:) = 0
 
    ! Allocate the tetrahedra array.
    if (allocated(tetrahedra)) deallocate(tetrahedra)
    allocate (tetrahedra(4, numTetrahedra))
 
-   ! Build the tetrahedra by iterating over every grid cell and decomposing it
-   !   into 6 tetrahedra.
+   ! Build the tetrahedra by visiting every grid cell and cutting it along
+   !   each requested diagonal in turn.
    t = 0
    do a = 1, nA
       do b = 1, nB
          do c = 1, nC
+            do whichDiagonal = 1, numTetraDiagonals
 
-            ! Compute the 8 corner indices of this parallelepiped with periodic
-            !   wrapping.
-            M1 = getIndexFromIndices( &
-                  & a, b, c)
-            M2 = getIndexFromIndices( &
-                  & mod(a, nA) + 1, b, c)
-            M3 = getIndexFromIndices( &
-                  & a, mod(b, nB) + 1, c)
-            M4 = getIndexFromIndices( &
-                  & a, b, mod(c, nC) + 1)
-            M5 = getIndexFromIndices( &
-                  & mod(a, nA) + 1, &
-                  & mod(b, nB) + 1, c)
-            M6 = getIndexFromIndices( &
-                  & mod(a, nA) + 1, &
-                  & b, mod(c, nC) + 1)
-            M7 = getIndexFromIndices( &
-                  & a, mod(b, nB) + 1, &
-                  & mod(c, nC) + 1)
-            M8 = getIndexFromIndices( &
-                  & mod(a, nA) + 1, &
-                  & mod(b, nB) + 1, &
-                  & mod(c, nC) + 1)
+               ! Both ends of this diagonal. The far end is reached by
+               !   changing all three coordinates, which is what makes it a
+               !   diagonal of the box rather than of a face or an edge.
+               startCorner(:) = diagonalStarts(:, whichDiagonal)
+               oppositeCorner(:) = 1 - startCorner(:)
 
-            ! Six tetrahedra sharing diagonal M1-M8.
-            tetrahedra(:, t+1) = (/M1, M2, M5, M8/)
-            tetrahedra(:, t+2) = (/M1, M3, M5, M8/)
-            tetrahedra(:, t+3) = (/M1, M3, M7, M8/)
-            tetrahedra(:, t+4) = (/M1, M4, M7, M8/)
-            tetrahedra(:, t+5) = (/M1, M4, M6, M8/)
-            tetrahedra(:, t+6) = (/M1, M2, M6, M8/)
-            t = t + 6
+               ! Walk from one end to the other, one coordinate at a time.
+               !   The six ordered choices of the first two axes give the six
+               !   tetrahedra; the third axis is whatever is left, and
+               !   changing it last is what lands the walk on the far end.
+               do firstAxis = 1, 3
+                  do secondAxis = 1, 3
+                     if (secondAxis == firstAxis) cycle
 
+                     secondCorner(:) = startCorner(:)
+                     secondCorner(firstAxis) = &
+                           & 1 - secondCorner(firstAxis)
+
+                     thirdCorner(:) = secondCorner(:)
+                     thirdCorner(secondAxis) = &
+                           & 1 - thirdCorner(secondAxis)
+
+                     ! The four corners visited, in walk order, are the
+                     !   tetrahedron. Order within a tetrahedron carries no
+                     !   meaning downstream: every consumer sorts the corner
+                     !   eigenvalues before using them.
+                     t = t + 1
+                     tetrahedra(1, t) = boxCornerIndex( &
+                           & a, b, c, startCorner)
+                     tetrahedra(2, t) = boxCornerIndex( &
+                           & a, b, c, secondCorner)
+                     tetrahedra(3, t) = boxCornerIndex( &
+                           & a, b, c, thirdCorner)
+                     tetrahedra(4, t) = boxCornerIndex( &
+                           & a, b, c, oppositeCorner)
+
+                  enddo ! secondAxis
+               enddo ! firstAxis
+
+            enddo ! whichDiagonal
          enddo ! c
       enddo ! b
    enddo ! a
 
+   ! Check the construction before anything integrates with it (PSEUDOCODE
+   !   1). Every mesh point must belong to the same number of tetrahedra,
+   !   since the same cuts are made in every box and the mesh is periodic:
+   !   24 per diagonal cut along. A wrong count means the walk is building
+   !   something other than the intended decomposition -- most likely
+   !   duplicates, which would make the extra diagonals silently worthless
+   !   because four copies of one decomposition at a quarter weight each
+   !   give back exactly the original. That failure produces output
+   !   identical to the single-diagonal form, which is indistinguishable
+   !   from "the setting had no effect" unless this check is here.
+   do t = 1, numTetrahedra
+      do corner = 1, 4
+         tetraPerPoint(tetrahedra(corner, t)) = &
+               & tetraPerPoint(tetrahedra(corner, t)) + 1
+      enddo
+   enddo
+
+   expectedPerPoint = 24 * numTetraDiagonals
+   if ((minval(tetraPerPoint(:)) /= expectedPerPoint) .or. &
+         & (maxval(tetraPerPoint(:)) /= expectedPerPoint)) then
+      write (20,*) 'ERROR: the tetrahedron construction is wrong.'
+      write (20,fmt="(a,i8,a,i8)") ' Mesh points belong to between ',&
+            & minval(tetraPerPoint(:)),' and ',maxval(tetraPerPoint(:))
+      write (20,fmt="(a,i8,a)") ' tetrahedra, but every one should belong &
+            &to ',expectedPerPoint,'.'
+      call flush (20)
+      stop 'generateTetrahedra: construction check failed'
+   endif
+
+   write (20,fmt="(a,i8,a)") &
+         & " Construction check passed: every mesh point belongs to ",&
+         & expectedPerPoint," tetrahedra."
+   call flush (20)
+
+   deallocate (tetraPerPoint)
+
 end subroutine generateTetrahedra
 
 
-! Compute the BZ integration weight for each tetrahedron. All tetrahedra tile
-!   the BZ uniformly, so each one represents an equal fraction 1/numTetrahedra
-!   of the full zone.
+! Convert one corner of the grid box at (a, b, c) into a full-mesh kpoint
+!   index. The offset is a triple of zeros and ones saying whether to step one
+!   grid cell along each axis. The mesh is periodic -- the Brillouin zone is a
+!   torus -- so stepping off the far edge wraps around to the near one, which
+!   is what the modular arithmetic does.
+function boxCornerIndex(a, b, c, offset)
+
+   implicit none
+
+   ! Define the function return value.
+   integer :: boxCornerIndex
+
+   ! Define passed parameters.
+   integer, intent(in) :: a, b, c
+   integer, dimension(3), intent(in) :: offset
+
+   ! Define local variables.
+   integer :: nA, nB, nC
+
+   ! Local shorthand for the axial kpoint counts.
+   nA = numAxialKPoints(1)
+   nB = numAxialKPoints(2)
+   nC = numAxialKPoints(3)
+
+   ! Step along each axis if this corner calls for it, wrapping at the mesh
+   !   edge. Note mod(a, nA) + 1 steps from a to a+1 and wraps nA back to 1,
+   !   which is the 1-based form of adding one modulo nA.
+   boxCornerIndex = getIndexFromIndices( &
+         & merge(mod(a, nA) + 1, a, offset(1) == 1), &
+         & merge(mod(b, nB) + 1, b, offset(2) == 1), &
+         & merge(mod(c, nC) + 1, c, offset(3) == 1))
+
+end function boxCornerIndex
+
+
+! Compute the BZ integration weight for each tetrahedron. Every tetrahedron
+!   carries the same fraction 1/numTetrahedra of the zone, and that one
+!   expression covers both decompositions without knowing which was built.
+!   With a single diagonal the tetrahedra tile the zone once and each is
+!   1/(6 nA nB nC) of it. With all four they tile it four times over, so each
+!   is a quarter of that -- which is exactly the share it should carry, since
+!   the four cuts are being averaged rather than added. Nothing downstream
+!   needs to know how many diagonals were used, and nothing downstream asks.
 subroutine computeTetraVol
 
    use O_Kinds

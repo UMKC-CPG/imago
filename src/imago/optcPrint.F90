@@ -43,7 +43,7 @@ subroutine computeOptcSpectra(doOPTC)
    use O_Input,           only: sigmaOPTC, deltaOPTC, sigmaPACS, deltaPACS,&
                                 & detailCodePOPTC
    use O_Constants,       only: dim3, pi, auTime, eCharge, hPlanck, hartree
-   use O_KPoints,         only: kPointIntgCode
+   use O_KPoints,         only: kPointIntgCode, symmetrizeLATPartials
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
@@ -218,6 +218,21 @@ subroutine computeOptcSpectra(doOPTC)
       if (detailCodePOPTC /= 0) then
          call accumulateOptcCondPOPTC (kPointFactor,sigma)
       endif
+   endif
+
+   ! Average the atom-resolved spectra over the point group (DESIGN 1.7).
+   !   Only the tetrahedron pathway needs it: the Gaussian one spreads each
+   !   irreducible point's contribution evenly across its star and so is
+   !   already symmetric. Only the atom grouped codes need it either, since
+   !   every operation carries an atom onto an atom of the same type and a
+   !   type level sum therefore maps onto itself.
+   !
+   ! This must run BEFORE printOptcSpectra, and it does so while partialPerm
+   !   is still alive -- subroutine optc releases the decomposition index
+   !   after the spectra are written, precisely so that this window exists.
+   if ((kPointIntgCode == 1) .and. (symmetrizeLATPartials == 1) &
+         & .and. (detailCodePOPTC >= 3)) then
+      call symmetrizeOptcPOPTC_LAT
    endif
 
    deallocate (kPointFactor)
@@ -681,6 +696,90 @@ subroutine accumulateOptcCondPOPTC_LAT (latFactor)
    enddo
 
 end subroutine accumulateOptcCondPOPTC_LAT
+
+
+! Average the atom-resolved optical spectra over the crystal point group and
+!   record in the log what that did (DESIGN 1.7; PSEUDOCODE 20).
+!
+!   The averaging is generic and lives in O_MathSubs; what belongs here is
+!   whether the permutation table exists, and reporting the outcome so that an
+!   imposed equality can be told apart from an earned one.
+!
+!   Both indices of each pair are permuted by the same operation. That is what
+!   preserves the meaning of a pair: the partial the transition starts on and
+!   the one it ends on are carried to their images together, exactly as the
+!   atoms they sit on are.
+subroutine symmetrizeOptcPOPTC_LAT
+
+   use O_Kinds
+   use O_MathSubs,        only: symmetrizePairs
+   use O_Potential,       only: spin
+   use O_KPoints,         only: numPointOps
+   use O_Constants,       only: dim3
+   use O_OptcTransitions, only: sumNumPartials, partialPerm
+
+   implicit none
+
+   ! Local variables.
+   integer :: h                        ! Spin loop index.
+   real (kind=double) :: largestSpread ! Biggest gap made equal.
+   real (kind=double) :: largestValue  ! Peak of the spectra.
+   real (kind=double) :: worstSpread   ! Largest over both spins.
+   real (kind=double) :: worstValue    ! Peak over both spins.
+   real (kind=double) :: relativeSpread
+
+   ! Without the symmetry maps there is nothing to average over. partialPerm
+   !   is built only for the atom grouped codes and only when atomPerm exists,
+   !   which it does not for an explicit kpoint list (style code 0). Say so
+   !   rather than returning quietly, because a skipped symmetrization and a
+   !   completed one are indistinguishable in every output file.
+   if (.not. allocated(partialPerm)) then
+      write (20,*) "Optical symmetrization SKIPPED: no point group maps"
+      write (20,*) "are available. This happens with an explicit kpoint"
+      write (20,*) "list (style code 0). Symmetry-equivalent atoms may"
+      write (20,*) "not agree in the partial spectra."
+      call flush (20)
+      return
+   endif
+
+   worstSpread = 0.0_double
+   worstValue  = 0.0_double
+
+   ! Each spin channel is averaged on its own. The point group acts on
+   !   positions and carries a spin channel onto itself, so mixing the two
+   !   would average unrelated quantities together.
+   do h = 1, spin
+      call symmetrizePairs(optcCondPOPTC(:,:,:,:,h), &
+            & partialPerm, numPointOps, sumNumPartials, &
+            & dim3, numEnergyPoints, largestSpread, &
+            & largestValue)
+      worstSpread = max(worstSpread, largestSpread)
+      worstValue  = max(worstValue,  largestValue)
+   enddo
+
+   ! Report the disagreement that was averaged away relative to the spectra it
+   !   sits in. The absolute number alone would say nothing, the same gap
+   !   being negligible under a tall peak and damning under a small one.
+   if (worstValue > 0.0_double) then
+      relativeSpread = worstSpread / worstValue
+   else
+      relativeSpread = 0.0_double
+   endif
+
+   write (20,*) "Partial optical spectra averaged over ",numPointOps,&
+         & " point group operations."
+   write (20,fmt="(a,e12.5,a,e12.5)") &
+         & " Largest disagreement made equal: ",worstSpread, &
+         & " of peak ",worstValue
+   write (20,fmt="(a,e12.5)") &
+         & " That is a relative spread of: ",relativeSpread
+   write (20,*) "This equality is IMPOSED by averaging, not earned by the"
+   write (20,*) "integration. A large value means the tetrahedron"
+   write (20,*) "decomposition is far from point-group invariant on this"
+   write (20,*) "lattice (DESIGN 1.2 and 1.7)."
+   call flush (20)
+
+end subroutine symmetrizeOptcPOPTC_LAT
 
 
 subroutine printSpectrum (specType,numEnergyPoints,spectrum,conversionFactor)
