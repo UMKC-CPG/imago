@@ -26,10 +26,11 @@ at lower k-point densities.
 ### 1.2 Tetrahedra Generation
 
 The uniform Monkhorst-Pack mesh defines a grid of nA x nB x nC
-parallelepipeds. Each parallelepiped has 8 corners and is
-decomposed into exactly 6 tetrahedra that tile without overlap.
-The standard decomposition (Bloechl 1994) shares the main
-diagonal M1-M8:
+parallelepipeds. Each parallelepiped has 8 corners. Six
+tetrahedra sharing one of the box's four long diagonals tile
+the box without overlap, and which diagonal is chosen is free.
+Taking the M1-M8 diagonal gives the standard set (Bloechl
+1994):
 
 ```
 Parallelepiped corners at grid position (a, b, c):
@@ -44,14 +45,137 @@ Six tetrahedra sharing diagonal M1-M8:
   T3: M1, M3, M7, M8      T6: M1, M2, M6, M8
 ```
 
-The mesh is periodic (the BZ is a torus), so indices wrap with
-modular arithmetic: `mod(a, nA) + 1` etc. The total count is:
+The rule behind that table generalizes to any diagonal, and
+the implementation needs the general form. Walk from one end
+of the chosen diagonal to the other changing one coordinate
+at a time; the four corners visited are a tetrahedron, and
+the six orders in which the three coordinates can be changed
+give the six tetrahedra, each containing both ends. Starting
+from M1 this reproduces the table above exactly.
 
-  numTetrahedra = 6 * nA * nB * nC
+The mesh is periodic (the BZ is a torus), so indices wrap with
+modular arithmetic: `mod(a, nA) + 1` etc.
+
+**Every box is cut all four ways.** Choosing one diagonal for
+the whole mesh, as the standard presentation does, produces a
+decomposition that the crystal point group does not carry
+onto itself: all six tetrahedra of a box share one diagonal,
+a box has four, and an operation carrying the chosen diagonal
+onto a different one produces a decomposition with nothing in
+common with the original. Imago therefore cuts each box once
+per diagonal and gives each of the resulting 24 tetrahedra a
+quarter of the weight. Each of the four cuts tiles the box on
+its own, so their average is a valid quadrature, and an
+operation that maps one diagonal to another now finds that
+cut already present. The count of diagonals used is an input,
+defaulting to all four; see the end of this section.
+
+  numTetrahedra = 6 * numTetraDiagonals * nA * nB * nC
 
 All tetrahedra span an equal fraction of the BZ:
 
   tetraVol = 1 / numTetrahedra
+
+**The quarter weight needs no separate factor.** With four
+times as many tetrahedra, `tetraVol` is a quarter of what it
+was, and each of the four cuts contributes 6*nA*nB*nC
+tetrahedra at that weight -- one quarter of the zone each,
+summing to one. Every consumer loops `do t = 1, numTetrahedra`
+and scales by `tetraVol`, so the change is confined to
+`generateTetrahedra` and no consumer is touched. The same
+sentence covers the one-diagonal setting: the weight follows
+the count without anyone having to know the count.
+
+**What this fixes, measured.** On a 4x4x4 cubic mesh, all 48
+operations leave the four-diagonal decomposition invariant,
+against 12 of 48 for the single-diagonal form, whose worst
+case maps NONE of its 384 tetrahedra onto a tetrahedron in
+the original set. On a hexagonal mesh it improves matters
+without curing them: 8 of 24 against 4 of 24. The argument
+needs an operation to carry a grid box onto a grid box, which
+holds when the operations permute the mesh axes up to sign
+(cubic, tetragonal, orthorhombic) and fails for hexagonal and
+rhombohedral, where a six-fold rotation sends one axis onto
+the SUM of two, so the image of a box is a sheared
+parallelepiped that is not a box of the grid. No choice of
+diagonal repairs a decomposition whose boxes are not
+preserved. Section 1.7 covers the remainder.
+
+**Why not the shortest diagonal.** The literature recommends
+choosing the shortest diagonal per box, and that advice is
+about interpolation accuracy -- more compact tetrahedra
+represent the bands better -- not about symmetry. On a cubic
+mesh all four diagonals are the same length, so the rule
+gives no guidance; the most even-handed per-box rule
+available measured 2 of 48, WORSE than the global choice, and
+left mesh points belonging to unequal numbers of tetrahedra
+(16, 24 and 40). Averaging all four includes the shortest
+alongside the others, which gives up some interpolation
+accuracy on a strongly skewed mesh in exchange for a
+decomposition with no preferred direction.
+
+**Cost.** Four times the tetrahedron loop in every consumer,
+and four times the `tetrahedra` array: 4 x 24 x numFullMeshKP
+integers. Totals shift slightly, because this is a different
+quadrature, so stored tetrahedron baselines move; the shift
+is a change of quadrature and not a regression.
+
+**The single-diagonal form stays available, per phase.** Four
+times a per-iteration cost is worth avoiding where it buys
+nothing, and there are two cases where it provably buys
+nothing.
+
+  1. A run that asks only for totals. A total sums over
+     exactly the set the asymmetry permutes, so it cancels
+     (section 1.7); the asymmetry has nothing to act on.
+  2. The SCF occupation path, whatever the run asks for.
+     `computeElectronPopulation_LAT` pools every corner's
+     weight onto that corner's IBZ representative, so every
+     consumer reading it per k-point already sees the star
+     sum, which is symmetric. This is the same structural
+     argument that makes effective charge and bond order
+     immune (section 1.7), and it matters here because those
+     weights are rebuilt every SCF iteration.
+
+So the number of diagonals is an input, read from the k-point
+file beside `KPOINT_INTG_CODE`:
+
+```
+NUM_TETRA_DIAGONALS
+4                        ! 4 = all four (default), 1 = one
+```
+
+It belongs there rather than in the shared control section
+for two reasons. It is a property of the k-point integration,
+which is what that file describes. And the SCF and post-SCF
+phases read separate k-point files, so putting it there gives
+per-phase control for nothing: a run may take one diagonal
+for the SCF occupation and all four for the post-SCF
+spectra. `makeinput.py` exposes it as a sibling of the
+existing `-scfkpint` and `-pscfkpint` options.
+
+The default is 4 in BOTH phases. The economy above is real
+but it rests on an argument about the consumers that exist
+today, and a later consumer of the LAT occupations would
+inherit the bias silently. A user who wants the saving asks
+for it and can be pointed at the reasoning; a user who does
+nothing gets the isotropic quadrature.
+
+Adding the tag is an input FORMAT change, so `makeinput.py`
+and the `skl/` examples move with it, and any other producer
+of these files must be checked.
+
+**What the two settings do and do not guarantee.** Do not
+read `NUM_TETRA_DIAGONALS 1` as "the broken one". The
+equality of symmetry-equivalent atoms is delivered by the
+symmetrization of section 1.7, which is on by default and
+works with either setting. What four diagonals adds is
+isotropy of the quadrature ITSELF, which shows up where there
+is no orbit to average over -- low-symmetry cells -- and in
+the shape of a spectrum rather than in the equality of atoms.
+One diagonal with symmetrization is a coherent choice; one
+diagonal without it is the configuration C149 was opened
+about.
 
 The tetrahedra reference the FULL uniform mesh, not the
 IBZ-reduced kpoints. Under Option A, eigenvalues are
@@ -70,6 +194,11 @@ tetrahedra are generated.
 ```fortran
 integer :: numTetrahedra
 integer :: numFullMeshKP
+integer :: numTetraDiagonals
+    ! How many of the box's four long diagonals are cut
+    ! along: 4 by default, 1 for the cheaper single-cut
+    ! decomposition. Read from the k-point file, so the
+    ! SCF and post-SCF phases carry their own value.
 real(kind=double) :: tetraVol
 integer, allocatable, dimension(:,:) :: tetrahedra
     ! (4, numTetrahedra) -- indices into the full mesh
@@ -599,10 +728,12 @@ the structural model to follow.
 depend on the Fermi level, which moves every cycle, so
 `computeElectronPopulation_LAT` runs once per SCF
 iteration rather than once per run. The cost is
-`numTetrahedra x numStates` = `6 x numFullMeshKP x bands`
+`numTetrahedra x numStates` = `24 x numFullMeshKP x bands`
 per evaluation, each item a four-corner sort and a few
-polynomial evaluations -- well under one percent of the
-iteration's diagonalizations. Note it scales with the FULL
+polynomial evaluations -- still well under one percent of
+the iteration's diagonalizations. The factor is 24 rather
+than the 6 of a single-diagonal decomposition because
+section 1.2 cuts every box four ways. Note it scales with the FULL
 mesh while the diagonalizations scale with the IBZ, so the
 margin narrows for a low-symmetry cell where the IBZ saves
 little.
@@ -680,6 +811,217 @@ anticipating it.
      unconverged k-sampling. The root-find tolerance
      should be tied to the SCF convergence criterion
      rather than fixed.
+
+---
+
+### 1.7 Symmetry of Atom-Resolved Tetrahedron Results
+
+Section 1.2 makes the decomposition point-group invariant for
+lattices whose operations permute the mesh axes up to sign,
+and leaves hexagonal and rhombohedral cells partly exposed.
+This section closes the remainder by symmetrizing the result
+rather than the geometry. The two are not alternatives: 1.2
+earns the symmetry where it can, and this imposes it where
+1.2 cannot reach.
+
+**What is already immune, and must not be "repaired".** The
+integrated partial properties -- effective charge and bond
+order -- are unaffected by any of this, for a structural
+reason worth stating so that a later reader does not add a
+correction that would double-count.
+`computeElectronPopulation_LAT` pools every tetrahedron
+corner's weight onto the corner's IBZ representative, and
+`computeBond` then spreads that pooled weight back across the
+star, dividing by the star size. Pooling followed by even
+redistribution IS the average over the star, so equivalent
+atoms receive equal weight whatever the decomposition does.
+
+The exposed quantities are precisely those that attach a
+weight to an INDIVIDUAL full-mesh corner rather than pooling
+it: the energy-resolved ones. That is `integratePDOS_LAT`
+(section 1.4) and the two optical accumulators (section 12).
+
+**The remedy: average the finished result over the group.**
+For a quantity resolved onto atoms, replace each value by its
+average over the point group, using the permutation table
+that the unfolding already builds:
+
+```
+pdos_sym(alpha, E) = (1 / numPointOps)
+    * sum over R of pdos(channelPermTbl(R, alpha), E)
+
+poptc_sym(a, b, c, E) = (1 / numPointOps)
+    * sum over R of poptc(partialPerm(R, a),
+                          partialPerm(R, b), c, E)
+```
+
+No orbit has to be enumerated. Summing over every operation
+of the group IS the average over each atom's orbit, because
+the operations that carry an atom to a given orbit member are
+a coset and contribute that member equally often. For the
+same reason the DIRECTION of the permutation does not matter:
+`channelPermTbl` is built from `invAtomPerm` and `partialPerm`
+from `atomPerm`, and either gives the same average, since R
+runs over the whole group in both cases.
+
+**This is not a cosmetic patch, and the equivalence is worth
+recording.** Averaging an atom-resolved result over its orbit
+is exactly equal to replacing each integration weight by its
+average over the star of its k-point. Writing p for a
+projection and w for the weight, and using the transformation
+law of section 2.3,
+
+```
+sum_k w_bar(k) p_A(k)
+    = (1/|G|) sum_R sum_k w(Rk) p_A(k)
+    = (1/|G|) sum_R sum_k w(k) p_{RA}(k)
+    = (1/|G|) sum_R (unsymmetrized result for atom RA)
+```
+
+So this is the projection of the quadrature onto the
+symmetric subspace, not an adjustment applied to a finished
+number. Two consequences follow and both matter in practice.
+Totals are preserved EXACTLY, because summing the averaged
+weights over k gives back the original sum, so no total
+spectrum and no TDOS moves. And the operation is exact for
+every lattice, including the hexagonal and rhombohedral cases
+1.2 cannot reach, because it averages over the star that
+actually exists rather than over an assumed geometry.
+
+What it does NOT do is remove the tiling bias itself. It
+removes the part of the bias that breaks the symmetry. In a
+cell where an atom is alone in its orbit there is nothing to
+average and this does nothing at all, which is the reason 1.2
+is worth its cost rather than being superseded here.
+
+**Which quantities, and which modes.** Only the atom-grouped
+decompositions need it; the type-grouped ones are already
+invariant because every operation carries an atom onto an
+atom of the same type, so a type-level sum maps onto itself
+(section 2.5).
+
+```
+  quantity        applies to          skip for
+  ------------------------------------------------------
+  LAT PDOS        detailCodePDOS      mode 0 (per type);
+                  1 and 2             mode 3 is refused
+                                      on this path (1.4)
+  LAT optical     detailCodePOPTC     codes 1 and 2
+                  3 and 4             (type grouped)
+```
+
+The Gaussian pathway needs none of this. Its star average
+distributes each IBZ point's contribution evenly over the
+star by construction, so it is already symmetric -- where it
+is applied at all, which is the separate defect recorded as
+TODO C148.
+
+**Default, and the opt-out.** Symmetrization is ON by
+default. The reason is not tidiness: on a hexagonal or
+rhombohedral cell it is the only thing standing between the
+user and unequal values for atoms that must be equivalent,
+and a default that ships those silently is the situation this
+work exists to end.
+
+A new tagged line in the k-point file turns it off, beside
+`KPOINT_INTG_CODE` and `NUM_TETRA_DIAGONALS`:
+
+```
+SYMMETRIZE_LAT_PARTIALS
+1                        ! 1 = on (default), 0 = off
+```
+
+The k-point file is the right home even though this reads
+like an output setting, and the equivalence derived above is
+why: averaging the result over the group IS averaging the
+integration weights over the star, so this is a property of
+the integration and belongs with the other two. Keeping all
+three together also means a reader looking for "what did this
+run do about symmetry" finds one place rather than two, and
+it inherits the same per-phase independence for free. Adding
+it is an input FORMAT change and therefore also touches
+`makeinput.py` and the `skl/` examples.
+
+The opt-out exists for diagnosis. Turning it off is how the
+residual asymmetry gets measured, which is how the size of
+C149 was established in the first place and how any later
+claim about it must be checked.
+
+**Report the spread, always.** Before averaging, compute the
+largest deviation within each group of channels that the
+averaging will merge, and write it to fort.20. An imposed
+equality that leaves no trace is indistinguishable from an
+earned one, and a reader who cannot see which they have is
+being misled by a number that looks like a result. This also
+gives every run a free measurement of the residual, which is
+what makes the diagnostic switch above a rarely-needed tool
+rather than the only route to the number.
+
+**Seam inventory.** Every quantity the new code consumes,
+where it comes from, who allocates it, and when it is
+released -- including the release, which is the item whose
+omission produced the defect described in PSEUDOCODE 19.2.1.
+
+```
+quantity           supplied by              lifetime
+---------------------------------------------------------
+numPointOps        read with the k-point    set in
+                     file; O_KPoints          initializeKPoints;
+                                              NOT set on the
+                                              SYBD path
+atomPerm,          buildAtomPerm and        allocated in
+  invAtomPerm        buildInvAtomPerm,        setupSCF (SCF)
+                     O_AtomicSites            and intgPSCF
+                                              (PSCF); absent
+                                              for k-point
+                                              style code 0
+channelPermTbl     buildChannelPermTable,   local to
+                     from invAtomPerm         computeDOS; the
+                                              symmetrization
+                                              must run before
+                                              it is released
+                                              and before the
+                                              output phase
+pdosComplete       allocated in             filled by
+                     computeDOS's setup       integratePDOS_LAT,
+                                              then symmetrized,
+                                              then written
+partialPerm        buildPOPTCIndex, from    released by
+                     atomPerm; built only     cleanUpPOPTCIndex
+                     when detailCodePOPTC     from subroutine
+                     >= 3 AND atomPerm is     optc, AFTER the
+                     allocated                spectra are
+                                              written
+optcCondPOPTC      allocated in             filled by the
+                     computeOptcSpectra,      accumulators, then
+                     O_OptcPrint              symmetrized, then
+                                              printed by
+                                              printOptcSpectra
+symmetrizeLAT      readKPoints, from the    read once per
+  Partials           k-point file;            k-point set, so
+                     O_KPoints                the SCF and PSCF
+                                              phases carry
+                                              their own value
+```
+
+Two consequences of that table are binding on the code.
+`atomPerm` is absent for k-point style code 0, so both
+permutation tables may be unallocated; the symmetrization is
+guarded on the table's allocation and says in fort.20 that it
+was skipped, rather than failing or silently doing nothing.
+And the optical symmetrization must sit between the
+accumulators and `printOptcSpectra`, inside the window that
+today's `cleanUpPOPTCIndex` placement keeps `partialPerm`
+alive -- which is exactly the window that did not exist
+before that placement was corrected.
+
+**Memory.** The averaged values must be built from the
+unsymmetrized ones, so the sum cannot be accumulated in
+place. For the PDOS a single channel-indexed scratch vector
+per energy point suffices. For the optical partials, work one
+energy point at a time: the slab is `sumNumPartials` squared
+by `dim3`, which is small, whereas a full copy of
+`optcCondPOPTC` is not.
 
 ---
 
@@ -14781,11 +15123,25 @@ only where the rotation is applied.
 The Gaussian accumulation is O(numKPoints x pairs x
 energyPoints) over IBZ points. The LAT accumulation is
 O(numTetrahedra x pairs x energyPoints), and
-`numTetrahedra` is `6 x numFullMeshKP`. So the inner work
-grows by six times the IBZ reduction factor, which is the
-same full-mesh scaling section 1.6(b) notes for the SCF
-occupation path, and it is a real increase rather than a
-rounding error.
+`numTetrahedra` is `24 x numFullMeshKP` (section 1.2 cuts
+every box four ways, so it is 24 and not 6). So the inner
+work grows by twenty-four times the IBZ reduction factor,
+which is the same full-mesh scaling section 1.6(b) notes for
+the SCF occupation path, and it is a substantial increase
+rather than a rounding error.
+
+That factor is large enough to be worth attacking rather
+than accepting, and there is an obvious way in. The
+accumulation currently touches each corner once per
+containing tetrahedron and multiplies by the whole partial
+matrix each time, so a k-point's matrix is walked 96 times.
+Accumulating the corner WEIGHTS per (k-point, energy) first
+and multiplying by the partial matrix once afterwards does
+the same arithmetic with the multiplications divided by 96,
+at the cost of holding a weight array. That restructure is
+recorded as its own task rather than folded in here, because
+it changes the loop structure of a routine this section
+specifies and is not needed for correctness.
 
 Set against it: LAT is expected to reach a converged answer
 at a lower mesh density, which is the reason to accept the

@@ -495,10 +495,26 @@ the current design:
   lattice` and `CELL_MODE` from the skeleton flag.
   See DESIGN 2.7 for the diagnostic history.
 - `generateTetrahedra`: tiles the full uniform mesh
-  with tetrahedra (6 per sub-cube) using
-  `getIndexFromIndices` for periodic wrapping.
-  Called from `initializeKPoints` when
-  `kPointIntgCode == 1` (kpoints.f90)
+  with tetrahedra, six for each of the box's long
+  diagonals that are used, so 24 per sub-cube by
+  default.  Cutting along all four is what makes the
+  crystal point group carry the decomposition onto
+  itself; `NUM_TETRA_DIAGONALS` in the k-point file
+  selects 1 instead for runs that need only totals
+  (DESIGN 1.2).  Uses `getIndexFromIndices` for
+  periodic wrapping.  Called from
+  `initializeKPoints` when `kPointIntgCode == 1`
+  (kpoints.f90)
+- Atom-resolved tetrahedron results are averaged over
+  the point group before being written, using the
+  permutation tables the unfolding already builds.
+  This reaches the lattices the decomposition alone
+  cannot (hexagonal, rhombohedral) and is on by
+  default, controlled by `SYMMETRIZE_LAT_PARTIALS`
+  in the k-point file alongside the two settings
+  above, since averaging the result is equivalent to
+  averaging the integration weights over the star
+  (DESIGN 1.7)
 - `getIndexFromIndices(a,b,c)`: converts mesh indices
   to the linear k-point index (kpoints.f90)
 - `energyEigenValues(n, i, spin)`: fully in memory

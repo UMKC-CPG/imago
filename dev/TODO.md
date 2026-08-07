@@ -6426,19 +6426,48 @@ on the same data later with no schema change.  Built on P10.
   `integratePDOS_LAT` and the two optical accumulators.  Say this
   where a later reader will otherwise "fix" the integrated path too.
 
-  **Still open: where the opt-out lives.**  It wants a control
-  readable on every path.  `SHARED_INPUT_DATA` is the natural home --
-  `parseInput` reads that section for every subprogram, and it already
-  holds the cross-cutting settings (space group, cutoffs, states,
-  electrons, thermal smearing).  A tagged line there, say
-  `SYMMETRIZE_LAT_PARTIALS` with 1 = on, costs an input-format change
-  and therefore `makeinput.py` and the `skl/` examples.  Not yet
-  written; settle it in DESIGN before coding.
+  **Chain state: DESIGN and PSEUDOCODE WRITTEN 2026-08-07.**  The
+  decisions above now live where they will be checked, and this entry
+  should not be treated as the specification.
 
-  **Chain state.**  Nothing is written down yet.  DESIGN 1.2 needs the
-  four-diagonal decomposition, and a new DESIGN 1.7 needs the
-  symmetrization with its seam inventory.  PSEUDOCODE follows, then
-  code.  No `src/` edit until both exist.
+  - DESIGN 1.2 -- the decomposition, the general diagonal-walk rule,
+    the measured invariance for cubic and hexagonal, why the
+    shortest-diagonal remedy was struck, the cost, and the
+    `NUM_TETRA_DIAGONALS` control.
+  - DESIGN 1.7 -- the symmetrization: what is already immune and must
+    not be "repaired", the equivalence to star-averaging the weights,
+    the per-mode rules, the default and the opt-out, the obligation to
+    report the spread, and the seam inventory.
+  - ARCHITECTURE -- `generateTetrahedra`'s description and the new
+    control.
+  - PSEUDOCODE 1 -- generation, taking the diagonal count as data.
+  - PSEUDOCODE 20 -- the two symmetrization routines, their call
+    sites and the window each must sit in.
+
+  **Three settings were decided along the way, all recorded in DESIGN
+  1.2 and 1.7 rather than here.**  The number of diagonals is an input
+  (`NUM_TETRA_DIAGONALS`, default 4) because four times a
+  per-iteration cost is worth avoiding where it provably buys nothing:
+  a totals-only run, and the SCF occupation path, which is immune
+  through the same pooling argument that protects effective charge.
+  It lives in the K-POINT FILE, not the shared control section, so the
+  SCF and post-SCF phases choose independently.  And
+  `SYMMETRIZE_LAT_PARTIALS` sits beside it for the same reason,
+  because averaging the result over the group IS averaging the weights
+  over the star -- it is an integration setting wearing an output
+  setting's clothes.
+
+  **What is NOT yet done.**  No code.  The input-format change reaches
+  `makeinput.py` and the `skl/` examples, and any other producer of
+  k-point files must be checked -- `makeKPoints` declares
+  `numTetrahedra` and `tetrahedralKPointMap` but never uses them, so
+  confirm it does not write this format before assuming it is clear.
+
+  **Test first, before any spectrum.**  With `NUM_TETRA_DIAGONALS 1`
+  the rewritten generator must reproduce the historical decomposition
+  tetrahedron for tetrahedron.  That separates a mistake in the
+  general diagonal walk from a change of physics, and no four-diagonal
+  result means anything until it passes (PSEUDOCODE 1).
 
   **Literature CHECKED 2026-08-06.**  Searched rather than assumed.
   What the three earlier beliefs came to:

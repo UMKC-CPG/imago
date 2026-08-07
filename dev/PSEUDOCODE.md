@@ -8,32 +8,71 @@
 
 ## 1. Generate Tetrahedra (DESIGN 1.2)
 
+Every box is cut once per long diagonal, and each resulting
+tetrahedron carries an equal share of the weight.  DESIGN 1.2
+gives the reason: six tetrahedra sharing ONE diagonal is not
+a decomposition the crystal point group carries onto itself,
+and the average of all four cuts is.
+
+`numTetraDiagonals` says how many to use.  It comes from the
+k-point file, defaults to 4, and may be 1 for the cheaper
+single-cut decomposition, which is safe for a totals-only run
+and for the SCF occupation path (DESIGN 1.2).  The routine
+below is written once and takes the count as data; it must
+not branch on 1 versus 4.
+
+The share of the weight is not written anywhere.  `tetraVol`
+is `1 / numTetrahedra` as before, so it follows the count
+automatically and every consumer stays unchanged.  Nothing
+downstream needs to know how many diagonals were used, and
+nothing downstream should ask.
+
 ```
-function generateTetrahedra(nA, nB, nC):
-    numTetrahedra = 6 * nA * nB * nC
+# A box corner is a triple of bits. The diagonal from a
+#   corner to its opposite is walked one coordinate at a
+#   time; the four corners visited form a tetrahedron, and
+#   the six orders of the three coordinates give the six
+#   tetrahedra of that diagonal. Starting from (0,0,0) this
+#   reproduces the M1..M8 table of DESIGN 1.2 exactly, which
+#   is the check to run first when transcribing this.
+# The four diagonals, named by the corner each starts from.
+#   The opposite ends are (1,1,1), (0,1,1), (1,0,1) and
+#   (1,1,0), so these four cover every diagonal once. Taking
+#   the first `numTetraDiagonals` of them means the single-cut
+#   setting reproduces the historical decomposition exactly,
+#   which is what makes a one-diagonal run comparable with
+#   anything computed before this section existed.
+DIAGONAL_STARTS = [(0,0,0), (1,0,0), (0,1,0), (0,0,1)]
+
+function generateTetrahedra(nA, nB, nC, numTetraDiagonals):
+    numTetrahedra = 6 * numTetraDiagonals * nA * nB * nC
     allocate tetrahedra(4, numTetrahedra)
     t = 0
     for a = 1 to nA:
         for b = 1 to nB:
             for c = 1 to nC:
-                # 8 corners with periodic wrapping
-                M1 = idx(a,     b,     c    )
-                M2 = idx(a+1,   b,     c    )
-                M3 = idx(a,     b+1,   c    )
-                M4 = idx(a,     b,     c+1  )
-                M5 = idx(a+1,   b+1,   c    )
-                M6 = idx(a+1,   b,     c+1  )
-                M7 = idx(a,     b+1,   c+1  )
-                M8 = idx(a+1,   b+1,   c+1  )
+                for start in the first numTetraDiagonals
+                        entries of DIAGONAL_STARTS:
+                    opposite = (1,1,1) - start
+                    for (first, second) in the six ordered
+                            pairs of distinct axes:
+                        second_corner = start with
+                              coordinate `first` changed
+                        third_corner = second_corner with
+                              coordinate `second` changed
 
-                # 6 tetrahedra sharing diagonal M1-M8
-                tetrahedra(:, t+1) = [M1, M2, M5, M8]
-                tetrahedra(:, t+2) = [M1, M3, M5, M8]
-                tetrahedra(:, t+3) = [M1, M3, M7, M8]
-                tetrahedra(:, t+4) = [M1, M4, M7, M8]
-                tetrahedra(:, t+5) = [M1, M4, M6, M8]
-                tetrahedra(:, t+6) = [M1, M2, M6, M8]
-                t = t + 6
+                        t = t + 1
+                        tetrahedra(:, t) = [
+                            corner(a, b, c, start),
+                            corner(a, b, c, second_corner),
+                            corner(a, b, c, third_corner),
+                            corner(a, b, c, opposite)]
+
+function corner(a, b, c, offset):
+    # One box corner, with periodic wrapping.
+    return idx(a + offset(1),
+               b + offset(2),
+               c + offset(3))
 
 function idx(a, b, c):
     # Periodic wrapping, 1-based indexing
@@ -42,6 +81,29 @@ function idx(a, b, c):
         mod(b-1, nB) + 1,
         mod(c-1, nC) + 1)
 ```
+
+**Check on the construction, not on the physics.**  Three
+properties hold for any mesh and each fails loudly if the
+transcription is wrong, so test them before testing any
+spectrum: the number of DISTINCT tetrahedra is
+`6 * numTetraDiagonals * nA * nB * nC`; no tetrahedron has a
+repeated mesh point; and every mesh point belongs to the same
+number of tetrahedra (24 per diagonal, so 96 at the default
+on a 4x4x4 mesh).  The reference implementation of these
+checks is `jobs/knbo3/o9_pdos/tetra_symmetry_remedies.py`,
+which also verifies the generic diagonal walk against the six
+explicit assignments of DESIGN 1.2.
+
+**And one check on the setting itself.**  With
+`numTetraDiagonals = 1` the routine must reproduce the
+historical decomposition tetrahedron for tetrahedron, since
+it is then walking the same M1-M8 diagonal by a general rule
+instead of an explicit table.  That equality is the cheapest
+possible test of the rewrite and should be the first one run,
+because it separates a mistake in the general construction
+from a change of physics: if it fails, the walk is wrong, and
+no result from the four-diagonal setting means anything until
+it passes.
 
 ---
 
@@ -15264,3 +15326,123 @@ other corners.
   zero below the gap on both paths.  Under LAT this is
   exact rather than approximate, since no broadening leaks
   weight below `sortedDiff(1)`.
+
+---
+
+## 20. Symmetrize Atom-Resolved Results (DESIGN 1.7)
+
+Section 1's decomposition is carried onto itself by the point
+group for lattices whose operations permute the mesh axes up
+to sign, and not for hexagonal or rhombohedral ones.  This
+closes the remainder by averaging the finished result over
+the group.  It runs on the tetrahedron pathway only; the
+Gaussian star average already distributes each irreducible
+point's contribution evenly over its star.
+
+**Where it does NOT go.**  Effective charge and bond order
+need nothing.  `computeElectronPopulation_LAT` pools every
+corner's weight onto the corner's IBZ representative and
+`computeBond` spreads it back over the star divided by the
+star size, which IS the star average.  Adding this there
+would average an already-averaged quantity.  The quantities
+that need it are the energy-resolved ones, which attach a
+weight to an individual corner: the LAT PDOS of section 8.3
+and the LAT optical accumulators of section 19.
+
+```
+function symmetrizeChannels(values, permTable, numOps,
+                            numChannels, numEnergyPoints):
+
+    # values(channel, energyPoint), modified in place.
+    #
+    # No orbit is enumerated. Summing over EVERY operation
+    #   is the orbit average, because the operations
+    #   carrying a channel onto a given orbit member form a
+    #   coset and so contribute that member equally often.
+    #   This is also why the direction of the permutation
+    #   does not matter: channelPermTbl is built from
+    #   invAtomPerm and partialPerm from atomPerm, and both
+    #   give the same average when R runs over the group.
+
+    # The averaged values must be built from the
+    #   UNSYMMETRIZED ones, so the sum cannot go in place.
+    #   One energy point at a time keeps the scratch to a
+    #   single channel vector.
+    allocate scratch(numChannels)
+
+    for iE = 1 to numEnergyPoints:
+        scratch = 0.0
+        for R = 1 to numOps:
+            for alpha = 1 to numChannels:
+                scratch(alpha) += values(permTable(R, alpha),
+                                         iE)
+        values(:, iE) = scratch / real(numOps)
+
+
+function symmetrizePairs(values, permTable, numOps,
+                         numPartials, numEnergyPoints):
+
+    # values(a, b, dim3, energyPoint), modified in place.
+    #   Both indices are permuted by the same operation,
+    #   which is what preserves the meaning of a pair.
+    allocate scratch(numPartials, numPartials, dim3)
+
+    for iE = 1 to numEnergyPoints:
+        scratch = 0.0
+        for R = 1 to numOps:
+            # b OUTER, a INNER: a is the leftmost index of
+            #   both the scratch slab and the store.
+            for b = 1 to numPartials:
+                bRot = permTable(R, b)
+                for a = 1 to numPartials:
+                    aRot = permTable(R, a)
+                    scratch(a, b, :) +=
+                          values(aRot, bRot, :, iE)
+        values(:, :, :, iE) = scratch / real(numOps)
+```
+
+**Call sites, and the window each must sit in.**
+
+- LAT PDOS: after `integratePDOS_LAT` fills `pdosComplete`
+  and BEFORE the shared output phase writes it, while
+  `channelPermTbl` is still allocated -- `computeDOS`
+  releases that table at the end of the routine.  Applies
+  to `detailCodePDOS` 1 and 2 only; mode 0 is a type-level
+  sum and already invariant, and mode 3 is refused on this
+  pathway (DESIGN 1.4).
+- LAT optical: after the accumulators fill
+  `optcCondPOPTC` and before `printOptcSpectra`, which is
+  inside the window where `cleanUpPOPTCIndex` keeps
+  `partialPerm` alive (19.2.1).  Applies to
+  `detailCodePOPTC` 3 and 4 only; codes 1 and 2 are type
+  grouped and already invariant.
+
+**Guard, and say so out loud.**  For k-point style code 0 the
+symmetry maps are never built, so `atomPerm` and therefore
+both permutation tables are unallocated.  Guard on the
+table's allocation, skip the averaging, and write a line to
+fort.20 saying it was skipped and why.  Silence here would be
+indistinguishable from having done the work.
+
+**Report the spread before averaging.**  For each group of
+channels the averaging will merge, compute the largest
+deviation among them first and write the maximum over all
+groups to fort.20.  An imposed equality that leaves no trace
+cannot be told from an earned one, and this also gives every
+run a free measurement of the residual asymmetry -- which is
+what makes `SYMMETRIZE_LAT_PARTIALS 0` a rarely-needed
+diagnostic rather than the only way to see the number.
+
+**Checks.**
+
+- Totals must not move at all.  Summing the averaged
+  weights over k-points returns the original sum, so the
+  TDOS and the total spectra are unchanged to round-off.
+  A total that shifts means the permutation table is not a
+  permutation, and that is the first thing to test.
+- Symmetry-equivalent atoms must agree to round-off
+  afterwards, on any lattice, including the hexagonal case
+  the decomposition alone cannot fix.
+- The partials-sum-to-total identity proves nothing here.
+  It holds under any permutation of the indices, which is
+  the same blindness sections 7a and 19 record.
