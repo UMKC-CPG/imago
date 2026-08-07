@@ -7563,9 +7563,102 @@ is not carried only in conversation.
   `L R_abc L^-1` with the real lattice vectors as columns
   (`O_Lattice`'s `realVectors`, whose columns are the
   vectors) -- the same conjugation `computeRealPointOps`
-  already performs, into one more basis.  So the work is one
-  new array built beside the existing ones, plus applying it
-  to the three-component slab at deposit time.
+  already performs, into one more basis.
+
+  **That last sentence used to end "so the work is one new
+  array plus applying it to the three-component slab at
+  deposit time".  That is wrong, and here is why.**  Found
+  2026-08-07 by reading `computePairs` rather than reasoning
+  about it.  The squared modulus is formed the instant the
+  matrix element exists (`optc.F90:1399`):
+
+  ```fortran
+  valeValeXMom(k) = sum(valeVale(:,i,1) &
+        & * conjWaveMomSum(:,finalStateIndex,k))
+  transitionProbTemp(k,transPairCount) = ( &
+        & real(valeValeXMom(k),double)**2 &
+        & + aimag(valeValeXMom(k))**2) &
+        & * initStateFactor*finStateFactor
+  ```
+
+  **A squared modulus cannot be rotated.**  Under an operation
+  R the components mix as M'^c = sum_d R_cd M^d, so
+
+  ```
+  |M'^c|^2 = sum_{d,e} R_cd R_ce M^d conjg(M^e)
+  ```
+
+  which needs the OFF-DIAGONAL products.  The code keeps only
+  the three diagonal entries of a rank-two tensor, so by the
+  time anything could rotate, the information required has
+  been discarded.  Building the Cartesian rotations is still
+  necessary; it is nowhere near sufficient.
+
+  **DECIDED 2026-08-07: keep the complex matrix element.**
+  Store M^c as three complex numbers rather than three squared
+  moduli, rotate at the deposit, and square there.  Correct
+  for every crystal system and both integration pathways.
+  Costs 2x memory on the transition stores, including
+  `transProbPOPTCBanded`, already the largest array in the
+  calculation, and touches both producers.
+
+  **What is computable today, and what is not.**  Exactly one
+  combination survives the error: the SUM of the three
+  directional spectra, because rotating a vector never changes
+  the sum of the squares of its components.  Everything else
+  in the directional breakdown is a redistribution error.  So:
+
+  - The isotropic column is ALWAYS correct, on any mesh, for
+    any crystal.  That is why this has survived unnoticed --
+    it is the column nearly everyone reads.
+  - A cubic crystal is fully recoverable, and not by any
+    clever averaging.  Symmetry forces the three directions
+    equal, so there is one unknown and the reliable sum
+    already gives it.  "Averaging the three columns over the
+    point group" there amounts to printing the isotropic value
+    three times.
+  - Nothing else is recoverable.  Tetragonal, hexagonal and
+    trigonal crystals have two independent directional values;
+    orthorhombic has three.  One trustworthy number cannot
+    determine two or three.
+
+  **Orthorhombic is the trap.**  Its operations carry each axis
+  onto plus or minus ITSELF and never onto another axis, so
+  averaging over the point group changes nothing at all,
+  leaves the three columns exactly as wrong as they were, and
+  gives no sign that it did nothing.  Do not offer group
+  averaging as a partial remedy for this defect; it is a no-op
+  precisely where it would be most tempting.
+
+  **The workaround that works today** is to not reduce the
+  mesh: with every k-point computed directly there is no
+  unfolding and nothing to rotate.  That is what produced the
+  clean 48.47 / 48.47 / 48.47 measured on cubic KNbO3.  Worth
+  knowing before judging urgency: symmetry reduction saves
+  most in cubic crystals, where directional spectra carry no
+  information beyond the isotropic one, and least in
+  low-symmetry crystals, where they are physically
+  interesting.  A monoclinic cell reduces by about four.  So
+  the workaround is cheapest exactly where it is needed.
+
+  **One consequence is a gain, not a cost.**  Imago computes
+  three numbers per transition, the diagonal directions.  A
+  dielectric response is a three-by-three tensor whose
+  off-diagonal parts are physically real for monoclinic and
+  triclinic crystals and are not computed at all today.
+  Keeping the complex matrix elements makes them available
+  from the same quantities, so this is the only route that
+  lets Imago express something it currently cannot.
+
+  **Chain state: nothing written.**  O3 sits in this section,
+  which is outside the document chain, so the work starts at
+  DESIGN -- not at code.  DESIGN must settle the storage
+  change and its memory consequence, the Cartesian rotation
+  array, and whether the off-diagonal tensor components become
+  output or merely become possible.  Then PSEUDOCODE, then
+  code.  Design it together with the PDOS mode 3 restriction
+  of DESIGN 1.4, which is the same missing machinery at higher
+  angular momentum.
 
   Note also that DESIGN 2.6 names `xyzPointOps` and
   `xyzFracTrans` among the arrays the SYBD branch skips
