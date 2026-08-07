@@ -14742,9 +14742,34 @@ tetrahedra,         generateTetrahedra, from    before optc
                       kPointIntgCode == 1
 fullKPToIBZKPMap,   the IBZ fold in             before optc
   fullKPToIBZOpMap    initializeKPointMesh        runs
-pOptcIndex,         the section 18 index        per call,
-  sumNumPartials      construction                today
+pOptcIndex,         buildPOPTCIndex, called    before the
+  segmentBase,        once from                   k-point
+  slotsPerSegment,    computeTransitions          loop
+  sumNumPartials,
+  partialPerm
 ```
+
+**A row's "when" has two halves, and the second one is where
+this section went wrong.**  Every row above says when a
+quantity is FILLED.  For anything the code releases, when it
+is FREED is equally part of the contract, and a consumer
+that runs in a later phase can be starved by a release that
+looked correct beside the loop that built it.  The rule that
+holds is that **a lifetime spans every consumer**, not that
+the routine owning a loop owns what the loop used.
+
+Two quantities here run past the k-point loop and must not
+be freed with it:
+
+  - `pairIsWanted`, read by both accumulators to skip band
+    pairs that were never filled.
+  - `partialPerm`, read by the decomposed accumulator of
+    19.4 to permute the two partial indices at each corner.
+
+Both are therefore released by `subroutine optc` after the
+spectra have been written, alongside the banded stores they
+describe.  `cleanUpPOPTCIndex` is called from there for the
+same reason, rather than at the end of `computeTransitions`.
 
 Two of these rows decide the structure, and they are the
 reason this section can no longer be written as a routine
@@ -14922,14 +14947,29 @@ entire purpose of the operation (DESIGN 12.4).
 **The decomposition index is built once, before the loop.**
 Section 18 describes it as a standalone construction and it now
 is one: `buildPOPTCIndex` fills `pOptcIndex`, `segmentBase`,
-`slotsPerSegment`, `sumNumPartials` and `partialPerm`, and
-`cleanUpPOPTCIndex` releases them after the k-point loop ends.
-Two reasons it cannot stay inside a producer.  The tetrahedron
+`slotsPerSegment`, `sumNumPartials` and `partialPerm`.  Two
+reasons it cannot stay inside a producer.  The tetrahedron
 store is sized from `sumNumPartials`, which is therefore needed
 before the loop begins; and both producers read the index while
 neither owns it, so a producer that freed it would be guessing
-whether it was the last to run.  The routine that owns the loop
-owns the lifetime.
+whether it was the last to run.
+
+**It is released after the SPECTRA are written, not after the
+loop ends.**  `cleanUpPOPTCIndex` is called from `subroutine
+optc`, which is the routine that owns the whole optical phase.
+Releasing it at the end of `computeTransitions` instead is
+wrong, and wrong silently: the accumulation of 19.4 runs later
+and reads `partialPerm`, so the table it needs would already be
+gone, its `allocated` guard would read false, and the corner
+permutation would be skipped without any complaint.  A guard
+written to protect a legitimately absent table cannot tell that
+case apart from a table freed too early -- which is why the
+lifetime has to be settled here rather than left to the guard.
+
+The tempting shorter rule, that the routine owning the loop
+owns the lifetime, is what produced that error.  It is right
+about who must not free the index (the producers inside the
+loop) and wrong about who must (the phase, not the loop).
 
 ### 19.2.2 Cost, measured against the Gaussian producer
 
@@ -15160,6 +15200,13 @@ deposit-forward direction matches section 7a -- the partial
 that IBZ index `a` represents AT THIS CORNER is
 `partialPerm(R, a)` -- so the two blocks express one map and
 a reader can check them against each other.
+
+**This loop is the reason the index outlives the k-point
+loop** (19.2.1a).  It runs from `computeOptcSpectra`, well
+after the producers have finished, and it is the last reader
+of `partialPerm`.  A release placed beside the construction,
+or beside the loop that filled the stores, leaves this line
+indexing a table that is gone.
 
 For the type-grouped detail codes 1 and 2 no permutation is
 needed, exactly as in 7a, and `partialPerm` is not built.
