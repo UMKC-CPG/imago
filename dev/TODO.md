@@ -6274,8 +6274,8 @@ on the same data later with no schema change.  Built on P10.
 
 - [ ] C149. Atom-resolved LAT quantities do not reproduce the
   equivalence of symmetry-equivalent atoms, and it is not the
-  unfolding.  Opened 2026-08-06; **cause hypothesized, not
-  established.**
+  unfolding.  Opened 2026-08-06; cause confirmed and remedy settled
+  the same day, both by measurement.  Nothing coded yet.
 
   Two measurements, both on cubic KNbO3 at a 4x4x4 shifted mesh,
   where the three oxygens are one orbit and must agree:
@@ -6335,60 +6335,142 @@ on the same data later with no schema change.  Built on P10.
   wholly attributable to it.  They are consistent with it and no
   competing explanation is in hand, which is where the evidence stops.
 
-  **Three remedies, none obviously right.**
+  **REMEDY SETTLED 2026-08-06, by measurement rather than by
+  argument.**  Adopt BOTH of the following.  The three candidates
+  originally listed here are kept below with what testing did to them,
+  because one of them turned out to make the defect worse and that is
+  worth not rediscovering.
 
-  1. *Choose the diagonal per box rather than globally.*  The usual
-     advice in the literature is to take the SHORTEST diagonal, and
-     that advice is about interpolation accuracy rather than about
-     symmetry.  Note what it does here: on a cubic cell with a cubic
-     mesh all four diagonals are the same length, so the rule gives no
-     guidance and the asymmetry survives untouched.  It helps the
-     low-symmetry cells and does nothing for the high-symmetry ones,
-     which is the opposite of what is wanted.
-  2. *Symmetrize the finished result over the point group.*  Average
-     each atom-resolved quantity over the orbit its atom belongs to
-     after integrating.  This forces the equality rather than earning
-     it, and it needs the same atom permutation machinery section 2.4
-     already provides.  It is the common practical remedy and it is
-     honest provided the documentation says the equality is imposed.
-  3. *Document the limitation and scope around it.*  Record that
-     atom-resolved LAT carries an error of this order, keep the LAT
-     path for totals, and require the Gaussian path where per-atom
-     equality matters.  Cheapest, and it leaves a known-wrong number
-     reachable, which this project's own standard argues against.
+  *Adopted 1 -- cut every box all four ways.*  Instead of six
+  tetrahedra sharing one chosen diagonal, cut the box once per
+  diagonal and give each of the resulting 24 tetrahedra a quarter of
+  the weight.  Each cut tiles the box on its own, so their average is
+  a valid quadrature, and an operation carrying one diagonal onto
+  another now finds that cut already present.  Measured on the
+  4x4x4 cubic mesh: **48 of 48 operations leave it fixed**, worst-case
+  survival 1.000, against 12 of 48 and 0.000 today.  The change is
+  confined to `generateTetrahedra`: `tetraVol = 1/numTetrahedra`
+  delivers the quarter weight by itself, and every consumer loops
+  `do t = 1, numTetrahedra` and scales by `tetraVol`, so none of them
+  notices.  Costs 4x the tetrahedron loop, and shifts LAT totals
+  slightly because it is a different quadrature, so stored baselines
+  move.
 
-  Settle which before either C148 or O9's remaining work is finished,
-  because both are measured against the floor this sets.
+  *Adopted 2 -- average the finished atom-resolved result over the
+  point group,* ON BY DEFAULT with an opt-out.  This is remedy 2
+  below, and testing showed it is not optional: the geometric fix
+  alone still leaves hexagonal and rhombohedral cells asymmetric.
 
-  **Check the literature before choosing a remedy.**  This is a long
-  established method and the ground has been walked before, so the
-  choice above should not be made from first principles when it may
-  already be settled practice.  What is believed, and what should be
-  verified rather than trusted:
+  **Fate of the original three.**
 
-  - The diagonal choice IS discussed in the standard references,
-    including Bloechl, Jepsen and Andersen (1994), the paper this
-    implementation follows.  The recommendation there is the shortest
-    diagonal, and it is offered as an ACCURACY measure -- more compact
-    tetrahedra interpolate the bands better -- rather than as a
-    symmetry fix.  Confirm whether those authors connect it to
-    point-group symmetry at all.
-  - Symmetrizing the result over the point group after integration is
-    believed to be common practice in production codes.  If that is
-    right, remedy 2 is a well-trodden path rather than something being
-    invented here, which should weigh heavily in choosing it.
-  - The specific consequence seen here -- quantities projected onto
-    individual atoms coming out unequal for atoms that must be
-    equivalent -- appears to be under-discussed, and there is a likely
-    reason.  The classic treatments concentrate on total densities of
-    states, Fermi surface integrals and total energies, which are
-    exactly the quantities in which this cancels.  So silence in the
-    literature is not evidence that it does not happen; it may be the
-    same blind spot that let it survive here.
+  1. *Choose the diagonal per box rather than globally.*  STRUCK.  It
+     makes the defect worse.  On a cubic mesh all four diagonals are
+     the same length, so "shortest" gives no guidance and any per-box
+     rule is arbitrary; the most even-handed arbitrary rule available
+     was measured at **2 of 48**, down from 12, and left mesh points
+     sitting in unequal numbers of tetrahedra (16, 24 and 40).
+  2. *Symmetrize the finished result over the point group.*  ADOPTED,
+     and it is not the concession this entry first called it.
+     Averaging an atom-resolved quantity over its orbit is EXACTLY
+     equal to replacing each integration weight by its average over
+     the star of its k-point -- the group projection of the quadrature
+     -- and it preserves totals exactly.  It is also cheap to
+     implement with tables that already exist, because summing over
+     every operation IS the orbit average:
 
-  The above is from general knowledge of the method rather than from
-  the papers in hand, and the third point in particular is an
-  inference.  Read the references before relying on any of it.
+     ```
+     pdos_sym(alpha) = (1/numPointOps)
+                       sum_R pdos(channelPermTbl(R, alpha))
+     poptc_sym(a,b)  = (1/numPointOps)
+                       sum_R poptc(partialPerm(R,a), partialPerm(R,b))
+     ```
+
+     No orbit enumeration is needed, and the direction of the
+     permutation does not matter because R runs over the whole group.
+  3. *Document the limitation and scope around it.*  Not needed on its
+     own now, but the documentation obligation survives: the imposed
+     equality must be stated plainly, and the within-orbit spread
+     should be logged BEFORE averaging so the size of what is being
+     imposed stays visible rather than hidden.
+
+  **What the geometric fix does not reach, measured.**  On a
+  hexagonal mesh the four-diagonal cut improves matters and does not
+  cure them: **8 of 24** operations leave it fixed, against 4 of 24
+  today, worst-case survival 0.167 against 0.000.  The reason is that
+  the argument needs an operation to carry a grid box onto a grid box,
+  which holds when the operations permute the mesh axes up to sign
+  (cubic, tetragonal, orthorhombic) and fails for hexagonal and
+  rhombohedral, where a six-fold rotation sends one axis onto the SUM
+  of two.  No choice of diagonal inside a box can repair a
+  decomposition whose boxes are not preserved.  That is why the second
+  remedy is required rather than optional, and why it is on by
+  default.
+
+  Both measurements are from `jobs/knbo3/o9_pdos/`
+  `tetra_symmetry_remedies.py` (gitignored), which imports the tiling
+  construction from `tetra_symmetry.py` rather than re-transcribing
+  it, and first proves its generic diagonal walk reproduces
+  `generateTetrahedra` exactly before measuring anything.
+
+  **Scope is narrower than this entry assumed, and the reason is
+  structural.**  Effective charge and bond order under LAT are ALREADY
+  immune.  `electronPopulation_LAT` pools every corner's weight onto
+  the IBZ representative (`populate.F90:1507`), and `computeBond` then
+  spreads it back across the star divided by star size
+  (`bond.F90:716`).  Pooling and even redistribution IS the star
+  average, so equivalent atoms come out equal whatever the
+  decomposition does.  This is also why the C148 control was so clean:
+  the charges agreeing to eight digits was structural, not a lucky
+  run.  The remedy therefore has to reach only the energy-resolved
+  quantities, which attach a weight to an INDIVIDUAL corner:
+  `integratePDOS_LAT` and the two optical accumulators.  Say this
+  where a later reader will otherwise "fix" the integrated path too.
+
+  **Still open: where the opt-out lives.**  It wants a control
+  readable on every path.  `SHARED_INPUT_DATA` is the natural home --
+  `parseInput` reads that section for every subprogram, and it already
+  holds the cross-cutting settings (space group, cutoffs, states,
+  electrons, thermal smearing).  A tagged line there, say
+  `SYMMETRIZE_LAT_PARTIALS` with 1 = on, costs an input-format change
+  and therefore `makeinput.py` and the `skl/` examples.  Not yet
+  written; settle it in DESIGN before coding.
+
+  **Chain state.**  Nothing is written down yet.  DESIGN 1.2 needs the
+  four-diagonal decomposition, and a new DESIGN 1.7 needs the
+  symmetrization with its seam inventory.  PSEUDOCODE follows, then
+  code.  No `src/` edit until both exist.
+
+  **Literature CHECKED 2026-08-06.**  Searched rather than assumed.
+  What the three earlier beliefs came to:
+
+  - *Confirmed.*  The shortest-diagonal recommendation is real and
+    traces to Bloechl, Jepsen and Andersen (1994), the paper this
+    implementation follows, and it is offered as an interpolation
+    accuracy measure.  Nothing connects it to point-group symmetry.
+  - *Partly confirmed, and misleading if taken at face value.*  The
+    SYMPTOM is documented: VASP's manual carries almost exactly this
+    case -- cubic SrTiO3, three oxygens that must be equivalent, whose
+    partial charges and partial DOS come out unequal.  But the cause
+    diagnosed there is the symmetry handling of PROJECTED quantities,
+    and the prescribed remedy is to turn symmetry off entirely.  That
+    is C148 and the O9 unfolding, not the decomposition.  Our
+    unreduced control is the equivalent of turning symmetry off and
+    still disagrees by 0.106, so the published instance of this
+    symptom is a different mechanism wearing the same face.  Do not
+    read it as covering this entry.
+  - *Confirmed.*  Nothing found addresses the decomposition's own
+    contribution, and nothing found discusses averaging over the four
+    diagonals.  The inference stands: the classic treatments report
+    total densities of states, Fermi surface integrals and total
+    energies, which are exactly the quantities in which this cancels.
+
+  One neighbouring result worth not confusing with this one: phonopy
+  documents that a uniform mesh laid along the basis vectors may not
+  carry the crystal's point group, and lets the user disable mesh
+  symmetry.  That is a separate defect and it is NOT ours -- the mesh
+  points here do map onto each other correctly, as
+  `tetra_symmetry.py` shows.  It is the decomposition built on top of
+  them that does not.
 
   **Scope, and why this matters beyond the entry.**  It affects the
   LAT PDOS of DESIGN 1.4, which is implemented and was validated
@@ -7106,13 +7188,57 @@ is not carried only in conversation.
   and plausible wrong numbers are worse than a refusal.
   Remove that guard when the number below is fixed.
 
-  **The remaining defect, and the target to aim at.**  About
-  0.1 of that 0.7 is the tetrahedron symmetry floor of C149
-  and is NOT O9's to fix.  The rest appears only when the
-  mesh is symmetry reduced, which points at the corner
-  permutation in `accumulateOptcCondPOPTC_LAT`.
+  **The remaining defect: FOUND 2026-08-06, not yet fixed.**
+  `accumulateOptcCondPOPTC_LAT` reads a table that has
+  already been released, so the corner permutation never
+  happens at all.
 
-  The debugging target is therefore **not zero**.  It is to
+  `partialPerm` is built in `buildPOPTCIndex` and released by
+  `cleanUpPOPTCIndex`, which `computeTransitions` calls at
+  its own end (`optc.F90:1005`).  The tetrahedron
+  accumulation runs afterwards, from `computeOptcSpectra`.
+  So by the time `optcPrint.F90:673` tests
+
+  ```fortran
+  if ((detailCodePOPTC >= 3) .and. (allocated(partialPerm)))
+  ```
+
+  the answer is false on every pass and control falls to the
+  else branch, which deposits the matrix element with no
+  permutation.  The Gaussian path is untouched because it
+  applies the same table from inside `computePOPTCPairs`,
+  during the k-point loop, while the table is still alive.
+
+  This accounts for both measurements.  On the reduced mesh
+  the permutation is what unfolds each corner, so skipping it
+  wrecks the per-atom values: 0.68.  On the unreduced control
+  there is only the identity operation, so nothing is lost
+  and the number falls to 0.106 -- which is the C149 floor,
+  reached by a route that never touched `partialPerm`.  The
+  two numbers were never measuring the same thing.
+
+  **The specification gap is identifiable, and it is the one
+  CLAUDE.md warns about.**  PSEUDOCODE 19.4 says
+  "`partialPerm` is built by section 18 and is unchanged".
+  That names where the table comes from and never says who
+  releases it or when.  The seam-inventory rule asks for all
+  four -- where it comes from, who allocates it, who loads
+  it, and WHEN -- and the one item left out is the one that
+  broke.  Repair 19.2.1's inventory to carry the lifetime
+  before touching the code.
+
+  **The fix, and the choice inside it.**  Either move the
+  whole `cleanUpPOPTCIndex` call out of `computeTransitions`
+  and into `subroutine optc` after `printOptcSpectra`, or
+  release `partialPerm` alone there.  The first follows the
+  precedent already set in step 5 for `pairIsWanted`: the
+  lifetime belongs to the routine that owns the phase, not to
+  the loop that filled the array.  Prefer it unless something
+  else in the index turns out to be needed earlier.
+
+  The debugging target is unchanged, and it is **not zero**.
+  About 0.1 of the 0.7 is the C149 tetrahedron symmetry floor
+  and is not O9's to fix.  The aim is to
   make the reduced run reproduce the UNREDUCED run, which
   scores 1.06e-01 on the same test.  That comparison is
   nearly controlled: both build the same 384 tetrahedra from
