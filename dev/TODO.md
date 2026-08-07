@@ -7182,16 +7182,17 @@ is not carried only in conversation.
   **WHERE THIS STOPS, and what to pick up next.**  The total
   spectra work on the tetrahedron pathway end to end.  The
   DECOMPOSED tetrahedron combination is REFUSED by a guard in
-  `computeOptcSpectra`: it runs and writes a plausible
-  spectrum whose per-atom partials disagree by about 0.7
-  relative where symmetry-equivalent atoms must be identical,
-  and plausible wrong numbers are worse than a refusal.
-  Remove that guard when the number below is fixed.
+  `computeOptcSpectra` until 2026-08-07, because it wrote a
+  plausible spectrum whose per-atom partials disagreed by
+  about 0.7 relative where symmetry-equivalent atoms must be
+  identical, and plausible wrong numbers are worse than a
+  refusal.  The guard is now removed, the defect below having
+  been found and fixed.
 
-  **The remaining defect: FOUND 2026-08-06, not yet fixed.**
-  `accumulateOptcCondPOPTC_LAT` reads a table that has
-  already been released, so the corner permutation never
-  happens at all.
+  **The remaining defect: FOUND and FIXED 2026-08-07.**
+  `accumulateOptcCondPOPTC_LAT` read a table that had already
+  been released, so the corner permutation never happened at
+  all.
 
   `partialPerm` is built in `buildPOPTCIndex` and released by
   `cleanUpPOPTCIndex`, which `computeTransitions` calls at
@@ -7227,34 +7228,83 @@ is not carried only in conversation.
   broke.  Repair 19.2.1's inventory to carry the lifetime
   before touching the code.
 
-  **The fix, and the choice inside it.**  Either move the
-  whole `cleanUpPOPTCIndex` call out of `computeTransitions`
-  and into `subroutine optc` after `printOptcSpectra`, or
-  release `partialPerm` alone there.  The first follows the
-  precedent already set in step 5 for `pairIsWanted`: the
-  lifetime belongs to the routine that owns the phase, not to
-  the loop that filled the array.  Prefer it unless something
-  else in the index turns out to be needed earlier.
+  **The fix, as applied.**  The whole `cleanUpPOPTCIndex` call
+  moved out of `computeTransitions` and into `subroutine optc`
+  after `printOptcSpectra`, following the precedent step 5 set
+  for `pairIsWanted`: the lifetime belongs to the routine that
+  owns the phase, not to the loop that filled the array.  The
+  refusal guard in `computeOptcSpectra` came out with it.
 
-  The debugging target is unchanged, and it is **not zero**.
-  About 0.1 of the 0.7 is the C149 tetrahedron symmetry floor
-  and is not O9's to fix.  The aim is to
-  make the reduced run reproduce the UNREDUCED run, which
-  scores 1.06e-01 on the same test.  That comparison is
-  nearly controlled: both build the same 384 tetrahedra from
-  the same full mesh with the same corner weights and the
-  same energy grid, and differ only in whether the matrix
-  elements are read directly at 64 k-points or through
-  `partialPerm` from 4.  Driving the number to zero instead
-  would mean cancelling a real asymmetry with a compensating
-  error tuned to this one cubic cell, which would pass here
-  and fail on the next material.
+  **Measured 2026-08-07, both runs from one binary.**  The
+  earlier reference runs were made at 16:41 and 16:48 on
+  Aug 6, an hour BEFORE step 5 was committed at 17:42, so they
+  came from a work-in-progress build and are not a control for
+  anything built later.  Re-measured against a control run
+  today (`jobs/knbo3/o9_lifetime`, gitignored):
 
-  Evidence for all of this is in `jobs/knbo3/o9_step5`
-  (gitignored): `g0`/`g1`/`g3` are the Gaussian regression,
-  `lat0` and `lat3` the tetrahedron runs, `lat3_full` the
-  unreduced control, and `lat0_g`/`lat3_g` confirm the guard
-  admits totals and refuses decompositions.
+  ```
+  oxygen orbit spread within a run, three equivalent atoms
+    reduced mesh, before          6.80e-01
+    reduced mesh, after           6.50e-02
+    unreduced control, today      8.10e-02
+  reduced against unreduced, worst atom pair
+                                  5.76e-01
+    total spectrum                8.91e-03
+  ```
+
+  The permutation now runs, and the reduced run's asymmetry is
+  no longer eight times the unreduced floor but slightly BELOW
+  it.  Below is the expected direction, not a surprise: the
+  reduced run reconstructs 64 corners from 4 by symmetry,
+  which star-averages, and star-averaging is exactly the
+  symmetrization C149 remedy 2 describes.
+
+  **The target this entry used to state is not reachable, and
+  that is C149's doing.**  It asked for the reduced run to
+  reproduce the unreduced one.  Those are the SAME quadrature
+  only when the decomposition is point-group invariant, which
+  C149 established it is not: the star members carry genuinely
+  different tetrahedron weights, so reconstructing them by
+  symmetry is a different calculation from visiting them.  The
+  5.76e-01 residual is of the same order as the asymmetry
+  itself and is consistent with that reading.  **So the
+  definitive test of the permutation has to wait for C149's
+  four-diagonal decomposition, after which the two runs should
+  agree exactly, and the comparison becomes worth running.**
+
+  **One loose end, named rather than waved at.**  The TOTAL
+  spectrum disagrees between the two runs by 8.91e-03, and the
+  total involves no permutation at all: the isotropic column
+  sums the three Cartesian components, which is invariant
+  under the rotations relating star members, so it ought to be
+  identical.  The most likely cause is band connectivity at
+  degeneracies.  The tetrahedron method links four k-points
+  through a band INDEX, and inside a degenerate subspace the
+  diagonalizer's choice of basis and ordering is arbitrary --
+  one arbitrary choice propagated from 4 points in the reduced
+  run, 64 independent ones in the unreduced.  Gaussian
+  broadening never links bands across k-points, which is why
+  the equivalent Gaussian comparison (O2) agreed to print
+  precision.  Cubic KNbO3 is heavily degenerate, so this is a
+  plausible mechanism rather than a remote one.  It is
+  UNTESTED.  Do not close O9 while it is open, and note it
+  sits next to the degenerate-corner item already listed
+  below.
+
+  Evidence.  `jobs/knbo3/o9_lifetime` (gitignored) holds
+  today's controlled pair plus two cross-checks that separate
+  the fix from the change of binary.  `jobs/knbo3/o9_step5`
+  holds the earlier work: `g0`/`g1`/`g3` the Gaussian
+  regression, `lat0`/`lat3` the tetrahedron runs, `lat3_full`
+  the old unreduced control, `lat0_g`/`lat3_g` the guard
+  checks.  Treat everything in `o9_step5` as pre-step-5-commit.
+
+  **NOT yet re-run: the Gaussian regression.**  The lifetime
+  change touches `subroutine optc`, which both pathways use.
+  Nothing in the Gaussian path reads the index after the
+  k-point loop, so the change should be inert there, but that
+  is an argument and not a measurement.  Re-run `g0`/`g1`/`g3`
+  against their stored baselines before this is called done.
 
   **Scope: gapped systems first.**  DESIGN 12.4(c) is the
   reason.  Occupied versus unoccupied is a property of a

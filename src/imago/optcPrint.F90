@@ -205,30 +205,6 @@ subroutine computeOptcSpectra(doOPTC)
    latFactor = sum(kPointWeight(:)) * 0.5_double / hartree &
          & / real(spin,double)
 
-   ! Refuse the DECOMPOSED tetrahedron combination, which is not yet
-   !   trustworthy. The total spectra on this pathway are fine and are
-   !   allowed through: a total is a sum over partial pairs, so the
-   !   per-atom error below cancels in it exactly.
-   !
-   ! What is wrong. On a reduced mesh the atom-resolved partials of
-   !   symmetry-equivalent atoms disagree by about 0.7 relative, where
-   !   they must be identical. Roughly 0.1 of that is a floor shared
-   !   with the existing LAT partial DOS and is TODO C149's to explain;
-   !   the rest is a defect in the corner permutation here and is O9's.
-   !   Either way the numbers are not usable, and they look entirely
-   !   plausible, which is what makes writing them out worse than
-   !   refusing to.
-   if ((kPointIntgCode == 1) .and. (detailCodePOPTC /= 0)) then
-      write (20,*) 'ERROR: partial optical properties are not yet'
-      write (20,*) 'supported with LAT k-point integration. The'
-      write (20,*) 'per-atom decomposition does not reproduce the'
-      write (20,*) 'equivalence of symmetry-equivalent atoms. Use'
-      write (20,*) 'kPointIntgCode=0 for a decomposition, or ask for'
-      write (20,*) 'the total spectra only.'
-      call flush (20)
-      stop 'optc: LAT with a POPTC decomposition is not yet valid'
-   endif
-
    ! Accumulate the spectra by whichever method was requested. Both
    !   leave the same module arrays filled, so nothing downstream learns
    !   which one ran.

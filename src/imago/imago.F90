@@ -1195,7 +1195,8 @@ subroutine optc(inSCF,doOPTC)
          & detailCodePOPTC
    use O_OptcTransitions, only: transCounter, energyDiff, transitionProb, &
          & transitionProbPOPTC, getEnergyStatistics, computeTransitions, &
-         & transProbBanded, transProbPOPTCBanded, pairIsWanted
+         & transProbBanded, transProbPOPTCBanded, pairIsWanted, &
+         & cleanUpPOPTCIndex
    use O_SecularEquation, only: energyEigenValues, &
          & shiftEnergyEigenValues
 
@@ -1312,6 +1313,20 @@ subroutine optc(inSCF,doOPTC)
    !   rather than by computeTransitions, which merely built it.
    if (allocated(pairIsWanted)) then
       deallocate (pairIsWanted)
+   endif
+
+   ! The decomposition index is released here for the same reason, and
+   !   it must be released AFTER the spectra have been written. The
+   !   tetrahedron accumulation reads partialPerm from that index to
+   !   permute the two partial indices at each corner, and it runs
+   !   inside computeOptcSpectra above. Freeing the index at the end of
+   !   computeTransitions, where it was built, starved that accumulation
+   !   of the table without any error: its allocated() guard exists to
+   !   cover the type grouped codes, which never build the table, so a
+   !   table freed early looks exactly like one that was never needed
+   !   (PSEUDOCODE 19.2.1a).
+   if (detailCodePOPTC /= 0) then
+      call cleanUpPOPTCIndex
    endif
 
 end subroutine optc

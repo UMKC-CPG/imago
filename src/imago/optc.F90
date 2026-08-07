@@ -996,21 +996,21 @@ integer :: k,l
    deallocate (indirectGapEnergies)
    deallocate (indirectGap)
 
-   ! The decomposition index was built by this routine before the loop,
-   !   so this routine releases it. The producers inside the loop read it
-   !   and do not own it, which is what lets the same index serve both
-   !   integration pathways without either one guessing whether it is the
-   !   last caller.
-   if (detailCodePOPTC /= 0) then
-      call cleanUpPOPTCIndex
-   endif
-
-   ! NOTE that pairIsWanted is NOT released here, even though this
-   !   routine allocated it. The accumulation runs after this routine
-   !   returns and reads the mask to skip the pairs that were never
-   !   filled, so its lifetime matches the stores it describes rather
-   !   than the loop that filled them. It is released in subroutine optc
-   !   alongside them.
+   ! NOTE that neither the decomposition index nor pairIsWanted is
+   !   released here, even though this routine allocated both. The
+   !   accumulation runs after this routine returns and reads them: the
+   !   mask to skip band pairs that were never filled, and partialPerm
+   !   to permute the two partial indices at each tetrahedron corner. A
+   !   lifetime spans every consumer, so both belong to subroutine optc,
+   !   which owns the whole optical phase (PSEUDOCODE 19.2.1).
+   !
+   ! Releasing the index here instead was wrong, and wrong silently.
+   !   The accumulation guards its use of partialPerm on
+   !   allocated(partialPerm), because the type grouped detail codes
+   !   never build the table at all. That guard cannot tell a table
+   !   that was legitimately never built from one freed too early, so
+   !   the permutation was simply skipped and a plausible spectrum came
+   !   out with the wrong per-atom values.
 
    ! Log the date and time we end.
    call timeStampEnd (23)
