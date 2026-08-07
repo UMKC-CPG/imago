@@ -7272,24 +7272,30 @@ is not carried only in conversation.
   four-diagonal decomposition, after which the two runs should
   agree exactly, and the comparison becomes worth running.**
 
-  **One loose end, named rather than waved at.**  The TOTAL
-  spectrum disagrees between the two runs by 8.91e-03, and the
-  total involves no permutation at all: the isotropic column
-  sums the three Cartesian components, which is invariant
-  under the rotations relating star members, so it ought to be
-  identical.  The most likely cause is band connectivity at
-  degeneracies.  The tetrahedron method links four k-points
-  through a band INDEX, and inside a degenerate subspace the
-  diagonalizer's choice of basis and ordering is arbitrary --
-  one arbitrary choice propagated from 4 points in the reduced
-  run, 64 independent ones in the unreduced.  Gaussian
-  broadening never links bands across k-points, which is why
-  the equivalent Gaussian comparison (O2) agreed to print
-  precision.  Cubic KNbO3 is heavily degenerate, so this is a
-  plausible mechanism rather than a remote one.  It is
-  UNTESTED.  Do not close O9 while it is open, and note it
-  sits next to the degenerate-corner item already listed
-  below.
+  **The total spectrum agrees, and the 8.91e-03 figure was
+  measuring the wrong thing.**  That number is a worst case
+  over every energy point, and looking at eps2 -- which is
+  what Imago writes, rather than ELF or eps1, which are
+  post-processed from it -- shows where it lives:
+
+  ```
+  totalEps2 peak       reduced   4.653716e+01 at 4.55 eV
+                       unreduced 4.653707e+01 at 4.55 eV
+                       agreement 2e-06
+  integral over the whole spectrum       agreement 1.95e-05
+  worst single energy point, at 36.21 eV          5.6e-02
+  ```
+
+  The worst point is a van Hove spike a hundred times its own
+  neighbours, at 36 eV, far above anything optical.  The
+  tetrahedron method produces genuine discontinuities there,
+  so an eigenvalue difference of 1e-8 between a k-point read
+  from its IBZ representative and one diagonalised directly
+  moves finite weight across a bin edge.  Nothing is lost: the
+  integrated oscillator strength matches to 2e-05.  This is a
+  property of sharp features under tetrahedron integration,
+  not a defect, and the earlier suspicion of band connectivity
+  at degeneracies is not needed to explain it.
 
   Evidence.  `jobs/knbo3/o9_lifetime` (gitignored) holds
   today's controlled pair plus two cross-checks that separate
@@ -7299,12 +7305,34 @@ is not carried only in conversation.
   the old unreduced control, `lat0_g`/`lat3_g` the guard
   checks.  Treat everything in `o9_step5` as pre-step-5-commit.
 
-  **NOT yet re-run: the Gaussian regression.**  The lifetime
-  change touches `subroutine optc`, which both pathways use.
-  Nothing in the Gaussian path reads the index after the
-  k-point loop, so the change should be inert there, but that
-  is an argument and not a measurement.  Re-run `g0`/`g1`/`g3`
-  against their stored baselines before this is called done.
+  **Gaussian regression: RUN and CLEAN 2026-08-07**
+  (`jobs/knbo3/o9_gauss_regress`).  All three detail codes, on
+  eps2, compared where the spectrum exceeds one percent of its
+  peak:
+
+  ```
+  totalEps2 peak, baseline and today   4.846996e+01 at 3.09 eV
+  largest difference above the 1% floor          1.0000e-06
+  ```
+
+  Identical to every printed digit at the peak, and the
+  largest difference anywhere worth reading is one unit in the
+  last printed digit of a number of order fifty.  The Gaussian
+  pathway did not move.
+
+  **Two traps this regression walked into, both worth
+  remembering.**  A whole-file `cmp` reports "differs" for all
+  three cases, because a broadened spectrum runs over forty
+  orders of magnitude and its far tail is exp(-large), where a
+  negligible shift swings the value by a large FRACTION of a
+  number that is a billionth of the peak.  Compare where the
+  spectrum is large, or the answer is noise.  And compare
+  eps2: ELF, eps1, the absorption and the refractive index are
+  all derived from it by post-processing, so a disagreement
+  seen in them has been through a Kramers-Kronig transform
+  first and is not evidence about the calculation.  The
+  helper that does this correctly is
+  `jobs/knbo3/o9_gauss_regress/peak_compare.py`.
 
   **Scope: gapped systems first.**  DESIGN 12.4(c) is the
   reason.  Occupied versus unoccupied is a property of a
@@ -7355,8 +7383,62 @@ is not carried only in conversation.
   and is invariant under the rotation, so the "total" column
   that `printSpectrum` and `printSpectrumPOPTC` write (the
   sum over the three components divided by three) is correct.
-  The three individual columns are not, unless the crystal is
-  cubic or the mesh was never reduced.
+  The three individual columns are not, unless the mesh was
+  never reduced.
+
+  **Measured directly 2026-08-07, with a control that settles
+  it.**  The O9 pair in `jobs/knbo3/o9_lifetime` runs the same
+  cubic KNbO3 cell twice, reduced and unreduced, so the second
+  needs no unfolding at all and shows what the answer should
+  be.  Peak of eps2, by column:
+
+  ```
+                        x        y        z      isotropic
+  unreduced, 64 k-pts  46.562   46.564   46.485    46.537
+  reduced,    4 k-pts  52.131   63.807   65.294    46.537
+  ```
+
+  The unreduced run comes out isotropic on its own, to four
+  figures, exactly as a cubic crystal demands.  The reduced
+  run's three columns disagree with each other by up to 25
+  percent while its isotropic column matches the unreduced one
+  to 2e-06.  That is this defect, measured rather than argued,
+  and it also shows the damage is confined to the per-axis
+  columns and does not leak into the total.  Note the earlier
+  wording said the columns were safe on a cubic crystal; that
+  is wrong, and cubic is where it is easiest to see, because
+  the three columns must be equal and visibly are not.
+
+  **This is the same missing machinery as the PDOS mode 3
+  restriction, and saying so changes what should be built.**
+  DESIGN 1.4 refuses `detailCodePDOS == 3` (per atom, per
+  QN_nlm) on the tetrahedron path because it "requires D^l(R)
+  rotation matrices".  The three Cartesian components of a
+  vector ARE the l = 1 representation, so the optical columns
+  are the l = 1 instance of exactly that gap.  The unfolding
+  built in Phase F handles the SITE index and nothing handles
+  the component index; both entries are the second half of one
+  piece of work -- apply the rotation representation to the
+  non-site indices during unfolding -- and l = 1 is its cheap
+  end, since D^1 is just R itself.  Design them together.
+
+  **What is missing in the code, concretely.**  The rotations
+  exist only in FRACTIONAL abc form: `convAbcPointOps` as read
+  from the kpoint file, and `abcRealPointOps` conjugated into
+  the loaded direct basis by `computeRealPointOps` (DESIGN
+  2.7).  There is no Cartesian form anywhere in `src/`.
+  Rotating a momentum vector needs R in Cartesian form,
+  `L R_abc L^-1` with the real lattice vectors as columns
+  (`O_Lattice`'s `realVectors`, whose columns are the
+  vectors) -- the same conjugation `computeRealPointOps`
+  already performs, into one more basis.  So the work is one
+  new array built beside the existing ones, plus applying it
+  to the three-component slab at deposit time.
+
+  Note also that DESIGN 2.6 names `xyzPointOps` and
+  `xyzFracTrans` among the arrays the SYBD branch skips
+  allocating.  Neither identifier exists in the source.  Fix
+  that prose when this section is written.
   Decide between rotating the components during accumulation
   and documenting the per-axis columns as valid only for
   unreduced meshes.  Until then treat anisotropic per-axis
