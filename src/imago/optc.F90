@@ -360,15 +360,20 @@ subroutine setOptcStoreSize
    ! Code 1 is unrestricted, and code 1 is where the O3 correction
    !   lives; what is deferred is the extra RESOLUTION of codes 0 and 2,
    !   not the fix.
-   if ((cartesianCodeOPTC /= 1) .or. (cartesianCodePOPTC /= 1)) then
-      write (20,*) 'Direction codes 0 and 2 are not yet supported end'
-      write (20,*) 'to end. The engine computes them correctly and the'
-      write (20,*) 'raw epsilon-2 is valid, but imagoKKc still assumes'
-      write (20,*) 'a record of energy, total, x, y and z, so every'
-      write (20,*) 'spectrum derived from it would be wrong without'
-      write (20,*) 'saying so. Use direction code 1 for both.'
+   if ((cartesianCodeOPTC == 2) .or. (cartesianCodePOPTC == 2)) then
+      write (20,*) 'Direction code 2 is computed correctly here and'
+      write (20,*) 'its raw epsilon-2 is valid, but the spectra'
+      write (20,*) 'derived from it are not defined. The refractive'
+      write (20,*) 'index, extinction coefficient, reflectivity,'
+      write (20,*) 'absorption and energy loss function all come from'
+      write (20,*) 'a SCALAR dielectric function, and none of them has'
+      write (20,*) 'an accepted meaning applied to an off diagonal'
+      write (20,*) 'tensor entry. Only epsilon-1 generalizes, because'
+      write (20,*) 'the Kramers-Kronig transform is linear per column.'
+      write (20,*) 'Settling what the other five should hold is a'
+      write (20,*) 'DESIGN question. Use direction code 0 or 1.'
       call flush (20)
-      stop 'setOptcStoreSize: only direction code 1 is supported'
+      stop 'setOptcStoreSize: direction code 2 needs a DESIGN answer'
    endif
 
 end subroutine setOptcStoreSize

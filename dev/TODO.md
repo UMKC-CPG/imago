@@ -7495,10 +7495,28 @@ is not carried only in conversation.
   disagreement that persists with mesh density is the
   informative outcome.
 
-- [ ] O3. Decide whether the x, y, and z resolved columns of
+- [x] O3. Decide whether the x, y, and z resolved columns of
   the optical output are meaningful on a symmetry-reduced
   k-point mesh.  This is independent of POPTC and affects the
   *total* spectra that Imago already produces.
+
+  **DONE 2026-08-08.**  DESIGN 13, PSEUDOCODE 21, then code
+  across both integration pathways and both the total and
+  decomposed stores.  The producers now keep the COMPLEX
+  matrix element and the occupancy weight beside it, the
+  tetrahedron deposit rotates at the corner fetch, and the
+  Gaussian deposit contracts against a star average of the
+  rotation products built once per irreducible k-point.
+  Measured on cubic KNbO3, the reduced run's three columns
+  went from 52.13 / 63.81 / 23.67 to 46.551 / 46.530 /
+  46.530 against an unreduced target of 46.543 / 46.536 /
+  46.533, while the isotropic column did not move by a
+  single bit.  For the partials, the three symmetry
+  equivalent oxygens now each carry their small value on
+  their OWN axis and are permutations of one another; before,
+  all three put it on z and two were indistinguishable.
+  Direction codes 0 and 1 are supported end to end; code 2
+  is refused pending O11.
   **Sequencing: do O9 first** -- under a LAT integration
   pathway the fix below lands at tetrahedron corner assembly
   rather than in the star-average block, so settling that
@@ -7973,6 +7991,69 @@ is not carried only in conversation.
 
   Touches the same call path as O9 step 4, which adds
   another consumer to it.
+
+- [ ] O11. Decide what the derived spectra mean for the
+  off-diagonal tensor entries, so that optical direction
+  code 2 can be enabled.  The engine already computes the
+  six component symmetric tensor correctly and writes a
+  valid raw eps2; `setOptcStoreSize` refuses the code only
+  because nothing downstream of that raw file is defined.
+
+  The obstacle is physics rather than formatting.  Of the
+  seven quantities `imagoKKc` derives, only eps1 survives
+  the generalization, because Kramers-Kronig acts on each
+  column independently.  The refractive index, extinction
+  coefficient, reflectivity, absorption and energy loss
+  function are all built from a SCALAR complex dielectric
+  function, and none of them has an accepted meaning applied
+  to an off-diagonal entry -- there is no refractive index
+  "along xy".
+
+  The usual route is to diagonalize the tensor and report
+  along its principal axes, which DESIGN 13.7 has declined.
+  So the decision is between reversing that and defining
+  code 2 as producing eps2 and eps1 only.  Whichever way it
+  goes, it is a DESIGN edit before any code.  See DESIGN
+  13.7 and PSEUDOCODE 21.7.
+
+- [ ] O12. Rename `optcPrint.F90` to `optcSpectra.F90` and
+  the module `O_OptcPrint` to `O_OptcSpectra`.  The file's
+  two entry points are `computeOptcSpectra` and
+  `printOptcSpectra`, and after O3 the bulk of it is
+  accumulation, star-rotation averaging and symmetrization
+  rather than printing, so the name understates it.  Five
+  lines of code plus about fifteen references across
+  ARCHITECTURE, DESIGN, PSEUDOCODE and this file.  Worth a
+  commit of its own so the rename is not buried inside a
+  change to behaviour.
+
+- [ ] O13. Stop a job run from an unexpected directory from
+  taking the ROOT of `$IMAGO_TEMP` as its scratch.  A job
+  under the usual tree gets a scratch path mirroring its own
+  location, so two jobs never collide.  A job run from
+  somewhere else -- observed 2026-08-08 from a directory
+  under `/tmp` -- resolves instead to `$IMAGO_TEMP` itself,
+  which every such job then shares.  It overwrote the
+  `fort.*` files and an SCF HDF5 file left there by an
+  earlier run.  Nothing warned, and the run completed
+  normally.  Decide whether to derive a unique path, refuse
+  to run, or say something loudly; silently sharing scratch
+  is the one option to rule out.
+
+- [ ] O14. Decide what `imagoKKc` should do when its output
+  files already exist.  It opens all eight with
+  `status="new"`, so a run that died partway leaves them
+  behind and the NEXT run fails at its first sequence with a
+  bare non-zero exit.  Observed 2026-08-08: after an
+  unrelated crash, every following attempt failed until the
+  stale `fort.500` through `fort.570` were removed by hand,
+  and nothing in the message pointed at the cause.
+
+  The diagnosis is not obvious from the symptom, because
+  `processPOPTC.py` reports only that the subprocess returned
+  non-zero.  Either open with `status="replace"`, or fail
+  with a message naming the file that is in the way.  Doing
+  neither costs an hour every time it happens.
 
 ## TOOLING (lint helpers)
 

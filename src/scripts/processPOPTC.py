@@ -368,8 +368,26 @@ class POPTCData():
         self.type2 = [""]            # Index 0 unused.
         self.pair_kkc_factor = [None]  # Index 0 unused.
 
+        # The record width declared by the raw eps2 file, read
+        # rather than assumed because imago chooses it from the
+        # direction code (DESIGN 13.7). Left as None until
+        # get_eps2_raw_metadata finds the first COL_LABELS
+        # line, so that a file lacking one fails visibly
+        # instead of quietly adopting a default that happens
+        # to suit the common case.
+        self.num_col_labels = None
+        self.col_labels = None
+
         # Gather metadata and labels from the raw eps2 file.
         self.get_eps2_raw_metadata()
+
+        if self.num_col_labels is None:
+            raise ValueError(
+                f"{self.eps2_raw} declares no COL_LABELS, so "
+                f"the number of spectral columns is unknown. "
+                f"This file was probably written by a version "
+                f"of imago predating the direction codes."
+            )
 
         # Get the KKC control data (scaling factors for each
         # element pair).
@@ -485,8 +503,22 @@ class POPTCData():
             # "ELEMENT_1_NAME". When found, the next three
             # lines provide the element 2 name, type 1
             # number, and type 2 number.
+            #
+            # The COL_LABELS line and the label line that
+            # follows it are captured on the way past. Imago
+            # chooses its record width from the direction
+            # code (DESIGN 13.7), so the number of spectral
+            # columns is no longer fixed at four and must be
+            # taken from the file rather than assumed. Every
+            # unit in one file carries the same width, so the
+            # first one found settles it.
             j = 1
             for line in f:
+                if ("COL_LABELS" in line
+                        and self.num_col_labels is None):
+                    self.num_col_labels = int(line.split()[-1])
+                    self.col_labels = f.readline().strip()
+                    continue
                 if "ELEMENT_1_NAME" in line:
                     # Get element one name (this line).
                     self.element1.append(line.strip())
@@ -564,8 +596,10 @@ class POPTCData():
         the eps2 data for that pair from the raw file. This
         is done by running makePDOS with a control file that
         specifies which sequence number to extract and how to
-        label the columns. The control file requests four
-        columns: TOTAL, x, y, z.
+        label the columns. One line is requested per column
+        the raw file declares, so the request follows the
+        direction code rather than always asking for the
+        four columns TOTAL, x, y and z.
 
         Parameters
         ----------
@@ -578,10 +612,16 @@ class POPTCData():
             f.write(
                 "LABEL : SEQUENCE_NUM : COL_LABELS\n"
             )
-            f.write(f"{seq_num} T : {seq_num} : TOTAL\n")
-            f.write(f"{seq_num} x : {seq_num} : x\n")
-            f.write(f"{seq_num} y : {seq_num} : y\n")
-            f.write(f"{seq_num} z : {seq_num} : z\n")
+            for column in self.col_labels.split():
+                # The leading isotropic column is labelled
+                # "T" in the extracted file, matching what
+                # the rest of this script expects, while
+                # every direction resolved column keeps its
+                # own name.
+                tag = "T" if column == "TOTAL" else column
+                f.write(
+                    f"{seq_num} {tag} : {seq_num} : {column}\n"
+                )
 
     def call_make_pdos(self):
         """Run makePDOS to extract one pair's eps2 data.
@@ -688,10 +728,13 @@ class POPTCData():
         repeating it per pair would waste space and invite
         the two copies to disagree. Every other column is
         spectral data and must be kept: imagoKKc writes
-        four columns to fort.500 (energy, eps1, eps2, ELF)
-        and five to the rest (energy, total, x, y, z), so
-        after the strip the counts are the 3 and the 4 that
-        num_col_labels declares.
+        four columns to fort.500 (energy, eps1, eps2, ELF),
+        and to the rest it writes the energy plus however
+        many the direction code calls for -- five at code 1
+        (energy, total, x, y, z) and two at code 0 (energy,
+        total). After the strip the counts are therefore the
+        3 of the e1e2elf file and whatever num_col_labels
+        declares for the others.
 
         Parameters
         ----------
@@ -831,8 +874,12 @@ class POPTCData():
                     3, "Epsilon1 Epsilon2 ELF", i,
                 )
 
-                # The remaining files each have 4 columns:
-                #   TOTAL, x, y, z
+                # The remaining files carry whatever width the
+                # raw eps2 declared: one column at direction
+                # code 0, four at code 1. imagoKKc writes the
+                # energy plus that many, and copy_data strips
+                # the energy, so the count that reaches the
+                # output file is the declared one unchanged.
                 for key, temp in [
                     ("eps1", self.eps1_temp),
                     ("elf", self.elf_temp),
@@ -844,7 +891,7 @@ class POPTCData():
                 ]:
                     self.copy_data(
                         raw_files[key], temp,
-                        4, "TOTAL x y z", i,
+                        self.num_col_labels, self.col_labels, i,
                     )
 
         finally:

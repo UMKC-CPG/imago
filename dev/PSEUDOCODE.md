@@ -15766,6 +15766,37 @@ consumer that only wants it needs no knowledge of the code.
 be checked against the declared width rather than assuming
 four.
 
+**How each consumer learns the width.** They differ, and the
+difference is not cosmetic. `processPOPTC.py` parses the raw
+decomposed file, which carries `COL_LABELS`, so it reads the
+count and the label text from there and passes both on to
+every file it writes. `imagoKKc` is handed the TOTAL
+spectrum files as well, and those name their columns in a
+header without declaring a count, so it counts the numeric
+fields on the first data line instead. Counting the data is
+the one method that serves both file kinds, and it cannot
+disagree with the data it describes.
+
+```
+  numDirCols = (fields on a data line) - 2
+                 # drop the energy and the isotropic column
+  numWorkCols = 1 if numDirCols == 0 else numDirCols
+```
+
+`numWorkCols` is what every array is sized by, and averaging
+over it reproduces the division by three at code 1 while
+being the identity at code 0. Dividing by a literal three at
+code 0 would shrink every derived spectrum to a third of its
+value without any symptom other than the numbers.
+
+**The list-directed read is the trap.** At code 0 a record
+holds two values. Reading three would not fail -- Fortran's
+list-directed input runs on into the NEXT record to satisfy
+the list, shifting every subsequent line by one and yielding
+a complete, plausible, wrong spectrum. The read is therefore
+branched on the width rather than left to consume what it
+needs.
+
 ### 21.8 Checks, in the order they are worth running
 
 1. **Orthogonality of the rotations**, at construction

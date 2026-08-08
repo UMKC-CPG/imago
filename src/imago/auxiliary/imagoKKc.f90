@@ -41,6 +41,27 @@ program imagoKkc
    integer :: length  ! Length of the optical conductivity file
    integer :: spin    ! 1 for spin up or total, 2 for spin down.
 
+   ! How many DIRECTION resolved columns the input carries, and how many
+   !   columns this program therefore works in. Imago's optical writers
+   !   choose their record width from the direction code of DESIGN 13.7,
+   !   so it is no longer fixed at three and has to be discovered from
+   !   the file rather than assumed.
+   !
+   !   direction code 0   record: energy, total          numDirCols = 0
+   !   direction code 1   record: energy, total, x, y, z numDirCols = 3
+   !
+   ! numWorkCols is what every array below is sized by. At code 1 it is
+   !   the three Cartesian directions. At code 0 it is ONE, and that one
+   !   column is the direction average itself -- which is a genuine
+   !   scalar dielectric function, so every quantity this program
+   !   derives is well defined on it. Averaging over numWorkCols then
+   !   reproduces the division by three at code 1 and is the identity at
+   !   code 0, so one expression serves both.
+   integer :: numDirCols
+   integer :: numWorkCols
+   integer :: numFields    ! Numeric fields on one input data line.
+   character*400 :: probeLine
+
    character*40 :: buffer ! Character buffer for command line arguments
 
    ! Define the subroutine interfaces for proper passing of allocatable arrays.
@@ -143,6 +164,9 @@ program imagoKkc
          real (kind=double), dimension (:,:) :: refractIndex,extnctCoeff
          real (kind=double), dimension (:,:) :: reflectivity,absorpCoeff
       end subroutine printData
+      integer function countNumericFields (textLine)
+         character*(*) :: textLine
+      end function countNumericFields
    end interface
 
    ! Get command line parameter for the number of lines. Note that the
@@ -219,6 +243,44 @@ program imagoKkc
       open (unit=170,file='fort.570',status="new",form="formatted") ! Absorp
    endif
 
+   ! Discover the record width before anything is sized by it. Counting
+   !   the numeric fields on the first DATA line works for both kinds of
+   !   input this program is given: the total spectrum files, whose
+   !   header names its columns but declares no count, and the
+   !   per-partial files that makePDOS.py extracts, whose header is
+   !   reduced to a single line by the time it arrives here. Reading the
+   !   count from the data is therefore the one method that serves both,
+   !   and it cannot disagree with the data it describes.
+   read (50,fmt="(a)") probeLine
+   read (50,fmt="(a)") probeLine
+   rewind (50)
+
+   numFields = countNumericFields(probeLine)
+
+   ! Drop the energy column and the leading isotropic column; whatever
+   !   remains is direction resolved.
+   numDirCols = numFields - 2
+
+   if (numDirCols == 0) then
+      numWorkCols = 1
+   elseif (numDirCols == 3) then
+      numWorkCols = 3
+   else
+      write (6,*) 'imagoKKc: this input carries ',numFields, &
+            & ' fields per line, giving ',numDirCols, &
+            & ' direction resolved columns.'
+      write (6,*) 'Only 0 (the direction average alone) and 3 (x, y and'
+      write (6,*) 'z) are supported. The six component tensor of'
+      write (6,*) 'direction code 2 is not: the refractive index,'
+      write (6,*) 'extinction coefficient, reflectivity, absorption and'
+      write (6,*) 'energy loss function are all defined from a SCALAR'
+      write (6,*) 'dielectric function, and there is no accepted'
+      write (6,*) 'meaning for any of them applied to an off diagonal'
+      write (6,*) 'tensor entry. Deciding what those columns should'
+      write (6,*) 'hold is a DESIGN question, not a formatting one.'
+      stop 'imagoKKc: unsupported number of direction columns'
+   endif
+
    allocate (energy(length))
    allocate (fine_energy(numValues))
    allocate (totalEps1(length))
@@ -229,15 +291,15 @@ program imagoKkc
    allocate (totalExtnctCoeff(length))
    allocate (totalReflectivity(length))
    allocate (totalAbsorpCoeff(length))
-   allocate (eps1(dim3,length))
-   allocate (eps1i(dim3,length))
-   allocate (eps2(dim3,length))
-   allocate (fine_eps2(dim3,numValues))
-   allocate (elf(dim3,length))
-   allocate (refractIndex(dim3,length))
-   allocate (extnctCoeff(dim3,length))
-   allocate (reflectivity(dim3,length))
-   allocate (absorpCoeff(dim3,length))
+   allocate (eps1(numWorkCols,length))
+   allocate (eps1i(numWorkCols,length))
+   allocate (eps2(numWorkCols,length))
+   allocate (fine_eps2(numWorkCols,numValues))
+   allocate (elf(numWorkCols,length))
+   allocate (refractIndex(numWorkCols,length))
+   allocate (extnctCoeff(numWorkCols,length))
+   allocate (reflectivity(numWorkCols,length))
+   allocate (absorpCoeff(numWorkCols,length))
 
    ! Read the energy and epsilon2 data (output of the optc program).
    call readOPTCData(length, energy, totalEps2, eps2)
@@ -324,8 +386,20 @@ subroutine readOPTCData (length, energy, totalEps2, eps2)
    read (50,*)
 
    ! Read the energy and epsilon2 data (output of the optc program).
+   !
+   ! At direction code 0 the record holds the energy and one value, and
+   !   that value IS the working column, so it is copied into the single
+   !   slot rather than read separately. Reading eps2(:,i) as well would
+   !   run the list-directed read on into the NEXT record, quietly
+   !   shifting every subsequent line by one -- a misalignment that
+   !   produces a complete, plausible spectrum rather than an error.
    do i=1,length
-      read (50,*) energy(i),totalEps2(i),eps2(:,i)
+      if (size(eps2,1) == 1) then
+         read (50,*) energy(i),totalEps2(i)
+         eps2(1,i) = totalEps2(i)
+      else
+         read (50,*) energy(i),totalEps2(i),eps2(:,i)
+      endif
    enddo
 
 end subroutine readOPTCData
@@ -409,7 +483,9 @@ subroutine makeFineEps2(length,grain,energy,fine_energy,eps2,fine_eps2)
    integer :: i,j,k
    real (kind=double), allocatable, dimension(:,:) :: diffRatio
 
-   allocate(diffRatio(dim3,length))
+   ! Sized from the array it differentiates rather than from a constant,
+   !   so the width follows the caller's direction code automatically.
+   allocate(diffRatio(size(eps2,1),length))
 
    do i=1,length-1
       diffRatio(:,i)=(eps2(:,i+1)-eps2(:,i))/(energy(i+1)-energy(i))
@@ -473,12 +549,12 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
    !   does not, and they are not.
    multFactor = 2.0_double/3.0_double/pi
 
-   allocate (evenSum    (dim3))
-   allocate (oddSum     (dim3))
-   allocate (integrand  (dim3,numValues))
-   allocate (evenSumi   (dim3))
-   allocate (oddSumi    (dim3))
-   allocate (integrandi (dim3,numValues))
+   allocate (evenSum    (size(eps1,1)))
+   allocate (oddSum     (size(eps1,1)))
+   allocate (integrand  (size(eps1,1),numValues))
+   allocate (evenSumi   (size(eps1,1)))
+   allocate (oddSumi    (size(eps1,1)))
+   allocate (integrandi (size(eps1,1),numValues))
 
    do i=1,length
       oddSum(:)    = 0.0_double
@@ -595,8 +671,13 @@ subroutine get_n_k_R_a(length,energy,eps1,eps2,refractIndex,extnctCoeff,&
    integer :: i,j
    complex (kind=double) :: reflecTemp
 
+   ! Bounded by the array rather than by three. At direction code 0
+   !   there is a single working column, and running to three here
+   !   writes past the end of every one of these arrays -- which does
+   !   not fail at the write but corrupts the heap and aborts later,
+   !   somewhere with no connection to the cause.
    do i = 1,length
-      do j = 1,3
+      do j = 1,size(eps1,1)
 
          ! ~eps = eps1 + i eps2
          ! eps1 = n^2 - k^2  (n=refractive index, k=extinction coeff)
@@ -670,14 +751,29 @@ subroutine averageFunctions(length,eps1,eps1i,refractIndex,extnctCoeff,&
 
    integer :: i
 
+   ! The divisor is the number of columns actually carried, not the
+   !   literal three. At direction code 1 that IS three and every result
+   !   is unchanged. At direction code 0 there is a single column which
+   !   is already the direction average, so dividing by one returns it
+   !   untouched -- dividing by three there would shrink every derived
+   !   spectrum to a third of its value, silently.
+   !
+   ! Note that totalElf is NOT an average of the per-column values. It
+   !   is built from the total eps1 and eps2, because the energy loss
+   !   function is a non-linear function of the dielectric function and
+   !   the average of Im(-1/eps) is not Im(-1/eps_avg).
    do i = 1,length
-      totalEps1(i)         = sum(eps1(:,i))/3.0_double
-      totalEps1i(i)        = sum(eps1i(:,i))/3.0_double
+      totalEps1(i)         = sum(eps1(:,i))/real(size(eps1,1),double)
+      totalEps1i(i)        = sum(eps1i(:,i))/real(size(eps1i,1),double)
       totalElf(i)          = totalEps2(i)/(totalEps1(i)**2+totalEps2(i)**2)
-      totalRefractIndex(i) = sum(refractIndex(:,i))/3.0_double
-      totalExtnctCoeff(i)  = sum(extnctCoeff(:,i))/3.0_double
-      totalReflectivity(i) = sum(reflectivity(:,i))/3.0_double
-      totalAbsorpCoeff(i)  = sum(absorpCoeff(:,i))/3.0_double
+      totalRefractIndex(i) = sum(refractIndex(:,i)) &
+            & /real(size(refractIndex,1),double)
+      totalExtnctCoeff(i)  = sum(extnctCoeff(:,i)) &
+            & /real(size(extnctCoeff,1),double)
+      totalReflectivity(i) = sum(reflectivity(:,i)) &
+            & /real(size(reflectivity,1),double)
+      totalAbsorpCoeff(i)  = sum(absorpCoeff(:,i)) &
+            & /real(size(absorpCoeff,1),double)
    enddo
 
 end subroutine averageFunctions
@@ -710,42 +806,119 @@ subroutine printData(length,energy,totalEps1,totalEps1i,totalEps2,totalElf,&
       write (100,701) energy(i),totalEps1(i),totalEps2(i),totalELF(i)
    enddo
 
-   write (110,*) "Energy   totalEps1   xEps1   yEps1   zEps1"
-   do i = 1,length
-      write (110,700) energy(i),totalEps1(i),eps1(:,i)
-   enddo
+   ! Each of these writes a header naming its columns and then one
+   !   record per energy point, at whatever width the input carried.
+   !   The per-direction columns disappear entirely at direction code 0,
+   !   where the single value is the direction average and repeating it
+   !   under an "x" heading would invite a reader to treat one number as
+   !   three independent ones.
+   call writeSpectrum (110,"Eps1",length,size(eps1,1),energy, &
+         & totalEps1,eps1)
+   call writeSpectrum (120,"ELF",length,size(elf,1),energy, &
+         & totalELF,elf)
+   call writeSpectrum (130,"n",length,size(refractIndex,1),energy, &
+         & totalRefractIndex,refractIndex)
+   call writeSpectrum (140,"k",length,size(extnctCoeff,1),energy, &
+         & totalExtnctCoeff,extnctCoeff)
+   call writeSpectrum (150,"Eps1i",length,size(eps1i,1),energy, &
+         & totalEps1i,eps1i)
+   call writeSpectrum (160,"Reflectivity",length, &
+         & size(reflectivity,1),energy,totalReflectivity,reflectivity)
 
-   write (120,*) "Energy   totalELF   xELF   yELF   zELF"
-   do i = 1,length
-      write (120,700) energy(i),totalELF(i),elf(:,i)
-   enddo
+   call writeSpectrum (170,"Alpha",length,size(absorpCoeff,1),energy, &
+         & totalAbsorpCoeff,absorpCoeff)
 
-   write (130,*) "Energy   totaln      xn      yn      zn"
-   do i = 1,length
-      write (130,700) energy(i),totalRefractIndex(i),refractIndex(:,i)
-   enddo
-
-   write (140,*) "Energy   totalk      xk      yk      zk"
-   do i = 1,length
-      write (140,700) energy(i),totalExtnctCoeff(i),extnctCoeff(:,i)
-   enddo
-
-   write (150,*) "Energy   totalEps1i   xEps1i   yEps1i   zEps1i"
-   do i = 1,length
-      write (150,700) energy(i),totalEps1i(i),eps1i(:,i)
-   enddo
-
-   write (160,*) "Energy   totalReflectivity   xRef   yRef   zRef"
-   do i = 1,length
-      write (160,700) energy(i),totalReflectivity(i),reflectivity(:,i)
-   enddo
-
-   write (170,*) "Energy   totalAbsorpCoeff   xAlpha   yAlpha   zAlpha"
-   do i = 1,length
-      write (170,700) energy(i),totalAbsorpCoeff(i),absorpCoeff(:,i)
-   enddo
-
-   700 format (5e15.7)
    701 format (4e15.7)
 
 end subroutine printData
+
+
+! Write one derived spectrum: a header naming its columns, then one
+!   record per energy point.
+!
+! The width follows the array rather than a literal, because Imago's
+!   optical writers choose their record width from the direction code
+!   of DESIGN 13.7. At code 1 this produces exactly the five field
+!   record and the "total x y z" heading that this program has always
+!   written. At code 0 there is one working column which IS the
+!   direction average, so only the energy and that average are written.
+! The arrays are declared with EXPLICIT shape rather than assumed
+!   shape, so that no explicit interface is needed to call this. That
+!   matters here because the caller is itself an external subroutine
+!   and cannot see the interface block the main program carries.
+subroutine writeSpectrum (outputUnit,quantityName,length,numCols, &
+      & energy,totalValues,columnValues)
+
+   use O_Kinds
+
+   implicit none
+
+   integer :: outputUnit
+   character*(*) :: quantityName
+   integer :: length
+   integer :: numCols
+   real (kind=double), dimension (length) :: energy, totalValues
+   real (kind=double), dimension (numCols,length) :: columnValues
+
+   integer :: i
+   character*20 :: recordFormat
+   character*3, dimension (3), parameter :: axisTag = &
+         & (/ "x  ", "y  ", "z  " /)
+
+   if (numCols == 1) then
+      write (outputUnit,*) "Energy   total"//trim(quantityName)
+   else
+      write (outputUnit,*) "Energy   total"//trim(quantityName)// &
+            & "   "//trim(axisTag(1))//trim(quantityName)// &
+            & "   "//trim(axisTag(2))//trim(quantityName)// &
+            & "   "//trim(axisTag(3))//trim(quantityName)
+   endif
+
+   if (numCols == 1) then
+      write (recordFormat,fmt="(a)") "(2e15.7)"
+      do i = 1,length
+         write (outputUnit,fmt=recordFormat) energy(i),totalValues(i)
+      enddo
+   else
+      write (recordFormat,fmt="(a,i2,a)") "(",numCols+2,"e15.7)"
+      do i = 1,length
+         write (outputUnit,fmt=recordFormat) energy(i),totalValues(i),&
+               & columnValues(:,i)
+      enddo
+   endif
+
+end subroutine writeSpectrum
+
+
+! Count the numeric fields on one line of an input record.
+!
+! Used to discover how many direction resolved columns the input
+!   carries, since the total spectrum files name their columns in a
+!   header but declare no count. Counting transitions from blank to
+!   non-blank is enough: every field on these lines is a number written
+!   in a fixed width numeric format, so there are no quoted strings or
+!   embedded spaces to confuse it.
+integer function countNumericFields (textLine)
+
+   implicit none
+
+   character*(*) :: textLine
+
+   integer :: i
+   logical :: insideField
+
+   countNumericFields = 0
+   insideField = .false.
+
+   do i = 1, len_trim(textLine)
+      if (textLine(i:i) == ' ') then
+         insideField = .false.
+      else
+         if (.not. insideField) then
+            countNumericFields = countNumericFields + 1
+         endif
+         insideField = .true.
+      endif
+   enddo
+
+end function countNumericFields

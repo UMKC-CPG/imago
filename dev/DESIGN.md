@@ -15550,6 +15550,64 @@ built once per IBZ k-point rather than once per transition.
 Section 11.4's cost projection and TODO O8 need the storage
 factor above.
 
+**Level 0 changes what SOME of the derived spectra mean, and
+the split is not where one would first guess.** What matters
+is not whether a quantity is linear, but whether `imagoKKc`
+forms its isotropic value by AVERAGING the three
+per-direction values or by computing it from the isotropic
+epsilon directly. Level 0 has no per-direction values to
+average, so only the first group can move.
+
+```
+  from the isotropic values directly -- unaffected
+    epsilon-1, epsilon-1i, the energy loss function
+  averaged over the three directions -- level 0 differs
+    refractive index, extinction coefficient,
+    reflectivity, absorption
+```
+
+Measured on cubic KNbO3, level 0 against level 1:
+
+```
+  epsilon-1              1e-5   agrees
+  energy loss function   1e-6   agrees
+  refractive index       5e-2   genuinely different
+```
+
+Epsilon-1 agrees because Kramers-Kronig is linear, so
+transforming the average equals averaging the transforms;
+the residual is interpolation on the fine grid. The energy
+loss function agrees because it is built from the total
+epsilon-1 and epsilon-2 rather than averaged -- which is
+also the correct construction, since the average of
+Im(-1/eps) is not Im(-1/eps_avg).
+
+The refractive index differs because level 1 reports the
+average of n(eps_x), n(eps_y) and n(eps_z) while level 0
+reports n(eps_avg), and n is a square root. Neither is
+wrong; they answer different questions. But a user moving
+between the two levels will see it shift by several percent,
+and an unexplained five percent step is indistinguishable
+from a bug, which is why it is written down here.
+
+**Level 2's derived spectra are NOT defined, and this is
+open.** The refractive index, extinction coefficient,
+reflectivity, absorption and energy loss function are all
+built from a SCALAR complex dielectric function. There is no
+accepted meaning for any of them applied to an off-diagonal
+tensor entry: there is no refractive index "along xy".
+Epsilon-1 alone generalizes, because Kramers-Kronig acts on
+each column independently.
+
+The usual route to a physical answer is to diagonalize the
+tensor and report along its principal axes, and this section
+has already declined diagonalization. So level 2 currently
+yields a valid raw epsilon-2 and nothing downstream of it,
+and the engine refuses it rather than emitting derived
+columns whose meaning nobody has settled. Deciding this is
+the remaining work: either diagonalize after all, or define
+level 2 as producing epsilon-1 only.
+
 ### 13.8 Seam inventory
 
 Every quantity the new code consumes or produces: where it
