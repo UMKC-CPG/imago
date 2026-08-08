@@ -477,6 +477,15 @@ the current design:
   currently in O_Lattice (full conventional cell or
   primitive reduction).  Consumed by `buildAtomPerm`
   (kpoints.f90 / atomicSites.f90, DESIGN 2.7)
+- `xyzRealPointOps`: the same operations in CARTESIAN
+  form, `L R_abc L^-1` with the real lattice vectors as
+  columns.  Needed because the momentum operator is a
+  vector whose components mix under an operation, so
+  unfolding an optical matrix element to a star member
+  requires rotating it and not only permuting atoms.
+  Built beside `abcRealPointOps` on the same branches,
+  and therefore absent on the SYBD path and for k-point
+  style code 0 (kpoints.f90, DESIGN 13.4)
 - `sc.full_cell_real_lattice` (structure_control.py):
   snapshot of the conventional lattice captured before
   `apply_space_group()` may overwrite `sc.real_lattice`

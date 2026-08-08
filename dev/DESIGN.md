@@ -1686,9 +1686,11 @@ atomPerm to reconstruct, so the table is not needed.
 This matters in practice because the SYBD branch of
 `initializeKPoints` calls `makePathKPoints` and skips all of
 the point-ops setup that the style-code 0/1/2 branches do
-(`numPointOps` assignment, `xyzPointOps`/`xyzFracTrans`
-allocation, `computeRealPointOps`).  `abcRealPointOps` and
-`abcRealFracTrans` therefore stay unallocated.
+(`numPointOps` assignment, the point-op array allocations,
+`computeRealPointOps`).  `abcRealPointOps` and
+`abcRealFracTrans` therefore stay unallocated, as will
+`xyzRealPointOps` when section 13.4 adds it, since it is
+built on the same branches.
 Consequently, the calls to `buildAtomPerm` and
 `buildInvAtomPerm` in `setupSCF` (SCF path) and `intgPSCF`
 (PSCF path) are guarded with `if (doSYBD_SCF /= 1)` and
@@ -15179,3 +15181,411 @@ neither path is cheap and the decomposition cost of section
      is the informative outcome, and per 12.5 the comparison
      must hold the meaning of `sigmaOPTC` fixed rather than
      its value.
+
+---
+
+## 13. Optical Cartesian Components Under Symmetry
+
+### 13.1 The defect, and the one thing that survives it
+
+The momentum operator is a vector. Under a point group
+operation its Cartesian components mix:
+
+  P_i(Rk) = sum_j R_ij P_j(k)
+
+The IBZ unfolding of section 2.4 handles the SITE index --
+`atomPerm` says which atom becomes which -- and nothing
+handles the COMPONENT index. Every member of a k-point's
+star is therefore credited with the representative's
+orientation, unrotated.
+
+Exactly one combination survives, and saying which is worth
+the space, because it is why this went unnoticed. Rotating a
+vector does not change the sum of the squares of its
+components:
+
+  sum_c |P'^c|^2 = sum_c |P^c|^2
+
+The isotropic column is that sum divided by three, so it is
+correct on any mesh for any crystal. The three individual
+columns are a redistribution error.
+
+**This axis is independent of the atom decomposition, and
+the output makes that easy to miss.** `printSpectrumPOPTC`
+writes the same header for the undecomposed unit and for
+every atom-pair unit:
+
+```
+COL_LABELS 4
+TOTAL x y z
+```
+
+"TOTAL" there means direction-AVERAGED, not undecomposed. A
+run with `detailCodePOPTC = 3` on the five-atom cell writes
+26 units, and every one of them -- the undecomposed unit and
+all 25 atom pairs -- carries its own isotropic column and
+its own x, y, z columns. So this section is about those
+three columns wherever they appear, and says nothing about
+the atom decomposition, which is sections 11 and 1.7's
+concern.
+
+**Every isotropic column in the file is correct, including
+the partials', and that needs its own argument.** The
+undecomposed case is the sum of squares above. A partial
+stores a cross-term rather than a modulus, but the same
+orthogonality carries it:
+
+  sum_c M'_c(o,n) conjg(S'_c)
+      = sum_{c,d,e} R_cd R_ce M_d(o,n) conjg(S_e)
+      = sum_d M_d(o,n) conjg(S_d)
+
+using sum_c R_cd R_ce = delta_de. So the defect costs the
+x, y and z columns of every unit and none of the isotropic
+ones.
+
+Measured on cubic KNbO3, 4x4x4 shifted mesh, peak of eps2:
+
+```
+                          x        y        z    isotropic
+unreduced, 64 k-points  48.470   48.470   48.470   48.470
+reduced,    4 k-points  37.607   72.701   85.237   48.470
+```
+
+The unreduced run needs no unfolding and comes out isotropic
+on its own to every printed digit. That is both the proof
+that the momentum matrix elements themselves are sound and
+the reference the reduced run fails to reproduce.
+
+### 13.2 What can be recovered, and what cannot
+
+One trustworthy number is available per energy point. How
+far it goes is decided by how many independent directional
+values the crystal's symmetry allows.
+
+```
+  cubic                    1 value    recoverable
+  tetragonal, hexagonal,   2 values   not recoverable
+    trigonal
+  orthorhombic             3 values   not recoverable
+  monoclinic, triclinic    3 values, plus off-diagonal
+                                      terms not computed at
+                                      all today
+```
+
+A cubic crystal is fully recoverable, and not by any clever
+averaging: symmetry forces the three directions equal, so
+there is one unknown and the reliable sum supplies it.
+Averaging the three columns over the point group amounts
+there to printing the isotropic value three times.
+
+**Orthorhombic is the trap, and the reason group averaging
+must never be offered as a partial remedy here.** Its
+operations carry each axis onto plus or minus ITSELF and
+never onto another axis, so averaging over the point group
+changes nothing at all, leaves the three columns exactly as
+wrong as they were, and gives no sign that it did nothing.
+An apparent remedy that is a silent no-op is worse than
+none.
+
+**The workaround that works today** is to not reduce the
+mesh: with every k-point diagonalized there is no unfolding
+and nothing to rotate. Worth knowing before judging urgency.
+Symmetry reduction saves most in cubic crystals, where
+directional spectra carry no information beyond the
+isotropic one, and least in low-symmetry crystals, where
+they are physically interesting -- a monoclinic cell reduces
+by about four. The workaround is cheapest exactly where it
+is needed.
+
+### 13.3 Why this is a storage change
+
+The obvious repair -- build the Cartesian rotations and
+apply them where each star member is credited -- cannot
+work, and the reason decides the whole design.
+
+`computePairs` forms the squared modulus the instant the
+matrix element exists (`optc.F90:1399`), and the tetrahedron
+producer does the same:
+
+```fortran
+valeValeXMom(k) = sum(valeVale(:,i,1) &
+      & * conjWaveMomSum(:,finalStateIndex,k))
+transitionProbTemp(k,transPairCount) = ( &
+      & real(valeValeXMom(k),double)**2 &
+      & + aimag(valeValeXMom(k))**2) &
+      & * initStateFactor*finStateFactor
+```
+
+A squared modulus cannot be rotated. Under R,
+
+  |M'^c|^2 = sum_{d,e} R_cd R_ce M^d conjg(M^e)
+
+which needs the OFF-DIAGONAL products M^d conjg(M^e). The
+code keeps only the three diagonal entries of a rank-two
+tensor, so by the time anything could rotate, what it needs
+has been discarded.
+
+**Decision: keep the complex matrix element.** Store M^c as
+three complex numbers rather than three squared moduli,
+rotate at the deposit, and square there. Correct for every
+crystal system and both integration pathways.
+
+Storing the full Hermitian tensor M^d conjg(M^e) instead
+also works and is strictly worse: nine complex numbers where
+three suffice, since the tensor is reconstructible from the
+vector at the point of use.
+
+**Occupancy factors stay separate.** They are real scalars
+per (initial band, final band, k-point) and are folded into
+the stored product today. Folding them into the stored M as
+a square root would be wrong: the final-state vacancy
+`1 - occupancy` can go slightly negative through round-off
+near a Fermi surface, and the square root of a negative
+number is a crash rather than a rounding error. Store M
+unscaled and apply the real factor at the deposit, where the
+band and k-point indices are already in hand.
+
+### 13.4 The Cartesian rotation matrices
+
+The rotations exist only in FRACTIONAL form:
+`convAbcPointOps` as read from the k-point file, and
+`abcRealPointOps(3,3,numPointOps)` conjugated into the
+loaded direct basis by `computeRealPointOps` (section 2.7).
+There is no Cartesian form anywhere in `src/`.
+
+  R_cart = L R_abc L^-1
+
+with L the real lattice vectors as COLUMNS, which is
+`O_Lattice`'s `realVectors`. Note this is the transpose of
+the row layout the k-point file's `CONV_LATTICE` block uses;
+section 1.2's module data comment records the same trap.
+This is the conjugation `computeRealPointOps` already
+performs, into one more basis, so the new array belongs
+beside it in `O_KPoints` as `xyzRealPointOps(3,3,numPointOps)`,
+built in `initializeKPoints` on the same branches.
+
+Section 2.6 used to name `xyzPointOps` and `xyzFracTrans`
+among the arrays the SYBD branch skips allocating. Neither
+identifier has ever existed in the source; that prose is
+corrected alongside this section, and its point survives --
+`xyzRealPointOps` is built on the same branches as its
+fractional sibling and is therefore absent on the SYBD path
+and for k-point style code 0.
+
+### 13.5 Where the rotation is applied
+
+The two pathways reach IBZ correctness by different routes
+(section 12.6), so the rotation lands in a different place
+on each.
+
+**Tetrahedron pathway.** It already visits full-mesh corners
+directly and applies that corner's operation as it fetches,
+so the rotation joins the fetch. The corner supplies both
+the IBZ k-point and the operation index; the stored complex
+vector is rotated by `xyzRealPointOps(:,:,opR)` and squared
+there.
+
+**Gaussian pathway, totals.** The harder one, and the
+difficulty is structural rather than incidental: it never
+visits star members at all. It accumulates over IBZ points
+with `kPointFactor` carrying the star multiplicity through
+`kPointWeight`. There is no loop for a per-member rotation
+to live in.
+
+Two ways to give it one:
+
+  1. Add a star loop, mirroring the tetrahedron pathway.
+     Correct, and it multiplies the accumulation by the
+     reduction factor, 4 to 48, for a quantity whose
+     isotropic part was already right.
+  2. Precompute the star-summed rotation. What is wanted is
+     the sum over the star of |M'^c|^2, which is
+     sum_{d,e} (sum_R R_cd R_ce) M^d conjg(M^e). The inner
+     sum depends only on which operations make up that
+     star -- not on the band, the energy, or the matrix
+     element -- so it is a fixed 3x3x3 object per IBZ
+     k-point, computed once. The accumulation applies it to
+     the tensor formed from the stored vector, and the star
+     loop disappears.
+
+**Option 2 is chosen.** It leaves the Gaussian pathway's
+cost where it is, and it writes down explicitly what that
+pathway has always done implicitly -- sum over the star --
+instead of hiding it inside a multiplicity factor.
+
+### 13.6 The decomposed case
+
+The partial store holds, for each ordered pair of partials,
+the real part of a product between that pair's matrix
+element and the total over all pairs:
+
+  transProbPOPTCBanded(o,n,c) =
+      Re[ M_c(o,n) conjg( S_c ) ],
+      S_c = sum_{o',n'} M_c(o',n')
+
+Summing over (o,n) returns the undecomposed transition
+probability, which is the sum rule section 11 depends on.
+
+Both factors carry the component index, so both must be
+rotated, and the rotated quantity is Re[ M'_c(o,n)
+conjg(S'_c) ]. The store therefore keeps the complex
+M_c(o,n) and, separately, the complex total S_c. S_c is one
+vector per (initial band, final band, k-point, spin) rather
+than one per pair, so it costs nothing beside the pair
+matrix.
+
+**The star average of section 7a must move inside the
+component loop.** As written, `computePOPTCPairs` walks the
+star with the component index held FIXED outside it
+(`optc.F90:2596`), which is correct only while an operation
+cannot mix components. Once it can, the component index has
+to sit inside the star walk and the scratch slab has to
+carry it. This is the one place in the change where an
+existing loop nest is reordered rather than extended, and it
+is the first place to look if the sum rule breaks.
+
+### 13.7 Direction resolution, its control, and its cost
+
+**The cost ladder is blunter than it looks.** Per
+transition, per partial pair:
+
+```
+  what is wanted            stored        against today
+  ----------------------------------------------------
+  isotropic only            1 real        one third
+  diagonal x, y, z          3 complex     twice
+  full symmetric tensor     3 complex     twice
+  full Hermitian tensor     3 complex     twice
+```
+
+Anything directional costs the SAME to store, because it all
+comes from the same three complex numbers at the deposit.
+So the storage decision is binary -- isotropic or
+directional -- and choosing between the diagonal and the
+full tensor costs accumulation time and output width only.
+
+The other end is the useful surprise: an isotropic-only mode
+is a third of today's storage rather than a compromise, and
+the isotropic column is the one most users read.
+
+**Three levels, controlled from `OPTC_INPUT_DATA`.** This is
+an optical output choice rather than an integration one, so
+it sits beside `detailCodePOPTC` rather than in the k-point
+file where sections 1.2 and 1.7 put their settings. It forms
+a THIRD axis on section 11's grouping-by-resolution grid
+rather than crossing into it: crossing would turn five
+decomposition codes into fifteen.
+
+```
+  0   isotropic only.  One column per unit.  Correct on any
+        mesh today, and the cheapest thing the code can do.
+  1   diagonal.  The TOTAL x y z columns written today,
+        made correct on a reduced mesh.
+  2   full symmetric tensor.  Six components, xx yy zz xy
+        xz yz, which Imago cannot express at all today and
+        which monoclinic and triclinic crystals require.
+```
+
+Level 2 is nearly free once level 1 exists, since it needs
+no extra storage -- only a wider accumulation and a wider
+output record.
+
+**Totals and partials are set independently.** The
+undecomposed store carries no `sumNumPartials` factor and is
+small; `transProbPOPTCBanded` is sized as
+
+  sumNumPartials^2 x 3 x numKPoints x nOcc x nUnocc x spin
+
+so it grows as the SQUARE of the atom count and is already
+the binding array -- which is why TODO O8 exists. Doubling
+it matters most exactly where it is already the limit.
+Tying the two settings together would make anyone who wants
+directional totals on a large system pay for directional
+partials they may not want, so they are separate fields.
+
+The natural combination on a large low-symmetry system is
+therefore level 2 on the totals and level 0 on the partials:
+the full dielectric tensor where it is affordable, and the
+direction-averaged decomposition where it is not.
+
+**What level 2 opens.** A dielectric response is a
+three-by-three tensor whose off-diagonal parts are
+physically real for monoclinic and triclinic crystals and
+are not computed at all today. Once the complex vector is
+stored they are products of quantities already in hand.
+Writing them changes the output record width and therefore
+`imagoKKc` and `processPOPTC.py`, which is why level 2 is a
+level rather than the default.
+
+**What is NOT added.** No diagonalization on either
+pathway, and the Gaussian pathway's star-summed rotation is
+built once per IBZ k-point rather than once per transition.
+Section 11.4's cost projection and TODO O8 need the storage
+factor above.
+
+### 13.8 Seam inventory
+
+Every quantity the new code consumes or produces: where it
+comes from, who builds it, and when.
+
+```
+quantity            supplied by           lifetime
+------------------------------------------------------------
+abcRealPointOps     computeRealPointOps,  built in
+                      from convAbcPointOps  initializeKPoints
+                      (section 2.7)         for style codes
+                                            0, 1, 2; NOT on
+                                            the SYBD branch
+realVectors         O_Lattice, read from  resident for the
+                      the structure file    whole run; its
+                                            COLUMNS are the
+                                            lattice vectors
+xyzRealPointOps     NEW. Built beside     same branches and
+                      abcRealPointOps as    lifetime as
+                      L R_abc L^-1          abcRealPointOps
+fullKPToIBZOpMap    the IBZ fold in       before optc runs;
+                      initializeKPointMesh  absent for style
+                                            code 0
+transitionProb,     computePairs and      become COMPLEX;
+  transProbBanded     computeTransProb-     allocation sites
+                      Banded                and lifetimes
+                                            otherwise unchanged
+transProbPOPTC-     computeTransProb-     becomes COMPLEX and
+  Banded              POPTCBanded           gains a companion
+                                            holding the
+                                            per-pair total S_c
+starRotationSum     NEW. One 3x3x3 per    built once after
+                      IBZ k-point from      the IBZ fold,
+                      that point's star     released with the
+                                            k-point set
+cartesianCodeOPTC,  NEW. readOptcControl, read once per run,
+  cartesianCode-      from fort.5's         before any store
+  POPTC               OPTC_INPUT_DATA;      is sized -- both
+                      O_Input               stores are
+                                            dimensioned from
+                                            them
+```
+
+Two consequences bind the code. The permutation tables are
+absent for k-point style code 0, and `xyzRealPointOps` will
+be too since it is built on the same branches, so every
+consumer guards on allocation and writes to fort.20 when it
+skipped -- exactly as section 1.7 requires of the
+symmetrization. And the SYBD branch builds no point-op
+machinery at all (section 2.6), so a band structure run must
+not reach any of this.
+
+### 13.9 Relation to the partial DOS restriction
+
+Section 1.4 refuses `detailCodePDOS == 3` on the tetrahedron
+pathway because per-lm projections "require D^l(R) rotation
+matrices". The three Cartesian components of a vector ARE
+the l = 1 representation, so the optical columns are the
+l = 1 instance of that same gap: the unfolding handles the
+site index and nothing handles the representation index.
+
+For l = 1 the matrix is R itself, which makes this the cheap
+end of one piece of work rather than a separate problem. A
+later section closing the PDOS restriction should generalize
+`xyzRealPointOps` to the D^l(R) it needs rather than
+introduce a second mechanism beside it.

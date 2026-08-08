@@ -7650,15 +7650,51 @@ is not carried only in conversation.
   from the same quantities, so this is the only route that
   lets Imago express something it currently cannot.
 
-  **Chain state: nothing written.**  O3 sits in this section,
-  which is outside the document chain, so the work starts at
-  DESIGN -- not at code.  DESIGN must settle the storage
-  change and its memory consequence, the Cartesian rotation
-  array, and whether the off-diagonal tensor components become
-  output or merely become possible.  Then PSEUDOCODE, then
-  code.  Design it together with the PDOS mode 3 restriction
-  of DESIGN 1.4, which is the same missing machinery at higher
-  angular momentum.
+  **Chain state: DESIGN 13 WRITTEN 2026-08-07.**  O3 sits in
+  this section, which is outside the document chain, so the
+  work started at DESIGN.  That section now carries the whole
+  argument and this entry should not be treated as the
+  specification.  PSEUDOCODE is next, then code.
+
+  Three things DESIGN 13 settles that are not obvious from
+  the above:
+
+  - **The Cartesian axis is independent of the atom
+    decomposition**, and the output makes that easy to miss.
+    Every unit of a partial file, the undecomposed one and
+    all 25 atom pairs alike, carries `COL_LABELS 4` and
+    `TOTAL x y z`.  "TOTAL" there means direction-AVERAGED,
+    not undecomposed.  The defect costs the x, y and z
+    columns of every unit and none of the isotropic ones --
+    including the partials', which needs its own orthogonality
+    argument because a partial stores a cross-term rather than
+    a modulus.
+  - **Anything directional costs the same to store.**  One
+    real for isotropic only, three complex for the diagonal,
+    and three complex for the full tensor.  So the storage
+    decision is binary and the diagonal-versus-tensor choice
+    costs only accumulation time and output width.  An
+    isotropic-only mode is a THIRD of today's storage, not a
+    compromise.
+  - **The Gaussian totals pathway has no star loop to put a
+    rotation in.**  It accumulates over irreducible points
+    with the multiplicity carried in `kPointWeight`.  DESIGN
+    13.5 precomputes a star-summed rotation per irreducible
+    k-point instead of adding the loop, which keeps that
+    pathway's cost where it is.
+
+  **Decided with the user 2026-08-07.**  Three direction
+  levels (isotropic / diagonal / full symmetric tensor),
+  controlled from `OPTC_INPUT_DATA` beside `detailCodePOPTC`
+  as a third axis on section 11's grid, with SEPARATE fields
+  for the totals and the partials -- because
+  `transProbPOPTCBanded` grows as the square of the atom count
+  and is already the binding array, while the undecomposed
+  store is small.
+
+  Design the eventual generalization together with the PDOS
+  mode 3 restriction of DESIGN 1.4: the Cartesian components
+  are the l = 1 case of the same missing machinery.
 
   Note also that DESIGN 2.6 names `xyzPointOps` and
   `xyzFracTrans` among the arrays the SYBD branch skips
