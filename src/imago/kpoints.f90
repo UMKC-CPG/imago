@@ -157,6 +157,16 @@ module O_KPoints
          !   expressed in fractional coordinates of the matching
          !   reciprocal lattice. buildAtomPerm consumes these.
          !   Dimensions: (3, 3, numPointOps).
+   real (kind=double), allocatable, dimension (:,:,:) :: xyzRealPointOps
+         !   The same point group operations again, in CARTESIAN form.
+         !   Needed because the momentum operator is a vector: when an
+         !   optical matrix element computed at an irreducible kpoint is
+         !   unfolded onto a member of that point's star, its three
+         !   Cartesian components MIX, and permuting atoms is not enough
+         !   (DESIGN 13). A fractional vector f sits at Cartesian r = L f
+         !   with L the lattice vectors as columns, so these are
+         !   L R_abc L^-1 built from abcRealPointOps by
+         !   computeXyzPointOps. Dimensions: (3, 3, numPointOps).
    real (kind=double), allocatable, dimension (:,:) :: abcRealFracTrans
          !   Per-operation fractional translation vectors transformed
          !   into the same real-space abc basis as abcRealPointOps -- the
@@ -1278,6 +1288,12 @@ subroutine initializeKPoints (inSCF)
       !   consumes abcRealPointOps free of style-code special cases.
       call computeRealPointOps
 
+      ! The Cartesian twin, for the same reason: with an explicit kpoint
+      !   list every operation index is the identity, so the rotation is a
+      !   no-op, but the array must exist for its consumers to index
+      !   without asking which style code produced the mesh.
+      call computeXyzPointOps
+
       numFullMeshKP = numKPoints
       allocate (fullKPToIBZKPMap(numKPoints))
       allocate (fullKPToIBZOpMap(numKPoints))
@@ -1292,6 +1308,7 @@ subroutine initializeKPoints (inSCF)
       !   AUTO shift request from those counts (DESIGN 3.9).
       call computeRealPointOps
       call computeRecipPointOps
+      call computeXyzPointOps
       ! Unlike the density branch, the counts are already fixed, so
       !   the axis classes are not needed to SELECT them.  They are
       !   computed here only so the run can emit RESOLVED_KP_CLASSES
@@ -1311,6 +1328,7 @@ subroutine initializeKPoints (inSCF)
       !   counts, since the shift choice depends on their parity.
       call computeRealPointOps
       call computeRecipPointOps
+      call computeXyzPointOps
       call computeAxisClasses(axisClass)
       call selectAxialCounts(axisClass)
       call resolveShift
@@ -2232,6 +2250,114 @@ subroutine computeRealPointOps
 end subroutine computeRealPointOps
 
 
+! Build the CARTESIAN form of the point group operations (DESIGN 13.4;
+!   PSEUDOCODE 21.2).
+!
+! Why a third form is needed when two already exist. abcRealPointOps acts
+!   on atom positions in fractional coordinates and abcRecipPointOps acts
+!   on kpoints in fractional coordinates; both are what you want for
+!   anything indexed by site or by kpoint. The optical matrix elements are
+!   different in kind: the momentum operator is a VECTOR, and its three
+!   Cartesian components mix under an operation,
+!
+!     P_i(Rk) = sum_j R_ij P_j(k)
+!
+!   so unfolding an optical matrix element from an irreducible kpoint onto
+!   a member of its star means rotating those components. A fractional
+!   rotation cannot do that job: it acts on the wrong kind of index.
+!
+! The conversion. A vector with fractional coordinates f sits at Cartesian
+!   position r = L f, where L holds the lattice vectors as COLUMNS -- which
+!   is exactly how O_Lattice stores realVectors. (Note the kpoint file's
+!   CONV_LATTICE block uses the transpose of that layout, one vector per
+!   ROW; confusing the two is a standing trap in this file.) So the same
+!   operation expressed in Cartesian coordinates is
+!
+!     R_xyz = L R_abc L^-1
+!
+! This starts from abcRealPointOps rather than from the on-disk
+!   convAbcPointOps so that it inherits the full/prim cell-mode handling
+!   computeRealPointOps has already done, instead of repeating that branch
+!   and risking the two drifting apart.
+subroutine computeXyzPointOps
+
+   ! Import necessary modules.
+   use O_Kinds
+   use O_Lattice, only: realVectors
+
+   implicit none
+
+   ! Define local variables.
+   integer :: opIdx  ! Point group operation loop index.
+   integer :: row, col
+   real (kind=double), dimension (3,3) :: realVectorsInv
+         !   L^-1, the Cartesian-to-fractional direction.
+   real (kind=double), dimension (3,3) :: shouldBeIdentity
+         !   R R^T for the orthogonality check below.
+   real (kind=double) :: worstDeviation
+
+   ! The orthogonality tolerance. These matrices are built from a handful
+   !   of multiplications of numbers of order one, so anything beyond a few
+   !   parts in 10^10 is a real defect and not accumulated round-off.
+   real (kind=double), parameter :: orthogonalityTol = 1.0e-10_double
+
+   allocate (xyzRealPointOps(3, 3, numPointOps))
+
+   call invert3x3(realVectors, realVectorsInv)
+
+   do opIdx = 1, numPointOps
+      xyzRealPointOps(:,:,opIdx) = matmul(realVectors, &
+            & matmul(abcRealPointOps(:,:,opIdx), realVectorsInv))
+   enddo
+
+   ! Check the result before anything is built on it. A symmetry operation
+   !   is a rigid motion, so its Cartesian form must be orthogonal: R R^T
+   !   is the identity. That is NOT automatic here -- it holds only because
+   !   the operation really is a symmetry of the lattice that was loaded --
+   !   so a failure means either the conjugation above is wrong or the cell
+   !   does not have the symmetry its space group claims.
+   !
+   ! This check earns its place because every downstream symptom of getting
+   !   it wrong looks like a physics result. A non-orthogonal rotation
+   !   still produces a spectrum, still integrates to something plausible,
+   !   and differs from the truth by an amount a reader would sooner blame
+   !   on k-point convergence.
+   worstDeviation = 0.0_double
+   do opIdx = 1, numPointOps
+      shouldBeIdentity = matmul(xyzRealPointOps(:,:,opIdx), &
+            & transpose(xyzRealPointOps(:,:,opIdx)))
+      do row = 1, 3
+         shouldBeIdentity(row,row) = shouldBeIdentity(row,row) &
+               & - 1.0_double
+      enddo
+      do row = 1, 3
+         do col = 1, 3
+            worstDeviation = max(worstDeviation, &
+                  & abs(shouldBeIdentity(row,col)))
+         enddo
+      enddo
+   enddo
+
+   if (worstDeviation > orthogonalityTol) then
+      write (20,*) 'ERROR: the Cartesian point group operations are not'
+      write (20,*) 'orthogonal. R R^T departs from the identity by ',&
+            & worstDeviation
+      write (20,*) 'A symmetry operation is a rigid motion, so this means'
+      write (20,*) 'either the loaded cell does not have the symmetry its'
+      write (20,*) 'space group claims, or the conventional lattice given'
+      write (20,*) 'in the kpoint file does not match that cell.'
+      call flush (20)
+      stop 'computeXyzPointOps: rotations are not orthogonal'
+   endif
+
+   write (20,fmt="(a,i4,a,e12.5)") &
+         & " Cartesian point ops built: ",numPointOps,&
+         & ", worst departure from orthogonality ",worstDeviation
+   call flush (20)
+
+end subroutine computeXyzPointOps
+
+
 ! Invert a 3x3 real matrix using cofactor expansion.  Used by
 !   computeRealPointOps and computeRecipPointOps to form
 !   C^{-1} from C = invRealVectors^T * convLattice when the
@@ -2349,6 +2475,9 @@ subroutine cleanUpKPoints
    endif
    if (allocated(abcRealFracTrans)) then
       deallocate (abcRealFracTrans)
+   endif
+   if (allocated(xyzRealPointOps)) then
+      deallocate (xyzRealPointOps)
    endif
 
    ! Only allocated when the mesh is built internally (style codes 1, 2) with or

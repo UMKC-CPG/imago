@@ -39,7 +39,8 @@ subroutine computeOptcSpectra(doOPTC)
    use O_Lattice,         only: realCellVolume
    use O_KPoints,         only: numKPoints, kPointWeight
    use O_OptcTransitions, only: maxTransEnergy, energyMin, energyScale,&
-                                & sumNumPartials
+                                & sumNumPartials, numAccumCompOPTC, &
+                                & numAccumCompPOPTC
    use O_Input,           only: sigmaOPTC, deltaOPTC, sigmaPACS, deltaPACS,&
                                 & detailCodePOPTC
    use O_Constants,       only: dim3, pi, auTime, eCharge, hPlanck, hartree
@@ -158,13 +159,18 @@ subroutine computeOptcSpectra(doOPTC)
 
    ! Allocate space to hold the appropriate optical conductivity and then
    !   initialize.
+   ! How many spectra each array carries is set by the direction code
+   !   rather than fixed at three (PSEUDOCODE 21.3): one for the
+   !   direction average alone, three for x, y and z, six for the
+   !   symmetric tensor. The leading isotropic column is NOT among them;
+   !   it is formed from the diagonal entries when the file is written.
    if (detailCodePOPTC == 0) then
-      allocate (optcCond(dim3,numEnergyPoints,spin))
+      allocate (optcCond(numAccumCompOPTC,numEnergyPoints,spin))
       optcCond(:,:,:) = 0.0_double
    else
-      allocate (optcCond(dim3,numEnergyPoints,spin))
-      allocate (optcCondPOPTC(sumNumPartials,sumNumPartials,dim3,&
-            & numEnergyPoints,spin))
+      allocate (optcCond(numAccumCompOPTC,numEnergyPoints,spin))
+      allocate (optcCondPOPTC(sumNumPartials,sumNumPartials, &
+            & numAccumCompPOPTC,numEnergyPoints,spin))
       optcCond(:,:,:) = 0.0_double
       optcCondPOPTC(:,:,:,:,:) = 0.0_double
    endif
@@ -308,7 +314,8 @@ subroutine accumulateOptcCond (kPointFactor, sigma)
    use O_Potential,       only: spin
    use O_KPoints,         only: numKPoints
    use O_OptcTransitions, only: energyScale, energyDiff, transCounter, &
-         & transitionProb
+         & transitionProb, transitionMoment, pairOccupancy, &
+         & numStoredCompOPTC, numAccumCompOPTC
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
@@ -320,11 +327,71 @@ subroutine accumulateOptcCond (kPointFactor, sigma)
    ! Define local variables
    real (kind=double) :: broadenEnergyDiff
    real (kind=double) :: expAlpha
+   real (kind=double) :: broadenWeight ! Everything but the strength.
    integer :: h,i,j,k
+   integer :: c,d,e ! Cartesian component indices.
+   real (kind=double), allocatable, dimension (:,:,:,:,:) :: starRotAvg
+   real (kind=double), dimension (numAccumCompOPTC) :: strength
+         !   This transition's contribution before broadening.
+   real (kind=double), dimension (3,3) :: momentProduct
+         !   Re[ M_d conjg(M_e) ], the only combination of the stored
+         !   element any direction code needs.
+
+   ! At direction codes 1 and 2 the star-averaged rotation products have
+   !   to be in hand before the loop begins. See the routine's own
+   !   commentary for why an average and not a sum.
+   if (numStoredCompOPTC > 1) then
+      allocate (starRotAvg (3,3,3,3,numKPoints))
+      call buildStarRotationAverage (starRotAvg)
+   endif
 
    do h = 1, spin
       do i = 1, numKPoints
          do j = 1, transCounter(i,h)
+
+            ! Form this transition's strength once per pair rather than
+            !   once per energy point. It does not depend on the energy
+            !   point at all, and the energy loop below runs to
+            !   thousands of points, so building it inside would repeat
+            !   the whole rotation contraction for every one of them.
+            if (numStoredCompOPTC == 1) then
+
+               ! Direction code 0. The producer already collapsed to the
+               !   rotation-invariant direction sum, so there is nothing
+               !   to rotate and nothing to combine.
+               strength(1) = transitionProb(1,j,i,h)
+            else
+
+               ! Codes 1 and 2. Build the outer product of the matrix
+               !   element with its own conjugate. Only the real part
+               !   survives into any spectrum: the imaginary part is
+               !   antisymmetric in d and e while the rotation product
+               !   contracted against it is symmetric, so it cancels.
+               do d = 1, 3
+                  do e = 1, 3
+#ifndef GAMMA
+                     momentProduct(d,e) = &
+                           & real(transitionMoment(d,j,i,h) &
+                           & * conjg(transitionMoment(e,j,i,h)),double)
+#else
+                     momentProduct(d,e) = transitionMoment(d,j,i,h) &
+                           & * transitionMoment(e,j,i,h)
+#endif
+                  enddo
+               enddo
+
+               ! Contract with the star average. For the diagonal
+               !   entries this is the rotated squared magnitude
+               !   averaged over the star; for the off-diagonal entries
+               !   of code 2 it is the corresponding averaged product.
+               call contractStarRotation (starRotAvg(:,:,:,:,i), &
+                     & momentProduct,numAccumCompOPTC,strength)
+
+               ! The occupancy weight, held out of the element so that
+               !   it never had to be square rooted, rejoins here.
+               strength(:) = strength(:) * pairOccupancy(j,i,h)
+            endif
+
             do k = 1, numEnergyPoints
 
                ! Determine the energy difference between the current transition
@@ -339,16 +406,156 @@ subroutine accumulateOptcCond (kPointFactor, sigma)
                !   complete the broadening for this set because it will not
                !   have a significant effect.
                if (expAlpha < 50.0_double) then
+                  broadenWeight = exp(-expAlpha) * kPointFactor(i)
                   optcCond(:,k,h) = optcCond(:,k,h) &
-                        & + transitionProb(:,j,i,h) * exp(-expAlpha) &
-                        & * kPointFactor(i)
+                        & + strength(:) * broadenWeight
                endif
             enddo
          enddo
       enddo
    enddo
 
+   if (allocated(starRotAvg)) then
+      deallocate (starRotAvg)
+   endif
+
 end subroutine accumulateOptcCond
+
+
+! Average the product of two rotation entries over the star of each
+!   irreducible k-point (DESIGN 13.5, PSEUDOCODE 21.5).
+!
+! Why this exists at all. The Gaussian pathway has NO star loop: it
+!   accumulates over irreducible points and carries the star
+!   multiplicity inside kPointWeight. So there is nowhere for a
+!   per-star-member rotation to live, and adding such a loop would
+!   multiply the cost of the accumulation by the reduction factor --
+!   four to forty-eight. What the accumulation actually needs from the
+!   star is only the AVERAGE of R(c,d)*R(c2,e) over its members, which
+!   depends on the star alone: not on the band, not on the energy, not
+!   on the matrix element. So it is computed once here and reused.
+!
+! It must be the AVERAGE and never the sum. kPointWeight already
+!   carries the star multiplicity, so summing here would apply the
+!   symmetry twice -- the same double-counting trap PSEUDOCODE 19.5
+!   records for the tetrahedron pathway. On an unreduced mesh every
+!   star has one member, the average is the identity's own product, and
+!   the accumulation reduces exactly to what it was before this change.
+!
+! The four index form generalizes PSEUDOCODE 21.5, which writes three
+!   indices because it describes direction code 1. Code 1 needs only
+!   the entries with c2 equal to c, and reads them from this array
+!   unchanged; code 2 needs the off diagonal c2 as well.
+subroutine buildStarRotationAverage (starRotAvg)
+
+   ! Import the necessary data modules.
+   use O_Kinds
+   use O_KPoints, only: numKPoints, numFullMeshKP, fullKPToIBZKPMap, &
+         & fullKPToIBZOpMap, xyzRealPointOps
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define the dummy variables passed to this subroutine.
+   real (kind=double), dimension (3,3,3,3,numKPoints) :: starRotAvg
+
+   ! Define local variables.
+   integer :: kFull, kIBZ, c, c2, d, e
+   integer, allocatable, dimension (:) :: starSize
+   real (kind=double), dimension (3,3) :: rotation
+
+   allocate (starSize (numKPoints))
+   starSize(:) = 0
+   starRotAvg(:,:,:,:,:) = 0.0_double
+
+   ! Without a folded mesh there is no star to average over. This
+   !   happens for an explicitly listed k-point set, where each point
+   !   stands for itself; the identity below then leaves the
+   !   accumulation exactly as it was.
+   if ((.not. allocated(fullKPToIBZKPMap)) .or. &
+         & (.not. allocated(xyzRealPointOps))) then
+      do kIBZ = 1, numKPoints
+         do c = 1, 3
+            starRotAvg(c,c,c,c,kIBZ) = 1.0_double
+         enddo
+      enddo
+      deallocate (starSize)
+      return
+   endif
+
+   do kFull = 1, numFullMeshKP
+      kIBZ = fullKPToIBZKPMap(kFull)
+      rotation(:,:) = xyzRealPointOps(:,:,fullKPToIBZOpMap(kFull))
+      starSize(kIBZ) = starSize(kIBZ) + 1
+
+      do c = 1, 3
+         do c2 = 1, 3
+            do d = 1, 3
+               do e = 1, 3
+                  starRotAvg(c,c2,d,e,kIBZ) = &
+                        & starRotAvg(c,c2,d,e,kIBZ) &
+                        & + rotation(c,d) * rotation(c2,e)
+               enddo
+            enddo
+         enddo
+      enddo
+   enddo
+
+   do kIBZ = 1, numKPoints
+      if (starSize(kIBZ) > 0) then
+         starRotAvg(:,:,:,:,kIBZ) = starRotAvg(:,:,:,:,kIBZ) &
+               & / real(starSize(kIBZ),double)
+      endif
+   enddo
+
+   deallocate (starSize)
+
+end subroutine buildStarRotationAverage
+
+
+! Contract one k-point's star-averaged rotation products against one
+!   transition's moment product, producing the spectra entries this
+!   direction code asks for.
+!
+! The tensor entry order is the one PSEUDOCODE 21.7 declares and the
+!   printer relies on: xx, yy, zz, then xy, xz, yz. Changing it here
+!   without changing the header there would mislabel every column, in a
+!   way no sum rule could detect.
+subroutine contractStarRotation (starRotAvg,momentProduct,numWanted, &
+      & strength)
+
+   ! Import the necessary data modules.
+   use O_Kinds
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define the dummy variables passed to this subroutine.
+   real (kind=double), dimension (3,3,3,3) :: starRotAvg
+   real (kind=double), dimension (3,3) :: momentProduct
+   integer :: numWanted
+   real (kind=double), dimension (numWanted) :: strength
+
+   ! Define local variables.
+   integer :: slot, d, e
+   integer, dimension (6), parameter :: firstOfPair = &
+         & (/ 1, 2, 3, 1, 1, 2 /)
+   integer, dimension (6), parameter :: secondOfPair = &
+         & (/ 1, 2, 3, 2, 3, 3 /)
+
+   strength(:) = 0.0_double
+
+   do slot = 1, numWanted
+      do d = 1, 3
+         do e = 1, 3
+            strength(slot) = strength(slot) &
+                  & + starRotAvg(firstOfPair(slot), &
+                  & secondOfPair(slot),d,e) * momentProduct(d,e)
+         enddo
+      enddo
+   enddo
+
+end subroutine contractStarRotation
 
 
 ! The decomposed counterpart, identical in structure and looping over
@@ -423,10 +630,11 @@ subroutine accumulateOptcCond_LAT (latFactor)
    use O_MathSubs,        only: bloechlCornerDOSWt
    use O_SecularEquation, only: energyEigenValues
    use O_KPoints,         only: numTetrahedra, tetraVol, tetrahedra, &
-         & fullKPToIBZKPMap
+         & fullKPToIBZKPMap, fullKPToIBZOpMap, xyzRealPointOps
    use O_OptcTransitions, only: energyScale, transProbBanded, &
          & bandedInitLo, bandedInitHi, bandedFinLo, bandedFinHi, &
-         & pairIsWanted
+         & pairIsWanted, transMomentBanded, bandedOccupancy, &
+         & numStoredCompOPTC, numAccumCompOPTC
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
@@ -442,11 +650,26 @@ subroutine accumulateOptcCond_LAT (latFactor)
    integer :: firstPoint, lastPoint ! Energy range this tetrahedron spans.
    integer, dimension (4) :: sortOrder ! Sorted corner to original corner.
    integer, dimension (4) :: cornerKP  ! IBZ k-point of each corner.
+   integer, dimension (4) :: cornerOp  ! Operation carrying IBZ to corner.
    real (kind=double), dimension (4) :: epsDiff
    real (kind=double), dimension (4) :: cornerDOSWt
    real (kind=double) :: tempVal
    real (kind=double) :: energyStep
    real (kind=double) :: energy
+   integer :: slot, d, e ! Spectrum slot and Cartesian component indices.
+   real (kind=double), dimension (numAccumCompOPTC) :: cornerStrength
+         !   One corner's contribution before the tetrahedron weight.
+   ! The tensor entry order declared by PSEUDOCODE 21.7 and relied on by
+   !   the printed header: xx, yy, zz, xy, xz, yz.
+   integer, dimension (6), parameter :: firstOfPair = &
+         & (/ 1, 2, 3, 1, 1, 2 /)
+   integer, dimension (6), parameter :: secondOfPair = &
+         & (/ 1, 2, 3, 2, 3, 3 /)
+#ifndef GAMMA
+   complex (kind=double), dimension (3) :: rotatedMoment
+#else
+   real (kind=double), dimension (3) :: rotatedMoment
+#endif
 
    ! The grid is uniform, so its step can be recovered from it rather
    !   than passed in. Taking it from the scale itself means the bounds
@@ -473,6 +696,7 @@ subroutine accumulateOptcCond_LAT (latFactor)
                !   enters here.
                do c = 1, 4
                   cornerKP(c) = fullKPToIBZKPMap(tetrahedra(c,t))
+                  cornerOp(c) = fullKPToIBZOpMap(tetrahedra(c,t))
                   epsDiff(c) = energyEigenValues(j,cornerKP(c),h) &
                         & - energyEigenValues(i,cornerKP(c),h)
                   sortOrder(c) = c
@@ -538,9 +762,57 @@ subroutine accumulateOptcCond_LAT (latFactor)
                      if (abs(cornerDOSWt(c)) < 1.0d-30) cycle
                      orig = sortOrder(c)
 
+                     if (numStoredCompOPTC == 1) then
+
+                        ! Direction code 0. The stored number is the
+                        !   rotation-invariant direction sum, so this
+                        !   corner needs no operation applied to it.
+                        cornerStrength(1) = &
+                              & transProbBanded(1,cornerKP(orig),i,j,h)
+                     else
+
+                        ! Codes 1 and 2. This corner is a full-mesh
+                        !   k-point reached from its irreducible
+                        !   representative by cornerOp, and the momentum
+                        !   operator is a vector, so the element that
+                        !   belongs at this corner is the stored one
+                        !   ROTATED by that operation. Rotate first and
+                        !   square afterwards; doing it the other way
+                        !   round is precisely the defect this change
+                        !   exists to remove, because squaring destroys
+                        !   the cross terms a rotated square is built
+                        !   from.
+                        rotatedMoment(:) = matmul( &
+                              & xyzRealPointOps(:,:,cornerOp(orig)), &
+                              & transMomentBanded(:,cornerKP(orig), &
+                              & i,j,h))
+
+                        do slot = 1, numAccumCompOPTC
+                           d = firstOfPair(slot)
+                           e = secondOfPair(slot)
+#ifndef GAMMA
+                           cornerStrength(slot) = &
+                                 & real(rotatedMoment(d) &
+                                 & * conjg(rotatedMoment(e)),double)
+#else
+                           cornerStrength(slot) = rotatedMoment(d) &
+                                 & * rotatedMoment(e)
+#endif
+                        enddo
+
+                        ! The occupancy weight, kept out of the element
+                        !   so it never had to be square rooted, rejoins
+                        !   here. It belongs to the irreducible
+                        !   representative because occupancy is a
+                        !   property of the band and the k-point, both
+                        !   of which the operation leaves unchanged.
+                        cornerStrength(:) = cornerStrength(:) &
+                              & * bandedOccupancy(cornerKP(orig),i,j,h)
+                     endif
+
                      optcCond(:,iE,h) = optcCond(:,iE,h) &
                            & + cornerDOSWt(c) * tetraVol * latFactor &
-                           & * transProbBanded(:,cornerKP(orig),i,j,h)
+                           & * cornerStrength(:)
                   enddo
                enddo
             enddo
@@ -788,7 +1060,8 @@ subroutine printSpectrum (specType,numEnergyPoints,spectrum,conversionFactor)
    use O_Kinds
    use O_Potential,       only: spin
    use O_Constants,       only: hartree
-   use O_OptcTransitions, only: energyScale
+   use O_OptcTransitions, only: energyScale, numAccumCompOPTC, &
+         & numPrintColOPTC
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
@@ -800,32 +1073,63 @@ subroutine printSpectrum (specType,numEnergyPoints,spectrum,conversionFactor)
    real (kind=double) :: conversionFactor
 
    ! Define the local variables
-   character*75 :: header
+   ! Wide enough for the largest record the direction codes allow: the
+   !   energy, the isotropic column and the six tensor entries, each in
+   !   a fifteen character field.
+   character*120 :: header
+   character*20  :: headerFormat, recordFormat
+   character*10  :: specTag ! "Cond", "Eps2" or "XANES".
    integer :: h,i
    integer :: unitBase
+   real (kind=double) :: isotropic
+   ! The suffixes naming each accumulated column, in the order
+   !   PSEUDOCODE 21.7 declares and the deposit fills. Only the first
+   !   numAccumCompOPTC of them are ever used.
+   character*3, dimension (6), parameter :: columnTag = &
+         & (/ "x  ", "y  ", "z  ", "xy ", "xz ", "yz " /)
 
 
 
-   ! Customize the output for the current spectrum type.
+   ! Customize the output for the current spectrum type. The column
+   !   count follows the direction code rather than being fixed at five,
+   !   so both the header and the record are built rather than written
+   !   as literals (PSEUDOCODE 21.7).
    if (specType == 0) then ! XANES/ELNES
       unitBase = 49
-      write (header, fmt="(5a15)") "Energy","totalXANES","xXANES",&
-            & "yXANES","zXANES"
+      specTag = "XANES"
    elseif (specType == 1) then ! Optical Conductivity
       unitBase = 39
-      write (header,fmt="(5a15)") "Energy","totalCond","xCond","yCond","zCond"
+      specTag = "Cond"
    elseif (specType == 2) then ! Epsilon2
       unitBase = 49
-      write (header,fmt="(5a15)") "Energy","totalEps2","xEps2","yEps2","zEps2"
+      specTag = "Eps2"
    else
       stop "Need a spectrum type of 0, 1, or 2"
+   endif
+
+   ! One field for the energy, then the isotropic column, then whichever
+   !   direction resolved columns this run carries. At direction code 0
+   !   the loop below adds nothing and the record is energy plus the
+   !   isotropic value alone.
+   write (headerFormat,fmt="(a,i2,a)") "(",numPrintColOPTC+1,"a15)"
+   write (recordFormat,fmt="(a,i2,a)") "(",numPrintColOPTC+1,"e15.7)"
+
+   header = ""
+   if (numPrintColOPTC == 1) then
+      write (header,fmt=headerFormat) "Energy","total"//trim(specTag)
+   else
+      write (header,fmt=headerFormat) "Energy","total"//trim(specTag),&
+            & (trim(columnTag(i))//trim(specTag), &
+            & i = 1, numAccumCompOPTC)
    endif
 
    ! Print the total (if spin == 1) or spin up and spin down (if spin == 2).
    do h = 1, spin
 
-      ! Insert the appropriate header.
-      write(unitBase+h,fmt="(a75)") header
+      ! Insert the appropriate header. Trimmed rather than written at
+      !   the full buffer width so that a narrow direction code does not
+      !   leave a trail of blanks behind the last column name.
+      write(unitBase+h,fmt="(a)") trim(header)
 
       do i = 1, numEnergyPoints
 
@@ -833,12 +1137,28 @@ subroutine printSpectrum (specType,numEnergyPoints,spectrum,conversionFactor)
          !   called for printing either XANES/ELNES or the optical
          !   conductivity then the optcCond data structure is modified. For
          !   printing epsilon2, that modification side-effect is an expected
-         !   prerequisite operation. 
+         !   prerequisite operation.
          spectrum(:,i,h) = spectrum(:,i,h) * conversionFactor / energyScale(i)
 
+         ! The isotropic column is the average over the three Cartesian
+         !   directions, and it is formed here rather than accumulated.
+         !   At direction code 0 the single stored number is already the
+         !   SUM over the three, so the same division by three applies;
+         !   at codes 1 and 2 the first three accumulated entries are
+         !   the diagonal, and the off diagonal entries of code 2 must
+         !   be left out of it.
+         isotropic = sum(spectrum(1:min(3,numAccumCompOPTC),i,h)) &
+               & / 3.0_double
+
          ! Record the spectra to disk, making sure to convert the scale to eV.
-         write (unitBase+h,fmt="(5e15.7)") energyScale(i)*hartree,&
-               & sum(spectrum(:,i,h))/3.0_double,spectrum(:,i,h)
+         if (numPrintColOPTC == 1) then
+            write (unitBase+h,fmt=recordFormat) &
+                  & energyScale(i)*hartree,isotropic
+         else
+            write (unitBase+h,fmt=recordFormat) &
+                  & energyScale(i)*hartree,isotropic, &
+                  & spectrum(1:numAccumCompOPTC,i,h)
+         endif
       enddo
    enddo
 end subroutine printSpectrum

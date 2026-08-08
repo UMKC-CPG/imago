@@ -341,6 +341,15 @@ class ScriptSettings:
         self.e_cutoff_nlop = rc["e_cutoff_nlop"]
         self.e_cutoff_sige = rc["e_cutoff_sige"]
         self.detail_code_poptc = rc["detail_code_poptc"]
+        # Direction resolution, read tolerantly because these keys are
+        #   newer than the resource-control files people already have in
+        #   their job directories. Absent means 1, which is the behaviour
+        #   every existing file was written expecting: x, y and z
+        #   reported separately. This is the one place a missing rc key
+        #   is not a contract fault, because the default reproduces what
+        #   the file's author intended rather than guessing at it.
+        self.cartesian_code_optc = rc.get("cartesian_code_optc", 1)
+        self.cartesian_code_poptc = rc.get("cartesian_code_poptc", 1)
 
         # MAIN (SCF).
         self.num_iter_main = rc["num_iter_main"]
@@ -977,6 +986,24 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
                  "both SCF and post-SCF.  4 = all four and "
                  "average (default), 1 = one only.  Used "
                  "only with LAT integration.")
+        # How finely the optical response is resolved by direction.
+        parser.add_argument(
+            "-optcdir", dest="optcdir", type=int,
+            metavar="D", default=None,
+            help="Direction resolution of the TOTAL optical "
+                 "spectra.  0 = the direction average alone, "
+                 "1 = x, y and z separately (default), "
+                 "2 = the full symmetric tensor.")
+        parser.add_argument(
+            "-poptcdir", dest="poptcdir", type=int,
+            metavar="D", default=None,
+            help="Direction resolution of the PARTIAL optical "
+                 "spectra.  Same codes as -optcdir; default 1.  "
+                 "Set separately because the partial store grows "
+                 "as the square of the number of partials and is "
+                 "the first thing to exhaust memory on a large "
+                 "system, so 0 here with 2 for the totals is a "
+                 "sensible combination.")
         # Turn off the point-group averaging of atom-resolved LAT results.
         parser.add_argument(
             "-nolatsym", dest="nolatsym", action="store_true",
@@ -1409,6 +1436,13 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
         if args.nolatsym:
             self.symmetrize_lat_partials[1] = 0
             self.symmetrize_lat_partials[2] = 0
+
+        # Direction resolution of the optical spectra, totals and
+        # partials set independently.  See DESIGN 13.7.
+        if args.optcdir is not None:
+            self.cartesian_code_optc = args.optcdir
+        if args.poptcdir is not None:
+            self.cartesian_code_poptc = args.poptcdir
 
         # Shift applies to both mesh and density modes.
         if args.kpshift is not None:
@@ -5542,6 +5576,10 @@ def _print_imago_input(settings, sc, file_set,
                    f"                      ! OPTC broadening\n")
     imago_fh.write(f"{settings.detail_code_poptc}"
                    f"                ! POPTC 0N;1t;2tnl;3a;4anl\n")
+    imago_fh.write(f"{settings.cartesian_code_optc}"
+                   f"                ! OPTC dir 0iso;1xyz;2tensor\n")
+    imago_fh.write(f"{settings.cartesian_code_poptc}"
+                   f"                ! POPTC dir 0iso;1xyz;2tensor\n")
 
     # Nonlinear optical properties.
     imago_fh.write("NLOP_INPUT_DATA\n")

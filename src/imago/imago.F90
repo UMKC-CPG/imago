@@ -1196,7 +1196,8 @@ subroutine optc(inSCF,doOPTC)
    use O_OptcTransitions, only: transCounter, energyDiff, transitionProb, &
          & transitionProbPOPTC, getEnergyStatistics, computeTransitions, &
          & transProbBanded, transProbPOPTCBanded, pairIsWanted, &
-         & cleanUpPOPTCIndex
+         & cleanUpPOPTCIndex, transitionMoment, pairOccupancy, &
+         & transMomentBanded, bandedOccupancy
    use O_SecularEquation, only: energyEigenValues, &
          & shiftEnergyEigenValues
 
@@ -1294,6 +1295,18 @@ subroutine optc(inSCF,doOPTC)
       if (allocated(transitionProbPOPTC)) then
          deallocate (transitionProbPOPTC)
       endif
+
+      ! The complex element and its occupancy weight exist only when the
+      !   direction code asked for x, y and z or the full tensor; at the
+      !   isotropic code the producer collapses on the spot and neither
+      !   is ever allocated. Guarded on the allocation for the same
+      !   reason as the arrays below.
+      if (allocated(transitionMoment)) then
+         deallocate (transitionMoment)
+      endif
+      if (allocated(pairOccupancy)) then
+         deallocate (pairOccupancy)
+      endif
    endif
 
    ! The band-pair stores belong to the tetrahedron pathway and exist
@@ -1306,6 +1319,12 @@ subroutine optc(inSCF,doOPTC)
    endif
    if (allocated(transProbPOPTCBanded)) then
       deallocate (transProbPOPTCBanded)
+   endif
+   if (allocated(transMomentBanded)) then
+      deallocate (transMomentBanded)
+   endif
+   if (allocated(bandedOccupancy)) then
+      deallocate (bandedOccupancy)
    endif
 
    ! The pruning mask describes those stores and is read by the

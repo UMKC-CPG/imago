@@ -53,6 +53,91 @@ module O_OptcTransitions
          & dimension (:,:,:,:,:,:) :: transitionProbPOPTC
    real (kind=double), allocatable, dimension (:,:,:)   :: energyDiff
 
+   ! How wide the stores and the printed records are (DESIGN 13.7,
+   !   PSEUDOCODE 21.3 and 21.7). These are derived once from the
+   !   direction codes read out of fort.5, and every allocation and
+   !   every loop bound below is taken from them rather than from the
+   !   literal 3 that used to be written everywhere.
+   !
+   !   direction code   stored   accumulated   printed
+   !        0              1          1           1   TOTAL
+   !        1              3          3           4   TOTAL x y z
+   !        2              3          6           7   TOTAL xx yy zz xy xz yz
+   !
+   ! Three counts rather than one because the widths genuinely differ at
+   !   each stage. "Stored" is what the producer keeps per transition,
+   !   "accumulated" is how many spectra the deposit builds, and
+   !   "printed" adds the leading isotropic column, which is formed at
+   !   the moment of writing from the three diagonal entries rather than
+   !   accumulated in its own slot.
+   !
+   ! Codes 1 and 2 store the same three numbers and differ only in what
+   !   is formed from them at the deposit, because the off diagonal
+   !   tensor entries are products of the SAME three components. Code 0
+   !   stores one number because the direction average is invariant
+   !   under every rotation, so it can be collapsed at the producer and
+   !   never needs the components again.
+   integer :: numStoredCompOPTC   ! Components kept per transition.
+   integer :: numStoredCompPOPTC  ! The same, for the decomposed store.
+   integer :: numAccumCompOPTC    ! Spectra built by the deposit.
+   integer :: numAccumCompPOPTC   ! The same, for the decomposed spectra.
+   integer :: numPrintColOPTC     ! Columns written per spectrum.
+   integer :: numPrintColPOPTC    ! The same, for a decomposed unit.
+
+   ! The momentum matrix element itself, kept COMPLEX rather than
+   !   squared on the spot (DESIGN 13.3). The momentum operator is a
+   !   vector, so unfolding a matrix element from an irreducible k-point
+   !   onto a member of its star mixes the three Cartesian components:
+   !
+   !     P_i(Rk) = sum over j of R_ij P_j(k)
+   !
+   !   A squared modulus cannot be rotated -- the information needed to
+   !   form the rotated square, namely the cross products between
+   !   different components, is destroyed by the squaring. So the square
+   !   has to happen AFTER the rotation, and that means the element must
+   !   survive the producer intact. These arrays exist only when the
+   !   matching direction code is 1 or 2; at code 0 the collapse is
+   !   still done in the producer and the real stores above carry it.
+   !
+   ! Indices mirror transitionProb and transProbBanded exactly, so that
+   !   the accumulation reads them with the same subscripts it already
+   !   uses. See the index-order argument on transProbBanded below; it
+   !   applies here unchanged.
+#ifndef GAMMA
+   complex (kind=double), allocatable, &
+         & dimension (:,:,:,:) :: transitionMoment
+   complex (kind=double), allocatable, &
+         & dimension (:,:,:,:,:) :: transMomentBanded
+#else
+   ! At the Gamma point the matrix element is real, and there is a
+   !   second reason this build needs nothing more: a Gamma-only
+   !   calculation has a single k-point that every symmetry operation
+   !   holds fixed, so its star has one member and no rotation is ever
+   !   applied. The arrays exist so the shared code below compiles and
+   !   indexes identically, not because the physics differs.
+   real (kind=double), allocatable, &
+         & dimension (:,:,:,:) :: transitionMoment
+   real (kind=double), allocatable, &
+         & dimension (:,:,:,:,:) :: transMomentBanded
+#endif
+
+   ! The occupancy weight that used to be folded into the stored square,
+   !   now carried alongside it (PSEUDOCODE 21.3).
+   !
+   ! Why it cannot stay folded in. The stored quantity is now the
+   !   element rather than its square, so folding in the occupancy would
+   !   mean multiplying by the SQUARE ROOT of the initial occupancy
+   !   times the final vacancy. Near a Fermi surface that vacancy is a
+   !   difference of two nearly equal numbers and can land a hair below
+   !   zero through round-off, and the square root of a negative number
+   !   is a crash rather than a small error. Kept separate it is applied
+   !   at the deposit as the plain real scalar it has always been.
+   real (kind=double), allocatable, dimension (:,:,:) :: pairOccupancy
+         !   (pair, kPoint, spin), matching energyDiff.
+   real (kind=double), allocatable, &
+         & dimension (:,:,:,:) :: bandedOccupancy
+         !   (kPoint, initial band, final band, spin).
+
    ! Tetrahedron (LAT) integration pathway. DESIGN 12, PSEUDOCODE 19.
    !
    ! The Gaussian pathway stores each transition at a position in a list
@@ -155,6 +240,70 @@ module O_OptcTransitions
 
 contains
 
+! Turn the two direction codes read from fort.5 into the two sizes they
+!   govern: how many Cartesian components each store keeps per
+!   transition, and how many columns each spectrum prints
+!   (PSEUDOCODE 21.3 and 21.7).
+!
+! This must run before ANY optical store is sized. The call sits at the
+!   top of getEnergyStatistics because that is the first routine to
+!   allocate one, and because the codes themselves are read much
+!   earlier, in parseInput. A later reader moving an allocation ahead of
+!   this call would size it from an undefined width, so the ordering is
+!   stated here rather than left to be inferred.
+subroutine setOptcStoreSize
+
+   ! Import necessary modules.
+   use O_Input, only: cartesianCodeOPTC, cartesianCodePOPTC
+
+   implicit none
+
+   ! Codes 1 and 2 both keep the three Cartesian components; they part
+   !   company only at the deposit, where code 1 forms the three squared
+   !   magnitudes and code 2 additionally forms the three off-diagonal
+   !   products. Code 0 keeps the direction average alone, which is
+   !   invariant and so needs no components at all.
+   if (cartesianCodeOPTC == 0) then
+      numStoredCompOPTC = 1
+      numAccumCompOPTC  = 1
+      numPrintColOPTC   = 1
+   elseif (cartesianCodeOPTC == 1) then
+      numStoredCompOPTC = 3
+      numAccumCompOPTC  = 3
+      numPrintColOPTC   = 4
+   else
+      numStoredCompOPTC = 3
+      numAccumCompOPTC  = 6
+      numPrintColOPTC   = 7
+   endif
+
+   if (cartesianCodePOPTC == 0) then
+      numStoredCompPOPTC = 1
+      numAccumCompPOPTC  = 1
+      numPrintColPOPTC   = 1
+   elseif (cartesianCodePOPTC == 1) then
+      numStoredCompPOPTC = 3
+      numAccumCompPOPTC  = 3
+      numPrintColPOPTC   = 4
+   else
+      numStoredCompPOPTC = 3
+      numAccumCompPOPTC  = 6
+      numPrintColPOPTC   = 7
+   endif
+
+   write (20,fmt="(a,i2,a,i2,a,i2,a)") &
+         & " Optical directions, totals:   store ",numStoredCompOPTC, &
+         & ", accumulate ",numAccumCompOPTC,", print ", &
+         & numPrintColOPTC
+   write (20,fmt="(a,i2,a,i2,a,i2,a)") &
+         & " Optical directions, partials: store ",numStoredCompPOPTC,&
+         & ", accumulate ",numAccumCompPOPTC,", print ", &
+         & numPrintColPOPTC
+   call flush (20)
+
+end subroutine setOptcStoreSize
+
+
 subroutine getEnergyStatistics(doOPTC)
 
    ! Import necessary modules.
@@ -185,6 +334,11 @@ subroutine getEnergyStatistics(doOPTC)
    integer :: firstFin
    integer :: lastFin
    integer :: orderedIndex
+
+   ! Settle how wide the optical stores are before any of them is sized.
+   !   The allocation at the end of this routine is the first one in the
+   !   program, so this is the last moment the widths can be fixed.
+   call setOptcStoreSize
 
    ! Pull variables out of imported modules.
    if (doOPTC == 1) then   ! Standard optical properties calculation.
@@ -639,11 +793,27 @@ subroutine getEnergyStatistics(doOPTC)
    !   are doing POPTC or not, because we will *always* do a total optc.
    if (doOPTC /= 3) then  ! Not doing a Sigma(E)
       allocate (energyDiff (maxPairs,numKPoints,spin))
-      allocate (transitionProb  (dim3,maxPairs,numKPoints,spin))
+      allocate (transitionProb (numStoredCompOPTC,maxPairs,numKPoints,&
+            & spin))
 
       ! Initialize these arrays.
       energyDiff(:maxPairs,:numKPoints,:) = 0.0_double
-      transitionProb(:dim3,:maxPairs,:numKPoints,:) = 0.0_double
+      transitionProb(:,:,:,:) = 0.0_double
+
+      ! At direction codes 1 and 2 the producer keeps the complex matrix
+      !   element instead of its square, so that the star unfolding can
+      !   rotate the components before they are squared, and the
+      !   occupancy weight travels beside it rather than inside it
+      !   (PSEUDOCODE 21.3). At code 0 neither array is needed: the
+      !   direction average is rotation invariant, so the producer
+      !   collapses it on the spot into transitionProb above.
+      if (numStoredCompOPTC > 1) then
+         allocate (transitionMoment (numStoredCompOPTC,maxPairs, &
+               & numKPoints,spin))
+         allocate (pairOccupancy (maxPairs,numKPoints,spin))
+         transitionMoment(:,:,:,:) = 0.0_double
+         pairOccupancy(:,:,:) = 0.0_double
+      endif
    endif
 
 end subroutine getEnergyStatistics
@@ -724,13 +894,29 @@ integer :: k,l
    if (kPointIntgCode == 1) then
       call selectBandedPairs
 
-      allocate (transProbBanded (dim3,numKPoints, &
+      allocate (transProbBanded (numStoredCompOPTC,numKPoints, &
             & bandedInitLo:bandedInitHi,bandedFinLo:bandedFinHi,spin))
 
       ! Zeroed because the pair mask leaves gaps: a pair no tetrahedron
       !   wants is never written, and the accumulation must read a zero
       !   there rather than whatever the allocation happened to contain.
       transProbBanded(:,:,:,:,:) = 0.0_double
+
+      ! At direction codes 1 and 2 the element and its occupancy weight
+      !   are held separately so the star unfolding can rotate before it
+      !   squares (PSEUDOCODE 21.3). The occupancy carries no component
+      !   index: it depends on the two bands and the k-point alone, so
+      !   one number serves all three components.
+      if (numStoredCompOPTC > 1) then
+         allocate (transMomentBanded (numStoredCompOPTC,numKPoints, &
+               & bandedInitLo:bandedInitHi,bandedFinLo:bandedFinHi, &
+               & spin))
+         allocate (bandedOccupancy (numKPoints, &
+               & bandedInitLo:bandedInitHi,bandedFinLo:bandedFinHi, &
+               & spin))
+         transMomentBanded(:,:,:,:,:) = 0.0_double
+         bandedOccupancy(:,:,:,:) = 0.0_double
+      endif
 
       ! The decomposed store, when a decomposition was requested. This
       !   is the array whose size DESIGN 11.4 warns about: it carries
@@ -1251,12 +1437,19 @@ subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
    real    (kind=double) :: currentEnergyDiff
    real    (kind=double), allocatable, dimension (:)     :: energyDiffTemp
    real    (kind=double), allocatable, dimension (:,:)   :: transitionProbTemp
+   ! The unsorted companions of the two direction-resolved stores. Every
+   !   quantity this routine produces has to be held under the order the
+   !   pairs were MET and then copied into place under the order they
+   !   sort into, so each store needs its own temporary here.
+   real    (kind=double), allocatable, dimension (:) :: occupancyTemp
 #ifndef GAMMA
    complex (kind=double), allocatable, dimension (:,:,:) :: conjWaveMomSum
    complex (kind=double),              dimension (dim3)  :: valeValeXMom
+   complex (kind=double), allocatable, dimension (:,:) :: transMomentTemp
 #else
    real    (kind=double), allocatable, dimension (:,:,:) :: conjWaveMomSumGamma
    real    (kind=double),              dimension (dim3)  :: valeValeXMomGamma
+   real    (kind=double), allocatable, dimension (:,:) :: transMomentTemp
 #endif
 
    ! Initialize a counter for the current number of transition pairs
@@ -1300,10 +1493,21 @@ subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
 
    ! Allocate space for the energy difference.
    allocate (energyDiffTemp (maxPairs))
-   allocate (transitionProbTemp  (finComponent,maxPairs))
+
+   ! Only one of the two temporaries below is ever filled, chosen by the
+   !   direction code: at code 0 the square is formed here and there is
+   !   nothing to rotate later, while at codes 1 and 2 the element is
+   !   carried out intact for the star unfolding to rotate. Both are
+   !   allocated regardless so that the copy-into-place block at the end
+   !   has a valid array to reference on either branch, and because the
+   !   unused one costs a single k-point's worth of pairs.
+   allocate (transitionProbTemp (finComponent,maxPairs))
+   allocate (transMomentTemp (finComponent,maxPairs))
+   allocate (occupancyTemp (maxPairs))
 
    ! Initialize the temporary energy transition array.
    energyDiffTemp(:) = 0.0_double
+   occupancyTemp(:) = 0.0_double
 
    ! Allocate space to hold the indices for each segment of the energyDiff
    !   array.
@@ -1384,35 +1588,63 @@ subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
          finStateFactor = 1.0_double - electronPopulation(orderedIndex) / &
                & (kPointWeight(currentKPoint)/real(spin,double))
 
+         ! The occupancy weight for this pair. At direction code 0 it is
+         !   folded into the square immediately below, exactly as it
+         !   always has been; at codes 1 and 2 it is carried out of here
+         !   in its own array so that it never has to be square rooted
+         !   (PSEUDOCODE 21.3).
+         occupancyTemp(transPairCount) = initStateFactor * finStateFactor
+
 #ifndef GAMMA
 
          ! Loop to obtain the wave function times the momentum integral.
          do k = initComponent,finComponent
              valeValeXMom(k) = sum(valeVale(:,i,1) * &
                    & conjWaveMomSum(:,finalStateIndex,k))
-
-            ! Compute the imaginary component of the square of the valeValeXMom
-            !   to obtain the transition probability.  Note that the reason it
-            !   is imaginary is because of the negative sign included in the
-            !   getIntgResults subroutine for the momentum matrix. (I.e. this
-            !   is stored as a real number, but it represents the y in (x+iy).)
-            transitionProbTemp(k,transPairCount) = ( &
-                  & real(valeValeXMom(k),double)**2 &
-                  & + aimag(valeValeXMom(k))**2) &
-                  & * initStateFactor*finStateFactor
          enddo
+
+         if (numStoredCompOPTC == 1) then
+
+            ! Direction code 0. Collapse to the direction average here
+            !   and keep nothing else: the sum of the three squared
+            !   magnitudes is unchanged by any rotation, so no later
+            !   stage ever needs the components back. Note that the
+            !   squared magnitude is what the physics asks for even
+            !   though the element looks real, because the momentum
+            !   matrix carries a factor of -i applied in getIntgResults
+            !   -- what is stored as a real number is the y in (x+iy).
+            transitionProbTemp(1,transPairCount) = &
+                  & sum(real(valeValeXMom(initComponent:finComponent), &
+                  & double)**2 &
+                  & + aimag(valeValeXMom(initComponent:finComponent)) &
+                  & **2) * initStateFactor * finStateFactor
+         else
+
+            ! Direction codes 1 and 2. Carry the element out intact. It
+            !   is squared only after the star unfolding has rotated it,
+            !   because squaring first destroys the cross products
+            !   between components that a rotated square is built from.
+            transMomentTemp(initComponent:finComponent,transPairCount) &
+                  & = valeValeXMom(initComponent:finComponent)
+         endif
 #else
 
          ! Loop to get the wave function times the momentum matrix element.
          do k = initComponent,finComponent
             valeValeXMomGamma(k) = sum(valeValeGamma(:,i,1) * &
                   & conjWaveMomSumGamma(:,finalStateIndex,k))
-
-            ! Compute the real component of the square of the valeValeXMom to
-            !   obtain the transition probability.
-            transitionProbTemp(k,transPairCount) = valeValeXMomGamma(k)**2 * &
-                  & initStateFactor*finStateFactor
          enddo
+
+         if (numStoredCompOPTC == 1) then
+
+            ! Direction code 0, as above but with a real element.
+            transitionProbTemp(1,transPairCount) = &
+                  & sum(valeValeXMomGamma(initComponent:finComponent) &
+                  & **2) * initStateFactor * finStateFactor
+         else
+            transMomentTemp(initComponent:finComponent,transPairCount) &
+                  & = valeValeXMomGamma(initComponent:finComponent)
+         endif
 #endif
       enddo ! Fin loop j
 
@@ -1439,23 +1671,58 @@ subroutine computePairs (currentKPoint,xyzComponents,spinDirection,doOPTC)
    call mergeSort (energyDiffTemp,energyDiff(:,currentKPoint,spinDirection),&
          & sortOrder,segmentBorders,transPairCount)
 
-   ! Copy transitionProbTemp to the actual transitionProb data structure using
-   !   the sorting order determined in the mergeSort subroutine.
-   if (xyzComponents == 0) then
-      do i = 1, transPairCount
-         transitionProb(:,i,currentKPoint,spinDirection) = &
-               & transitionProbTemp(:,sortOrder(i))
-      enddo
+   ! Copy the temporaries into the real stores using the sorting order
+   !   determined in the mergeSort subroutine. Which store is filled
+   !   follows the direction code, and it is the same choice the deposit
+   !   loop above made.
+   if (numStoredCompOPTC == 1) then
+
+      ! Direction code 0. One collapsed number per transition.
+      if (xyzComponents == 0) then
+         do i = 1, transPairCount
+            transitionProb(1,i,currentKPoint,spinDirection) = &
+                  & transitionProbTemp(1,sortOrder(i))
+         enddo
+      else
+
+         ! One component per call, so the direction average has to be
+         !   built up across the three calls rather than written. The
+         !   sort order is a function of the transition energies alone,
+         !   which do not depend on the component, so position i means
+         !   the same pair on every call and the sum is well defined.
+         do i = 1, transPairCount
+            transitionProb(1,i,currentKPoint,spinDirection) = &
+                  & transitionProb(1,i,currentKPoint,spinDirection) &
+                  & + transitionProbTemp(1,sortOrder(i))
+         enddo
+      endif
    else
-      do i = 1, transPairCount
-         transitionProb(xyzComponents,i,currentKPoint,spinDirection) = &
-               & transitionProbTemp(1,sortOrder(i))
-      enddo
+
+      ! Direction codes 1 and 2. The complex element and its occupancy
+      !   weight travel separately, and the weight is written rather
+      !   than accumulated because it is the same on all three calls.
+      if (xyzComponents == 0) then
+         do i = 1, transPairCount
+            transitionMoment(:,i,currentKPoint,spinDirection) = &
+                  & transMomentTemp(:,sortOrder(i))
+            pairOccupancy(i,currentKPoint,spinDirection) = &
+                  & occupancyTemp(sortOrder(i))
+         enddo
+      else
+         do i = 1, transPairCount
+            transitionMoment(xyzComponents,i,currentKPoint, &
+                  & spinDirection) = transMomentTemp(1,sortOrder(i))
+            pairOccupancy(i,currentKPoint,spinDirection) = &
+                  & occupancyTemp(sortOrder(i))
+         enddo
+      endif
    endif
 
    ! Deallocate unnecessary arrays and matrices
    deallocate (energyDiffTemp)
    deallocate (transitionProbTemp)
+   deallocate (transMomentTemp)
+   deallocate (occupancyTemp)
    deallocate (segmentBorders)
    deallocate (sortOrder)
 
@@ -1588,12 +1855,28 @@ subroutine computeTransProbBanded (currentKPoint,xyzComponents, &
          finStateFactor = 1.0_double - electronPopulation_LAT(j, &
                & currentKPoint,spinDirection) / fullOccupancy
 
+         ! The occupancy weight for this band pair at this k-point. At
+         !   direction code 0 it is folded into the square below, as it
+         !   always has been; at codes 1 and 2 it is stored beside the
+         !   element so that it never has to be square rooted
+         !   (PSEUDOCODE 21.3). It carries no component index because
+         !   occupancy does not depend on direction.
+         if (numStoredCompOPTC > 1) then
+            bandedOccupancy(currentKPoint,i,j,spinDirection) = &
+                  & initStateFactor * finStateFactor
+         endif
+
          do k = initComponent, finComponent
 
             ! When the components are done one at a time the computed
             !   component always lands in slot 1 of conjWaveMomSum but
-            !   belongs in slot xyzComponents of the store.
-            if (xyzComponents == 0) then
+            !   belongs in slot xyzComponents of the store. At direction
+            !   code 0 there is only one slot and every component adds
+            !   into it, so the position is 1 whichever way the
+            !   components were computed.
+            if (numStoredCompOPTC == 1) then
+               storeComponent = 1
+            elseif (xyzComponents == 0) then
                storeComponent = k
             else
                storeComponent = xyzComponents
@@ -1603,20 +1886,40 @@ subroutine computeTransProbBanded (currentKPoint,xyzComponents, &
             valeValeXMom = sum(valeVale(:,i,1) &
                   & * conjWaveMomSum(:,finalStateIndex,k))
 
-            ! The squared magnitude. It is stored as a real number but
-            !   represents the y in (x+iy), because the momentum matrix
-            !   carries a factor of -i applied in getIntgResults.
-            transProbBanded(storeComponent,currentKPoint,i,j, &
-                  & spinDirection) = (real(valeValeXMom,double)**2 &
-                  & + aimag(valeValeXMom)**2) &
-                  & * initStateFactor * finStateFactor
+            if (numStoredCompOPTC == 1) then
+
+               ! Direction code 0. Accumulate the three squared
+               !   magnitudes into the single slot to form the direction
+               !   average, which no rotation can change. The square is
+               !   the right quantity even though the element looks
+               !   real, because the momentum matrix carries a factor of
+               !   -i applied in getIntgResults: what is stored as a
+               !   real number is the y in (x+iy).
+               transProbBanded(1,currentKPoint,i,j,spinDirection) = &
+                     & transProbBanded(1,currentKPoint,i,j, &
+                     & spinDirection) + (real(valeValeXMom,double)**2 &
+                     & + aimag(valeValeXMom)**2) &
+                     & * initStateFactor * finStateFactor
+            else
+
+               ! Direction codes 1 and 2. Keep the element itself; it is
+               !   squared only after the star unfolding has rotated it.
+               transMomentBanded(storeComponent,currentKPoint,i,j, &
+                     & spinDirection) = valeValeXMom
+            endif
 #else
             valeValeXMom = sum(valeValeGamma(:,i,1) &
                   & * conjWaveMomSum(:,finalStateIndex,k))
 
-            transProbBanded(storeComponent,currentKPoint,i,j, &
-                  & spinDirection) = valeValeXMom**2 &
-                  & * initStateFactor * finStateFactor
+            if (numStoredCompOPTC == 1) then
+               transProbBanded(1,currentKPoint,i,j,spinDirection) = &
+                     & transProbBanded(1,currentKPoint,i,j, &
+                     & spinDirection) + valeValeXMom**2 &
+                     & * initStateFactor * finStateFactor
+            else
+               transMomentBanded(storeComponent,currentKPoint,i,j, &
+                     & spinDirection) = valeValeXMom
+            endif
 #endif
          enddo
       enddo

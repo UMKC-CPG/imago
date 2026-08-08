@@ -74,6 +74,22 @@ module O_Input
    !   The type grouped codes come first so that the code number rises
    !   with how finely the decomposition resolves position.
    integer :: detailCodePOPTC ! 0=NONE;1=type;2=type nl;3=atom;4=atom nl
+   ! How finely the optical response is resolved by DIRECTION. This is a
+   !   third axis, independent of the decomposition codes above: the
+   !   decomposition says which atoms a transition is attributed to, and
+   !   this says which Cartesian components of the momentum operator are
+   !   reported. Every unit of an output file carries whichever of these
+   !   the code selects, so a partial run resolves each atom pair by
+   !   direction to the same degree as the undecomposed spectrum.
+   !   0=isotropic only; 1=diagonal x,y,z; 2=full symmetric tensor.
+   ! The two are read separately because the storage they imply differs
+   !   enormously. The undecomposed store carries no partial-pair factor
+   !   and is small, while the partial store grows as the SQUARE of the
+   !   number of partials and is already the binding array in a large
+   !   run, so a user may reasonably want the full tensor on the totals
+   !   and direction-averaged partials. See DESIGN 13.7.
+   integer :: cartesianCodeOPTC  ! Direction resolution, total spectra.
+   integer :: cartesianCodePOPTC ! Direction resolution, partial spectra.
 
    ! Define control variables that apply to the NLOP use of the optc program.
    real (kind=double) :: deltaNLOP      ! Given in eV, stored in a.u.
@@ -795,6 +811,34 @@ subroutine readOptcControl(readUnit,writeUnit)
    call readData(readUnit,writeUnit,deltaOPTC,0,'')
    call readData(readUnit,writeUnit,sigmaOPTC,0,'')
    call readData(readUnit,writeUnit,detailCodePOPTC,0,'')
+
+   ! How finely to resolve by direction, separately for the total and the
+   !   partial spectra (DESIGN 13.7). Read after the decomposition code
+   !   because these are a third, independent axis rather than a
+   !   refinement of it.
+   call readData(readUnit,writeUnit,cartesianCodeOPTC,0,'')
+   call readData(readUnit,writeUnit,cartesianCodePOPTC,0,'')
+
+   ! Refuse a code the printer and the accumulation have no meaning for.
+   !   Checked here, at the point of reading, so that a bad value is
+   !   reported against the input file rather than surfacing much later
+   !   as a wrongly-sized array.
+   if ((cartesianCodeOPTC < 0) .or. (cartesianCodeOPTC > 2)) then
+      write (writeUnit,*) 'OPTC direction code must be 0, 1 or 2, not ',&
+            & cartesianCodeOPTC
+      write (writeUnit,*) '0 = isotropic only, 1 = x, y and z,'
+      write (writeUnit,*) '2 = the full symmetric tensor.'
+      call flush (writeUnit)
+      stop 'readOptcControl: invalid OPTC direction code'
+   endif
+   if ((cartesianCodePOPTC < 0) .or. (cartesianCodePOPTC > 2)) then
+      write (writeUnit,*) 'POPTC direction code must be 0, 1 or 2, not ',&
+            & cartesianCodePOPTC
+      write (writeUnit,*) '0 = isotropic only, 1 = x, y and z,'
+      write (writeUnit,*) '2 = the full symmetric tensor.'
+      call flush (writeUnit)
+      stop 'readOptcControl: invalid POPTC direction code'
+   endif
 
    ! Apply necessary conversions to a.u.
    cutoffEnOPTC   = cutoffEnOPTC / hartree

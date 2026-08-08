@@ -90,6 +90,16 @@ def parameters_and_defaults():
         "e_cutoff_nlop":    45,
         "e_cutoff_sige":    5,
         "detail_code_poptc": 0,   # 0=NONE,1=type,2=type nl,3=atom,4=atom nl
+        # How finely the optical response is resolved by DIRECTION. This
+        #   is independent of the decomposition above: that says which
+        #   atoms a transition is attributed to, this says which Cartesian
+        #   components are reported. 0 = the direction average alone,
+        #   1 = x, y and z separately, 2 = the full symmetric tensor.
+        #   Set separately for the totals and the partials because the
+        #   partial store grows as the square of the number of partials
+        #   and is the first thing to run out of memory on a large system.
+        "cartesian_code_optc":  1,
+        "cartesian_code_poptc": 1,
 
         # ---- MAIN (SCF) defaults ----
         "num_iter_main":    50,
