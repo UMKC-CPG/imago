@@ -15590,23 +15590,58 @@ between the two levels will see it shift by several percent,
 and an unexplained five percent step is indistinguishable
 from a bug, which is why it is written down here.
 
-**Level 2's derived spectra are NOT defined, and this is
-open.** The refractive index, extinction coefficient,
-reflectivity, absorption and energy loss function are all
-built from a SCALAR complex dielectric function. There is no
-accepted meaning for any of them applied to an off-diagonal
-tensor entry: there is no refractive index "along xy".
-Epsilon-1 alone generalizes, because Kramers-Kronig acts on
-each column independently.
+**Level 2 is a strict superset of level 1.** It emits
+everything level 1 emits, plus epsilon-2 and epsilon-1 for
+the three off-diagonal entries. Nothing that level 1
+produces is withdrawn or changed.
 
-The usual route to a physical answer is to diagonalize the
-tensor and report along its principal axes, and this section
-has already declined diagonalization. So level 2 currently
-yields a valid raw epsilon-2 and nothing downstream of it,
-and the engine refuses it rather than emitting derived
-columns whose meaning nobody has settled. Deciding this is
-the remaining work: either diagonalize after all, or define
-level 2 as producing epsilon-1 only.
+```
+  epsilon-2, epsilon-1     xx yy zz xy xz yz
+  ELF, n, k, R, alpha      total, x, y, z
+```
+
+The asymmetry in that table is the whole of the design
+question, and it deserves stating rather than hiding.
+Kramers-Kronig acts on each tensor component independently,
+because causality holds element by element, so epsilon-1
+generalizes to all six without argument. The other five do
+not. They are functions of a SCALAR complex dielectric
+function: the energy loss function is properly
+`Im(-eps^-1)`, a matrix inverse rather than an element-wise
+one, and for an anisotropic medium the refractive index
+follows from the Fresnel equation, which admits two
+eigenmodes per propagation direction and no "index along
+xy" at all.
+
+**So why emit the per-axis five at level 2?** Because
+level 1 already emits them, for every crystal, including the
+monoclinic and triclinic ones where they rest on x, y and z
+being principal axes -- which is exactly the assumption a
+non-zero off-diagonal entry denies. Level 2 does not make
+that worse. It makes it VISIBLE: the off-diagonal columns
+sitting beside the diagonal ones are the measurement of how
+far the assumption is from holding, and a reader who
+compares `eps_xy` against `eps_xx` learns something no
+level 1 run can tell them.
+
+The alternative considered was to withhold the five at
+level 2 and offer the isotropic column alone. It was
+rejected because it would make level 2 give LESS than
+level 1 for the same run, which reads as a regression rather
+than as a caution, and because a user who wants the
+diagonal values would simply run level 1 and get them with
+no warning attached at all.
+
+**Diagonalization is deferred, not refused on the merits.**
+The physically complete answer is to diagonalize
+`eps(omega)` at each frequency and report along its
+principal axes. That is real work with real subtlety: the
+tensor is complex symmetric, so the transformation is
+complex-orthogonal rather than unitary; the principal axes
+rotate with frequency in monoclinic and triclinic cells; and
+eigenvalue branches have to be tracked to stay continuous.
+It is worth doing when a study needs principal-axis optics,
+and it is a separate task rather than a condition on level 2.
 
 ### 13.8 Seam inventory
 

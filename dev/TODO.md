@@ -7992,29 +7992,71 @@ is not carried only in conversation.
   Touches the same call path as O9 step 4, which adds
   another consumer to it.
 
-- [ ] O11. Decide what the derived spectra mean for the
+- [x] O11. Decide what the derived spectra mean for the
   off-diagonal tensor entries, so that optical direction
-  code 2 can be enabled.  The engine already computes the
-  six component symmetric tensor correctly and writes a
-  valid raw eps2; `setOptcStoreSize` refuses the code only
-  because nothing downstream of that raw file is defined.
+  code 2 can be enabled.
 
-  The obstacle is physics rather than formatting.  Of the
-  seven quantities `imagoKKc` derives, only eps1 survives
-  the generalization, because Kramers-Kronig acts on each
-  column independently.  The refractive index, extinction
-  coefficient, reflectivity, absorption and energy loss
-  function are all built from a SCALAR complex dielectric
-  function, and none of them has an accepted meaning applied
-  to an off-diagonal entry -- there is no refractive index
-  "along xy".
+  **DONE 2026-08-08.  Code 2 is a strict SUPERSET of code
+  1.**  It emits everything code 1 emits, plus eps2 and eps1
+  for the three off-diagonal entries.  The five quantities
+  built from a scalar dielectric function -- the energy loss
+  function, refractive index, extinction coefficient,
+  reflectivity and absorption -- keep the code 1 width,
+  because none of them has a meaning applied to an
+  off-diagonal entry.
 
-  The usual route is to diagonalize the tensor and report
-  along its principal axes, which DESIGN 13.7 has declined.
-  So the decision is between reversing that and defining
-  code 2 as producing eps2 and eps1 only.  Whichever way it
-  goes, it is a DESIGN edit before any code.  See DESIGN
-  13.7 and PSEUDOCODE 21.7.
+  ```
+    eps2, eps1              xx yy zz xy xz yz
+    ELF, n, k, R, alpha     total, x, y, z
+  ```
+
+  The per-axis five stay because code 1 already emits them
+  for every crystal including the monoclinic ones, where
+  they rest on x, y and z being principal axes -- exactly
+  what a non-zero off-diagonal entry denies.  Code 2 does
+  not make that worse; it makes it VISIBLE, since comparing
+  `eps_xy` against `eps_xx` measures how far that assumption
+  is from holding.  See DESIGN 13.7.
+
+  Verified on cubic KNbO3: the code 2 diagonal reproduces
+  code 1 bit for bit in all six derived files, the
+  off-diagonal eps2 and eps1 come out at 1e-15 to 1e-16 as
+  cubic symmetry requires, and code 1 is untouched.
+
+  One real defect surfaced only once eps1 carried six
+  columns.  The additive term of the dispersion relation is
+  a KRONECKER DELTA, `eps1_ij = delta_ij + (2/pi) P Int`,
+  and it was being added to every column, leaving each
+  off-diagonal eps1 at exactly one where it belongs at zero.
+  A uniform offset across the whole spectrum reads as a
+  plausible baseline rather than as an error, and codes 0
+  and 1 could never have shown it because every column they
+  carry is diagonal.
+
+- [ ] O15. Report the optical response along the PRINCIPAL
+  axes of the dielectric tensor.  Deferred from O11 rather
+  than refused: with the six component tensor now available
+  at direction code 2, the physically complete answer for a
+  monoclinic or triclinic crystal is to diagonalize
+  `eps(omega)` at each frequency and compute the refractive
+  index, extinction coefficient, reflectivity and absorption
+  from the three principal values.
+
+  It is real work with real subtlety, which is why it is its
+  own task.  The tensor is complex symmetric, so the
+  diagonalizing transformation is complex-orthogonal rather
+  than unitary and the usual Hermitian eigensolvers do not
+  apply.  The principal axes rotate with frequency in
+  monoclinic and triclinic cells -- one axis is fixed by
+  symmetry in monoclinic, the other two turn in a plane --
+  so the eigenvalue branches have to be tracked across the
+  energy grid to stay continuous, and a naive per-frequency
+  sort will swap them at every near-degeneracy.
+
+  Worth doing when a study needs principal-axis optics on a
+  low-symmetry cell.  Until then code 2's diagonal columns
+  carry the same approximation code 1 always has, and its
+  off-diagonal columns say how good it is.
 
 - [x] O12. Rename `optcPrint.F90` to `optcSpectra.F90` and
   the module `O_OptcPrint` to `O_OptcSpectra`.  The file's

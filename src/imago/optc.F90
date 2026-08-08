@@ -360,21 +360,15 @@ subroutine setOptcStoreSize
    ! Code 1 is unrestricted, and code 1 is where the O3 correction
    !   lives; what is deferred is the extra RESOLUTION of codes 0 and 2,
    !   not the fix.
-   if ((cartesianCodeOPTC == 2) .or. (cartesianCodePOPTC == 2)) then
-      write (20,*) 'Direction code 2 is computed correctly here and'
-      write (20,*) 'its raw epsilon-2 is valid, but the spectra'
-      write (20,*) 'derived from it are not defined. The refractive'
-      write (20,*) 'index, extinction coefficient, reflectivity,'
-      write (20,*) 'absorption and energy loss function all come from'
-      write (20,*) 'a SCALAR dielectric function, and none of them has'
-      write (20,*) 'an accepted meaning applied to an off diagonal'
-      write (20,*) 'tensor entry. Only epsilon-1 generalizes, because'
-      write (20,*) 'the Kramers-Kronig transform is linear per column.'
-      write (20,*) 'Settling what the other five should hold is a'
-      write (20,*) 'DESIGN question. Use direction code 0 or 1.'
-      call flush (20)
-      stop 'setOptcStoreSize: direction code 2 needs a DESIGN answer'
-   endif
+   ! All three direction codes are supported end to end. Direction code
+   !   2 is a strict SUPERSET of code 1 (DESIGN 13.7): epsilon-2 and
+   !   epsilon-1 carry all six tensor entries, while the energy loss
+   !   function, refractive index, extinction coefficient, reflectivity
+   !   and absorption keep the code 1 width, because each of those is a
+   !   function of a scalar dielectric function and has no meaning
+   !   applied to an off-diagonal entry. The off-diagonal columns
+   !   sitting beside the diagonal ones are what tells a reader how far
+   !   the diagonal approximation those five rest on is from holding.
 
 end subroutine setOptcStoreSize
 

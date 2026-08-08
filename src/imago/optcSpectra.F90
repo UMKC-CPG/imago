@@ -1287,8 +1287,19 @@ subroutine printSpectrum (specType,numEnergyPoints,spectrum,conversionFactor)
    ! The suffixes naming each accumulated column, in the order
    !   PSEUDOCODE 21.7 declares and the deposit fills. Only the first
    !   numAccumCompOPTC of them are ever used.
-   character*3, dimension (6), parameter :: columnTag = &
-         & (/ "x  ", "y  ", "z  ", "xy ", "xz ", "yz " /)
+   !
+   ! Two sets, because the diagonal is named differently depending on
+   !   whether anything else is present. At direction code 1 the three
+   !   columns are directions and are called x, y and z. At code 2 they
+   !   are the diagonal ENTRIES of a tensor whose off-diagonal entries
+   !   are also present, so they are called xx, yy and zz -- and calling
+   !   them x, y and z there would put this header at odds with the one
+   !   imagoKKc writes for the same quantity.
+   character*3, dimension (6), parameter :: axisTag = &
+         & (/ "x  ", "y  ", "z  ", "   ", "   ", "   " /)
+   character*3, dimension (6), parameter :: tensorTag = &
+         & (/ "xx ", "yy ", "zz ", "xy ", "xz ", "yz " /)
+   character*3, dimension (6) :: columnTag
 
 
 
@@ -1315,6 +1326,12 @@ subroutine printSpectrum (specType,numEnergyPoints,spectrum,conversionFactor)
    !   isotropic value alone.
    write (headerFormat,fmt="(a,i2,a)") "(",numPrintColOPTC+1,"a15)"
    write (recordFormat,fmt="(a,i2,a)") "(",numPrintColOPTC+1,"e15.7)"
+
+   if (numAccumCompOPTC == 6) then
+      columnTag(:) = tensorTag(:)
+   else
+      columnTag(:) = axisTag(:)
+   endif
 
    header = ""
    if (numPrintColOPTC == 1) then

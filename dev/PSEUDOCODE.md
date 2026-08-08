@@ -15760,6 +15760,20 @@ width-aware:
   code 2   COL_LABELS 7   TOTAL xx yy zz xy xz yz
 ```
 
+Those are the widths of epsilon-2 as the engine writes it,
+and of epsilon-1 as imagoKKc writes it. The other five
+derived files follow `numScalarCols` instead, so at code 2
+they keep the code 1 width of four rather than widening to
+seven:
+
+```
+  code 2   eps2, eps1              7   TOTAL xx yy zz xy xz yz
+  code 2   ELF, n, k, R, alpha     4   TOTAL x y z
+```
+
+A consumer must therefore take each file's width from that
+file, and never from the run's direction code.
+
 The isotropic column stays FIRST in every case, so a
 consumer that only wants it needs no knowledge of the code.
 `imagoKKc` and `processPOPTC.py` read these files and must
@@ -15781,13 +15795,37 @@ disagree with the data it describes.
   numDirCols = (fields on a data line) - 2
                  # drop the energy and the isotropic column
   numWorkCols = 1 if numDirCols == 0 else numDirCols
+  numScalarCols = min(3, numWorkCols)
 ```
 
-`numWorkCols` is what every array is sized by, and averaging
-over it reproduces the division by three at code 1 while
-being the identity at code 0. Dividing by a literal three at
-code 0 would shrink every derived spectrum to a third of its
-value without any symptom other than the numbers.
+`numWorkCols` sizes epsilon-2 and epsilon-1, which carry
+every component the input holds: 1, 3 or 6.
+
+`numScalarCols` sizes the five quantities that are functions
+of a scalar dielectric function -- the energy loss function,
+the refractive index, the extinction coefficient, the
+reflectivity and the absorption. It is the DIAGONAL count,
+so it is 1, 3 and 3 for the three direction codes (DESIGN
+13.7). At code 2 those five are computed from the first
+three columns and the off-diagonal three are carried through
+epsilon-1 only.
+
+**The isotropic average runs over `numScalarCols`, never
+over `numWorkCols`.** At code 2 they differ, and averaging
+epsilon-1 over all six would fold the off-diagonal entries
+into a quantity that is supposed to be one third of the
+TRACE. The result stays finite and plausible and is wrong.
+
+```
+  totalEps1(i) = sum(eps1(1:numScalarCols, i))
+                 / numScalarCols
+```
+
+At code 1 that is the division by three this has always
+done. At code 0 it is the identity on the single column;
+dividing by a literal three there would shrink every derived
+spectrum to a third of its value with no symptom but the
+numbers.
 
 **The list-directed read is the trap.** At code 0 a record
 holds two values. Reading three would not fail -- Fortran's

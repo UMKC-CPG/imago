@@ -47,18 +47,32 @@ program imagoKkc
    !   so it is no longer fixed at three and has to be discovered from
    !   the file rather than assumed.
    !
-   !   direction code 0   record: energy, total          numDirCols = 0
-   !   direction code 1   record: energy, total, x, y, z numDirCols = 3
+   !   code 0   energy, total                        numDirCols = 0
+   !   code 1   energy, total, x, y, z               numDirCols = 3
+   !   code 2   energy, total, xx yy zz xy xz yz     numDirCols = 6
    !
-   ! numWorkCols is what every array below is sized by. At code 1 it is
-   !   the three Cartesian directions. At code 0 it is ONE, and that one
-   !   column is the direction average itself -- which is a genuine
-   !   scalar dielectric function, so every quantity this program
-   !   derives is well defined on it. Averaging over numWorkCols then
-   !   reproduces the division by three at code 1 and is the identity at
-   !   code 0, so one expression serves both.
+   ! TWO widths are needed, and confusing them is the trap this program
+   !   has to avoid (DESIGN 13.7, PSEUDOCODE 21.7).
+   !
+   ! numWorkCols sizes epsilon-2 and epsilon-1, which carry every
+   !   component the input holds. Kramers-Kronig acts on each component
+   !   independently, because causality holds element by element, so
+   !   epsilon-1 generalizes to all six without argument.
+   !
+   ! numScalarCols sizes the five quantities that are functions of a
+   !   SCALAR dielectric function -- the energy loss function, the
+   !   refractive index, the extinction coefficient, the reflectivity
+   !   and the absorption. None of those has a meaning applied to an
+   !   off-diagonal entry, so they are computed from the DIAGONAL
+   !   entries alone and numScalarCols never exceeds three.
+   !
+   ! The isotropic average runs over numScalarCols, never over
+   !   numWorkCols. At code 2 the two differ, and averaging over all six
+   !   would fold the off-diagonal entries into a quantity that is meant
+   !   to be one third of the TRACE -- finite, plausible, and wrong.
    integer :: numDirCols
    integer :: numWorkCols
+   integer :: numScalarCols
    integer :: numFields    ! Numeric fields on one input data line.
    character*400 :: probeLine
 
@@ -261,23 +275,18 @@ program imagoKkc
    !   remains is direction resolved.
    numDirCols = numFields - 2
 
-   if (numDirCols == 0) then
-      numWorkCols = 1
-   elseif (numDirCols == 3) then
-      numWorkCols = 3
+   if ((numDirCols == 0) .or. (numDirCols == 3) .or. &
+         & (numDirCols == 6)) then
+      numWorkCols = max(numDirCols,1)
+      numScalarCols = min(3,numWorkCols)
    else
       write (6,*) 'imagoKKc: this input carries ',numFields, &
             & ' fields per line, giving ',numDirCols, &
             & ' direction resolved columns.'
-      write (6,*) 'Only 0 (the direction average alone) and 3 (x, y and'
-      write (6,*) 'z) are supported. The six component tensor of'
-      write (6,*) 'direction code 2 is not: the refractive index,'
-      write (6,*) 'extinction coefficient, reflectivity, absorption and'
-      write (6,*) 'energy loss function are all defined from a SCALAR'
-      write (6,*) 'dielectric function, and there is no accepted'
-      write (6,*) 'meaning for any of them applied to an off diagonal'
-      write (6,*) 'tensor entry. Deciding what those columns should'
-      write (6,*) 'hold is a DESIGN question, not a formatting one.'
+      write (6,*) 'Only 0 (the direction average alone), 3 (x, y and z)'
+      write (6,*) 'and 6 (the symmetric tensor) are meaningful. A count'
+      write (6,*) 'outside those means the file was not written by an'
+      write (6,*) 'optical writer, or was truncated.'
       stop 'imagoKKc: unsupported number of direction columns'
    endif
 
@@ -291,15 +300,18 @@ program imagoKkc
    allocate (totalExtnctCoeff(length))
    allocate (totalReflectivity(length))
    allocate (totalAbsorpCoeff(length))
+   ! Epsilon-2 and epsilon-1 carry every component the input holds.
    allocate (eps1(numWorkCols,length))
    allocate (eps1i(numWorkCols,length))
    allocate (eps2(numWorkCols,length))
    allocate (fine_eps2(numWorkCols,numValues))
-   allocate (elf(numWorkCols,length))
-   allocate (refractIndex(numWorkCols,length))
-   allocate (extnctCoeff(numWorkCols,length))
-   allocate (reflectivity(numWorkCols,length))
-   allocate (absorpCoeff(numWorkCols,length))
+
+   ! The scalar-derived five carry the diagonal entries only.
+   allocate (elf(numScalarCols,length))
+   allocate (refractIndex(numScalarCols,length))
+   allocate (extnctCoeff(numScalarCols,length))
+   allocate (reflectivity(numScalarCols,length))
+   allocate (absorpCoeff(numScalarCols,length))
 
    ! Read the energy and epsilon2 data (output of the optc program).
    call readOPTCData(length, energy, totalEps2, eps2)
@@ -516,6 +528,7 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
    real (kind=double) :: fine_e,original_e
    real (kind=double), allocatable, dimension (:) :: evenSum,oddSum
    real (kind=double), allocatable, dimension (:) :: evenSumi,oddSumi
+   real (kind=double), allocatable, dimension (:) :: vacuumTerm
    real (kind=double), allocatable, dimension (:,:) :: integrand,integrandi
 
    real (kind=double) :: multFactor
@@ -555,6 +568,24 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
    allocate (evenSumi   (size(eps1,1)))
    allocate (oddSumi    (size(eps1,1)))
    allocate (integrandi (size(eps1,1),numValues))
+
+   ! The additive term of the dispersion relation,
+   !
+   !   eps1_ij(w) = delta_ij + (2/pi) P Int[ ... ]
+   !
+   !   is a KRONECKER DELTA: it is the vacuum contribution, present on
+   !   the diagonal and absent off it. So it goes on the first three
+   !   entries and nowhere else. Adding it to every column would leave
+   !   each off-diagonal epsilon-1 sitting at exactly one where it
+   !   should sit at zero -- a constant offset, uniform across the
+   !   spectrum, that looks like a plausible baseline rather than an
+   !   error.
+   !
+   ! At direction codes 0 and 1 every column IS diagonal, so this is
+   !   the unconditional addition it has always been.
+   allocate (vacuumTerm (size(eps1,1)))
+   vacuumTerm(:) = 0.0_double
+   vacuumTerm(1:min(3,size(eps1,1))) = pOptcFactor
 
    do i=1,length
       oddSum(:)    = 0.0_double
@@ -637,10 +668,10 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
       !   error of the whole integration.
       eps1(:,i)=fineEnergyDiff*(integrand(:,int(numValues-grain)) + &
             & integrand(:,1) + 4.0_double * evenSum(:) + 2.0_double * &
-            & oddSum(:)) * multFactor + pOptcFactor
+            & oddSum(:)) * multFactor + vacuumTerm(:)
       eps1i(:,i)=fineEnergyDiff*(integrandi(:,int(numValues-grain)) + &
             & integrandi(:,1) + 4.0_double * evenSumi(:) + 2.0_double * &
-            & oddSumi(:)) * multFactor + pOptcFactor
+            & oddSumi(:)) * multFactor + vacuumTerm(:)
    enddo
 
    deallocate (evenSum)
@@ -649,6 +680,7 @@ subroutine kramersKronig(length,grain,numValues,fineEnergyDiff,&
    deallocate (evenSumi)
    deallocate (oddSumi)
    deallocate (integrandi)
+   deallocate (vacuumTerm)
 
 end subroutine kramersKronig
 
@@ -671,13 +703,15 @@ subroutine get_n_k_R_a(length,energy,eps1,eps2,refractIndex,extnctCoeff,&
    integer :: i,j
    complex (kind=double) :: reflecTemp
 
-   ! Bounded by the array rather than by three. At direction code 0
-   !   there is a single working column, and running to three here
-   !   writes past the end of every one of these arrays -- which does
-   !   not fail at the write but corrupts the heap and aborts later,
-   !   somewhere with no connection to the cause.
+   ! Bounded by the DESTINATION arrays rather than by three, and not by
+   !   eps1 either. At direction code 0 there is a single column, and
+   !   running to three here writes past the end of every one of these
+   !   -- which does not fail at the write but corrupts the heap and
+   !   aborts later, somewhere with no connection to the cause. At code
+   !   2 eps1 is six wide while these are three, so bounding by eps1
+   !   would make the same mistake in the other direction.
    do i = 1,length
-      do j = 1,size(eps1,1)
+      do j = 1,size(refractIndex,1)
 
          ! ~eps = eps1 + i eps2
          ! eps1 = n^2 - k^2  (n=refractive index, k=extinction coeff)
@@ -723,8 +757,15 @@ subroutine getELF(length,eps1,eps2,elf)
    integer :: i
 
    ! ELF = Im(-1/eps) = eps2 / (eps1^2 + eps2^2)
+   !
+   ! Restricted to the DIAGONAL entries. This expression is the loss
+   !   function of a scalar dielectric function; the tensor form is
+   !   Im(-eps^-1), a matrix inverse, which is not this applied
+   !   element-wise. So elf is narrower than eps1 and eps2 whenever the
+   !   input carries off-diagonal components (DESIGN 13.7).
    do i = 1,length
-      elf(:,i) = eps2(:,i) / (eps1(:,i)**2 + eps2(:,i)**2)
+      elf(:,i) = eps2(1:size(elf,1),i) &
+            & / (eps1(1:size(elf,1),i)**2 + eps2(1:size(elf,1),i)**2)
    enddo
 
 
@@ -750,8 +791,9 @@ subroutine averageFunctions(length,eps1,eps1i,refractIndex,extnctCoeff,&
          & totalAbsorpCoeff
 
    integer :: i
+   integer :: numDiagonal
 
-   ! The divisor is the number of columns actually carried, not the
+   ! The divisor is the number of DIAGONAL columns carried, not the
    !   literal three. At direction code 1 that IS three and every result
    !   is unchanged. At direction code 0 there is a single column which
    !   is already the direction average, so dividing by one returns it
@@ -762,18 +804,29 @@ subroutine averageFunctions(length,eps1,eps1i,refractIndex,extnctCoeff,&
    !   is built from the total eps1 and eps2, because the energy loss
    !   function is a non-linear function of the dielectric function and
    !   the average of Im(-1/eps) is not Im(-1/eps_avg).
+   ! The isotropic value is one third of the TRACE, so the average runs
+   !   over the DIAGONAL entries only. At direction code 2 epsilon-1 is
+   !   six columns wide while this average must still take three;
+   !   averaging over all six would fold the off-diagonal entries into
+   !   the trace and produce a number that is finite, plausible and
+   !   wrong. `refractIndex` is the diagonal width by construction, so
+   !   it is what the bound is taken from.
+   numDiagonal = size(refractIndex,1)
+
    do i = 1,length
-      totalEps1(i)         = sum(eps1(:,i))/real(size(eps1,1),double)
-      totalEps1i(i)        = sum(eps1i(:,i))/real(size(eps1i,1),double)
+      totalEps1(i)         = sum(eps1(1:numDiagonal,i)) &
+            & /real(numDiagonal,double)
+      totalEps1i(i)        = sum(eps1i(1:numDiagonal,i)) &
+            & /real(numDiagonal,double)
       totalElf(i)          = totalEps2(i)/(totalEps1(i)**2+totalEps2(i)**2)
       totalRefractIndex(i) = sum(refractIndex(:,i)) &
-            & /real(size(refractIndex,1),double)
+            & /real(numDiagonal,double)
       totalExtnctCoeff(i)  = sum(extnctCoeff(:,i)) &
-            & /real(size(extnctCoeff,1),double)
+            & /real(numDiagonal,double)
       totalReflectivity(i) = sum(reflectivity(:,i)) &
-            & /real(size(reflectivity,1),double)
+            & /real(numDiagonal,double)
       totalAbsorpCoeff(i)  = sum(absorpCoeff(:,i)) &
-            & /real(size(absorpCoeff,1),double)
+            & /real(numDiagonal,double)
    enddo
 
 end subroutine averageFunctions
@@ -860,19 +913,30 @@ subroutine writeSpectrum (outputUnit,quantityName,length,numCols, &
    real (kind=double), dimension (length) :: energy, totalValues
    real (kind=double), dimension (numCols,length) :: columnValues
 
-   integer :: i
+   integer :: i, col
    character*20 :: recordFormat
-   character*3, dimension (3), parameter :: axisTag = &
-         & (/ "x  ", "y  ", "z  " /)
+   character*200 :: header
+   ! Three columns are named for the Cartesian axes; six are named for
+   !   the entries of the symmetric tensor, in the order PSEUDOCODE
+   !   21.7 declares and the engine's writers fill.
+   character*3, dimension (6), parameter :: axisTag = &
+         & (/ "x  ", "y  ", "z  ", "   ", "   ", "   " /)
+   character*3, dimension (6), parameter :: tensorTag = &
+         & (/ "xx ", "yy ", "zz ", "xy ", "xz ", "yz " /)
 
-   if (numCols == 1) then
-      write (outputUnit,*) "Energy   total"//trim(quantityName)
-   else
-      write (outputUnit,*) "Energy   total"//trim(quantityName)// &
-            & "   "//trim(axisTag(1))//trim(quantityName)// &
-            & "   "//trim(axisTag(2))//trim(quantityName)// &
-            & "   "//trim(axisTag(3))//trim(quantityName)
+   header = " Energy   total"//trim(quantityName)
+   if (numCols > 1) then
+      do col = 1, numCols
+         if (numCols == 6) then
+            header = trim(header)//"   "//trim(tensorTag(col))// &
+                  & trim(quantityName)
+         else
+            header = trim(header)//"   "//trim(axisTag(col))// &
+                  & trim(quantityName)
+         endif
+      enddo
    endif
+   write (outputUnit,fmt="(a)") trim(header)
 
    if (numCols == 1) then
       write (recordFormat,fmt="(a)") "(2e15.7)"
