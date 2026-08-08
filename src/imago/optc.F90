@@ -138,6 +138,44 @@ module O_OptcTransitions
          & dimension (:,:,:,:) :: bandedOccupancy
          !   (kPoint, initial band, final band, spin).
 
+   ! The DECOMPOSED counterparts, holding the pair matrix's momentum
+   !   element rather than the product formed from it (PSEUDOCODE 21.6).
+   !
+   ! The decomposed quantity is a cross term between one partial pair's
+   !   element and the total over all pairs,
+   !
+   !     Re[ M_c(o,n) conjg(S_c) ],   S_c = sum over (o,n) of M_c(o,n)
+   !
+   !   and BOTH factors carry the component index, so both are rotated.
+   !   Only M_c(o,n) needs a new array: S_c is the undecomposed matrix
+   !   element itself, which transitionMoment and transMomentBanded
+   !   already hold. Those two are therefore allocated whenever EITHER
+   !   direction code asks for components, not only when the total's
+   !   code does, so that a run resolving partials by direction while
+   !   leaving totals isotropic still has the total element to hand.
+   !
+   ! At partial direction code 0 neither array below exists. Summing the
+   !   cross term over the three components gives sum_c |...|, in which
+   !   the rotation cancels outright because R is orthogonal, so the
+   !   producer collapses to one real per partial pair and the store is
+   !   a THIRD of the size DESIGN 11.4 warns about. That saving is the
+   !   main reason the two direction codes are separately settable.
+#ifndef GAMMA
+   complex (kind=double), allocatable, &
+         & dimension (:,:,:,:,:,:,:) :: transMomentPOPTCBanded
+   complex (kind=double), allocatable, &
+         & dimension (:,:,:,:,:,:) :: transMomentPOPTC
+#else
+   real (kind=double), allocatable, &
+         & dimension (:,:,:,:,:,:,:) :: transMomentPOPTCBanded
+   real (kind=double), allocatable, &
+         & dimension (:,:,:,:,:,:) :: transMomentPOPTC
+#endif
+         !   Banded: (initial partial, final partial, component, kPoint,
+         !     initial band, final band, spin).
+         !   Gaussian: (initial partial, final partial, component, pair,
+         !     kPoint, spin).
+
    ! Tetrahedron (LAT) integration pathway. DESIGN 12, PSEUDOCODE 19.
    !
    ! The Gaussian pathway stores each transition at a position in a list
@@ -303,37 +341,34 @@ subroutine setOptcStoreSize
          & numPrintColPOPTC
    call flush (20)
 
-   ! TEMPORARY, and to be deleted once the decomposed producers carry
-   !   the complex element the way the undecomposed ones now do.
+   ! The ENGINE now honours all three direction codes on both
+   !   integration pathways, with or without a decomposition. What is
+   !   not yet converted is the post-processing that turns the raw
+   !   epsilon-2 into the derived spectra: imagoKKc allocates every one
+   !   of them at three components and reads a fixed five value record
+   !   (energy, total, x, y, z).
    !
-   ! Until then a Gaussian run that asks for a decomposition would emit
-   !   a total spectrum of ZEROS rather than failing: computePOPTCPairs
-   !   still fills the squared real store, while the accumulation now
-   !   reads the complex one, which is allocated and zeroed. A spectrum
-   !   of zeros is indistinguishable from a material that does not
-   !   absorb, so it has to be a stop and not a warning.
-   if ((detailCodePOPTC /= 0) .and. (kPointIntgCode /= 1) .and. &
-         & (numStoredCompOPTC > 1)) then
-      write (20,*) 'A decomposed Gaussian run needs direction code 0'
-      write (20,*) 'until the decomposed producers are converted to'
-      write (20,*) 'carry the complex matrix element. Set the OPTC'
-      write (20,*) 'direction code to 0, or use the tetrahedron'
-      write (20,*) 'integration method, which is already converted.'
+   ! Measured, rather than assumed, on cubic KNbO3: at code 2 imagoKKc
+   !   read the three DIAGONAL entries and silently discarded xy, xz and
+   !   yz, so its output was byte identical to a code 1 run while
+   !   claiming to describe a tensor. At code 0 it produced no derived
+   !   file at all and the run still exited zero. Both are the silent
+   !   failure this project refuses to ship, so the codes are refused
+   !   here until imagoKKc and processPOPTC.py take their width from the
+   !   COL_LABELS the writers now declare.
+   !
+   ! Code 1 is unrestricted, and code 1 is where the O3 correction
+   !   lives; what is deferred is the extra RESOLUTION of codes 0 and 2,
+   !   not the fix.
+   if ((cartesianCodeOPTC /= 1) .or. (cartesianCodePOPTC /= 1)) then
+      write (20,*) 'Direction codes 0 and 2 are not yet supported end'
+      write (20,*) 'to end. The engine computes them correctly and the'
+      write (20,*) 'raw epsilon-2 is valid, but imagoKKc still assumes'
+      write (20,*) 'a record of energy, total, x, y and z, so every'
+      write (20,*) 'spectrum derived from it would be wrong without'
+      write (20,*) 'saying so. Use direction code 1 for both.'
       call flush (20)
-      stop 'setOptcStoreSize: decomposed Gaussian needs OPTC dir 0'
-   endif
-
-   ! The second half of the same temporary restriction. The decomposed
-   !   stores are still fixed at three components, so a partial
-   !   direction code of 0 or 2 would size the spectra and the store
-   !   differently and read past the end of one of them.
-   if ((detailCodePOPTC /= 0) .and. (numAccumCompPOPTC /= 3)) then
-      write (20,*) 'The POPTC direction code must be 1 until the'
-      write (20,*) 'decomposed stores carry a width of their own.'
-      write (20,*) 'Requested code gives ',numAccumCompPOPTC, &
-            & ' components; the store holds 3.'
-      call flush (20)
-      stop 'setOptcStoreSize: decomposed runs need POPTC dir 1'
+      stop 'setOptcStoreSize: only direction code 1 is supported'
    endif
 
 end subroutine setOptcStoreSize
@@ -842,9 +877,8 @@ subroutine getEnergyStatistics(doOPTC)
       !   (PSEUDOCODE 21.3). At code 0 neither array is needed: the
       !   direction average is rotation invariant, so the producer
       !   collapses it on the spot into transitionProb above.
-      if (numStoredCompOPTC > 1) then
-         allocate (transitionMoment (numStoredCompOPTC,maxPairs, &
-               & numKPoints,spin))
+      if ((numStoredCompOPTC > 1) .or. (numStoredCompPOPTC > 1)) then
+         allocate (transitionMoment (3,maxPairs,numKPoints,spin))
          allocate (pairOccupancy (maxPairs,numKPoints,spin))
          transitionMoment(:,:,:,:) = 0.0_double
          pairOccupancy(:,:,:) = 0.0_double
@@ -942,8 +976,8 @@ integer :: k,l
       !   squares (PSEUDOCODE 21.3). The occupancy carries no component
       !   index: it depends on the two bands and the k-point alone, so
       !   one number serves all three components.
-      if (numStoredCompOPTC > 1) then
-         allocate (transMomentBanded (numStoredCompOPTC,numKPoints, &
+      if ((numStoredCompOPTC > 1) .or. (numStoredCompPOPTC > 1)) then
+         allocate (transMomentBanded (3,numKPoints, &
                & bandedInitLo:bandedInitHi,bandedFinLo:bandedFinHi, &
                & spin))
          allocate (bandedOccupancy (numKPoints, &
@@ -959,10 +993,27 @@ integer :: k,l
       !   holds, so the atom-nl cell reaches tens of gigabytes on a cell
       !   of a few tens of atoms.
       if (detailCodePOPTC /= 0) then
-         allocate (transProbPOPTCBanded (sumNumPartials,sumNumPartials, &
-               & dim3,numKPoints,bandedInitLo:bandedInitHi, &
-               & bandedFinLo:bandedFinHi,spin))
-         transProbPOPTCBanded(:,:,:,:,:,:,:) = 0.0_double
+
+         ! Exactly one of these two exists. At partial direction code 0
+         !   the producer collapses the cross term over the three
+         !   components, where the rotation cancels because R is
+         !   orthogonal, and one real per partial pair is enough. At
+         !   codes 1 and 2 the three complex elements must survive to
+         !   the deposit so the corner's operation can rotate them
+         !   before the product is formed.
+         if (numStoredCompPOPTC == 1) then
+            allocate (transProbPOPTCBanded (sumNumPartials, &
+                  & sumNumPartials,1,numKPoints, &
+                  & bandedInitLo:bandedInitHi, &
+                  & bandedFinLo:bandedFinHi,spin))
+            transProbPOPTCBanded(:,:,:,:,:,:,:) = 0.0_double
+         else
+            allocate (transMomentPOPTCBanded (sumNumPartials, &
+                  & sumNumPartials,3,numKPoints, &
+                  & bandedInitLo:bandedInitHi, &
+                  & bandedFinLo:bandedFinHi,spin))
+            transMomentPOPTCBanded(:,:,:,:,:,:,:) = 0.0_double
+         endif
       endif
    endif
 
@@ -1896,7 +1947,7 @@ subroutine computeTransProbBanded (currentKPoint,xyzComponents, &
          !   element so that it never has to be square rooted
          !   (PSEUDOCODE 21.3). It carries no component index because
          !   occupancy does not depend on direction.
-         if (numStoredCompOPTC > 1) then
+         if (allocated(bandedOccupancy)) then
             bandedOccupancy(currentKPoint,i,j,spinDirection) = &
                   & initStateFactor * finStateFactor
          endif
@@ -1905,13 +1956,12 @@ subroutine computeTransProbBanded (currentKPoint,xyzComponents, &
 
             ! When the components are done one at a time the computed
             !   component always lands in slot 1 of conjWaveMomSum but
-            !   belongs in slot xyzComponents of the store. At direction
-            !   code 0 there is only one slot and every component adds
-            !   into it, so the position is 1 whichever way the
-            !   components were computed.
-            if (numStoredCompOPTC == 1) then
-               storeComponent = 1
-            elseif (xyzComponents == 0) then
+            !   belongs in slot xyzComponents of the store. This is the
+            !   TRUE Cartesian index, so it addresses the element store,
+            !   which always keeps three. The collapsed store has a
+            !   single slot and every component adds into it, so it is
+            !   addressed by the literal 1 rather than by this.
+            if (xyzComponents == 0) then
                storeComponent = k
             else
                storeComponent = xyzComponents
@@ -1935,10 +1985,16 @@ subroutine computeTransProbBanded (currentKPoint,xyzComponents, &
                      & spinDirection) + (real(valeValeXMom,double)**2 &
                      & + aimag(valeValeXMom)**2) &
                      & * initStateFactor * finStateFactor
-            else
+            endif
 
-               ! Direction codes 1 and 2. Keep the element itself; it is
-               !   squared only after the star unfolding has rotated it.
+            ! Keep the element itself whenever anything downstream will
+            !   need to rotate it -- which is either because the totals
+            !   ask for direction resolution, or because the PARTIALS do
+            !   and this undecomposed element is the total S_c their
+            !   cross term is built against. Not an else of the branch
+            !   above: at total code 0 with partial code 1 both the
+            !   collapsed square and the element are wanted.
+            if (allocated(transMomentBanded)) then
                transMomentBanded(storeComponent,currentKPoint,i,j, &
                      & spinDirection) = valeValeXMom
             endif
@@ -1951,7 +2007,8 @@ subroutine computeTransProbBanded (currentKPoint,xyzComponents, &
                      & transProbBanded(1,currentKPoint,i,j, &
                      & spinDirection) + valeValeXMom**2 &
                      & * initStateFactor * finStateFactor
-            else
+            endif
+            if (allocated(transMomentBanded)) then
                transMomentBanded(storeComponent,currentKPoint,i,j, &
                      & spinDirection) = valeValeXMom
             endif
@@ -2093,17 +2150,43 @@ subroutine computeTransProbPOPTCBanded (currentKPoint,xyzComponents, &
 
             ! n outer, o inner: o is the leftmost index of both the
             !   scratch matrix and the store, so it must run innermost.
-            do n = 1, sumNumPartials
-               do o = 1, sumNumPartials
-                  transProbPOPTCBanded(o,n,storeComponent,currentKPoint, &
-                        & i,j,spinDirection) = &
-                        & ((real(valeValeXMom(o,n,k),double) &
-                        & * valeValeXMomSumReal) &
-                        & + (aimag(valeValeXMom(o,n,k)) &
-                        & * valeValeXMomSumImag)) &
-                        & * initStateFactor * finStateFactor
+            if (numStoredCompPOPTC == 1) then
+
+               ! Partial direction code 0. Accumulate the cross term
+               !   over the three components into the single slot. That
+               !   sum is what the rotation cancels out of: with R
+               !   orthogonal, sum_c R_cd R_ce is delta_de, so the
+               !   component-summed cross term is unchanged by any
+               !   operation and can be collapsed here for good. This is
+               !   where the store's threefold saving comes from.
+               do n = 1, sumNumPartials
+                  do o = 1, sumNumPartials
+                     transProbPOPTCBanded(o,n,1,currentKPoint, &
+                           & i,j,spinDirection) = &
+                           & transProbPOPTCBanded(o,n,1,currentKPoint, &
+                           & i,j,spinDirection) &
+                           & + ((real(valeValeXMom(o,n,k),double) &
+                           & * valeValeXMomSumReal) &
+                           & + (aimag(valeValeXMom(o,n,k)) &
+                           & * valeValeXMomSumImag)) &
+                           & * initStateFactor * finStateFactor
+                  enddo
                enddo
-            enddo
+            else
+
+               ! Codes 1 and 2. Carry the partial pair's element out
+               !   intact. Its partner in the cross term, the total S_c,
+               !   is the undecomposed element that computeTransProbBanded
+               !   has already stored, so it is not duplicated here. The
+               !   occupancy weight likewise travels in bandedOccupancy.
+               do n = 1, sumNumPartials
+                  do o = 1, sumNumPartials
+                     transMomentPOPTCBanded(o,n,storeComponent, &
+                           & currentKPoint,i,j,spinDirection) = &
+                           & valeValeXMom(o,n,k)
+                  enddo
+               enddo
+            endif
 #else
             valeValeXMom(:,:,k) = 0.0_double
 
@@ -2118,14 +2201,26 @@ subroutine computeTransProbPOPTCBanded (currentKPoint,xyzComponents, &
 
             valeValeXMomSum = sum(valeValeXMom(:,:,k))
 
-            do n = 1, sumNumPartials
-               do o = 1, sumNumPartials
-                  transProbPOPTCBanded(o,n,storeComponent,currentKPoint, &
-                        & i,j,spinDirection) = &
-                        & valeValeXMom(o,n,k) * valeValeXMomSum &
-                        & * initStateFactor * finStateFactor
+            if (numStoredCompPOPTC == 1) then
+               do n = 1, sumNumPartials
+                  do o = 1, sumNumPartials
+                     transProbPOPTCBanded(o,n,1,currentKPoint, &
+                           & i,j,spinDirection) = &
+                           & transProbPOPTCBanded(o,n,1,currentKPoint, &
+                           & i,j,spinDirection) &
+                           & + valeValeXMom(o,n,k) * valeValeXMomSum &
+                           & * initStateFactor * finStateFactor
+                  enddo
                enddo
-            enddo
+            else
+               do n = 1, sumNumPartials
+                  do o = 1, sumNumPartials
+                     transMomentPOPTCBanded(o,n,storeComponent, &
+                           & currentKPoint,i,j,spinDirection) = &
+                           & valeValeXMom(o,n,k)
+                  enddo
+               enddo
+            endif
 #endif
          enddo
       enddo
@@ -2520,7 +2615,8 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    use O_SortSubs,    only: mergeSort
    use O_Populate,    only: electronPopulation
    use O_KPoints,     only: kPointWeight, numKPoints, numFullMeshKP, &
-         & fullKPToIBZKPMap, fullKPToIBZOpMap, kPointIntgCode
+         & fullKPToIBZKPMap, fullKPToIBZOpMap, kPointIntgCode, &
+         & xyzRealPointOps
    use O_Constants,   only: pi, hartree, dim3
    use O_AtomicSites, only: valeDim, atomPerm
    use O_Input,       only: numStates, detailCodePOPTC
@@ -2564,9 +2660,40 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    integer :: partialB   ! Final-state partial index of the pair
    integer :: permPartialA ! Image of partialA under the operation
    integer :: permPartialB ! Image of partialB under the operation
-   real (kind=double), allocatable, dimension (:,:) :: pairSlabSym
+   real (kind=double), allocatable, &
+         & dimension (:,:,:) :: symmetrizedPairMatrix
    real (kind=double), allocatable, &
          & dimension (:,:,:,:) :: transitionProbTemp
+
+   ! Direction resolution of the partials (PSEUDOCODE 21.6). The star
+   !   walk below now carries TWO things across a star member rather
+   !   than one: the permutation of the partial indices, which it always
+   !   did, and the rotation of the Cartesian components, which is new.
+   !   They cannot be separated -- a single star member supplies both --
+   !   which is why the component index had to move inside the star loop
+   !   instead of outside it.
+   integer :: slot, d      ! Spectrum slot and Cartesian component.
+   integer :: storeSlots   ! Width of the unsorted product temporary.
+   real (kind=double) :: slotValue
+   real (kind=double), allocatable, dimension (:) :: occupancyTemp
+   ! The tensor entry order of PSEUDOCODE 21.7.
+   integer, dimension (6), parameter :: firstOfPairP = &
+         & (/ 1, 2, 3, 1, 1, 2 /)
+   integer, dimension (6), parameter :: secondOfPairP = &
+         & (/ 1, 2, 3, 2, 3, 3 /)
+#ifndef GAMMA
+   complex (kind=double), allocatable, &
+         & dimension (:,:,:,:) :: momentPairTemp
+   complex (kind=double), allocatable, dimension (:,:) :: momentTotTemp
+   complex (kind=double), dimension (3) :: rotatedTotal
+   complex (kind=double), dimension (6,3) :: crossFactor
+#else
+   real (kind=double), allocatable, &
+         & dimension (:,:,:,:) :: momentPairTemp
+   real (kind=double), allocatable, dimension (:,:) :: momentTotTemp
+   real (kind=double), dimension (3) :: rotatedTotal
+   real (kind=double), dimension (6,3) :: crossFactor
+#endif
 
    ! Define local variables that are the same as computePairs.
    integer :: initComponent
@@ -2605,8 +2732,8 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    !   is the GAUSSIAN pathway's store; the tetrahedron pathway fills
    !   transProbPOPTCBanded instead, under a band-pair index.
    if (.not. allocated(transitionProbPOPTC)) then
-      allocate(transitionProbPOPTC(sumNumPartials,sumNumPartials,dim3,&
-            & maxPairs,numKPoints,spin))
+      allocate(transitionProbPOPTC(sumNumPartials,sumNumPartials, &
+            & numAccumCompPOPTC,maxPairs,numKPoints,spin))
       transitionProbPOPTC (:,:,:,:,:,:) = 0.0_double
    endif
 
@@ -2653,8 +2780,35 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
 
    ! Allocate space for the energy difference.
    allocate (energyDiffTemp (maxPairs))
-   allocate (transitionProbTemp (sumNumPartials,sumNumPartials,finComponent,&
-                                 & maxPairs))
+
+   ! The unsorted product temporary has to be wide enough for whichever
+   !   of the two things gets written into it: the per-component
+   !   products at partial direction code 0, or the spectrum slots the
+   !   star walk produces at codes 1 and 2. Those widths differ, and
+   !   taking the larger keeps a single array serving both.
+   storeSlots = max(finComponent,numAccumCompPOPTC)
+   allocate (transitionProbTemp (sumNumPartials,sumNumPartials, &
+         & storeSlots,maxPairs))
+   transitionProbTemp(:,:,:,:) = 0.0_double
+
+   ! At codes 1 and 2 the pair matrix's element and the total it is
+   !   crossed against both have to survive to the star walk, together
+   !   with the occupancy weight that is no longer folded into either.
+   ! The total element and the occupancy are needed on EVERY path, not
+   !   only the direction resolved ones, because this routine also feeds
+   !   the undecomposed store that produces the total spectrum.
+   allocate (occupancyTemp (maxPairs))
+   allocate (momentTotTemp (3,maxPairs))
+   occupancyTemp(:) = 0.0_double
+   momentTotTemp(:,:) = 0.0_double
+
+   ! Only the per-pair elements are conditional; they are the large
+   !   array, carrying the partial count squared.
+   if (numStoredCompPOPTC > 1) then
+      allocate (momentPairTemp (sumNumPartials,sumNumPartials,3, &
+            & maxPairs))
+      momentPairTemp(:,:,:,:) = 0.0_double
+   endif
 
    ! Initialize the temporary energy transition array.
    energyDiffTemp(:) = 0.0_double
@@ -2775,15 +2929,45 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
             !   from sum squared to sum of squares
             valeValeXMomSumReal = sum(real(valeValeXMom(:,:,k),double))
             valeValeXMomSumImag = sum(aimag(valeValeXMom(:,:,k)))
-            do n = 1, sumNumPartials
-               do o = 1,sumNumPartials
 
-                  transitionProbTemp(o,n,k,transPairCount) = &
-                        & ((real(valeValeXMom(o,n,k))*valeValeXMomSumReal) &
-                        & + (aimag(valeValeXMom(o,n,k))*valeValeXMomSumImag)) &
+            ! The occupancy weight and the total element, both needed by
+            !   the star walk below and by the undecomposed spectrum.
+            occupancyTemp(transPairCount) = &
+                  & initStateFactor * finStateFactor
+            if (allocated(momentTotTemp)) then
+               momentTotTemp(k,transPairCount) = &
+                     & cmplx(valeValeXMomSumReal,valeValeXMomSumImag, &
+                     & double)
+            endif
+
+            if (numStoredCompPOPTC == 1) then
+
+               ! Partial direction code 0. Accumulate the cross term
+               !   over the three components into one slot; that sum is
+               !   what the rotation cancels out of, so it can be
+               !   collapsed here and never resolved again.
+               do n = 1, sumNumPartials
+                  do o = 1,sumNumPartials
+                     transitionProbTemp(o,n,1,transPairCount) = &
+                        & transitionProbTemp(o,n,1,transPairCount) &
+                        & + ((real(valeValeXMom(o,n,k)) &
+                        & * valeValeXMomSumReal) &
+                        & + (aimag(valeValeXMom(o,n,k)) &
+                        & * valeValeXMomSumImag)) &
                         & * initStateFactor*finStateFactor
+                  enddo
                enddo
-            enddo
+            else
+
+               ! Codes 1 and 2. Keep the element; the cross term is
+               !   formed in the star walk, after the rotation.
+               do n = 1, sumNumPartials
+                  do o = 1,sumNumPartials
+                     momentPairTemp(o,n,k,transPairCount) = &
+                           & valeValeXMom(o,n,k)
+                  enddo
+               enddo
+            endif
          enddo
 
 #else
@@ -2813,14 +2997,31 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
             !   probability to account from the change from sum squared 
             !   to the sum of squares.
             valeValeXMomGammaSum = sum(valeValeXMomGamma(:,:,k))
-            do n = 1, sumNumPartials
-               do o = 1,sumNumPartials
 
-                  transitionProbTemp(o,n,k,transPairCount) = &
-                        & valeValeXMomGamma(o,n,k)*valeValeXMomGammaSum &
+            occupancyTemp(transPairCount) = &
+                  & initStateFactor * finStateFactor
+            if (allocated(momentTotTemp)) then
+               momentTotTemp(k,transPairCount) = valeValeXMomGammaSum
+            endif
+
+            if (numStoredCompPOPTC == 1) then
+               do n = 1, sumNumPartials
+                  do o = 1,sumNumPartials
+                     transitionProbTemp(o,n,1,transPairCount) = &
+                        & transitionProbTemp(o,n,1,transPairCount) &
+                        & + valeValeXMomGamma(o,n,k) &
+                        & * valeValeXMomGammaSum &
                         & * initStateFactor*finStateFactor
+                  enddo
                enddo
-            enddo
+            else
+               do n = 1, sumNumPartials
+                  do o = 1,sumNumPartials
+                     momentPairTemp(o,n,k,transPairCount) = &
+                           & valeValeXMomGamma(o,n,k)
+                  enddo
+               enddo
+            endif
          enddo
 #endif
       enddo ! Fin loop j
@@ -2902,8 +3103,15 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    !   symmetry twice. Both pathways are correct under reduction; they
    !   reach it by different routes (PSEUDOCODE 19.5, DESIGN 12.6).
    ! ----------------------------------------------------------------------
-   if ((kPointIntgCode == 0) .and. (detailCodePOPTC >= 3) .and. &
-         & (allocated(atomPerm))) then
+   ! O3 widens when this block runs. It used to be reserved for the atom
+   !   grouped codes, because a PERMUTATION of partials is a no-op for
+   !   the type grouped ones. The ROTATION of Cartesian components is
+   !   not: it applies to every detail code, so the star walk now runs
+   !   whenever the partials are direction resolved, and the permutation
+   !   inside it is applied only where partialPerm exists.
+   if ((kPointIntgCode == 0) .and. &
+         & (((detailCodePOPTC >= 3) .and. (allocated(atomPerm))) .or. &
+         & (numStoredCompPOPTC > 1))) then
 
       ! Count the star: the number of full-mesh k-points that fold onto
       !   this IBZ representative. Counted the same way as in computeBond.
@@ -2914,14 +3122,18 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
          endif
       enddo
 
-      ! Scratch space for one symmetrized slab. The averaging cannot be
-      !   done in place because each star member reads the whole original
-      !   slab while writing scattered elements of the result. The slab
-      !   is indexed by PARTIAL rather than by site: the two coincide for
-      !   detail code 3, where each site owns one partial, but for code 4
-      !   a site owns one partial per radial function and a slab bounded
-      !   by the site count would be far too small.
-      allocate (pairSlabSym(sumNumPartials,sumNumPartials))
+      ! Scratch space for one symmetrized pair matrix. The averaging
+      !   cannot be done in place because each star member reads the
+      !   whole original matrix while writing scattered elements of the
+      !   result. It is indexed by PARTIAL rather than by site: the two
+      !   coincide for detail code 3, where each site owns one partial,
+      !   but for code 4 a site owns one partial per radial function and
+      !   a matrix bounded by the site count would be far too small. The
+      !   third index is the spectrum slot, which the rotation makes
+      !   necessary: a star member no longer moves a component onto
+      !   itself, so a component cannot be held fixed outside the walk.
+      allocate (symmetrizedPairMatrix(sumNumPartials,sumNumPartials, &
+            & storeSlots))
 
       ! The star sum is a fixed linear map on the pair matrix: it does not
       !   depend on energy, and the Gaussian broadening applied later in
@@ -2930,38 +3142,105 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
       !   is left alone. Doing it inside the energy loop instead would
       !   multiply the innermost work by the reduction factor of 4 to 48
       !   for the very same answer.
+      !
+      ! THE COMPONENT LOOP HAS MOVED INSIDE THE STAR WALK (PSEUDOCODE
+      !   21.6). Holding it outside was correct only while an operation
+      !   could not mix components, which is true of a permutation and
+      !   false of a rotation. This is the one loop nest O3 reorders
+      !   rather than extends, and the first place to look if the
+      !   partials stop summing to the total.
       do pairIndex = 1, transPairCount
-         do component = initComponent, finComponent
 
-            pairSlabSym(:,:) = 0.0_double
+         symmetrizedPairMatrix(:,:,:) = 0.0_double
 
-            ! Walk the star. Each member contributes the IBZ slab with
-            !   both of its partial indices carried through that member's
-            !   operation, and the division by starSize turns the sum into
-            !   an average, so the totals are preserved exactly.
-            do fullIdx = 1, numFullMeshKP
-               if (fullKPToIBZKPMap(fullIdx) /= currentKPoint) cycle
-               opIdx = fullKPToIBZOpMap(fullIdx)
+         ! Walk the star. Each member contributes the irreducible
+         !   point's pair matrix with both partial indices carried
+         !   through that member's operation AND its Cartesian
+         !   components rotated by the same operation. The division by
+         !   starSize turns the sum into an average, so the totals are
+         !   preserved exactly.
+         do fullIdx = 1, numFullMeshKP
+            if (fullKPToIBZKPMap(fullIdx) /= currentKPoint) cycle
+            opIdx = fullKPToIBZOpMap(fullIdx)
 
-               do partialA = 1, sumNumPartials
+            ! Everything independent of the partial pair, hoisted out of
+            !   the two loops that run over the partial count squared.
+            if (numStoredCompPOPTC > 1) then
+               do d = 1, 3
+                  rotatedTotal(d) = &
+                        & sum(xyzRealPointOps(d,:,opIdx) &
+                        & * momentTotTemp(:,pairIndex))
+               enddo
+               do slot = 1, storeSlots
+                  do d = 1, 3
+                     crossFactor(slot,d) = &
+                           & xyzRealPointOps(firstOfPairP(slot),d, &
+                           & opIdx) &
+#ifndef GAMMA
+                           & * conjg(rotatedTotal(secondOfPairP(slot)))
+#else
+                           & * rotatedTotal(secondOfPairP(slot))
+#endif
+                  enddo
+               enddo
+            endif
+
+            do partialA = 1, sumNumPartials
+               if (allocated(partialPerm)) then
                   permPartialA = partialPerm(opIdx,partialA)
+               else
+                  permPartialA = partialA
+               endif
 
-                  do partialB = 1, sumNumPartials
+               do partialB = 1, sumNumPartials
+                  if (allocated(partialPerm)) then
                      permPartialB = partialPerm(opIdx,partialB)
+                  else
+                     permPartialB = partialB
+                  endif
 
-                     pairSlabSym(permPartialA,permPartialB) = &
-                           & pairSlabSym(permPartialA,permPartialB) &
-                           & + transitionProbTemp(partialA,partialB, &
-                           & component,pairIndex) / real(starSize,double)
-                  enddo ! partialB
-               enddo ! partialA
-            enddo ! fullIdx (star members)
+                  do slot = 1, storeSlots
+                     if (numStoredCompPOPTC == 1) then
 
-            transitionProbTemp(:,:,component,pairIndex) = pairSlabSym(:,:)
-         enddo ! component
+                        ! Partial direction code 0. The stored number is
+                        !   already summed over components, where the
+                        !   rotation cancels, so only the permutation
+                        !   acts.
+                        slotValue = transitionProbTemp(partialA, &
+                              & partialB,slot,pairIndex)
+                     else
+                        slotValue = 0.0_double
+                        do d = 1, 3
+#ifndef GAMMA
+                           slotValue = slotValue &
+                                 & + real(momentPairTemp(partialA, &
+                                 & partialB,d,pairIndex) &
+                                 & * crossFactor(slot,d),double)
+#else
+                           slotValue = slotValue &
+                                 & + momentPairTemp(partialA,partialB, &
+                                 & d,pairIndex) * crossFactor(slot,d)
+#endif
+                        enddo
+                        slotValue = slotValue &
+                              & * occupancyTemp(pairIndex)
+                     endif
+
+                     symmetrizedPairMatrix(permPartialA,permPartialB, &
+                           & slot) = &
+                           & symmetrizedPairMatrix(permPartialA, &
+                           & permPartialB,slot) &
+                           & + slotValue / real(starSize,double)
+                  enddo ! slot
+               enddo ! partialB
+            enddo ! partialA
+         enddo ! fullIdx (star members)
+
+         transitionProbTemp(:,:,1:storeSlots,pairIndex) = &
+               & symmetrizedPairMatrix(:,:,:)
       enddo ! pairIndex
 
-      deallocate (pairSlabSym)
+      deallocate (symmetrizedPairMatrix)
    endif
 
    ! Determine if there was only one segment.  In this case we don't have to
@@ -2981,21 +3260,51 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    if (xyzComponents == 0) then
       do i = 1, transPairCount
          transitionProbPOPTC(:,:,:,i,currentKPoint,spinDirection) = &
-               & transitionProbTemp(:,:,:,sortOrder(i))
-         do j = 1, dim3
-            transitionProb(j,i,currentKPoint,spinDirection) = &
-                  & sum(transitionProbPOPTC(:,:,j,i,currentKPoint,&
-                  & spinDirection))
-         enddo
+               & transitionProbTemp(:,:,1:numAccumCompPOPTC, &
+               & sortOrder(i))
       enddo
    else
       do i = 1, transPairCount
          transitionProbPOPTC(:,:,xyzComponents,i, &
                & currentKPoint,spinDirection) = &
                & transitionProbTemp(:,:,1,sortOrder(i))
-         transitionProb(xyzComponents,i,currentKPoint,spinDirection) = &
-               & sum(transitionProbPOPTC(:,:,xyzComponents,i,currentKPoint,&
-               & spinDirection))
+      enddo
+   endif
+
+   ! Feed the UNDECOMPOSED store as well, since computePairs does not
+   !   run when a decomposition was requested and the total spectrum is
+   !   produced regardless.
+   !
+   ! What is handed over is the total matrix element and the occupancy,
+   !   not a sum over the partial store. Summing the partials would give
+   !   the right answer only where the two direction codes happen to
+   !   agree, and it would make the total spectrum depend on how finely
+   !   the partials were resolved -- which is precisely the coupling the
+   !   two separate codes exist to avoid. Handing over the element makes
+   !   the total identical to what an undecomposed run produces.
+   if (allocated(transitionMoment)) then
+      do i = 1, transPairCount
+         transitionMoment(:,i,currentKPoint,spinDirection) = &
+               & momentTotTemp(:,sortOrder(i))
+         pairOccupancy(i,currentKPoint,spinDirection) = &
+               & occupancyTemp(sortOrder(i))
+      enddo
+   else
+
+      ! Total direction code 0. The undecomposed store holds the
+      !   collapsed direction sum, which is formed here from the total
+      !   element rather than from the partials, for the same reason.
+      do i = 1, transPairCount
+#ifndef GAMMA
+         transitionProb(1,i,currentKPoint,spinDirection) = &
+               & sum(real(momentTotTemp(:,sortOrder(i)),double)**2 &
+               & + aimag(momentTotTemp(:,sortOrder(i)))**2) &
+               & * occupancyTemp(sortOrder(i))
+#else
+         transitionProb(1,i,currentKPoint,spinDirection) = &
+               & sum(momentTotTemp(:,sortOrder(i))**2) &
+               & * occupancyTemp(sortOrder(i))
+#endif
       enddo
    endif
 
@@ -3005,6 +3314,13 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    !   producer read it and neither owns it.
    deallocate (energyDiffTemp)
    deallocate (transitionProbTemp)
+   deallocate (occupancyTemp)
+   if (allocated(momentPairTemp)) then
+      deallocate (momentPairTemp)
+   endif
+   if (allocated(momentTotTemp)) then
+      deallocate (momentTotTemp)
+   endif
    deallocate (segmentBorders)
    deallocate (sortOrder)
 

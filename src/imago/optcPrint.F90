@@ -838,10 +838,11 @@ subroutine accumulateOptcCondPOPTC_LAT (latFactor)
    use O_SecularEquation, only: energyEigenValues
    use O_Input,           only: detailCodePOPTC
    use O_KPoints,         only: numTetrahedra, tetraVol, tetrahedra, &
-         & fullKPToIBZKPMap, fullKPToIBZOpMap
+         & fullKPToIBZKPMap, fullKPToIBZOpMap, xyzRealPointOps
    use O_OptcTransitions, only: energyScale, transProbPOPTCBanded, &
          & bandedInitLo, bandedInitHi, bandedFinLo, bandedFinHi, &
-         & pairIsWanted, sumNumPartials, partialPerm
+         & pairIsWanted, sumNumPartials, partialPerm, &
+         & transMomentBanded, numStoredCompPOPTC, numAccumCompPOPTC
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
@@ -857,6 +858,7 @@ subroutine accumulateOptcCondPOPTC_LAT (latFactor)
    integer :: firstPoint, lastPoint
    integer :: a,b          ! Initial and final partial of the pair.
    integer :: aRot, bRot   ! Their images under the corner's operation.
+   integer :: slot, d      ! Spectrum slot and Cartesian component.
    integer, dimension (4) :: sortOrder
    integer, dimension (4) :: cornerKP
    integer, dimension (4) :: cornerOp ! Operation reaching each corner.
@@ -866,6 +868,20 @@ subroutine accumulateOptcCondPOPTC_LAT (latFactor)
    real (kind=double) :: energyStep
    real (kind=double) :: energy
    real (kind=double) :: weight ! The full per-corner scale factor.
+   ! The tensor entry order of PSEUDOCODE 21.7, named apart from the
+   !   total spectrum's copy because the two widths are set by different
+   !   direction codes and must not be made to share a variable.
+   integer, dimension (6), parameter :: firstOfPairP = &
+         & (/ 1, 2, 3, 1, 1, 2 /)
+   integer, dimension (6), parameter :: secondOfPairP = &
+         & (/ 1, 2, 3, 2, 3, 3 /)
+#ifndef GAMMA
+   complex (kind=double), dimension (3) :: rotatedTotal
+   complex (kind=double), dimension (6,3) :: crossFactor
+#else
+   real (kind=double), dimension (3) :: rotatedTotal
+   real (kind=double), dimension (6,3) :: crossFactor
+#endif
 
    if (size(energyScale) > 1) then
       energyStep = energyScale(2) - energyScale(1)
@@ -928,6 +944,45 @@ subroutine accumulateOptcCondPOPTC_LAT (latFactor)
                      opR  = cornerOp(orig)
                      weight = cornerDOSWt(c) * tetraVol * latFactor
 
+                     ! At partial direction code 1 or 2 the cross term
+                     !   has to be built HERE, because both of its
+                     !   factors are vectors that this corner's
+                     !   operation rotates. Everything that does not
+                     !   depend on the partial pair is formed once per
+                     !   corner, outside the pair loops below:
+                     !
+                     !     rotatedTotal(c) = sum_e R(c,e) S_e
+                     !     crossFactor(slot,d) = R(c1,d)
+                     !                           * conjg(rotatedTotal(c2))
+                     !
+                     !   after which one partial pair's entry for a slot
+                     !   is just sum_d Re[ M_d(a,b) * crossFactor ].
+                     !   Hoisting it matters: the pair loops run over
+                     !   the partial count SQUARED, which DESIGN 11.4
+                     !   names as the cost driver of the whole method.
+                     if (numStoredCompPOPTC > 1) then
+                        do d = 1, 3
+                           rotatedTotal(d) = &
+                                 & sum(xyzRealPointOps(d,:,opR) &
+                                 & * transMomentBanded(:, &
+                                 & cornerKP(orig),i,j,h))
+                        enddo
+                        do slot = 1, numAccumCompPOPTC
+                           do d = 1, 3
+                              crossFactor(slot,d) = &
+                                    & xyzRealPointOps( &
+                                    & firstOfPairP(slot),d,opR) &
+#ifndef GAMMA
+                                    & * conjg(rotatedTotal( &
+                                    & secondOfPairP(slot)))
+#else
+                                    & * rotatedTotal( &
+                                    & secondOfPairP(slot))
+#endif
+                           enddo
+                        enddo
+                     endif
+
                      ! The type grouped codes need no permutation: every
                      !   operation carries an atom onto an atom of the
                      !   same type, so a type level sum maps onto itself
@@ -942,21 +997,33 @@ subroutine accumulateOptcCondPOPTC_LAT (latFactor)
                            bRot = partialPerm(opR,b)
                            do a = 1, sumNumPartials
                               aRot = partialPerm(opR,a)
-                              optcCondPOPTC(aRot,bRot,:,iE,h) = &
-                                    & optcCondPOPTC(aRot,bRot,:,iE,h) &
-                                    & + weight &
-                                    & * transProbPOPTCBanded(a,b,:, &
-                                    & cornerKP(orig),i,j,h)
+                              if (numStoredCompPOPTC == 1) then
+                                 optcCondPOPTC(aRot,bRot,:,iE,h) = &
+                                     & optcCondPOPTC(aRot,bRot,:,iE,h) &
+                                     & + weight &
+                                     & * transProbPOPTCBanded(a,b,:, &
+                                     & cornerKP(orig),i,j,h)
+                              else
+                                 call depositRotatedPair (a,b,aRot, &
+                                     & bRot,iE,h,i,j,cornerKP(orig), &
+                                     & weight,crossFactor)
+                              endif
                            enddo
                         enddo
                      else
                         do b = 1, sumNumPartials
                            do a = 1, sumNumPartials
-                              optcCondPOPTC(a,b,:,iE,h) = &
-                                    & optcCondPOPTC(a,b,:,iE,h) &
-                                    & + weight &
-                                    & * transProbPOPTCBanded(a,b,:, &
-                                    & cornerKP(orig),i,j,h)
+                              if (numStoredCompPOPTC == 1) then
+                                 optcCondPOPTC(a,b,:,iE,h) = &
+                                     & optcCondPOPTC(a,b,:,iE,h) &
+                                     & + weight &
+                                     & * transProbPOPTCBanded(a,b,:, &
+                                     & cornerKP(orig),i,j,h)
+                              else
+                                 call depositRotatedPair (a,b,a,b,iE, &
+                                     & h,i,j,cornerKP(orig),weight, &
+                                     & crossFactor)
+                              endif
                            enddo
                         enddo
                      endif
@@ -968,6 +1035,141 @@ subroutine accumulateOptcCondPOPTC_LAT (latFactor)
    enddo
 
 end subroutine accumulateOptcCondPOPTC_LAT
+
+
+! Deposit one partial pair's rotated cross term at one tetrahedron
+!   corner (PSEUDOCODE 21.6).
+!
+! Everything that does not depend on the partial pair has already been
+!   folded into crossFactor by the caller, so what is left here is the
+!   contraction over the Cartesian index of the pair's own element:
+!
+!     entry(slot) = sum over d of Re[ M_d(a,b) * crossFactor(slot,d) ]
+!
+!   where crossFactor carries R(c1,d) times the conjugate of the ROTATED
+!   total. Both factors of the cross term are therefore rotated, which
+!   is the whole point: rotating only one of them would leave a quantity
+!   that is not the projection of anything.
+!
+! Split out of the accumulation rather than written inline because it
+!   appears twice there -- once for the permuted atom grouped codes and
+!   once for the type grouped codes that need no permutation -- and two
+!   hand-copied contractions would be two places to get the slot order
+!   wrong.
+subroutine depositRotatedPair (a,b,aRot,bRot,iE,h,initBand,finBand, &
+      & kIBZ,weight,crossFactor)
+
+   use O_Kinds
+   use O_OptcTransitions, only: transMomentPOPTCBanded, &
+         & bandedOccupancy, numAccumCompPOPTC
+
+   implicit none
+
+   ! Define the dummy variables passed to this subroutine.
+   integer :: a,b          ! The pair's partials, as stored.
+   integer :: aRot, bRot   ! Where they land after the permutation.
+   integer :: iE, h        ! Energy point and spin.
+   integer :: initBand, finBand
+   integer :: kIBZ         ! The corner's irreducible k-point.
+   real (kind=double) :: weight
+#ifndef GAMMA
+   complex (kind=double), dimension (6,3) :: crossFactor
+#else
+   real (kind=double), dimension (6,3) :: crossFactor
+#endif
+
+   ! Define local variables.
+   integer :: slot, d
+   real (kind=double) :: slotValue ! Not named "entry": that is a
+         !   Fortran statement keyword, and shadowing it reads as a
+         !   declaration to anyone skimming.
+
+   do slot = 1, numAccumCompPOPTC
+      slotValue = 0.0_double
+      do d = 1, 3
+#ifndef GAMMA
+         slotValue = slotValue + real(transMomentPOPTCBanded(a,b,d, &
+               & kIBZ,initBand,finBand,h) * crossFactor(slot,d),double)
+#else
+         slotValue = slotValue + transMomentPOPTCBanded(a,b,d,kIBZ, &
+               & initBand,finBand,h) * crossFactor(slot,d)
+#endif
+      enddo
+
+      ! The occupancy weight, held out of the element so that it never
+      !   had to be square rooted, rejoins here. It belongs to the
+      !   irreducible representative, since occupancy depends on the
+      !   band and the k-point and the operation changes neither.
+      optcCondPOPTC(aRot,bRot,slot,iE,h) = &
+            & optcCondPOPTC(aRot,bRot,slot,iE,h) + weight * slotValue &
+            & * bandedOccupancy(kIBZ,initBand,finBand,h)
+   enddo
+
+end subroutine depositRotatedPair
+
+
+! Write the two column-description lines that head every unit of a
+!   decomposed spectrum file (PSEUDOCODE 21.7).
+!
+! The declared width follows the partial direction code rather than
+!   being the literal 4 it used to be, and the consumers -- imagoKKc and
+!   processPOPTC.py -- are expected to read COL_LABELS rather than
+!   assume. The isotropic column stays FIRST in every case, so a reader
+!   that only wants it needs to know nothing about the code at all.
+subroutine writePOPTCColumnLabels (outputUnit)
+
+   use O_OptcTransitions, only: numPrintColPOPTC
+
+   implicit none
+
+   integer :: outputUnit
+
+   write (outputUnit,fmt="(a11,i2)") 'COL_LABELS ',numPrintColPOPTC
+   if (numPrintColPOPTC == 1) then
+      write (outputUnit,fmt="(a)") 'TOTAL'
+   elseif (numPrintColPOPTC == 4) then
+      write (outputUnit,fmt="(a)") 'TOTAL x y z'
+   else
+      write (outputUnit,fmt="(a)") 'TOTAL xx yy zz xy xz yz'
+   endif
+
+end subroutine writePOPTCColumnLabels
+
+
+! Write one energy point of a decomposed spectrum: the isotropic column
+!   followed by whichever direction resolved columns this run carries.
+!
+! The isotropic value is formed here from the first three slots rather
+!   than accumulated in a slot of its own. At direction code 0 the one
+!   stored slot is already the SUM over the three components, so the
+!   same division by three applies; at code 2 the off diagonal slots
+!   must be left out of it.
+subroutine writePOPTCRecord (outputUnit,slotValues)
+
+   use O_Kinds
+   use O_OptcTransitions, only: numAccumCompPOPTC, numPrintColPOPTC
+
+   implicit none
+
+   integer :: outputUnit
+   real (kind=double), dimension (:) :: slotValues
+
+   character*20 :: recordFormat
+   real (kind=double) :: isotropic
+
+   isotropic = sum(slotValues(1:min(3,numAccumCompPOPTC))) &
+         & / 3.0_double
+
+   write (recordFormat,fmt="(a,i2,a)") "(",numPrintColPOPTC,"e15.7)"
+
+   if (numPrintColPOPTC == 1) then
+      write (outputUnit,fmt=recordFormat) isotropic
+   else
+      write (outputUnit,fmt=recordFormat) isotropic, &
+            & slotValues(1:numAccumCompPOPTC)
+   endif
+
+end subroutine writePOPTCRecord
 
 
 ! Average the atom-resolved optical spectra over the crystal point group and
@@ -1173,7 +1375,8 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
    use O_Constants,       only: hartree, lAngMomCount
    use O_AtomicSites,     only: numAtomSites, atomSites
    use O_AtomicTypes,     only: numAtomTypes, atomTypes
-   use O_OptcTransitions, only: energyScale, sumNumPartials
+   use O_OptcTransitions, only: energyScale, sumNumPartials, &
+         & numAccumCompPOPTC
    use O_Input,           only: detailCodePOPTC
 
    ! Make sure that there are not accidental variable declarations.
@@ -1193,6 +1396,11 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
    integer :: currentTypeF ! Final
    integer :: poptcI ! pOptc initial
    integer :: poptcF ! pOptc final
+   integer :: slot   ! Spectrum slot within one partial pair.
+   real (kind=double), dimension (6) :: slotTotals
+         !   The spectrum summed over every partial pair, one entry per
+         !   slot. Sized for the widest direction code so that it does
+         !   not have to be allocatable for the sake of one array.
    character*1, dimension (lAngMomCount) :: QN_lLetter
 
    ! Customize the output for the current spectrum type.
@@ -1232,8 +1440,7 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
       write (unitBase+h,fmt="(a13,i5)") 'SEQUENCE_NUM ',sequenceNum
       write (unitBase+h,fmt="(a20)") 'ELEMENT_1_NAME total'
       write (unitBase+h,fmt="(a20)") 'ELEMENT_2_NAME total'
-      write (unitBase+h,fmt="(a12)") 'COL_LABELS 4'
-      write (unitBase+h,fmt="(a11)") 'TOTAL x y z'
+      call writePOPTCColumnLabels (unitBase+h)
 
       do i = 1, numEnergyPoints
 
@@ -1246,11 +1453,11 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
                & * conversionFactor / energyScale(i)
 
          ! Record the total spectrum to disk.
-         write (unitBase+h,fmt="(4e15.7)") &
-               & sum(spectrumPOPTC(:,:,:,i,h)) / 3.0_double,&
-               & sum(spectrumPOPTC(:,:,1,i,h)), &
-               & sum(spectrumPOPTC(:,:,2,i,h)), &
-               & sum(spectrumPOPTC(:,:,3,i,h))
+         ! The total over every partial pair, one value per slot.
+         do slot = 1, numAccumCompPOPTC
+            slotTotals(slot) = sum(spectrumPOPTC(:,:,slot,i,h))
+         enddo
+         call writePOPTCRecord (unitBase+h,slotTotals)
       enddo
 
 
@@ -1270,17 +1477,15 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
                      & atomTypes(k)%elementName
                write (unitBase+h,fmt="(a7,i6)") 'TYPE_1 ',i
                write (unitBase+h,fmt="(a7,i6)") 'TYPE_2 ',k
-               write (unitBase+h,fmt="(a12)") 'COL_LABELS 4'
-               write (unitBase+h,fmt="(a11)") 'TOTAL x y z'
+               call writePOPTCColumnLabels (unitBase+h)
 
 
                do l = 1, numEnergyPoints
                   
                   ! Record the optical conductivity to disk, making sure to
                   !   use au instead of eV.
-                  write (unitBase+h,fmt="(4e15.7)") &
-                        & sum(spectrumPOPTC(i,k,:,l,h)) / 3.0_double,&
-                        & spectrumPOPTC(i,k,:,l,h)
+                  call writePOPTCRecord (unitBase+h, &
+                        & spectrumPOPTC(i,k,:,l,h))
                enddo
             enddo
          enddo
@@ -1324,16 +1529,13 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
                                  & + n + m - 1, QN_lLetter(m)
                            write (unitBase+h,fmt="(a7,i6)") 'TYPE_1 ',i
                            write (unitBase+h,fmt="(a7,i6)") 'TYPE_2 ',l
-                           write (unitBase+h,fmt="(a12)") 'COL_LABELS 4'
-                           write (unitBase+h,fmt="(a11)") 'TOTAL x y z'
+                           call writePOPTCColumnLabels (unitBase+h)
 
                            do o = 1, numEnergyPoints
 
                               ! Record the spectrum to disk.
-                              write (unitBase+h,fmt="(4e15.7)") &
-                                    & sum(spectrumPOPTC(poptcI,poptcF,:,o,h))&
-                                    & / 3.0_double, &
-                                    & spectrumPOPTC(poptcI,poptcF,:,o,h)
+                              call writePOPTCRecord (unitBase+h, &
+                                    & spectrumPOPTC(poptcI,poptcF,:,o,h))
                            enddo
                         enddo
                      enddo
@@ -1371,16 +1573,14 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
                      & trim(atomTypes(currentTypeF)%elementName), k
                write (unitBase+h,fmt="(a7,i6)") 'TYPE_1 ',currentTypeI
                write (unitBase+h,fmt="(a7,i6)") 'TYPE_2 ',currentTypeF
-               write (unitBase+h,fmt="(a12)") 'COL_LABELS 4'
-               write (unitBase+h,fmt="(a11)") 'TOTAL x y z'
+               call writePOPTCColumnLabels (unitBase+h)
 
 
                do l = 1, numEnergyPoints
 
                   ! Record the spectrum to disk.
-                  write (unitBase+h,fmt="(4e15.7)") &
-                        & sum(spectrumPOPTC(i,k,:,l,h)) / 3.0_double,&
-                        & spectrumPOPTC(i,k,:,l,h)
+                  call writePOPTCRecord (unitBase+h, &
+                        & spectrumPOPTC(i,k,:,l,h))
                enddo
             enddo
          enddo
@@ -1443,16 +1643,13 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
                                  & currentTypeI
                            write (unitBase+h,fmt="(a7,i6)") 'TYPE_2 ',&
                                  & currentTypeF
-                           write (unitBase+h,fmt="(a12)") 'COL_LABELS 4'
-                           write (unitBase+h,fmt="(a11)") 'TOTAL x y z'
+                           call writePOPTCColumnLabels (unitBase+h)
 
                            do o = 1, numEnergyPoints
 
                               ! Record the spectrum to disk.
-                              write (unitBase+h,fmt="(4e15.7)") &
-                                    & sum(spectrumPOPTC(poptcI,poptcF,:,o,h))&
-                                    & / 3.0_double, &
-                                    & spectrumPOPTC(poptcI,poptcF,:,o,h)
+                              call writePOPTCRecord (unitBase+h, &
+                                    & spectrumPOPTC(poptcI,poptcF,:,o,h))
                            enddo ! o
                         enddo ! n
                      enddo ! m

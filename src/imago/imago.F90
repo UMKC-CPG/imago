@@ -1197,7 +1197,7 @@ subroutine optc(inSCF,doOPTC)
          & transitionProbPOPTC, getEnergyStatistics, computeTransitions, &
          & transProbBanded, transProbPOPTCBanded, pairIsWanted, &
          & cleanUpPOPTCIndex, transitionMoment, pairOccupancy, &
-         & transMomentBanded, bandedOccupancy
+         & transMomentBanded, bandedOccupancy, transMomentPOPTCBanded
    use O_SecularEquation, only: energyEigenValues, &
          & shiftEnergyEigenValues
 
@@ -1325,6 +1325,9 @@ subroutine optc(inSCF,doOPTC)
    endif
    if (allocated(bandedOccupancy)) then
       deallocate (bandedOccupancy)
+   endif
+   if (allocated(transMomentPOPTCBanded)) then
+      deallocate (transMomentPOPTCBanded)
    endif
 
    ! The pruning mask describes those stores and is read by the
