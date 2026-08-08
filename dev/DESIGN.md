@@ -15403,15 +15403,42 @@ Two ways to give it one:
      sum_{d,e} (sum_R R_cd R_ce) M^d conjg(M^e). The inner
      sum depends only on which operations make up that
      star -- not on the band, the energy, or the matrix
-     element -- so it is a fixed 3x3x3 object per IBZ
-     k-point, computed once. The accumulation applies it to
-     the tensor formed from the stored vector, and the star
+     element -- so it is a fixed object per IBZ k-point,
+     computed once. The accumulation applies it to the
+     tensor formed from the stored vector, and the star
      loop disappears.
 
 **Option 2 is chosen.** It leaves the Gaussian pathway's
 cost where it is, and it writes down explicitly what that
 pathway has always done implicitly -- sum over the star --
 instead of hiding it inside a multiplicity factor.
+
+**The object carries FOUR component indices, not three.**
+The expression above is written for a diagonal entry, where
+both factors of the squared modulus carry the same component
+`c`. Direction code 2 (section 13.7) asks for the off
+diagonal entries of the symmetric tensor as well, and there
+the two factors carry DIFFERENT components:
+
+```
+  sum over star of  M'^c1 conjg(M'^c2)
+     = sum_{d,e} ( sum_R R_c1,d R_c2,e ) M^d conjg(M^e)
+```
+
+So the precomputed object is `R_c1,d R_c2,e` summed over the
+star -- 81 numbers per IBZ k-point rather than 27. Setting
+`c2 = c1` recovers the diagonal form exactly, so codes 0 and
+1 read their entries out of the same array and nothing about
+them changes.
+
+This was missed when the section was first written, and the
+consequence is worth naming because it is not visible in any
+result: a three index object gives correct spectra for
+direction codes 0 and 1, which is every case that had been
+run. It fails only for code 2, and it fails by having no
+entry to read rather than by producing a wrong number, so
+the omission surfaces as a missing capability rather than as
+a defect in an answer.
 
 ### 13.6 The decomposed case
 

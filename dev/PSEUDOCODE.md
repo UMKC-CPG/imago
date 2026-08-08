@@ -15636,11 +15636,11 @@ irreducible k-point:
 
 ```
 function buildStarRotationAverage():
-    # For each irreducible k-point, average R_cd R_ce over
-    #   the operations that carry it to its star members.
-    #   This depends on the star alone: not on the band, not
-    #   on the energy, not on the matrix element.
-    allocate starRotationAvg(3, 3, 3, numKPoints)
+    # For each irreducible k-point, average R_c1,d R_c2,e
+    #   over the operations that carry it to its star
+    #   members. This depends on the star alone: not on the
+    #   band, not on the energy, not on the matrix element.
+    allocate starRotationAvg(3, 3, 3, 3, numKPoints)
     starRotationAvg = 0.0
 
     for kFull = 1 to numFullMeshKP:
@@ -15648,13 +15648,28 @@ function buildStarRotationAverage():
         R    = xyzRealPointOps(:,:, fullKPToIBZOpMap(kFull))
         starSize(kIBZ) += 1
 
-        for c, d, e in 1..3:
-            starRotationAvg(c,d,e, kIBZ) +=
-                R(c,d) * R(c,e)
+        for c1, c2, d, e in 1..3:
+            starRotationAvg(c1,c2,d,e, kIBZ) +=
+                R(c1,d) * R(c2,e)
 
     for kIBZ = 1 to numKPoints:
-        starRotationAvg(:,:,:, kIBZ) /= starSize(kIBZ)
+        starRotationAvg(:,:,:,:, kIBZ) /= starSize(kIBZ)
 ```
+
+**Why four component indices and not three** (DESIGN 13.5).
+A diagonal entry has both factors of the squared modulus
+carrying the same component, and for direction codes 0 and 1
+that is all that is ever asked for. Direction code 2 asks
+for the off diagonal tensor entries too, where the two
+factors carry different components, so the second index `c2`
+cannot be tied to `c1`. Setting `c2 = c1` recovers the
+diagonal form, so codes 0 and 1 read their entries out of
+this same array unchanged.
+
+If there is no folded mesh -- an explicitly listed k-point
+set, where each point stands for itself -- there is no star
+to average over. Fill the identity entries and return; the
+accumulation is then exactly what it was before this change.
 
 **It must be the AVERAGE and not the sum.** `kPointWeight`
 already carries the star multiplicity, so a star SUM here
@@ -15672,12 +15687,23 @@ The deposit then becomes
           T(d,e) = storedElement(d, ...) 
                    * conjg(storedElement(e, ...))
 
-    for c = 1 to 3:                       # code 1
-       optcCond(c, iE) += kPointFactor(kIBZ) * broadening
+    # One slot per accumulated spectrum: one at code 0,
+    #   three at code 1, six at code 2. The slot names the
+    #   pair of components (c1, c2) it is built from, in the
+    #   order 21.7 declares: xx, yy, zz, xy, xz, yz.
+    for slot = 1 to numAccumComp:
+       c1 = firstOfPair(slot)
+       c2 = secondOfPair(slot)
+       optcCond(slot, iE) += kPointFactor(kIBZ) * broadening
           * occupancy
-          * sum over d, e of starRotationAvg(c,d,e, kIBZ)
-            * real(T(d,e))
+          * sum over d, e of
+            starRotationAvg(c1,c2,d,e, kIBZ) * real(T(d,e))
 ```
+
+Form the strength ONCE per transition, outside the energy
+loop. It does not depend on the energy point, and the energy
+grid runs to thousands of points, so building it inside
+would repeat the whole contraction for every one of them.
 
 ### 21.6 The decomposed case, and the loop that moves
 
