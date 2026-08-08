@@ -15446,3 +15446,320 @@ diagnostic rather than the only way to see the number.
 - The partials-sum-to-total identity proves nothing here.
   It holds under any permutation of the indices, which is
   the same blindness sections 7a and 19 record.
+
+---
+
+## 21. Optical Cartesian Components (DESIGN 13)
+
+The momentum operator is a vector, so unfolding a matrix
+element onto a star member has to ROTATE its three Cartesian
+components and not merely permute atoms.  The code squares
+the matrix element before anything could rotate it, and a
+squared modulus cannot be rotated, so this section is a
+change of what is stored rather than an extra step at the
+deposit.
+
+### 21.1 What this consumes, and from where
+
+Each row answers "who fills this, and when", and -- because
+that omission is what broke section 19 -- also when it is
+freed.
+
+```
+quantity            supplied by            lifetime
+------------------------------------------------------------
+abcRealPointOps     computeRealPointOps,   built in
+                      already conjugated     initializeKPoints
+                      into the LOADED cell   for style codes
+                      basis (DESIGN 2.7)     0, 1, 2; never on
+                                             the SYBD branch;
+                                             freed in
+                                             cleanUpKPoints
+realVectors         O_Lattice, read from   resident for the
+                      the structure file     whole run.  Its
+                                             COLUMNS are the
+                                             lattice vectors --
+                                             the k-point file's
+                                             CONV_LATTICE block
+                                             uses ROWS, and the
+                                             two must not be
+                                             confused
+invert3x3           already in kpoints.f90 no lifetime; a
+                      beside                 helper
+                      computeRealPointOps
+xyzRealPointOps     NEW, built here        same branches and
+                                             same lifetime as
+                                             abcRealPointOps
+fullKPToIBZOpMap    the IBZ fold in        before optc runs;
+                      initializeKPointMesh   absent for style
+                                             code 0
+fullKPToIBZKPMap    same                   same
+cartesianCodeOPTC,  readOptcControl, from  read once, BEFORE
+  cartesianCode-      fort.5's               any store is
+  POPTC               OPTC_INPUT_DATA        sized, because the
+                                             stores are
+                                             dimensioned from
+                                             them
+```
+
+**One precondition is not met by the existing call
+sequence** and must be arranged rather than assumed. The
+stores are allocated in `getEnergyStatistics`, which runs
+before `computeTransitions`; the direction codes are read in
+`parseInput`, which runs before both. So the ordering is
+already correct and needs only to be stated -- but a later
+reader must not move the allocation earlier.
+
+### 21.2 The Cartesian rotations
+
+```
+function computeXyzPointOps():
+    # abcRealPointOps acts on LOADED-cell fractional
+    #   coordinates. A fractional vector f sits at Cartesian
+    #   r = L f, with L the lattice vectors as columns, so
+    #   the same operation in Cartesian form is
+    #   R_xyz = L R_abc L^-1.
+    #
+    # This starts from abcRealPointOps rather than from
+    #   convAbcPointOps, so it inherits the full/prim
+    #   cell-mode handling already done and does not repeat
+    #   that branch.
+    allocate xyzRealPointOps(3, 3, numPointOps)
+
+    call invert3x3(realVectors, realVectorsInv)
+
+    for opIdx = 1 to numPointOps:
+        xyzRealPointOps(:,:,opIdx) =
+            matmul(realVectors,
+                   matmul(abcRealPointOps(:,:,opIdx),
+                          realVectorsInv))
+```
+
+**Check this before trusting anything built on it.** Every
+`xyzRealPointOps` must be orthogonal to round-off:
+`R R^T = I`. That is not automatic -- it holds only because
+the operation really is a symmetry of the lattice -- so a
+failure means the conjugation is wrong or the cell is not
+what the space group says. Test it once at construction and
+stop loudly, because every downstream symptom of getting
+this wrong looks like a physics result.
+
+### 21.3 What the stores hold
+
+The direction code decides, and the two codes are read
+independently for totals and partials (DESIGN 13.7).
+
+```
+  code 0   isotropic only.  Store ONE real per transition:
+             sum over c of |M^c|^2.  No rotation is ever
+             needed, because that sum is invariant.  A third
+             of today's storage.
+  code 1   diagonal.  Store THREE COMPLEX: M^c itself.
+  code 2   full symmetric tensor.  Store the same three
+             complex numbers.  Levels 1 and 2 differ only in
+             what is formed at the deposit and how wide the
+             output record is.
+```
+
+So the producers change like this, with `computePairs`
+standing for all four:
+
+```
+    valeValeXMom(k) = sum(valeVale(:,i,1)
+                          * conjWaveMomSum(:,finalStateIndex,k))
+
+    if cartesianCode == 0:
+        # Collapse immediately. The occupancy factors are
+        #   real and fold in here as they do today.
+        store(pair) = sum over k of
+                      (real(valeValeXMom(k))**2
+                       + aimag(valeValeXMom(k))**2)
+                      * initStateFactor * finStateFactor
+    else:
+        # Keep the complex element. Occupancies are NOT
+        #   folded in: see below.
+        store(k, pair) = valeValeXMom(k)
+```
+
+**Occupancy factors stay out of the stored element.**
+Folding them in as a square root would be wrong, because the
+final-state vacancy `1 - occupancy` can go slightly negative
+through round-off near a Fermi surface and the square root
+of a negative number is a crash rather than a rounding
+error. They are real scalars per (initial band, final band,
+k-point), so carry them in their own small array and apply
+them at the deposit where those indices are already in hand.
+
+### 21.4 The tetrahedron pathway deposit
+
+This pathway already visits full-mesh corners and applies
+that corner's operation as it fetches, so the rotation joins
+the fetch and nothing moves.
+
+```
+    for c = 1 to 4:                      # tetrahedron corner
+       orig = sigma(c)
+       kIc  = kIBZ(orig)
+       R    = xyzRealPointOps(:,:, opIdx(orig))
+
+       # Rotate, THEN square. The other order is the defect.
+       rotated(:) = matmul(R, storedElement(:, kIc, i, j))
+
+       occupancy = initFactor(i, kIc) * finFactor(j, kIc)
+
+       if cartesianCode == 1:
+          for d = 1 to 3:
+             optcCond(d, iE) += weight * occupancy
+                                * abs(rotated(d))**2
+       else:                              # code 2
+          for (d, e) in the six upper-triangle pairs:
+             optcCond(pairIndex(d,e), iE) += weight
+                * occupancy
+                * real(rotated(d) * conjg(rotated(e)))
+```
+
+Code 0 needs no rotation at all: the stored scalar is
+already the invariant sum, and the deposit is what it is
+today with one component instead of three.
+
+### 21.5 The Gaussian pathway and the star-summed rotation
+
+**This pathway has no star loop, and that is the whole
+difficulty.** It accumulates over irreducible points with
+the multiplicity carried inside `kPointWeight`, so there is
+nowhere for a per-member rotation to live.
+
+Rather than add the loop -- which would multiply the
+accumulation by the reduction factor, 4 to 48 -- precompute
+the star AVERAGE of the rotation product, once per
+irreducible k-point:
+
+```
+function buildStarRotationAverage():
+    # For each irreducible k-point, average R_cd R_ce over
+    #   the operations that carry it to its star members.
+    #   This depends on the star alone: not on the band, not
+    #   on the energy, not on the matrix element.
+    allocate starRotationAvg(3, 3, 3, numKPoints)
+    starRotationAvg = 0.0
+
+    for kFull = 1 to numFullMeshKP:
+        kIBZ = fullKPToIBZKPMap(kFull)
+        R    = xyzRealPointOps(:,:, fullKPToIBZOpMap(kFull))
+        starSize(kIBZ) += 1
+
+        for c, d, e in 1..3:
+            starRotationAvg(c,d,e, kIBZ) +=
+                R(c,d) * R(c,e)
+
+    for kIBZ = 1 to numKPoints:
+        starRotationAvg(:,:,:, kIBZ) /= starSize(kIBZ)
+```
+
+**It must be the AVERAGE and not the sum.** `kPointWeight`
+already carries the star multiplicity, so a star SUM here
+would count the symmetry twice -- the same trap section 19.5
+records for applying both the star average and the
+per-corner permutation. An unreduced mesh gives every star
+one member, the average is the identity operation's own
+product, and the accumulation reduces to what it does today.
+
+The deposit then becomes
+
+```
+    for d = 1 to 3:
+       for e = 1 to 3:
+          T(d,e) = storedElement(d, ...) 
+                   * conjg(storedElement(e, ...))
+
+    for c = 1 to 3:                       # code 1
+       optcCond(c, iE) += kPointFactor(kIBZ) * broadening
+          * occupancy
+          * sum over d, e of starRotationAvg(c,d,e, kIBZ)
+            * real(T(d,e))
+```
+
+### 21.6 The decomposed case, and the loop that moves
+
+The partial store holds a cross-term between one pair's
+matrix element and the total over all pairs:
+
+  Re[ M_c(o,n) conjg(S_c) ],  S_c = sum over (o',n') of M_c
+
+Both factors carry the component index, so both are rotated.
+The store therefore keeps the complex `M_c(o,n)` AND the
+complex total `S_c`, which is one vector per (initial band,
+final band, k-point, spin) rather than one per pair and so
+costs nothing beside the pair matrix.
+
+```
+    rotatedPair(:) = matmul(R, storedPair(:, o, n, ...))
+    rotatedTotal(:) = matmul(R, storedTotal(:, ...))
+
+    for d = 1 to 3:
+       optcCondPOPTC(o, n, d, iE) += weight * occupancy
+          * real(rotatedPair(d) * conjg(rotatedTotal(d)))
+```
+
+**The section 7a star average must move INSIDE the component
+loop.**  As written, `computePOPTCPairs` walks the star with
+the component index held fixed outside it, which is correct
+only while an operation cannot mix components:
+
+```
+    for pairIndex, for component:          # TODAY
+       for each star member:
+          permute the two partial indices
+
+    for pairIndex:                         # REQUIRED
+       for each star member:
+          rotate the component index AND
+          permute the two partial indices
+```
+
+This is the only existing loop nest the change reorders
+rather than extends, and it is the first place to look if
+the sum rule breaks afterwards.
+
+### 21.7 Output width
+
+`printSpectrum` writes a fixed five-column record and a
+five-field header; `printSpectrumPOPTC` writes
+`COL_LABELS 4` and `TOTAL x y z` per unit.  Both become
+width-aware:
+
+```
+  code 0   COL_LABELS 1   TOTAL
+  code 1   COL_LABELS 4   TOTAL x y z
+  code 2   COL_LABELS 7   TOTAL xx yy zz xy xz yz
+```
+
+The isotropic column stays FIRST in every case, so a
+consumer that only wants it needs no knowledge of the code.
+`imagoKKc` and `processPOPTC.py` read these files and must
+be checked against the declared width rather than assuming
+four.
+
+### 21.8 Checks, in the order they are worth running
+
+1. **Orthogonality of the rotations**, at construction
+   (21.2).  Everything else is meaningless until it passes.
+2. **An unreduced mesh must be unchanged.**  With every star
+   of size one the rotations are the identity and the star
+   average is trivial, so the whole change must be a no-op
+   there.  Any movement means the rotation is being applied
+   where it should not be.
+3. **A reduced run must now reproduce the unreduced one,
+   per axis.**  This is the defect's own test and it has a
+   known target: on cubic KNbO3 the unreduced run gives
+   48.470 in all three columns while the reduced run today
+   gives 37.607 / 72.701 / 85.237.
+4. **The isotropic column must not move at all**, on any
+   mesh, for any direction code.  It is correct today, so a
+   shift means the rotation has broken something that was
+   working -- and it is the column every user reads.
+5. **Partials must still sum to the total** (section 11).
+   Weak, as always: it holds under any permutation of the
+   pair indices and so cannot see a wrong rotation.  It can
+   see a reordered loop nest, which is exactly what 21.6
+   introduces.

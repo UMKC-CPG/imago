@@ -7650,11 +7650,15 @@ is not carried only in conversation.
   from the same quantities, so this is the only route that
   lets Imago express something it currently cannot.
 
-  **Chain state: DESIGN 13 WRITTEN 2026-08-07.**  O3 sits in
-  this section, which is outside the document chain, so the
-  work started at DESIGN.  That section now carries the whole
-  argument and this entry should not be treated as the
-  specification.  PSEUDOCODE is next, then code.
+  **Chain state: DESIGN 13 and PSEUDOCODE 21 WRITTEN
+  2026-08-07.**  O3 sits in this section, which is outside the
+  document chain, so the work started at DESIGN.  Those two
+  sections now carry the whole argument and this entry should
+  not be treated as the specification.  Code is next, and
+  nothing under `src/` should be touched without reading
+  PSEUDOCODE 21 first -- particularly 21.5, which is where
+  the Gaussian pathway differs from every intuition built on
+  the tetrahedron one.
 
   Three things DESIGN 13 settles that are not obvious from
   the above:
