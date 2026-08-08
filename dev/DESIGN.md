@@ -994,7 +994,7 @@ partialPerm        buildPOPTCIndex, from    released by
                                               written
 optcCondPOPTC      allocated in             filled by the
                      computeOptcSpectra,      accumulators, then
-                     O_OptcPrint              symmetrized, then
+                     O_OptcSpectra            symmetrized, then
                                               printed by
                                               printOptcSpectra
 symmetrizeLAT      readKPoints, from the    read once per
@@ -14779,7 +14779,7 @@ The optical path is therefore restructured to match the DOS
 path rather than merely imitating it:
 
 - `optcCond` and `optcCondPOPTC` are promoted to module
-  scope in O_OptcPrint. This is the house pattern already --
+  scope in O_OptcSpectra. This is the house pattern already --
   `transitionProb` lives at module scope in
   O_OptcTransitions -- and they are local today by habit
   rather than by design.

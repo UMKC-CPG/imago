@@ -1,7 +1,7 @@
 !! SPDX-License-Identifier: ECL-2.0
 !! Copyright (c) 2026 Paul Rulis
 
-module O_OptcPrint
+module O_OptcSpectra
 
    use O_Kinds
 
@@ -1662,4 +1662,4 @@ subroutine printSpectrumPOPTC (specType,numEnergyPoints,spectrumPOPTC,&
 
 end subroutine printSpectrumPOPTC
 
-end module O_OptcPrint
+end module O_OptcSpectra

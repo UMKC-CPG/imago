@@ -25,7 +25,7 @@ add_executable(imagoG ../../kinds.f90 ../../constants.f90
    ../elecStat.f90 ../intgOrtho.F90 ../matrixSubs.F90 ../secularEqn.F90
    ../populate.F90 ../intgSaving.F90 ../integrals.F90 ../integrals3Terms.F90
    ../coreCharge.f90 ../forces.F90 ../valeCharge.F90 ../potentialUpdate.F90
-   ../dos.F90 ../bond.F90 ../bond3C.F90 ../optc.F90 ../optcPrint.F90
+   ../dos.F90 ../bond.F90 ../bond3C.F90 ../optc.F90 ../optcSpectra.F90
    ../dimo.F90 ../loen.f90 ../openDX.f90 ../xdmf_vtk.f90 ../field.F90
    ../mtop.F90 ../imago.F90 ../imagoWrap.f90 )
 target_link_libraries(imagoG imagoGGaussIntegrals)

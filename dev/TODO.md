@@ -8016,16 +8016,32 @@ is not carried only in conversation.
   goes, it is a DESIGN edit before any code.  See DESIGN
   13.7 and PSEUDOCODE 21.7.
 
-- [ ] O12. Rename `optcPrint.F90` to `optcSpectra.F90` and
+- [x] O12. Rename `optcPrint.F90` to `optcSpectra.F90` and
   the module `O_OptcPrint` to `O_OptcSpectra`.  The file's
   two entry points are `computeOptcSpectra` and
   `printOptcSpectra`, and after O3 the bulk of it is
   accumulation, star-rotation averaging and symmetrization
-  rather than printing, so the name understates it.  Five
-  lines of code plus about fifteen references across
-  ARCHITECTURE, DESIGN, PSEUDOCODE and this file.  Worth a
-  commit of its own so the rename is not buried inside a
-  change to behaviour.
+  rather than printing, so the name understated it.
+
+  **DONE 2026-08-08.**  Renamed under `git mv` so the
+  history follows the file, with the module name, the two
+  CMake source lists, the `use` in `imago.F90`, and the live
+  references in ARCHITECTURE, DESIGN and PSEUDOCODE all
+  moved with it.  Output verified byte identical across the
+  rename.
+
+  **Earlier entries in this file still say `optcPrint.F90`,
+  and that is deliberate.**  They record work done when the
+  file carried that name, as do the commit messages, so
+  rewriting them would make the record disagree with the
+  history it describes.  A reader meeting the old name in a
+  completed entry should read it as this file.
+
+  Stale `o_optcprint.mod` files were left behind in every
+  build tree.  They are generated and harmless, but a module
+  file for a module that no longer exists is exactly the
+  kind of thing that later produces a baffling build, so
+  they were removed rather than left to age.
 
 - [ ] O13. Stop a job run from an unexpected directory from
   taking the ROOT of `$IMAGO_TEMP` as its scratch.  A job

@@ -14704,7 +14704,7 @@ has a Mulliken projection.
 
 DESIGN 12.2 restructures the optical path to match the DOS
 path rather than imitate it.  `optcCond` and
-`optcCondPOPTC` move to module scope in O_OptcPrint,
+`optcCondPOPTC` move to module scope in O_OptcSpectra,
 `printOptcResults` splits in two, and `subroutine optc`
 calls the halves in turn -- which is where and how
 `subroutine dos` already makes the same choice.
@@ -14716,7 +14716,7 @@ call computeOptcSpectra(doOPTC)
 call printOptcSpectra(doOPTC)
 
 
-# computeOptcSpectra, in O_OptcPrint.  Setup, then the
+# computeOptcSpectra, in O_OptcSpectra.  Setup, then the
 #   pathway choice.  Both branches leave the same module
 #   arrays filled, so the printer never learns which ran.
 build energyScale

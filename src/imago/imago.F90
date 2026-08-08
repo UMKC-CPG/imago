@@ -1186,7 +1186,7 @@ subroutine optc(inSCF,doOPTC)
    ! Use necessary modules.
    use O_TimeStamps
    use O_Potential,       only: spin
-   use O_OptcPrint,       only: computeOptcSpectra, printOptcSpectra
+   use O_OptcSpectra,     only: computeOptcSpectra, printOptcSpectra
    use O_KPoints,         only: numKPoints, kPointIntgCode
    use O_Populate,        only: occupiedEnergy, populateStates, &
          & computeElectronPopulation_LAT

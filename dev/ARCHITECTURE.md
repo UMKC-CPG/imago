@@ -164,7 +164,7 @@ Modules directly affected by the current development:
   image atom only within the source atom's type and stops
   fatally otherwise -- so that closure is verified at
   startup rather than assumed (DESIGN 2.3).
-- **O_Optc / O_OptcPrint** (`optc.F90`, `optcPrint.F90`):
+- **O_Optc / O_OptcSpectra** (`optc.F90`, `optcSpectra.F90`):
   Compute and write the optical properties, both the total
   spectra and the partial (POPTC) decomposition of the
   momentum matrix element between a *pair* of groups.
@@ -182,7 +182,7 @@ Modules directly affected by the current development:
 
   Brillouin-zone integration is presently Gaussian
   unconditionally: `getOptcCond` and `getOptcCondPOPTC` in
-  O_OptcPrint smear each transition and weight it by
+  O_OptcSpectra smear each transition and weight it by
   `kPointWeight`, and this is the one consumer that does not
   branch on `kPointIntgCode`. It will gain a LAT pathway
   alongside, as a separate accumulation routine rather than
@@ -191,7 +191,7 @@ Modules directly affected by the current development:
 
   Taking it on restructures this pair of modules to match
   the DOS path rather than imitate it. `optcCond` and
-  `optcCondPOPTC` move to module scope in O_OptcPrint, the
+  `optcCondPOPTC` move to module scope in O_OptcSpectra, the
   house pattern that O_OptcTransitions already follows with
   `transitionProb`; `printOptcResults` splits into
   `computeOptcSpectra`, which sets up and selects the
@@ -203,7 +203,7 @@ Modules directly affected by the current development:
   `_LAT` counterparts, since they accumulate into an array
   handed to them rather than getting anything.
   That pathway adds two dependencies, and they land on
-  O_OptcPrint rather than on O_Optc, because the
+  O_OptcSpectra rather than on O_Optc, because the
   accumulation routines live there: the tetrahedra and
   `tetraVol` from O_KPoints, and `bloechlCornerDOSWt` from
   O_MathSubs, which it feeds the four corner values of the
@@ -353,7 +353,7 @@ imago.F90 (top-level dispatcher)
   |     |     type, for the QN_nl resolved partials)
   |     +-- O_SecularEquation (eigenvectors, momentum
   |     |     matrix elements, eigenvalues)
-  |     +-- O_OptcPrint (optcPrint.F90: broadening and
+  |     +-- O_OptcSpectra (optcSpectra.F90: broadening and
   |           spectrum output, total and per partial
   |           pair; carries both accumulation pathways)
   |           +-- O_KPoints (tetrahedra, tetraVol,
