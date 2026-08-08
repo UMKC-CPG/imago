@@ -50,3 +50,26 @@ gh_edit_view_mode: "tree"
 
 # Color scheme for the rendered site: "light" (default) or "dark".
 color_scheme: dark
+
+## Define Jekyll Collections
+
+collections:
+      overview:
+         output: true
+      reference_manual:
+         output: true
+      tutorials:
+         output: true
+
+## Add collections to just_the_docs
+
+just_the_docs:
+   collections:
+      overview:
+         name: Overview
+      reference_manual:
+         name: Reference Manual
+         nav_fold: false
+      tutorials:
+         name: Tutorials
+         nav_fold: true
