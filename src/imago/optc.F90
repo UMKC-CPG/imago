@@ -254,7 +254,9 @@ contains
 subroutine setOptcStoreSize
 
    ! Import necessary modules.
-   use O_Input, only: cartesianCodeOPTC, cartesianCodePOPTC
+   use O_Input, only: cartesianCodeOPTC, cartesianCodePOPTC, &
+         & detailCodePOPTC
+   use O_KPoints, only: kPointIntgCode
 
    implicit none
 
@@ -300,6 +302,39 @@ subroutine setOptcStoreSize
          & ", accumulate ",numAccumCompPOPTC,", print ", &
          & numPrintColPOPTC
    call flush (20)
+
+   ! TEMPORARY, and to be deleted once the decomposed producers carry
+   !   the complex element the way the undecomposed ones now do.
+   !
+   ! Until then a Gaussian run that asks for a decomposition would emit
+   !   a total spectrum of ZEROS rather than failing: computePOPTCPairs
+   !   still fills the squared real store, while the accumulation now
+   !   reads the complex one, which is allocated and zeroed. A spectrum
+   !   of zeros is indistinguishable from a material that does not
+   !   absorb, so it has to be a stop and not a warning.
+   if ((detailCodePOPTC /= 0) .and. (kPointIntgCode /= 1) .and. &
+         & (numStoredCompOPTC > 1)) then
+      write (20,*) 'A decomposed Gaussian run needs direction code 0'
+      write (20,*) 'until the decomposed producers are converted to'
+      write (20,*) 'carry the complex matrix element. Set the OPTC'
+      write (20,*) 'direction code to 0, or use the tetrahedron'
+      write (20,*) 'integration method, which is already converted.'
+      call flush (20)
+      stop 'setOptcStoreSize: decomposed Gaussian needs OPTC dir 0'
+   endif
+
+   ! The second half of the same temporary restriction. The decomposed
+   !   stores are still fixed at three components, so a partial
+   !   direction code of 0 or 2 would size the spectra and the store
+   !   differently and read past the end of one of them.
+   if ((detailCodePOPTC /= 0) .and. (numAccumCompPOPTC /= 3)) then
+      write (20,*) 'The POPTC direction code must be 1 until the'
+      write (20,*) 'decomposed stores carry a width of their own.'
+      write (20,*) 'Requested code gives ',numAccumCompPOPTC, &
+            & ' components; the store holds 3.'
+      call flush (20)
+      stop 'setOptcStoreSize: decomposed runs need POPTC dir 1'
+   endif
 
 end subroutine setOptcStoreSize
 
