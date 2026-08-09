@@ -43,12 +43,63 @@ the normal way, with the DEBUG entry left as a pointer.
   - *0e* -- `BUILD.md` (140 lines, at the repository root, NOT in
     `dev/`) documents every option and preset well enough to pick a
     build cold.
-- **Phases 1, 2 and 3 have not started. Findings recorded: 0.**
-  That is the real state of this campaign: the harness is built and
-  unused. The instrumented trees `build/gfortran-audit` and
-  `build/gfortran-asan` were configured 2026-06-26 and have not been
-  rebuilt since, so they predate roughly two months of source
-  changes and must be reconfigured before they mean anything.
+- **Phase 1 (compiler sweep) is SUBSTANTIALLY DONE, 2026-08-09.**
+  676 warnings in hand-written source at the start; **116** now,
+  with zero errors in either variant. An 83 percent reduction.
+
+  ```
+    676  at the start of Phase 1
+   -187  array temporaries, MOVED to dev/PERFORMANCE.md as HOT-001
+          rather than fixed -- they are a cost, not a defect
+   -373  unused entities removed (imports, locals, whole dead
+          "use" statements) across 26 files
+    116  remaining, per the counts below
+  ```
+
+  Remaining, by class:
+
+  ```
+    37  -Wunused-variable        all single-variant; need reading
+    33  -Wunused-dummy-argument  an argument passed but never used
+                                   can mean the routine FORGOT it
+    20  -Wcompare-reals          genuine hazard class
+    19  -Wconversion             precision / kind, bears on A3
+     4  -Wrealloc-lhs            silent shape change on assignment
+     2  -Wimplicit-interface
+  ```
+
+  Note `-Wimplicit-interface` fell from 22 to 2 not through any
+  fix but because the other 20 are in AUXILIARY programs, which
+  the `imagoG` and `imago` targets do not build. Those are outside
+  this document's stated scope and would need their own pass.
+
+- **Phase 1 correction: build each variant into its OWN log.**
+  The first sweep classified each warning's variant by the nearest
+  preceding "Building Fortran object" line in a single `-j8` log.
+  That is guesswork: under a parallel build the real and complex
+  target lines INTERLEAVE. Three entities were removed on the
+  strength of it that are genuinely used -- `secularEqn`'s
+  `atomKOverlap_did`, `atomKOverlapPlusG_did` and `fullVVDims`
+  with their PSCF twins, and `valeCharge`'s `h`, `l` and `skipKP`.
+  The compiler caught all three, but that was the build catching
+  the method rather than the method working.
+
+  The fix is `make imagoG` and `make imago` into separate logs, so
+  a warning's variant is which FILE it is in. Rebuilt that way
+  2026-08-09.
+
+- **This also makes the DIVERGE list real** rather than inferred:
+  29 sites appear only in the real build and 23 only in the
+  complex one. `field.F90` dominates both, and its pairing of
+  `valeValeOLGamma` (real only) against `valeValeOL` (complex
+  only) is the textbook case of each build using its own type.
+  More interesting are six `-Wconversion` sites in `field.F90`
+  present ONLY in the complex build: a real-to-complex conversion
+  that exists solely on the multi-k path.
+
+- **Phases 2 and 3 have not started. Findings ledger: 1 entry.**
+  `build/gfortran-asan` was configured 2026-06-26 and predates
+  months of source change; reconfigure before trusting it.
 - Phase 2 audit mechanism: multi-agent workflow (decided)
 
 ### Tool inventory on this machine (measured 2026-08-09)
