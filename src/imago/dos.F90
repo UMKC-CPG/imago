@@ -257,8 +257,12 @@ subroutine computeDOS(inSCF)
    ! LAT PDOS variables (used only when kPointIntgCode == 1).
    real (kind=double), allocatable, &
          & dimension(:,:,:) :: projArray
+
+   ! The channel permutation table is needed by BOTH pathways, for
+   !   different reasons (PSEUDOCODE 23.1), so it is not a LAT variable.
    integer, allocatable, &
-         & dimension(:,:) :: channelPermTbl
+         & dimension(:,:) :: channelPermTable
+   logical :: buildPermTable ! Whether this run needs that table.
 
    ! Log the date and time we start.
    call timeStampStart (19)
@@ -529,15 +533,38 @@ subroutine computeDOS(inSCF)
       energyScale(i) = eminDOS + (i-1) * deltaDOS
    enddo
 
-   ! For the LAT path, build the channel permutation table before the spin loop
-   !   (spin-independent). This maps PDOS channel indices through the inverse
-   !   atom permutation for IBZ unfolding during tetrahedron corner assembly
-   !   (DESIGN 1.4, PSEUDOCODE 8.1).
+   ! Build the channel permutation table before the spin loop (it is
+   !   spin-independent). This maps PDOS channel indices through the inverse
+   !   atom permutation.
+   !
+   ! BOTH pathways need it, for different reasons. The tetrahedron path
+   !   permutes once per tetrahedron corner as it assembles them (DESIGN 1.4,
+   !   PSEUDOCODE 8.1). The Gaussian path never visits a star member at all,
+   !   so it instead group-averages the finished accumulation, which
+   !   PSEUDOCODE 23.1 shows is exactly the same thing.
+   !
+   ! Only the atom-resolved modes need it. Mode 0 is type-resolved and a sum
+   !   over the atoms of a type is already invariant, because an operation
+   !   carries an atom onto one of the same type (DESIGN 2.3). Mode 3 is not
+   !   covered by the table at all -- see the note at the symmetrization call.
+   buildPermTable = (detailCodePDOS == 1) .or. (detailCodePDOS == 2)
    if (kPointIntgCode == 1) then
+      buildPermTable = .true.
+   endif
+
+   ! invAtomPerm is built for every run except SYBD, which needs no unfolding
+   !   and never initializes the point-operation machinery (DESIGN 2.6). The
+   !   guard is on the array rather than on the run type so that this cannot
+   !   disagree with whoever decides that elsewhere.
+   if (.not. allocated(invAtomPerm)) then
+      buildPermTable = .false.
+   endif
+
+   if (buildPermTable) then
       call buildChannelPermTable(detailCodePDOS, &
             & numPointOps, cumulDOSTotal, &
             & cumulNumDOS, numAtomSites, &
-            & invAtomPerm, channelPermTbl)
+            & invAtomPerm, channelPermTable)
    endif
 
    do h = 1, spin
@@ -583,7 +610,7 @@ subroutine computeDOS(inSCF)
          !   channel permutation for IBZ unfolding.
          write (20, *) "LAT PDOS Pass 2: integration"
          call integratePDOS_LAT(projArray, &
-               & channelPermTbl, pdosComplete, h, &
+               & channelPermTable, pdosComplete, h, &
                & numStates, cumulDOSTotal, &
                & numEnergyPoints, energyScale)
 
@@ -606,7 +633,7 @@ subroutine computeDOS(inSCF)
          if ((symmetrizeLATPartials == 1) .and. &
                & (detailCodePDOS >= 1)) then
             call symmetrizePDOS_LAT(pdosComplete, &
-                  & channelPermTbl, cumulDOSTotal, &
+                  & channelPermTable, cumulDOSTotal, &
                   & numEnergyPoints)
          endif
 
@@ -780,6 +807,43 @@ subroutine computeDOS(inSCF)
       if (mod(numKPoints,10) .ne. 0) then
          write (20,*)
          call flush (20)
+      endif
+
+      ! Unfold the Gaussian per-atom PDOS over the star of each irreducible
+      !   k-point (PSEUDOCODE 23, TODO C148).
+      !
+      ! This pathway never visits a star member: it accumulates over
+      !   irreducible points with the multiplicity carried inside
+      !   kPointWeight, so every member of a star was credited with the
+      !   REPRESENTATIVE's atom-by-atom breakdown. On cubic KNbO3 that left
+      !   three symmetry-equivalent oxygens differing by seventy percent.
+      !
+      ! One group average of the finished accumulation is EXACTLY the
+      !   per-k-point star average, and PSEUDOCODE 23.1 derives why: the
+      !   projection at an irreducible point is invariant under that point's
+      !   little group, so a star sum equals the whole-group average times
+      !   the multiplicity, and the group average commutes with the sum over
+      !   k-points because it is linear. So no loop moves and nothing inside
+      !   the accumulation changes.
+      !
+      ! Unlike symmetrizePDOS_LAT below, this is NOT optional cleanup. There
+      !   the per-corner permutation already gives the right answer and the
+      !   averaging only makes equal things exactly equal. Here the average
+      !   IS the correctness mechanism, so it is deliberately not wired to
+      !   symmetrizeLATPartials -- that switch would turn off a fix rather
+      !   than a polish.
+      !
+      ! Mode 3 is NOT covered, because the m components of an orbital mix
+      !   under a rotation and a channel permutation cannot express that.
+      !   It needs the D^l(R) matrices, which is why DESIGN 1.4 refuses mode
+      !   3 on the tetrahedron path. The Gaussian path does not refuse it, so
+      !   mode 3 on a reduced mesh stays wrong here (PSEUDOCODE 23.4).
+      ! No test on kPointIntgCode: this sits inside the Gaussian arm of that
+      !   branch already. The table exists only for the atom-resolved modes,
+      !   so asking whether it was built also selects the modes that need it.
+      if (allocated(channelPermTable)) then
+         call symmetrizePDOS_Gaussian(pdosComplete, channelPermTable, &
+               & cumulDOSTotal, numEnergyPoints)
       endif
 
       endif ! (kPointIntgCode branch)
@@ -1239,10 +1303,15 @@ subroutine computeDOS(inSCF)
 #endif
    endif ! (kPointIntgCode /= 1)
 
-   ! LAT-specific deallocation: channel permutation table was built before the
-   !   spin loop.
-   if (kPointIntgCode == 1) then
-      deallocate (channelPermTbl)
+   ! The channel permutation table was built before the spin loop, on whichever
+   !   pathway needed it. Released on the SAME condition it was built under,
+   !   expressed by asking the array rather than by repeating the condition:
+   !   widening one guard and not the other either leaks the table or frees
+   !   something that was never allocated, and a permutation table whose
+   !   lifetime disagreed with its consumer is exactly what made O9's fix
+   !   silently do nothing (PSEUDOCODE 19.2.1a, 23.2).
+   if (allocated(channelPermTable)) then
+      deallocate (channelPermTable)
    endif
 
    ! Log the date and time we end.
@@ -1441,7 +1510,7 @@ end subroutine computeTDOS_LAT
 
 ! Build the channel permutation lookup table for LAT PDOS IBZ unfolding
 !   (PSEUDOCODE 8.1). For each point group operation R and PDOS channel alpha,
-!   channelPermTbl(R, alpha) gives the channel index at the IBZ k-point whose
+!   channelPermTable(R, alpha) gives the channel index at the IBZ k-point whose
 !   projection should be used for channel alpha at the full-mesh k-point related
 !   by R.
 !
@@ -1459,7 +1528,7 @@ end subroutine computeTDOS_LAT
 !   spin-independent.
 subroutine buildChannelPermTable(detailCode, &
       & numOps, totalChannels, cumulDOS, &
-      & numSites, invPerm, channelPermTbl)
+      & numSites, invPerm, channelPermTable)
 
    use O_Kinds
 
@@ -1473,7 +1542,7 @@ subroutine buildChannelPermTable(detailCode, &
    integer, intent(in) :: numSites
    integer, dimension(:,:), intent(in) :: invPerm
    integer, allocatable, dimension(:,:), &
-         & intent(out) :: channelPermTbl
+         & intent(out) :: channelPermTable
 
    ! Local variables.
    integer :: opR       ! Point group operation index.
@@ -1485,7 +1554,7 @@ subroutine buildChannelPermTable(detailCode, &
    integer :: nOrbitals ! Number of l-shells for atomA.
    integer :: orbOff    ! Orbital offset loop index.
 
-   allocate (channelPermTbl(numOps, totalChannels))
+   allocate (channelPermTable(numOps, totalChannels))
 
    ! Mode 0: per-type, per-l. Type-level sums are invariant under R (R permutes
    !   atoms within each type, so the type sum is unchanged). Channel
@@ -1493,7 +1562,7 @@ subroutine buildChannelPermTable(detailCode, &
    if (detailCode == 0) then
       do opR = 1, numOps
          do alpha = 1, totalChannels
-            channelPermTbl(opR, alpha) = alpha
+            channelPermTable(opR, alpha) = alpha
          enddo
       enddo
       return
@@ -1504,7 +1573,7 @@ subroutine buildChannelPermTable(detailCode, &
    if (detailCode == 1) then
       do opR = 1, numOps
          do atomA = 1, numSites
-            channelPermTbl(opR, atomA) = &
+            channelPermTable(opR, atomA) = &
                   & invPerm(opR, atomA)
          enddo
       enddo
@@ -1524,7 +1593,7 @@ subroutine buildChannelPermTable(detailCode, &
             nOrbitals = cumulDOS(atomA + 1) &
                   & - cumulDOS(atomA)
             do orbOff = 1, nOrbitals
-               channelPermTbl(opR, &
+               channelPermTable(opR, &
                      & baseOld + orbOff) = &
                      & baseNew + orbOff
             enddo
@@ -1763,7 +1832,7 @@ end subroutine computeProjections_LAT
 !   pdosComplete must be initialized to zero by the caller before this
 !   subroutine is called.
 subroutine integratePDOS_LAT(projArr, &
-      & channelPermTbl, pdosComp, spinIdx, &
+      & channelPermTable, pdosComp, spinIdx, &
       & numSt, cumDOSTotal, numEPts, eScale)
 
    use O_Kinds
@@ -1781,7 +1850,7 @@ subroutine integratePDOS_LAT(projArr, &
    real (kind=double), dimension(:,:,:), &
          & intent(in) :: projArr
    integer, dimension(:,:), intent(in) :: &
-         & channelPermTbl
+         & channelPermTable
    real (kind=double), dimension(:,:), &
          & intent(inout) :: pdosComp
    integer, intent(in) :: spinIdx
@@ -1886,7 +1955,7 @@ subroutine integratePDOS_LAT(projArr, &
                kIBZc = kIBZ(orig)
 
                do alpha = 1, cumDOSTotal
-                  permAlpha = channelPermTbl( &
+                  permAlpha = channelPermTable( &
                         & opR, alpha)
                   pdosComp(alpha, iE) = &
                         & pdosComp(alpha, iE) &
@@ -1928,7 +1997,7 @@ end subroutine integratePDOS_LAT
 !   the log can tell them apart. The spread reported here is also a free
 !   measurement of the residual asymmetry, which is why turning the averaging
 !   off is a rarely-needed diagnostic rather than the only way to see it.
-subroutine symmetrizePDOS_LAT(pdosComp, channelPermTbl, &
+subroutine symmetrizePDOS_LAT(pdosComp, channelPermTable, &
       & cumDOSTotal, numEPts)
 
    use O_Kinds
@@ -1941,7 +2010,7 @@ subroutine symmetrizePDOS_LAT(pdosComp, channelPermTbl, &
    real (kind=double), dimension(:,:), &
          & intent(inout) :: pdosComp
    integer, allocatable, dimension(:,:), &
-         & intent(in) :: channelPermTbl
+         & intent(in) :: channelPermTable
    integer, intent(in) :: cumDOSTotal
    integer, intent(in) :: numEPts
 
@@ -1955,7 +2024,7 @@ subroutine symmetrizePDOS_LAT(pdosComp, channelPermTbl, &
    !   builds the full mesh and so cannot construct atomPerm or anything
    !   derived from it. Say so rather than returning quietly: a silent skip
    !   looks exactly like a completed job in every output file.
-   if (.not. allocated(channelPermTbl)) then
+   if (.not. allocated(channelPermTable)) then
       write (20,*) "PDOS symmetrization SKIPPED: no point group maps are"
       write (20,*) "available. This happens with an explicit kpoint list"
       write (20,*) "(style code 0). Symmetry-equivalent atoms may not"
@@ -1964,7 +2033,7 @@ subroutine symmetrizePDOS_LAT(pdosComp, channelPermTbl, &
       return
    endif
 
-   call symmetrizeChannels(pdosComp, channelPermTbl, &
+   call symmetrizeChannels(pdosComp, channelPermTable, &
          & numPointOps, cumDOSTotal, numEPts, &
          & largestSpread, largestValue)
 
@@ -1990,6 +2059,84 @@ subroutine symmetrizePDOS_LAT(pdosComp, channelPermTbl, &
    call flush (20)
 
 end subroutine symmetrizePDOS_LAT
+
+
+! Unfold the Gaussian per-atom PDOS over the star of each irreducible
+!   k-point (PSEUDOCODE 23, TODO C148).
+!
+! The counterpart of symmetrizePDOS_LAT above, sharing its machinery and
+!   differing in what the operation MEANS. There, the per-corner permutation
+!   has already produced the right answer and this averaging only makes
+!   equal things exactly equal, so a user may switch it off. Here there is
+!   no other unfolding anywhere on the pathway: the accumulation credits
+!   every star member with the representative's atom-by-atom breakdown, and
+!   this call is what repairs it. It is therefore not optional and takes no
+!   control setting.
+!
+! Why one average at the end is exact, rather than a permutation inside the
+!   k-point loop, is derived in PSEUDOCODE 23.1. In short: the projection at
+!   an irreducible k-point is invariant under that point's little group, so
+!   summing over a star equals averaging over the whole point group times
+!   the star multiplicity; and the group average commutes with the sum over
+!   k-points because averaging is linear.
+subroutine symmetrizePDOS_Gaussian(pdosComp, channelPermTable, &
+      & cumDOSTotal, numEPts)
+
+   use O_Kinds
+   use O_MathSubs, only: symmetrizeChannels
+   use O_KPoints, only: numPointOps
+
+   implicit none
+
+   ! Passed parameters.
+   real (kind=double), dimension(:,:), &
+         & intent(inout) :: pdosComp
+   integer, allocatable, dimension(:,:), &
+         & intent(in) :: channelPermTable
+   integer, intent(in) :: cumDOSTotal
+   integer, intent(in) :: numEPts
+
+   ! Local variables.
+   real (kind=double) :: largestSpread ! Biggest gap made equal.
+   real (kind=double) :: largestValue  ! Peak of the spectrum.
+   real (kind=double) :: relativeSpread
+
+   ! The caller already tests this, but a routine that would read an
+   !   unallocated array if called wrongly should say so itself rather than
+   !   rely on every future caller repeating the guard.
+   if (.not. allocated(channelPermTable)) then
+      write (20,*) "PDOS unfolding SKIPPED: no point group maps are"
+      write (20,*) "available. This happens with an explicit kpoint list"
+      write (20,*) "(style code 0), where no mesh was folded and so none"
+      write (20,*) "needs unfolding. The partial DOS below is unaffected."
+      call flush (20)
+      return
+   endif
+
+   call symmetrizeChannels(pdosComp, channelPermTable, &
+         & numPointOps, cumDOSTotal, numEPts, &
+         & largestSpread, largestValue)
+
+   if (largestValue > 0.0_double) then
+      relativeSpread = largestSpread / largestValue
+   else
+      relativeSpread = 0.0_double
+   endif
+
+   write (20,*) "PDOS unfolded over ",numPointOps," point group operations."
+   write (20,fmt="(a,e12.5,a,e12.5)") &
+         & " Disagreement between symmetry-equivalent channels: ", &
+         & largestSpread," of peak ",largestValue
+   write (20,fmt="(a,e12.5)") &
+         & " That is a relative spread of: ",relativeSpread
+   write (20,*) "Unlike the tetrahedron case, this equality is EARNED and"
+   write (20,*) "not imposed: the number above is the error the reduction"
+   write (20,*) "introduced by crediting a whole star with one k-point's"
+   write (20,*) "orientation, and averaging removes it. On an unreduced"
+   write (20,*) "mesh it is zero (PSEUDOCODE 23.5)."
+   call flush (20)
+
+end subroutine symmetrizePDOS_Gaussian
 
 
 end module O_DOS

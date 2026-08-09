@@ -6225,11 +6225,61 @@ on the same data later with no schema change.  Built on P10.
   DESIGN 2; PSEUDOCODE 4b.1 plus the section-4 permutation table;
   then CODE.
 
-- [ ] C148. The Gaussian per-atom PDOS does not apply the atom
+- [x] C148. The Gaussian per-atom PDOS does not apply the atom
   permutation, so it is wrong on any symmetry-reduced mesh.  **This
-  is a live defect in output the code produces today**, found
+  was a live defect in output the code produced**, found
   2026-08-06 while investigating something else, and it is
   independent of the LAT work.
+
+  **DONE 2026-08-09.**  PSEUDOCODE 23 written first, then the code.
+  The fix is one group average of the finished accumulation rather
+  than a permutation inside the k-point loop, and 23.1 derives why
+  that is EXACT: the projection at an irreducible k-point is
+  invariant under that point's little group, so a star sum equals
+  the whole-group average times the multiplicity, and the group
+  average commutes with the sum over k-points because averaging is
+  linear.  So no loop moved and nothing inside the accumulation
+  changed.
+
+  Measured on the control below, all five checks of PSEUDOCODE 23.5:
+
+  ```
+  three oxygens, spread     3.072458 -> 0.000000 exactly
+  reduced+fixed vs unreduced   7e-10 relative, EVERY channel
+  total DOS                    1.4e-9 relative (print precision)
+  mode 0                       unfolding correctly skipped
+  ```
+
+  The second line is the one that matters: a 4 k-point run now
+  reproduces a 64 k-point run across all five channels, so the
+  sixteen-fold saving is finally free rather than paid for in
+  wrong per-atom output.
+
+  `symmetrizeChannels` in `O_MathSubs` was reused unchanged; it was
+  written for the LAT path in C149.  The engine now reports the
+  disagreement it removed, and that report agreed with an
+  independent measurement to all printed digits.
+
+  **Unlike `symmetrizePDOS_LAT`, this is NOT optional.**  There the
+  per-corner permutation already gives the right answer and the
+  averaging only makes equal things exactly equal, so a user may
+  switch it off.  Here the average IS the correctness mechanism, so
+  it is deliberately not wired to `symmetrizeLATPartials`; that
+  switch would turn off a fix rather than a polish.
+
+  Also renamed `channelPermTbl` to `channelPermTable` throughout, and
+  moved both its build and its release onto guards that ask the array
+  rather than repeat a condition -- widening one and not the other is
+  what made O9's fix silently do nothing for weeks.
+
+  **Mode 3 is NOT covered and is still wrong on a reduced mesh**, on
+  BOTH pathways, for the same reason: the m components of an orbital
+  mix under rotation, so a channel permutation cannot express what
+  happens to them, and the `D^l(R)` matrices are needed.  DESIGN 1.4
+  refuses mode 3 on the tetrahedron path; the Gaussian path does not
+  refuse it and so produces it silently.  Making that consistent is a
+  decision with user-visible consequences and is deliberately left
+  open -- see PSEUDOCODE 23.4.
 
   **The evidence is unusually clean because a control sits beside
   it.**  In `jobs/knbo3/cubic` (gitignored), one run on the cubic
@@ -6271,6 +6321,76 @@ on the same data later with no schema change.  Built on P10.
   effective charge already reaches.  Note that the partials-sum-to-
   total identity cannot see this defect, for the same reason it
   cannot see the POPTC unfolding (PSEUDOCODE 7a).
+
+  **Scope check, 2026-08-08: the other two quantities accumulated in
+  the same loop do NOT need fixing, for two different reasons.**  The
+  governing fact is that a symmetry operation does not change WHICH
+  VALUES exist across the atoms, only which atom holds which value.
+  So any quantity that treats the atoms symmetrically is immune, and
+  only a quantity reported atom by atom can be damaged.
+
+  - `localizationIndex` is indexed by BAND, not by atom.  Inside the
+    atom loops it accumulates the square of each per-atom projection,
+    making it a sum of squares OVER atoms.  Symmetric in the atoms,
+    therefore already correct.  There is nothing here to fix: it
+    carries no atom index to permute.
+
+  - `electronNumber(l,k)` IS per-atom -- `k` is the site, `l` the
+    state within it -- and it is accumulated with no permutation, so
+    it does hold the wrong per-atom breakdown.  It is correct today
+    only by the accident that nobody reads that breakdown.  Every use
+    traced: it feeds exactly one expression, `sum(electronNumber(:,:))`
+    at `dos.F90:811`, a total over all atoms and states used to build
+    a normalization ratio.  It is written to no output file and never
+    leaves `dos.F90`.  A total is invariant under the permutation, so
+    the one number taken from it is right.
+
+    **The correct decomposition already exists: run `-bond`.**  This
+    is not an analogy.  The projection in `dos.F90:680` and the one in
+    `bond.F90:544` are the same construction character for character
+    -- the same overlap-weighted sum over the same wave functions,
+    down to the shared local name `oneValeRealAccum`.  One quantity is
+    accumulated in two places.  `electronNumber` keeps it resolved by
+    state within atom; `computeBond` sums over that index into
+    `ibzAtomProj(k)` and then distributes it across the star through
+    `atomPerm`.  So `sum over l of electronNumber(l,k)` and the
+    effective charge `-bond` prints are the same number up to a
+    normalization convention, and the `-bond` one is already right.
+
+    That is why this is NOT fixed alongside the pdos.  There is no
+    user-facing gap to close: anyone wanting a symmetry-correct
+    per-atom charge has `-bond` today.  Fixing `electronNumber` would
+    duplicate a correct result that already exists, in an array whose
+    per-atom detail nothing reads.
+
+    **The trap remains, one feature request away.**  The array holds
+    per-atom charges, so printing them is an obvious thing for someone
+    to add, and they would silently inherit this bug.  Whoever does
+    should either take the number from `-bond` instead, or apply
+    `atomPerm` directly -- `electronNumber(l, atomPerm(op,k))`, valid
+    because equivalent atoms carry the same state ordering and
+    `buildAtomPerm` guarantees an operation maps an atom onto one of
+    the same type (DESIGN 2.3).  `channelPermTbl` is the WRONG table
+    here; it is built over the pdos channel layout, not over
+    (state, site).
+
+    Note for whoever does fix it: it is testable, contrary to a first
+    reading.  Expose `sum over l of electronNumber(l,k)` and compare
+    per atom against `-bond` on cubic KNbO3 -- the three oxygens
+    collapse from a spread to agreement, and the absolute values track
+    `computeBond` once the normalization is reconciled.  A later,
+    independent check is Bader analysis of the integrated charge
+    density field: the magnitudes will NOT match, since Bader
+    partitions real space by density topology rather than basis
+    functions, but three symmetry-equivalent oxygens must come out
+    equal under any partitioning that respects the crystal, so the
+    symmetry consistency is confirmed without depending on the scheme.
+
+  **Do not read the effective charge as evidence about
+  `electronNumber`.**  The 6.70852906 agreement above comes from
+  `computeBond` in `bond.F90`, which applies `atomPerm` at line 721.
+  It is a different quantity in a different file and says nothing
+  about this array.
 
 - [ ] C149. Atom-resolved LAT quantities do not reproduce the
   equivalence of symmetry-equivalent atoms, and it is not the
@@ -8134,6 +8254,32 @@ is not carried only in conversation.
   (1) and `atomSCF/checkConvg.f90` (2).  Whether any of them
   can be reached the same way was NOT investigated; this
   entry was deliberately scoped to `imagoKKc`.
+
+- [ ] O16. Tell a user when `imago.dat` predates the reader
+  rather than failing with a parse error.  O3 added two lines
+  to `OPTC_INPUT_DATA` (the direction codes), so every input
+  file generated before 2026-08-08 is now short by two lines.
+  The reader walks off the end of the block and hits
+  `NLOP_INPUT_DATA` where it expects an integer, and what the
+  user sees is:
+
+  ```
+  At line 349 of file readDataSerial.f90 (unit = 5, file = 'fort.5')
+  Fortran runtime error: Bad integer for item 1 in list input
+  ```
+
+  Nothing in that says "your input file is from an older
+  version, re-run makeinput.py", which is the entire content
+  of the problem.  Hit 2026-08-09 on a job directory three
+  days old; the fix was to regenerate the input, and finding
+  that out took longer than doing it.
+
+  This will recur every time a block gains a field, so the
+  answer is not to special-case these two lines.  Options: a
+  format version stamp in `imago.dat` that the reader checks
+  first, or a reader that names the block and field it was
+  reading when a conversion fails.  The second is more work
+  and helps every future case, including hand-edited files.
 
 ## TOOLING (lint helpers)
 

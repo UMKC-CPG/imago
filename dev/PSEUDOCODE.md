@@ -15948,3 +15948,181 @@ needs. A clean run prints nothing.
 4. **A missing INPUT still fails**, and fails at the open
    rather than by producing zeros. This is the check that
    guards against the one-edit-away defect in 22.2.
+
+## 23. Gaussian Per-Atom PDOS Unfolding (TODO C148)
+
+The Gaussian accumulation deposits straight into
+`pdosAccum(pdosIndex(valeDimIndex))` and permutes nothing,
+so on a symmetry-reduced mesh every member of a k-point's
+star is credited with the REPRESENTATIVE's atom-by-atom
+breakdown. `buildChannelPermTable` is called only inside
+`if (kPointIntgCode == 1)`, so the table the tetrahedron
+path uses was never built for this one.
+
+Live in shipped output, on the default integration setting.
+Measured on cubic KNbO3: three symmetry-equivalent oxygens
+that must be identical differ by 7.1e-01.
+
+### 23.1 Why a single call at the end is exact
+
+The obvious fix is to permute inside the k-point loop, per
+star member. That is not needed, and the reason is worth
+writing down because it looks too convenient to be true.
+
+Let `P(k)` be the per-channel vector at irreducible k-point
+`k`, and `w_k` its star multiplicity. What is accumulated
+today is
+
+```
+  A = sum over k of  w_k * P(k)
+```
+
+What is WANTED is each representative spread over its own
+star,
+
+```
+  correct = sum over k of sum over R in the star of k
+                            of  R . P(k)
+```
+
+`P(k)` is invariant under the little group of `k` -- the
+operations that leave `k` fixed also carry the crystal onto
+itself, so they can only permute equal projections among
+equivalent atoms. Therefore summing over star members is
+the same as averaging over the WHOLE point group and
+multiplying by the multiplicity:
+
+```
+  sum over R in star of R . P(k)  =  w_k * groupAvg(P(k))
+```
+
+and because `groupAvg` is linear,
+
+```
+  correct = sum over k of w_k * groupAvg(P(k))
+          = groupAvg( sum over k of w_k * P(k) )
+          = groupAvg(A)
+```
+
+**So one group average of the finished accumulation is
+exactly the per-k-point star average.** No loop moves and
+nothing inside the accumulation changes.
+
+This holds for the accumulated PDOS even though individual
+band projections inside a degenerate subspace are NOT
+invariant -- the diagonalizer's basis there is arbitrary.
+Degenerate bands sit at one energy and so carry one
+broadening weight, which makes the sum over a degenerate
+multiplet invariant, and that sum is what the PDOS holds.
+
+**This is NOT the same as the LAT path's symmetrization.**
+There, correctness comes from permuting per tetrahedron
+corner, and `symmetrizePDOS_LAT` is an OPTIONAL cleanup
+(DESIGN 1.7) that a user can switch off. Here the group
+average IS the correctness mechanism and is not optional.
+Wiring it to `symmetrizeLATPartials` would let a user turn
+off a fix rather than a polish.
+
+### 23.2 Seam inventory
+
+Every quantity the change consumes, and when it lives.
+
+```
+quantity        supplied by          lifetime
+------------------------------------------------------------
+invAtomPerm     buildInvAtomPerm,    built for EVERY run
+                  called from          except SYBD, right
+                  imago.py's setup     after buildAtomPerm;
+                  and pscf paths       independent of
+                                       kPointIntgCode, so it
+                                       is already available
+                                       here. Guard on
+                                       allocated() anyway --
+                                       SYBD does not build it
+channelPermTbl  buildChannelPerm-    TODAY built and freed
+                  Table                only under
+                                       kPointIntgCode == 1.
+                                       BOTH guards must widen,
+                                       or the Gaussian path
+                                       leaks it or reads a
+                                       table that was never
+                                       filled
+cumulNumDOS,    allocated before     present on both paths
+  cumulDOSTotal   the spin loop        already
+pdosComplete    the accumulation     the average must run
+                  in the spin loop     AFTER the k-point loop
+                                       for that spin closes
+                                       and BEFORE the output
+                                       phase reads it
+```
+
+**The lifetime row is the one that matters.** Freeing a
+permutation table before its consumer runs is exactly the
+defect that made O9's fix silently do nothing for weeks
+(PSEUDOCODE 19.2.1a). Widening the build guard without
+widening the release guard leaks; widening the release
+without the build reads an unallocated array.
+
+### 23.3 What runs, and for which detail codes
+
+```
+  mode 0  type-resolved. NOTHING to do: a sum over all
+            atoms of a type is already invariant, and an
+            operation carries an atom onto one of the same
+            type (DESIGN 2.3)
+  mode 1  per-atom total.    group-average the channels
+  mode 2  per-atom, per QN_nl. group-average the channels
+  mode 3  per-atom, per QN_nlm. NOT COVERED -- see below
+```
+
+```
+if (kPointIntgCode /= 1) and (detailCodePDOS is 1 or 2)
+      and allocated(invAtomPerm):
+    build channelPermTbl before the spin loop
+    ...
+    after the k-point loop for spin h closes:
+        symmetrizeChannels(pdosComplete(:,:), channelPermTbl)
+    ...
+    release channelPermTbl after the spin loop
+```
+
+`symmetrizeChannels` already exists in `O_MathSubs` and
+already performs exactly this group average; it was written
+for the LAT path in C149 and needs no change.
+
+### 23.4 Mode 3 is the same defect and this does NOT fix it
+
+`buildChannelPermTable` has branches for detail codes 0, 1
+and 2 and none for 3. That is not an oversight: the m
+components of an orbital MIX under a rotation, so permuting
+channel indices cannot express what happens to them. The
+`D^l(R)` representation matrices are needed, which is
+exactly why DESIGN 1.4 REFUSES mode 3 on the tetrahedron
+path.
+
+The Gaussian path does not refuse it. So mode 3 on a reduced
+mesh is silently wrong TODAY, on both paths, and one of them
+says so while the other does not. Making that consistent is
+a decision with user-visible consequences -- refusing it
+would stop runs that people are doing now -- and it is
+deliberately left out of this section rather than settled by
+whoever writes the code.
+
+### 23.5 Checks
+
+1. **The three oxygens of cubic KNbO3 must agree**, on a
+   reduced mesh, to the precision the effective charge from
+   `-bond` already reaches. That control found the defect
+   and is in `jobs/knbo3/cubic`; a fresh reproduction is in
+   `jobs/knbo3/o9_pdos/gauss`. Spread today is 7.1e-01.
+2. **An unreduced mesh must not move at all.** Every star
+   has one member, the group average is over the identity
+   alone, and the whole change is a no-op there.
+3. **The total DOS must not move**, on any mesh. It is a
+   sum over channels, which no permutation can change, so
+   any shift means the average is being applied where it
+   should not be.
+4. **Mode 0 must not move**, for the same reason.
+5. The partials-sum-to-total identity CANNOT see this
+   defect and is not a check. It holds under any permutation
+   of the channel indices, which is the whole point.
