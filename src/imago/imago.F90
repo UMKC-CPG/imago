@@ -186,8 +186,10 @@ subroutine setupSCF
 !   integer profiler(2) / 0, 0 /
 !   save profiler
 
-   ! Define error detectors for hdf, tau, and mpi.
-   integer :: hdferr
+   ! Define error detectors for hdf, tau, and mpi. All three are
+   !   commented out: nothing in this routine currently checks them,
+   !   and a live-but-unused hdferr is reported by the audit build.
+!   integer :: hdferr
 !   integer :: tauerr
 !   integer :: mpierr
 
@@ -447,7 +449,6 @@ subroutine mainSCF
    ! Import necessary modules.
    use HDF5
    use O_Kinds
-   use O_CommandLine, only: doDOS_SCF, doBond_SCF, doDIMO_SCF, doForce_SCF
    use O_Input, only: numStates, iterFlagTDOS
    use O_Potential, only: converged, currIteration, lastIteration, &
          & spin, rel, initPotCoeffs, cleanUpPotential
@@ -459,7 +460,7 @@ subroutine mainSCF
    use O_SecularEquation, only: secularEqnSCF, cleanUpSecularEqn, &
          & shiftEnergyEigenValues
    use O_ValeCharge, only: makeValenceRho
-   use O_Populate, only: occupiedEnergy, populateStates
+   use O_Populate, only: populateStates
    use O_LAPACKParameters, only: setBlockSize
    use O_ExchangeCorrelation, only: cleanUpExchCorr
    use O_DOS, only: computeIterationTDOS, printIterationTDOS, computeDOS
@@ -472,7 +473,6 @@ subroutine mainSCF
    ! Define local variables.
    integer :: i
    integer :: imagoKill
-   integer :: hdferr
    real (kind=double) :: totalEnergy
 
    ! Open (almost) all the text files that will be written to in this program.
@@ -770,7 +770,7 @@ subroutine bandPSCF
    use O_AtomicSites,      only: valeDim
    use O_LAPACKParameters, only: setBlockSize
    use O_Input,            only: numStates
-   use O_CommandLine,      only: doSYBD_PSCF, doMTOP_PSCF
+   use O_CommandLine,      only: doSYBD_PSCF
    use O_Lattice,          only: initializeLattice, initializeFindVec
    use O_KPoints,          only: makePathKPoints, numKPoints, &
          & computePhaseFactors
@@ -919,11 +919,9 @@ subroutine dos(inSCF)
    use O_TimeStamps
    use O_Potential,       only: spin
    use O_DOS,             only: computeDOS, computeTDOS_LAT
-   use O_KPoints,         only: numKPoints, kPointIntgCode
-   use O_Input,           only: numStates
+   use O_KPoints,         only: kPointIntgCode
    use O_Populate,        only: occupiedEnergy, populateStates
-   use O_SecularEquation, only: energyEigenValues, &
-         & shiftEnergyEigenValues
+   use O_SecularEquation, only: shiftEnergyEigenValues
 
 
    ! Make sure that no funny variables are defined.
@@ -989,7 +987,7 @@ subroutine bond (inSCF, doBond)
    use O_Populate,        only: occupiedEnergy, populateStates, &
          & computeElectronPopulation_LAT
    use O_KPoints,         only: kPointIntgCode
-   use O_Input,           only: thermalSigma, numStates
+   use O_Input,           only: thermalSigma
    use O_SecularEquation, only: shiftEnergyEigenValues
 
 
@@ -1073,11 +1071,8 @@ subroutine dimo(inSCF)
    ! Use necessary modules.
    use O_TimeStamps
    use O_Potential,       only: spin
-   use O_KPoints,         only: numKPoints
-   use O_Input,           only: numStates
    use O_Populate,        only: occupiedEnergy, populateStates
-   use O_SecularEquation, only: energyEigenValues, &
-         & shiftEnergyEigenValues
+   use O_SecularEquation, only: shiftEnergyEigenValues
    !use O_ValeCharge, only: makeValenceRho
    use O_DIMO,            only: computeDIMO
 
@@ -1131,13 +1126,12 @@ subroutine field(inSCF)
    use O_Kinds
    use O_TimeStamps
    use O_Populate,        only: populateStates
-   use O_Potential,       only: spin, initPotCoeffs
+   use O_Potential,       only: initPotCoeffs
    use O_Field,           only: computeFieldMesh, cleanUpField
 !   use O_SCFFieldHDF5,    only: wav_did, rho_did, pot_did, triggerAxis, &
 !         & abcDimsChunk, fileFieldChunk_dsid
 !   use O_PSCFFieldHDF5,    only: wavPSCF_did, rhoPSCF_did, potPSCF_did, &
 !         & triggerAxisPSCF, abcDimsChunkPSCF, fileFieldChunkPSCF_dsid
-   use O_SecularEquation, only: energyEigenValues
    use O_Lattice,         only: initialize3DMesh
    use O_FieldHDF5,       only: prepFieldHDF5, closeFieldHDF5
 
@@ -1187,19 +1181,17 @@ subroutine optc(inSCF,doOPTC)
    use O_TimeStamps
    use O_Potential,       only: spin
    use O_OptcSpectra,     only: computeOptcSpectra, printOptcSpectra
-   use O_KPoints,         only: numKPoints, kPointIntgCode
+   use O_KPoints,         only: kPointIntgCode
    use O_Populate,        only: occupiedEnergy, populateStates, &
          & computeElectronPopulation_LAT
    use O_Lattice,         only: initializeLattice, initializeFindVec
-   use O_Input,           only: numStates, lastInitStatePACS, &
-         & detailCodePOPTC
+   use O_Input,           only: detailCodePOPTC
    use O_OptcTransitions, only: transCounter, energyDiff, transitionProb, &
          & transitionProbPOPTC, getEnergyStatistics, computeTransitions, &
          & transProbBanded, transProbPOPTCBanded, pairIsWanted, &
          & cleanUpPOPTCIndex, transitionMoment, pairOccupancy, &
          & transMomentBanded, bandedOccupancy, transMomentPOPTCBanded
-   use O_SecularEquation, only: energyEigenValues, &
-         & shiftEnergyEigenValues
+   use O_SecularEquation, only: shiftEnergyEigenValues
 
 
    ! Make sure that no funny variables are defined.
@@ -1371,7 +1363,6 @@ subroutine mtop(inSCF)
    integer, intent(in) :: inSCF
 
    ! Declare local variables.
-   integer :: i
    real(kind=double), dimension(3,2) :: xyzP
 
    ! Open the MTOP files that will be written to.  If a spin polarized
@@ -1481,7 +1472,7 @@ end subroutine loen
 subroutine cleanUpSCF
 
    ! Use necessary modules.
-   use O_CommandLine, only: doDIMO_SCF, doForce_SCF, doPSCF
+   use O_CommandLine, only: doDIMO_SCF, doForce_SCF
    use O_Lattice, only: cleanUpLattice
    use O_Potential, only:  cleanUpPotential, lastIteration
    use O_AtomicSites, only: cleanUpAtomSites

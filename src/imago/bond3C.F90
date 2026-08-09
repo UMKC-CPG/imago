@@ -100,15 +100,10 @@ subroutine computeBond3C(inSCF)
    implicit none
 
    ! Define local variables.
-   integer :: h,i,j,k,l,m,n,o ! Loop index variables
-   integer, allocatable, dimension (:) :: numTypeBonds
+   integer :: h,i,j,k,l,m ! Loop index variables
    integer, allocatable, dimension (:) :: numOrbIndex
    integer, allocatable, dimension (:) :: bondIndex
    integer, allocatable, dimension (:) :: numAtomStates
-   integer, allocatable, dimension (:) :: numAtomsBonded
-   integer, allocatable, dimension (:) :: currentBonds
-   integer, allocatable, dimension (:) :: numBondAngles
-   integer, allocatable, dimension (:,:,:) :: bondAngleAtoms
    integer, dimension (2) :: atom1Index
    integer, dimension (2) :: atom2Index
    integer, dimension (2) :: atom3Index
@@ -123,18 +118,10 @@ subroutine computeBond3C(inSCF)
    integer :: currentType
    integer :: valeDimIndex
    integer :: minDistCount
-   real (kind=double) :: systemBondOrder
-   real (kind=double) :: currentDistMag
-   real (kind=double) :: expAlpha
-   real (kind=double) :: expFactor
    real (kind=double) :: chargeScaleFactor ! A number from 0-1 that scales
          ! contributions to the bondOrder according to the electron population
          ! in the current state.
    real (kind=double), dimension (2) :: currentMinDist
-   real (kind=double), allocatable, dimension (:)      :: bondOrderTotal
-   real (kind=double), allocatable, dimension (:)      :: bondLengthTotal
-   real (kind=double), allocatable, dimension (:,:)    :: bondAngle
-   real (kind=double), allocatable, dimension (:,:)    :: bondedDist
    type (atom1Node), allocatable, dimension (:) :: BO3C
    type (atom2Node), pointer :: currentNode2
    type (atom3Node), pointer :: currentNode3

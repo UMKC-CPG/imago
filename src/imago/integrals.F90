@@ -159,8 +159,8 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
    use O_Constants, only: dim3
    use O_KPoints, only: numKPoints
    use O_GaussianRelations, only: alphaDist
-   use O_AtomicSites, only: valeDim, coreDim, numAtomSites, atomSites
-   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates, atomTypes
+   use O_AtomicSites, only: valeDim, coreDim, numAtomSites
+   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
    use O_Lattice, only: numCellsReal, cellSizesReal, cellDimsReal, &
          & findLatticeVector
    use O_GaussianIntegrals, only: overlap2CIntg
@@ -664,8 +664,8 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
    use O_Constants, only: dim3
    use O_KPoints, only: numKPoints
    use O_GaussianRelations, only: alphaDist
-   use O_AtomicSites, only: valeDim, coreDim, numAtomSites, atomSites
-   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates, atomTypes
+   use O_AtomicSites, only: valeDim, coreDim, numAtomSites
+   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
    use O_Lattice, only: numCellsReal, cellSizesReal, cellDimsReal, &
          & findLatticeVector
    use O_GaussianIntegrals, only: kinetic2CIntg
@@ -1099,8 +1099,8 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
    use O_Constants, only: dim3
    use O_KPoints, only: numKPoints
    use O_GaussianRelations, only: alphaDist
-   use O_AtomicSites, only: valeDim, coreDim, numAtomSites, atomSites
-   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates, atomTypes
+   use O_AtomicSites, only: valeDim, coreDim, numAtomSites
+   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
    use O_Lattice, only: numCellsReal, cellSizesReal, cellDimsReal, &
          & findLatticeVector
    use O_GaussianIntegrals, only: massVel2CIntg
@@ -1539,8 +1539,8 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
    use O_Constants, only: dim3
    use O_KPoints, only: numKPoints
    use O_GaussianRelations, only: alphaDist
-   use O_AtomicSites, only: valeDim, coreDim, numAtomSites, atomSites
-   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates, atomTypes
+   use O_AtomicSites, only: valeDim, coreDim, numAtomSites
+   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
    use O_Lattice, only: numCellsReal, cellSizesReal, cellDimsReal, &
          & findLatticeVector
    use O_Basis, only: initializeAtomSite
@@ -2867,9 +2867,9 @@ subroutine gaussOverlapHamPSCF(did,aid)
    use O_TimeStamps
    use O_Constants, only: dim3
    use O_KPoints, only: numKPoints
-   use O_GaussianRelations, only: alphaDist, alphaCenter, alphaNucDist
-   use O_AtomicSites, only: valeDim, coreDim, numAtomSites, atomSites
-   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates, atomTypes
+   use O_GaussianRelations, only: alphaDist, alphaCenter
+   use O_AtomicSites, only: numAtomSites
+   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
    use O_Lattice, only: numCellsReal, cellSizesReal, cellDimsReal, &
          & findLatticeVector, logBasisFnThresh
    use O_PotTypes, only: potTypes
@@ -2925,8 +2925,6 @@ subroutine gaussOverlapHamPSCF(did,aid)
    real (kind=double), allocatable, dimension (:,:,:,:) :: pairXBasisFn2Ham
          ! The pair overlap times the basis function from atom 2.  These
          ! are accumulated with each iteration of the alpha loop.
-   logical :: contrib  ! At least one alpha pair contributes.  For the nuc and
-         ! elec calculations this also requires that the pot term contribute.
 
    ! Variables and data structures that change or are accumulated with each
    !   iteration of the lattice loop.
@@ -3918,7 +3916,6 @@ subroutine orthoHamPSCF(spin,did,aid)
    ! Use necessary modules.
    use HDF5
    use O_Kinds
-   use O_PotTypes, only: potTypes
    use O_KPoints, only: numKPoints
    use O_AtomicSites, only: coreDim, valeDim
    use O_PSCFIntegralsHDF5, only: packedVVDimsPSCF
