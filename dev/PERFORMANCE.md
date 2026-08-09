@@ -280,7 +280,54 @@ static work that can proceed in parallel with everything above.
 
 ## Findings ledger
 
-No findings recorded yet.
+### HOT-001 -- 121 hidden array copies, from the compiler, for free
+- Site:      121 distinct sites, engine-wide. Worst offenders:
+             ```
+               48  imago/integrals.F90
+               43  imago/auxiliary/imagoKKc.f90
+               37  imago/potentialUpdate.F90
+               22  imago/integrals3Terms.F90
+               20  imago/secularEqn.F90
+               12  imago/forces.F90
+                9  imago/field.F90
+                8  imago/coreCharge.f90
+             ```
+             (187 warnings over 121 sites, since each site is
+             reported once per variant that compiles it.)
+- Variant:   [BOTH]
+- Deck:      none -- this is a COMPILE-time diagnostic, obtained
+             from the Phase 1 warning sweep of `dev/DEBUG.md` at
+             no runtime cost whatever
+- Cost:      UNKNOWN and deliberately not guessed. An array
+             temporary is a full copy of an array the compiler had
+             to materialize because it could not prove an operation
+             was safe in place. Whether that matters depends
+             entirely on the array's size and on how often the line
+             executes -- a temporary in a setup routine costs
+             nothing, one inside the integral loops could be
+             enormous. Ranking these needs PF1 and PF2.
+- Scaling:   unknown, per above
+- Parallel:  unknown
+- Status:    open
+- Evidence:  `-Warray-temporaries` under the `gfortran-audit`
+             build, 2026-08-09. Moved out of the correctness audit
+             and behind the new `IMAGO_WARN_PERF` option in the
+             same change, because 187 of these against 4 genuine
+             correctness warnings made the latter unfindable.
+
+**Why this is not yet actionable, and why it is still worth
+having.** It says WHERE copies happen but nothing about what they
+cost, and the distribution above is suggestive rather than
+conclusive: `integrals.F90` leading the count is consistent with
+ARCHITECTURE 6.2's plan to restructure exactly those alpha-pair
+loops, but a count is not a cost. Cross this list against the PF2
+time map and the intersection -- a hot routine that also copies --
+is where the cheap wins are.
+
+Note `imagoKKc.f90` at 43. That is post-processing, not the SCF,
+so it will not show up in a time map of the engine at all; it is
+its own small optimization target, separate from the parallel
+work.
 
 Entry schema, deliberately different from the bug ledger's --
 these rank by cost and by how well the site will parallelize:

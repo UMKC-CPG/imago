@@ -59,9 +59,21 @@ known-good default is never disturbed.
 |                    | zero / overflow) at the point of origin    |
 | `IMAGO_INIT_SNAN`  | initialize reals to signaling NaN, so any  |
 |                    | use of an uninitialized value traps        |
-| `IMAGO_WARN_EXTRA` | the extra, audit-grade compiler warnings   |
+| `IMAGO_WARN_EXTRA` | the extra, audit-grade compiler warnings,  |
+|                    | CORRECTNESS diagnostics only               |
+| `IMAGO_WARN_PERF`  | performance warnings: hidden array copies. |
+|                    | Kept apart from the audit set on purpose;  |
+|                    | see the note below                         |
 | `IMAGO_SANITIZE`   | a sanitizer: `address`, `undefined`, or    |
 |                    | `leak` (default `none`)                     |
+
+**Why the two warning options are separate.** `IMAGO_WARN_PERF`
+turns on `-Warray-temporaries`, which reports hidden array copies.
+Those are a COST, not a defect. One sweep produced 187 of them
+against 4 genuine correctness warnings, so bundling the two makes
+the correctness warnings impossible to find -- which is the whole
+purpose of the audit build. Turn `IMAGO_WARN_PERF` on when you are
+hunting for speed, and leave it off when you are hunting for bugs.
 
 You can compose these by hand onto any build, e.g.:
 

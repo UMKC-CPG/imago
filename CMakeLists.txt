@@ -96,13 +96,23 @@ message("CMAKE_EXE_LINKER_FLAGS= ${CMAKE_EXE_LINKER_FLAGS}")
 #   IMAGO_INIT_SNAN  initialize reals to a signaling NaN so that any use
 #                      of an uninitialized value traps instead of silently
 #                      producing a wrong answer
-#   IMAGO_WARN_EXTRA the extra, audit-grade compiler warning set
+#   IMAGO_WARN_EXTRA the extra, audit-grade compiler warning set --
+#                      CORRECTNESS diagnostics only
+#   IMAGO_WARN_PERF  performance diagnostics: warnings about hidden
+#                      array copies.  Deliberately SEPARATE from
+#                      IMAGO_WARN_EXTRA, because they report nothing
+#                      about correctness.  A single sweep emitted 187
+#                      of them against 4 genuine correctness warnings,
+#                      so bundling the two makes the correctness
+#                      warnings unfindable.  See dev/DEBUG.md's
+#                      drive-to-zero doctrine and dev/PERFORMANCE.md.
 #   IMAGO_SANITIZE   select a sanitizer: none, address, undefined, leak
 # ----------------------------------------------------------------------
 option (IMAGO_CHECKS     "Runtime checks (array bounds, etc.)"     OFF)
 option (IMAGO_FPE_TRAP   "Trap FP exceptions (inv/zero/overflow)"  OFF)
 option (IMAGO_INIT_SNAN  "Init reals to signaling NaN"             OFF)
 option (IMAGO_WARN_EXTRA "Extra audit-grade warning set"           OFF)
+option (IMAGO_WARN_PERF  "Performance warnings (array copies)"     OFF)
 set (IMAGO_SANITIZE "none" CACHE STRING
    "Sanitizer: none, address, undefined, or leak")
 
@@ -129,9 +139,20 @@ if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
       set (IMAGO_INSTRUMENT_FLAGS
          "${IMAGO_INSTRUMENT_FLAGS} -Wextra -Wuninitialized")
       set (IMAGO_INSTRUMENT_FLAGS
-         "${IMAGO_INSTRUMENT_FLAGS} -Wrealloc-lhs-all -Warray-temporaries")
+         "${IMAGO_INSTRUMENT_FLAGS} -Wrealloc-lhs-all")
       set (IMAGO_INSTRUMENT_FLAGS
          "${IMAGO_INSTRUMENT_FLAGS} -Wimplicit-interface")
+   endif ()
+   # Kept apart from the audit set above. An array temporary is a
+   #   hidden copy, which is a COST rather than a defect, and there are
+   #   two orders of magnitude more of them than there are correctness
+   #   warnings -- so mixing them buries what the audit is looking for.
+   #   -Wrealloc-lhs-all stays with the audit despite also implying a
+   #   copy, because automatic reallocation on assignment silently
+   #   changes an array's shape and that IS a correctness surprise.
+   if (IMAGO_WARN_PERF)
+      set (IMAGO_INSTRUMENT_FLAGS
+         "${IMAGO_INSTRUMENT_FLAGS} -Warray-temporaries")
    endif ()
    if (NOT IMAGO_SANITIZE STREQUAL "none")
       set (IMAGO_INSTRUMENT_FLAGS
