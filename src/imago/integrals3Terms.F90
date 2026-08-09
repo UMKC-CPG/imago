@@ -73,8 +73,8 @@ subroutine gaussOverlapDM(valeValeDims,did,aid)
    use O_Input, only: dipoleCenter
    use O_KPoints, only: numKPoints
    use O_GaussianRelations, only: alphaDist
-   use O_AtomicSites, only: valeDim, coreDim, numAtomSites, atomSites
-   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates, atomTypes
+   use O_AtomicSites, only: valeDim, coreDim, numAtomSites
+   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
    use O_Lattice, only: numCellsReal, cellSizesReal, cellDimsReal, &
          & findLatticeVector
    use O_GaussianIntegrals, only: dipole3CIntg
@@ -517,11 +517,10 @@ subroutine gaussOverlapMM(valeValeDims,did,aid)
    use O_Kinds
    use O_TimeStamps
    use O_Constants, only: dim3
-   use O_Input, only: dipoleCenter
    use O_KPoints, only: numKPoints
    use O_GaussianRelations, only: alphaDist
-   use O_AtomicSites, only: valeDim, coreDim, numAtomSites, atomSites
-   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates, atomTypes
+   use O_AtomicSites, only: valeDim, coreDim, numAtomSites
+   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
    use O_Lattice, only: numCellsReal, cellSizesReal, cellDimsReal, &
          & findLatticeVector, logBasisFnThresh
    use O_GaussianIntegrals, only: momentum2CIntg
@@ -965,8 +964,8 @@ subroutine gaussKOverlap(valeValeDims,did1,did2,aid,plusG)
    use O_Input, only: dipoleCenter
    use O_KPoints, only: numKPoints, numAxialKPoints
    use O_GaussianRelations, only: alphaDist
-   use O_AtomicSites, only: valeDim, coreDim, numAtomSites, atomSites
-   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates, atomTypes
+   use O_AtomicSites, only: valeDim, coreDim, numAtomSites
+   use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
    use O_Lattice, only: numCellsReal, cellSizesReal, cellDimsReal, &
          & findLatticeVector, logBasisFnThresh, recipVectors
    use O_GaussianIntegrals, only: KOverlap2CIntg
@@ -1392,11 +1391,9 @@ subroutine ortho3Terms (opCode,valeValeDims,did1,did2,aid)
 
    ! Use necessary modules.
    use O_Kinds
-   use O_PotTypes, only: potTypes
    use O_KPoints, only: numKPoints
    use O_AtomicSites, only: coreDim, valeDim
    use O_Orthogonalization
-   use O_Potential, only: rel
 #ifndef GAMMA
    use O_Integrals, only: coreValeOL
 #else

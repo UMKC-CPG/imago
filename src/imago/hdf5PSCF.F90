@@ -55,7 +55,7 @@ subroutine initHDF5_PSCF (numStates)
    use O_CommandLine, only: excitedQN_n, excitedQN_l, basisCode_PSCF, &
          & doSYBD_PSCF, doMTOP_PSCF
    use O_KPoints, only: numAxialKPoints, numPathKP, numPaths, &
-         & numTotalHighSymKP, numHighSymKP, highSymKP, highSymKPChar
+         & numHighSymKP, highSymKPChar
 
    ! Make sure that no funny variables are defined.
    implicit none

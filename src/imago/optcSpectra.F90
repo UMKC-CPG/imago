@@ -43,7 +43,7 @@ subroutine computeOptcSpectra(doOPTC)
                                 & numAccumCompPOPTC
    use O_Input,           only: sigmaOPTC, deltaOPTC, sigmaPACS, deltaPACS,&
                                 & detailCodePOPTC
-   use O_Constants,       only: dim3, pi, auTime, eCharge, hPlanck, hartree
+   use O_Constants,       only: pi, auTime, eCharge, hPlanck, hartree
    use O_KPoints,         only: kPointIntgCode, symmetrizeLATPartials
 
    ! Make sure that there are not accidental variable declarations.
@@ -329,7 +329,7 @@ subroutine accumulateOptcCond (kPointFactor, sigma)
    real (kind=double) :: expAlpha
    real (kind=double) :: broadenWeight ! Everything but the strength.
    integer :: h,i,j,k
-   integer :: c,d,e ! Cartesian component indices.
+   integer :: d,e ! Cartesian component indices.
    real (kind=double), allocatable, dimension (:,:,:,:,:) :: starRotAvg
    real (kind=double), dimension (numAccumCompOPTC) :: strength
          !   This transition's contribution before broadening.

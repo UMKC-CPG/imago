@@ -188,7 +188,7 @@ end subroutine getAtomicSiteImplicitInfo
 subroutine computeIonicMoment(incChargePerVol)
 
    use O_Kinds
-   use O_Constants, only: eCharge,pi
+   use O_Constants, only: eCharge
    use O_PotTypes, only: potTypes
    use O_Lattice, only: getRealmagnitudes,realCellVolume,invRealVectors,realMag
    use O_ElementData, only: coreCharge

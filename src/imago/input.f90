@@ -584,7 +584,6 @@ end subroutine readDIMOControl
 
 subroutine getDipoleMomentCenter
 
-   use O_Constants, only: hartree
    use O_Lattice, only: realVectors
 
    implicit none

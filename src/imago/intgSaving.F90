@@ -540,7 +540,7 @@ subroutine valeValeSavingFull (atom1,atom2,kPointCount,valeStateIndex,&
          & numKPoints) :: currentPairDagger
 
    ! Define local variables for loop control and tracking.
-   integer :: i,j,k
+   integer :: i
 
    do i = 1, kPointCount
       valeVale(valeStateIndex(1)+1:valeStateIndex(1)+valeStateNum(1),&

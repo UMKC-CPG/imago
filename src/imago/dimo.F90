@@ -16,7 +16,7 @@ subroutine computeDIMO (inSCF)
    ! Import necessary modules.
    use O_TimeStamps
    use O_AtomicSites, only: valeDim, computeIonicMoment, xyzIonMoment
-   use O_Input, only: numStates, numElectrons
+   use O_Input, only: numStates
    use O_KPoints, only: numKPoints
    use O_Constants, only: smallThresh, eCharge, bohrRad
    use O_Potential, only: spin

@@ -69,7 +69,7 @@ subroutine computeForceIntg(totalEnergy)
    use O_KPoints, only: numKPoints
    use O_PotTypes,     only: potTypes
    use O_AtomicSites,  only: numAtomSites, valeDim, coreDim
-   use O_Potential,    only: rel, spin, potCoeffs
+   use O_Potential,    only: spin, potCoeffs
    use O_Basis,        only: initializeAtomSite
    use O_PotSites,     only: numPotSites, potSites
    use O_AtomicTypes,  only: maxNumAtomAlphas, maxNumStates

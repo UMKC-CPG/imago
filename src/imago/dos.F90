@@ -1626,10 +1626,7 @@ subroutine computeProjections_LAT(inSCF, spinIdx, &
       & elecNum, locIdx)
 
    use O_Kinds
-   use O_Potential, only: spin
    use O_KPoints, only: kPointWeight
-   use O_Constants, only: pi, hartree
-   use O_AtomicSites, only: valeDim
    use O_SecularEquation, only: energyEigenValues, &
          & readDataSCF, readDataPSCF
 #ifndef GAMMA

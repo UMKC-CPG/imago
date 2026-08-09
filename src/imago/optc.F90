@@ -292,9 +292,7 @@ contains
 subroutine setOptcStoreSize
 
    ! Import necessary modules.
-   use O_Input, only: cartesianCodeOPTC, cartesianCodePOPTC, &
-         & detailCodePOPTC
-   use O_KPoints, only: kPointIntgCode
+   use O_Input, only: cartesianCodeOPTC, cartesianCodePOPTC
 
    implicit none
 
@@ -382,7 +380,7 @@ subroutine getEnergyStatistics(doOPTC)
    use O_SecularEquation, only: energyEigenValues
    use O_Populate,        only: electronPopulation
    use O_KPoints,         only: numKPoints, kPointWeight
-   use O_Constants,       only: dim3, smallThresh, bigThresh, hartree
+   use O_Constants,       only: smallThresh, bigThresh, hartree
    use O_Input, only: numStates, cutoffEnOPTC, maxTransEnOPTC, &
          & totalEnergyDiffPACS, energyWindowPACS, firstInitStatePACS, &
          & lastInitStatePACS, onsetEnergySlackPACS, cutoffEnSIGE, &
@@ -895,9 +893,8 @@ subroutine computeTransitions(inSCF,doOPTC)
    use O_Kinds
    use O_TimeStamps
    use O_Potential,     only: spin
-   use O_Constants,     only: dim3
    use O_KPoints,       only: numKPoints, kPointIntgCode
-   use O_AtomicSites,   only: coreDim, valeDim
+   use O_AtomicSites,   only: valeDim
    use O_CommandLine,   only: serialXYZ
    use O_Input,         only: numStates, totalEnergyDiffPACS, detailCodePOPTC
 #ifndef GAMMA
@@ -916,8 +913,7 @@ subroutine computeTransitions(inSCF,doOPTC)
    integer, intent(in) :: doOPTC
 
    ! Define local variables.
-   integer :: h,i,j ! Loop index variables
-integer :: k,l
+   integer :: h,i ! Loop index variables
    real (kind=double) :: energyShift
 !   real (kind=double), allocatable, dimension (:,:) :: tempRealValeVale
 !#ifndef GAMMA
@@ -2616,7 +2612,6 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    use O_KPoints,     only: kPointWeight, numKPoints, numFullMeshKP, &
          & fullKPToIBZKPMap, fullKPToIBZOpMap, kPointIntgCode, &
          & xyzRealPointOps
-   use O_Constants,   only: pi, hartree, dim3
    use O_AtomicSites, only: valeDim, atomPerm
    use O_Input,       only: numStates, detailCodePOPTC
 
@@ -2654,7 +2649,6 @@ subroutine computePOPTCPairs(currentKPoint,xyzComponents,spinDirection,doOPTC)
    integer :: fullIdx    ! Index of a full-mesh k-point in that star
    integer :: opIdx      ! Point operation carrying the IBZ point to it
    integer :: pairIndex  ! Transition pair within this k-point
-   integer :: component  ! Cartesian component of the momentum operator
    integer :: partialA   ! Initial-state partial index of the pair
    integer :: partialB   ! Final-state partial index of the pair
    integer :: permPartialA ! Image of partialA under the operation

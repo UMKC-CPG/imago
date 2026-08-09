@@ -255,7 +255,7 @@ subroutine closeSCFPotRhoHDF5
    implicit none
 
    ! Declare local loop variables and error control.
-   integer :: i,j,k
+   integer :: i,j
    integer :: hdferr
    integer :: numIterations
 

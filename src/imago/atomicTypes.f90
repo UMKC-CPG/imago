@@ -137,7 +137,7 @@ subroutine readAtomicTypes(readUnit,writeUnit,inSCF)
    ! Bring in necessary modules.
    use O_Kinds
    use O_Constants, only: lAngMomCount
-   use O_CommandLine, only: basisCode_SCF, basisCode_PSCF, doSCF, doPSCF
+   use O_CommandLine, only: basisCode_SCF, basisCode_PSCF
 
    ! Import necessary subroutine modules.
    use O_ReadDataSubs

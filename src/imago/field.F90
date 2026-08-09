@@ -96,9 +96,9 @@ subroutine computeFieldMesh(inSCF)
    use O_Constants,    only: smallThresh, hartree
    use O_PotTypes,     only: maxNumPotAlphas, potTypes
    use O_AtomicSites,  only: valeDim, numAtomSites, atomSites, &
-         & computeIonicMoment, xyzIonMoment
+         & computeIonicMoment
    use O_Kpoints,      only: numKPoints, kPointWeight, phaseFactor
-   use O_Input,        only: numStates, numElectrons, doProfileField, &
+   use O_Input,        only: numStates, doProfileField, &
          & eminFIELD, emaxFIELD, doPsiFIELD, doWavFIELD, doRhoFIELD, &
          & doPotFIELD, doXDMFField, doDipoleField
    use O_XDMF_VTK,     only: printXDMFMetaFile
@@ -109,8 +109,8 @@ subroutine computeFieldMesh(inSCF)
          & findLatticeVector, realCellVolume
    use O_FieldHDF5,    only: psiR_did, psiI_did, wav_did, rho_did, pot_did, &
          & mesh_did, triggerAxis, meshTriggerAxis, fieldDimsChunk, &
-         & meshDimsChunk, memFieldChunk_dsid, memMeshChunk_dsid, field_dsid, &
-         & mesh_dsid, numDataSets
+         & meshDimsChunk, memMeshChunk_dsid, field_dsid, &
+         & mesh_dsid
 #ifndef GAMMA
    use O_MatrixSubs,      only: readMatrix
    use O_SecularEquation, only: valeVale, energyEigenValues, readDataSCF, &
@@ -130,7 +130,7 @@ subroutine computeFieldMesh(inSCF)
    ! Define local variables.
    integer :: hdferr
    integer :: a,b,c
-   integer :: i,j,k,l,m,n,u,v,w  ! Loop index variables.
+   integer :: i,j,k,l,m,u,v,w  ! Loop index variables.
    integer :: dimOne
    integer :: skipKP
    integer :: currentPointCount
@@ -1869,11 +1869,6 @@ end subroutine computeFieldMesh
 !   change values if the program is modified or extended in the future.)
 subroutine initEnv
 
-   ! Use necessary modules
-   use O_Potential, only: spin
-   use O_Input, only: doProfileField, doPsiFIELD, doWavFIELD, doRhoFIELD, &
-         & doPotFIELD, doXDMFField
-
    ! Make sure that no variables are accidentally defined.
    implicit none
 
@@ -1887,7 +1882,7 @@ subroutine printProfileData
    use O_Potential, only: spin
    use O_Constants, only: hartree, bohrRad
    use O_Lattice,   only: realMag, realFractCrossArea, realFractStrideLength, &
-         & realPlaneAngles, numMeshPoints
+         & numMeshPoints
    use O_FieldHDF5, only: dataSetNames
    use O_Input, only: doPsiFIELD, doWavFIELD, doRhoFIELD, doPotFIELD
 

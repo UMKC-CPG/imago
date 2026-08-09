@@ -53,7 +53,7 @@ subroutine computeMTOPPolarization(inSCF,xyzP)
 
    ! Define local variables.
    integer :: h,i,j,k,l
-integer :: n,m
+integer :: m
    integer :: maxOccupiedState
    integer :: currNumLines,numSteps
    integer :: energyLevelCounter
@@ -82,13 +82,6 @@ integer :: n,m
    real(kind=double), allocatable, dimension(:,:) :: stringPhaseSet_C
 complex(kind=double), allocatable, dimension(:,:) :: unitary
 
-   complex(kind=double), dimension(2,2) :: ssm
-   complex(kind=double), dimension(2,2) :: pma
-   complex(kind=double) :: psb, psc
-   real(kind=double) :: resultA
-   real(kind=double) :: resultB
-   real(kind=double) :: resultC
-   complex(kind=double) :: tempVar
 integer :: stepCount, stepBandCount
 real(kind=double) :: idenDiff
 
@@ -544,7 +537,7 @@ subroutine getAveragePhase(currNumLines,axis,stringPhaseSet,averagePhase,code)
 
    ! Use necessary modules
    use O_Kinds
-   use O_Constants, only: pi, eCharge, smallThresh
+   use O_Constants, only: pi
    use O_SortSubs, only: mergeSort
    use O_Potential, only: spin
    use O_AtomicSites, only: abcIonMoment

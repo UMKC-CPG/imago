@@ -235,7 +235,6 @@ function wignerD(twoj, twom, twomp, eulerCoords)
 
    ! Use necessary modules.
    use O_Kinds
-   use O_Constants, only: pi
 
    implicit none
 

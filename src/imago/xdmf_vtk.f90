@@ -8,9 +8,8 @@ module O_XDMF_VTK
 subroutine printXDMFMetaFile
 
    ! Import the necessary data modules.
-   use O_Constants, only: bohrRad
-   use O_Lattice,   only: realVectors, realFractStrideLength, numMeshPoints
-   use O_FieldHDF5, only: dataSetNames, groupNames, fileName, numDataSets
+   use O_Lattice,   only: numMeshPoints
+   use O_FieldHDF5, only: dataSetNames, groupNames, fileName
 
    ! Make sure that no variables are accidentally defined.
    implicit none
@@ -62,15 +61,8 @@ end subroutine printXDMFMetaFile
 
 subroutine printVTKHead
 
-   ! Import the necessary data modules.
-   use O_Constants, only: bohrRad
-   use O_Lattice,   only: realVectors, realFractStrideLength, numMeshPoints
-
    ! Make sure that no variables are accidentally defined.
    implicit none
-
-   ! Define local variables.
-   integer :: i,j
 
    ! Open the field file.
    open (unit=56,file="fort.56",status='new',form='formatted')

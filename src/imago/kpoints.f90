@@ -598,7 +598,6 @@ subroutine readMTOPKPoints(readUnit, writeUnit)
 
    ! Include the necessary modules
    use O_Kinds
-   use O_Constants, only: dim3
    use O_ReadDataSubs
 
    implicit none
@@ -1151,7 +1150,6 @@ subroutine initializeKPoints (inSCF)
 
    ! Define used modules.
    use O_Kinds
-   use O_Constants, only: dim3
    use O_CommandLine, only: doSYBD_SCF, doSYBD_PSCF, doMTOP_SCF, doMTOP_PSCF
    use O_Lattice, only: realVectors
          ! Used by the style-code-0 trivial-identity setup to seed

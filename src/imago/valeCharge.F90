@@ -41,9 +41,9 @@ subroutine makeValenceRho(inSCF)
    use O_TimeStamps
    use O_CommandLine, only: doForce_SCF, doForce_PSCF
    use O_AtomicSites, only: valeDim
-   use O_Input, only: numStates, numElectrons
+   use O_Input, only: numStates
    use O_KPoints, only: numKPoints
-   use O_Constants, only: smallThresh,eCharge
+   use O_Constants, only: smallThresh
    use O_Potential, only: rel,spin,potDim,potCoeffs,&
          & numPlusUJAtoms, converged
    use O_Populate, only: electronPopulation,cleanUpPopulation, &
@@ -52,20 +52,19 @@ subroutine makeValenceRho(inSCF)
    use O_SCFIntegralsHDF5, only: atomOverlap_did,atomKEOverlap_did, &
          & atomMVOverlap_did,atomNPOverlap_did,atomPotOverlap_did,packedVVDims
    use O_PSCFIntegralsHDF5, only: atomOverlapPSCF_did,packedVVDimsPSCF
-   use O_Lattice, only: realCellVolume
 #ifndef GAMMA
    use O_BLASZHER
    use O_SecularEquation, only: valeVale,cleanUpSecularEqn,energyEigenValues,&
          & update1UJ, readDataSCF, readDataPSCF
    use O_MatrixSubs, only: readPackedMatrix,matrixElementMult,packMatrix
-   use O_Force, only: computeForce,valeValeF
+   use O_Force, only: computeForce
 #else
    use O_BLASDSYR
    use O_SecularEquation, only: valeValeGamma, cleanUpSecularEqn, &
          & energyEigenValues, update1UJ, readDataSCF, readDataPSCF
    use O_MatrixSubs, only: readPackedMatrix, &
          & matrixElementMultGamma,packMatrixGamma
-   use O_Force, only: computeForceGamma,valeValeFGamma
+   use O_Force, only: computeForceGamma
 #endif
 
    ! Make sure that there are not accidental variable declarations.

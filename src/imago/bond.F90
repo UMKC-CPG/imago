@@ -21,8 +21,8 @@ subroutine computeBond (inSCF)
    use O_Potential,   only: spin
    use O_Lattice,     only: realVectors,realCellVolume
    use O_AtomicTypes, only: numAtomTypes, atomTypes, maxNumStates
-   use O_KPoints,     only: numKPoints, kPointWeight, &
-         & kPoints, kPointIntgCode, &
+   use O_KPoints,     only: numKPoints, &
+         & kPointIntgCode, &
          & fullKPToIBZKPMap, fullKPToIBZOpMap, &
          & numFullMeshKP
    use O_Populate,    only: electronPopulation, &
