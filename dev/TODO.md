@@ -8281,6 +8281,65 @@ is not carried only in conversation.
   reading when a conversion fails.  The second is more work
   and helps every future case, including hand-edited files.
 
+## PERFORMANCE AND PARALLELIZATION
+
+> Campaign ledger: `dev/PERFORMANCE.md`.  Design already
+> settled in ARCHITECTURE section 6; the optimization TARGETS
+> are A3-A6 above.  What is missing is the measurement that
+> says which of them to do first, which is what PF1-PF3 build.
+>
+> **Read `dev/PERFORMANCE.md` first.**  It records the state of
+> both campaigns, the tool inventory measured on this machine
+> (notably: valgrind and gprof yes, `perf` NO), and four open
+> questions that should go to the programmer before any code is
+> written.
+
+- [ ] PF1. Establish a profiling build and a benchmark deck set,
+  and capture a baseline for BOTH variants.  Optimization
+  without a fixed, versioned set of representative inputs
+  measures noise, and improvement claims against no recorded
+  baseline are unfalsifiable.  Needs a small deck (callgrind
+  runs 20-50x slow, so it must finish in seconds), a medium one
+  as the honest profile target, and a large one that hurts.
+  `imagoG` and `imago` are different programs and need separate
+  baselines.  See PERFORMANCE.md Phase P0 and open question 2.
+
+- [ ] PF2. Produce the coarse time map, at the level of the 34
+  operations `O_TimeStamps` already names.  This is the cheapest
+  possible answer to "where does the time go" and it is enough to
+  TEST the two claims ARCHITECTURE 6.5 inherited from a sibling
+  code base but never measured on imago: that the real-space grid
+  loops in `elecStat` and `exchCorr` are "the cheap, proven win
+  and the right first target", and that the secular solve is "the
+  actual scaling wall".  If the grid loops turn out to be five
+  percent of runtime then the right first target is the wrong
+  first target, and that is worth knowing before any restructure.
+
+- [ ] PF3. Decide whether `O_TimeStamps` becomes real accumulating
+  timers.  Today it writes wall-clock start and end STRINGS for
+  each operation: a progress indicator, not a profile.  It counts
+  no calls and accumulates no cost.  Extending it is the only
+  measurement option that survives into production runs and into
+  a parallel code -- callgrind and gprof both become awkward the
+  moment MPI enters, and this campaign exists to lead into MPI.
+  So this is likely the backbone rather than an afterthought.
+
+- [ ] PF4. Sweep for parallelization hazards: mutable `SAVE` and
+  module state, non-reentrant routines, race-prone I/O.
+  `dev/DEBUG.md` already defines the PARALLEL-HAZARD tag for
+  exactly these.  They block threading regardless of where the
+  time goes, so this is static work that can run in parallel with
+  PF1-PF3 rather than behind them.
+
+- [ ] PF5. Settle the sequencing question: does the bug campaign
+  run before, alongside, or after the performance campaign?
+  `dev/DEBUG.md` opens with an explicit doctrine -- squash serial
+  bugs BEFORE parallelizing, because bugs are far harder to find
+  and reproduce in a parallel environment -- and that campaign has
+  produced zero findings so far.  Profiling finds no bugs and so
+  does not conflict; but ACTING on the findings by restructuring
+  loops absolutely does.  A decision, not a task.
+
 ## TOOLING (lint helpers)
 
 - [ ] T1. Improve `.claude/commands/scripts/rewrap_prose.py`

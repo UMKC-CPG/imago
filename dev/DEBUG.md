@@ -26,18 +26,49 @@ the normal way, with the DEBUG entry left as a pointer.
 ## Status
 
 - Date opened: 2026-06-25
-- Current phase: Phase 0 (build harness). **Steps 0a and 0d
-  COMPLETE** (2026-06-26). 0a: the opt-in gfortran instrumentation
-  options are wired into the top-level `CMakeLists.txt` and
-  verified -- the default build is byte-for-byte unchanged, and the
-  options inject correctly when enabled. 0d: an instrumented
-  `imagoG` (`Debug + IMAGO_CHECKS + IMAGO_SANITIZE=address`) built,
-  linked, and ran a full all-electron Gamma SCF on a real deck to
-  completion with zero AddressSanitizer errors -- the harness is
-  usable and Phase 3 is unblocked. Next: 0b (presets), 0e (docs).
-  0c (ifort) deferrable.
+- **Phase 0 is COMPLETE except 0c (ifort), which stays deferred.**
+  Re-verified against the repository 2026-08-09, because the status
+  below had gone stale: it still named 0b and 0e as "next" when both
+  had in fact been done.
+  - *0a* -- the opt-in gfortran instrumentation options are wired
+    into the top-level `CMakeLists.txt` and verified: the default
+    build is byte-for-byte unchanged and each option injects
+    correctly. `IMAGO_CHECKS`, `IMAGO_FPE_TRAP`, `IMAGO_INIT_SNAN`,
+    `IMAGO_WARN_EXTRA` and `IMAGO_SANITIZE` are all present.
+  - *0b* -- `CMakePresets.json` exists and carries
+    `gfortran-release`, `gfortran-debug`, `gfortran-audit` and
+    `gfortran-asan`, each binding its own build tree.
+  - *0d* -- an instrumented `imagoG` ran a full all-electron Gamma
+    SCF to completion with zero AddressSanitizer errors.
+  - *0e* -- `BUILD.md` (140 lines, at the repository root, NOT in
+    `dev/`) documents every option and preset well enough to pick a
+    build cold.
+- **Phases 1, 2 and 3 have not started. Findings recorded: 0.**
+  That is the real state of this campaign: the harness is built and
+  unused. The instrumented trees `build/gfortran-audit` and
+  `build/gfortran-asan` were configured 2026-06-26 and have not been
+  rebuilt since, so they predate roughly two months of source
+  changes and must be reconfigured before they mean anything.
 - Phase 2 audit mechanism: multi-agent workflow (decided)
-- Findings recorded so far: 0
+
+### Tool inventory on this machine (measured 2026-08-09)
+
+Checked rather than assumed, because the campaign plan names tools
+without recording whether they are actually reachable here.
+
+```
+  valgrind             /usr/bin/valgrind   3.22.0
+  gprof                /usr/bin/gprof      2.30
+  callgrind_annotate   /usr/bin/callgrind_annotate
+  perf                 NOT on PATH
+  massif-visualizer    NOT on PATH
+  hpcrun               NOT on PATH
+  nvidia-smi           NOT on PATH  (no GPU visible from the head node)
+```
+
+`module` is available, so `perf` and others may be loadable; that
+was not chased. The absence of `perf` matters for the performance
+campaign rather than for this one -- see `dev/PERFORMANCE.md`.
 
 ### Phase 0a verification record (2026-06-26)
 

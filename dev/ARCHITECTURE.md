@@ -538,6 +538,14 @@ the current design:
 
 ## 6. Compute Architecture Direction
 
+> **Nothing in this section has been measured on imago.** The
+> seam map in 6.5 and its claims about which loops are the
+> cheap win and which are the scaling wall were inherited
+> from a sibling OLCAO branch. They are plausible and they
+> are untested here. The campaign that tests them is tracked
+> in `dev/PERFORMANCE.md`, with tasks PF1-PF5 in `TODO.md`;
+> read that before acting on the ordering implied below.
+
 ### 6.1 Configurable Precision
 
 The program will support compilation in both double
