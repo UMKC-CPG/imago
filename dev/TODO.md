@@ -8098,20 +8098,42 @@ is not carried only in conversation.
   to run, or say something loudly; silently sharing scratch
   is the one option to rule out.
 
-- [ ] O14. Decide what `imagoKKc` should do when its output
-  files already exist.  It opens all eight with
-  `status="new"`, so a run that died partway leaves them
-  behind and the NEXT run fails at its first sequence with a
-  bare non-zero exit.  Observed 2026-08-08: after an
+- [x] O14. Decide what `imagoKKc` should do when its output
+  files already exist.  It opened all eight with
+  `status="new"`, so a run that died partway left them
+  behind and the NEXT run failed at its first sequence with
+  a bare non-zero exit.  Observed 2026-08-08: after an
   unrelated crash, every following attempt failed until the
   stale `fort.500` through `fort.570` were removed by hand,
   and nothing in the message pointed at the cause.
 
-  The diagnosis is not obvious from the symptom, because
-  `processPOPTC.py` reports only that the subprocess returned
-  non-zero.  Either open with `status="replace"`, or fail
-  with a message naming the file that is in the way.  Doing
-  neither costs an hour every time it happens.
+  **DONE 2026-08-08.**  PSEUDOCODE 22 written first, then
+  the code.  The twenty-four OUTPUT opens became
+  `status="replace"`; the three INPUT opens keep
+  `status="old"` and a comment says why, because opening a
+  missing input as anything else would CREATE it empty and
+  the program would then read a spectrum of zeros and write
+  derived spectra of zeros without failing anywhere -- a
+  worse defect than the one being fixed, one edit away.
+
+  Replacing silently would have traded a loud wrong
+  behaviour for a quiet one, so `reportStaleOutputs`
+  inquires the eight before opening them and writes ONE line
+  giving the count when any existed.  A clean run prints
+  nothing.
+
+  All four checks of PSEUDOCODE 22.4 pass: a clean run is
+  silent, a run over eight stale files now succeeds where it
+  used to fail and reports "replaced 8", a partial case
+  reports the right smaller count, and a missing input still
+  fails at the open with `Cannot open file 'fort.450'` and
+  creates nothing.
+
+  The same `status="new"` pattern exists in
+  `contract/printResults.f90` (3), `contract/chargeDensity.f90`
+  (1) and `atomSCF/checkConvg.f90` (2).  Whether any of them
+  can be reached the same way was NOT investigated; this
+  entry was deliberately scoped to `imagoKKc`.
 
 ## TOOLING (lint helpers)
 

@@ -219,27 +219,56 @@ program imagoKkc
    call getarg(4,buffer)
    read (buffer,*) pOptcFactor
 
+   ! Report and then replace any output left by a run that did not
+   !   finish (PSEUDOCODE 22).
+   !
+   ! The outputs below open with status="replace" rather than "new".
+   !   Under "new" a single crashed run blocked every later one, because
+   !   the leftover files could not be recreated, and the failure
+   !   reached the user as a bare non-zero exit naming nothing. Nothing
+   !   is lost by replacing them: every one is transient scratch that
+   !   its consumer removes -- imago.py moves the total spectra into the
+   !   job directory, and processPOPTC.py appends each pair's spectra
+   !   into the accumulated raw file and deletes them (PSEUDOCODE 22.1).
+   !
+   ! The INPUTS keep status="old" and must keep it. Opening a missing
+   !   input as anything else would CREATE it empty, and this program
+   !   would then read a spectrum of zeros and write derived spectra of
+   !   zeros without failing anywhere -- a worse defect than the one
+   !   being fixed here, and one edit away from it.
+   !
+   ! The unit numbers carry the same meaning in all three branches
+   !   below, so the mapping is given once here rather than repeated as
+   !   a trailing comment on each of the twenty-four opens:
+   !
+   !!    50  eps2, the INPUT      130  refractive index
+   !!   100  the combined file    140  extinction coefficient
+   !!   110  eps1                 150  eps1i
+   !!   120  energy loss function 160  reflectivity
+   !!                             170  absorption coefficient
+   call reportStaleOutputs (usePOPTCFiles,spin)
+
    if (usePOPTCFiles == 0) then
       if (spin == 1) then
          open (unit=50, file='fort.50', status="old",form="formatted") ! Eps2
-         open (unit=100,file='fort.100',status="new",form="formatted") ! Total
-         open (unit=110,file='fort.110',status="new",form="formatted") ! Eps1
-         open (unit=120,file='fort.120',status="new",form="formatted") ! ELF 
-         open (unit=130,file='fort.130',status="new",form="formatted") ! Refrct
-         open (unit=140,file='fort.140',status="new",form="formatted") ! Extnct
-         open (unit=150,file='fort.150',status="new",form="formatted") ! Eps1i
-         open (unit=160,file='fort.160',status="new",form="formatted") ! Reflct
-         open (unit=170,file='fort.170',status="new",form="formatted") ! Absorp
+         open (unit=100,file='fort.100',status="replace",form="formatted")
+         open (unit=110,file='fort.110',status="replace",form="formatted")
+         open (unit=120,file='fort.120',status="replace",form="formatted")
+         open (unit=130,file='fort.130',status="replace",form="formatted")
+         open (unit=140,file='fort.140',status="replace",form="formatted")
+         open (unit=150,file='fort.150',status="replace",form="formatted")
+         open (unit=160,file='fort.160',status="replace",form="formatted")
+         open (unit=170,file='fort.170',status="replace",form="formatted")
       else
          open (unit=50, file='fort.51', status="old",form="formatted") ! Eps2
-         open (unit=100,file='fort.101',status="new",form="formatted") ! Total
-         open (unit=110,file='fort.111',status="new",form="formatted") ! Eps1
-         open (unit=120,file='fort.121',status="new",form="formatted") ! ELF 
-         open (unit=130,file='fort.131',status="new",form="formatted") ! Refrct
-         open (unit=140,file='fort.141',status="new",form="formatted") ! Extnct
-         open (unit=150,file='fort.151',status="new",form="formatted") ! Eps1i
-         open (unit=160,file='fort.161',status="new",form="formatted") ! Reflct
-         open (unit=170,file='fort.171',status="new",form="formatted") ! Absorp
+         open (unit=100,file='fort.101',status="replace",form="formatted")
+         open (unit=110,file='fort.111',status="replace",form="formatted")
+         open (unit=120,file='fort.121',status="replace",form="formatted")
+         open (unit=130,file='fort.131',status="replace",form="formatted")
+         open (unit=140,file='fort.141',status="replace",form="formatted")
+         open (unit=150,file='fort.151',status="replace",form="formatted")
+         open (unit=160,file='fort.161',status="replace",form="formatted")
+         open (unit=170,file='fort.171',status="replace",form="formatted")
       endif
    else
       ! The processPOPTC script automatically calls imagoKkc multiple times
@@ -247,14 +276,14 @@ program imagoKkc
       !   (I.e., processPOPTC does not produce different input files for
       !   imagoKkc for spin up vs. spin down.)
       open (unit=50, file='fort.450',status="old",form="formatted") ! Eps2
-      open (unit=100,file='fort.500',status="new",form="formatted") ! Total
-      open (unit=110,file='fort.510',status="new",form="formatted") ! Eps1
-      open (unit=120,file='fort.520',status="new",form="formatted") ! ELF 
-      open (unit=130,file='fort.530',status="new",form="formatted") ! Refrct
-      open (unit=140,file='fort.540',status="new",form="formatted") ! Extnct
-      open (unit=150,file='fort.550',status="new",form="formatted") ! Eps1i
-      open (unit=160,file='fort.560',status="new",form="formatted") ! Reflct
-      open (unit=170,file='fort.570',status="new",form="formatted") ! Absorp
+      open (unit=100,file='fort.500',status="replace",form="formatted")
+      open (unit=110,file='fort.510',status="replace",form="formatted")
+      open (unit=120,file='fort.520',status="replace",form="formatted")
+      open (unit=130,file='fort.530',status="replace",form="formatted")
+      open (unit=140,file='fort.540',status="replace",form="formatted")
+      open (unit=150,file='fort.550',status="replace",form="formatted")
+      open (unit=160,file='fort.560',status="replace",form="formatted")
+      open (unit=170,file='fort.570',status="replace",form="formatted")
    endif
 
    ! Discover the record width before anything is sized by it. Counting
@@ -952,6 +981,66 @@ subroutine writeSpectrum (outputUnit,quantityName,length,numCols, &
    endif
 
 end subroutine writeSpectrum
+
+
+! Say so when an earlier run left output behind (PSEUDOCODE 22.3).
+!
+! Replacing a stale file silently would trade a loud wrong behaviour
+!   for a quiet one. Stale output is evidence that a previous run died
+!   partway, and that is worth one line of the log: this program is
+!   invoked once per partial pair, so a user who sees the message on
+!   pair one and not again knows the debris was old rather than being
+!   produced now.
+!
+! ONE line, not one per file. Eight lines per pair across twenty-six
+!   pairs is noise, and the count is the part a reader acts on. A run
+!   that finds nothing prints nothing at all.
+subroutine reportStaleOutputs (usePOPTCFiles,spin)
+
+   implicit none
+
+   integer :: usePOPTCFiles
+   integer :: spin
+
+   integer :: i
+   integer :: staleCount
+   logical :: alreadyThere
+   character*9 :: outputName
+   ! The eight output file names for each of the three cases, in the
+   !   same order the opens below use them.
+   character*9, dimension (8) :: fileNames
+
+   if (usePOPTCFiles /= 0) then
+      fileNames = (/ "fort.500 ", "fort.510 ", "fort.520 ", &
+            & "fort.530 ", "fort.540 ", "fort.550 ", "fort.560 ", &
+            & "fort.570 " /)
+   elseif (spin == 1) then
+      fileNames = (/ "fort.100 ", "fort.110 ", "fort.120 ", &
+            & "fort.130 ", "fort.140 ", "fort.150 ", "fort.160 ", &
+            & "fort.170 " /)
+   else
+      fileNames = (/ "fort.101 ", "fort.111 ", "fort.121 ", &
+            & "fort.131 ", "fort.141 ", "fort.151 ", "fort.161 ", &
+            & "fort.171 " /)
+   endif
+
+   staleCount = 0
+   do i = 1, 8
+      outputName = fileNames(i)
+      inquire (file=trim(outputName), exist=alreadyThere)
+      if (alreadyThere) then
+         staleCount = staleCount + 1
+      endif
+   enddo
+
+   if (staleCount > 0) then
+      write (6,fmt="(a,i2,a)") " imagoKKc: replaced ",staleCount, &
+            & " stale output file(s) left by an earlier run that"
+      write (6,fmt="(a)") " did not finish. This is not an error, but"
+      write (6,fmt="(a)") " it means a previous run died partway."
+   endif
+
+end subroutine reportStaleOutputs
 
 
 ! Count the numeric fields on one line of an input record.

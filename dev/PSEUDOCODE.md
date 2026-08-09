@@ -15858,3 +15858,93 @@ needs.
    pair indices and so cannot see a wrong rotation.  It can
    see a reordered loop nest, which is exactly what 21.6
    introduces.
+
+## 22. imagoKKc's Output File Lifecycle (TODO O14)
+
+`imagoKKc` opens all eight of its outputs with
+`status="new"`, which fails if the file already exists. A
+run that dies partway therefore leaves them behind and
+BLOCKS every later run, and the failure surfaces as a bare
+non-zero exit that names nothing.
+
+### 22.1 The seam: who creates, consumes and removes each file
+
+Read from the callers rather than assumed, because that is
+where this project's specification errors have actually
+happened.
+
+```
+file                created by     consumed by
+------------------------------------------------------------
+fort.50, fort.51    the optc run   READ by imagoKKc as
+  (total eps2)                       status="old"
+fort.450            makePDOS.py,   READ by imagoKKc as
+  (one pair's         once per       status="old"
+   eps2)              pair
+fort.100-170        imagoKKc       imago.py safe_move's each
+fort.101-171          (spin 1        one into the job
+  (total spectra)     and 2)         directory, which
+                                     removes the source
+fort.500-570        imagoKKc       processPOPTC.copy_data
+  (one pair's         (POPTC         appends each into the
+   spectra)           path)          accumulated raw file,
+                                     then os.remove()s it
+```
+
+**So in a normal run nothing is ever left behind**, which is
+why `status="new"` has held up for as long as it has. The
+window is narrow: a crash BETWEEN `imagoKKc` writing and the
+caller consuming. The POPTC path widens it by running
+`imagoKKc` once per pair, so an abort at pair seventeen
+leaves a full set of eight.
+
+### 22.2 What changes
+
+```
+  the three INPUTS   stay status="old"
+  the 24 OUTPUTS     become status="replace"
+```
+
+**The inputs must not be touched.** Opening a missing input
+as anything but `"old"` would CREATE it empty, and imagoKKc
+would then read a spectrum of zeros and write derived
+spectra of zeros without failing. That is a worse defect
+than the one being fixed, and it is one edit away.
+
+Re-running a job is meant to be idempotent. These files are
+transient scratch whose consumers remove them, so replacing
+a stale one restores the intended behaviour rather than
+discarding anything a user wanted.
+
+### 22.3 Say when it happened
+
+Replacing silently would trade a loud wrong behaviour for a
+quiet one, and stale output is evidence that an earlier run
+died. So `inquire` the outputs before opening them and, if
+any existed, write ONE line naming how many were replaced.
+
+```
+  count = number of the 8 output files already present
+  if count > 0:
+      write "imagoKKc: replaced <count> stale output
+             file(s) from an earlier run that did not
+             finish."
+```
+
+One line and not one per file: eight lines per pair across
+twenty-six pairs is noise, and the count is what a reader
+needs. A clean run prints nothing.
+
+### 22.4 Checks
+
+1. **A normal run is unchanged**, and prints no replacement
+   message. Nothing is left behind in a run that completes,
+   so the count is zero.
+2. **A run after a crash now succeeds** where it previously
+   failed. Reproduce by writing a stale `fort.500` by hand
+   before invoking `processPOPTC.py`.
+3. **The message appears exactly once** for that run, and
+   names a non-zero count.
+4. **A missing INPUT still fails**, and fails at the open
+   rather than by producing zeros. This is the check that
+   guards against the one-edit-away defect in 22.2.
