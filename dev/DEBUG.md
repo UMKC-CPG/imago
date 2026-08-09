@@ -454,10 +454,84 @@ the ledger drives the fix work and can be cross-linked into
   guaranteed off-ramp so the working compile process is never put
   at risk.
 
+## Doctrine: drive the warning count to ZERO
+
+Adopted 2026-08-09, during Phase 1, and it changes what the sweep
+is for.
+
+A warning that has been investigated once and found harmless does
+not stay investigated. It sits in the log, and the next person to
+read that log -- or the same person six weeks later -- has to
+re-derive the same conclusion from the same code. There are far
+too many to hold in a human head, so in practice nobody
+re-derives anything: they learn to skim past warnings, and the
+one that matters goes past with the rest.
+
+So the target is not "understand the warnings." It is **no
+warnings**, by one of three routes, in this order of preference:
+
+1. **Fix the code**, when the warning names something real.
+2. **Make the warning structurally impossible**, when the code is
+   correct but only by a convention a future edit could break.
+   BUG-001 below is the model: the pointers were nullified by
+   hand at four sites and it worked; default initialization makes
+   it a property of the type instead of a habit, and the warning
+   disappears because the situation it warns about can no longer
+   arise.
+3. **Move the class out of the bug audit**, when it is a real
+   diagnostic about something other than correctness.
+   `-Warray-temporaries` is the case in point: 187 of them, none
+   a bug, every one a hidden array copy that the PERFORMANCE
+   campaign wants and this one does not.
+
+What is NOT acceptable is a standing list of known-benign
+warnings, because that list is indistinguishable from a standing
+list of unread ones.
+
+**A caution that Phase 1 produced immediately.** Silencing a
+warning can introduce a defect. The naive fix for BUG-001 -- add
+`=> null()` everywhere a pointer is declared -- would have given
+two LOCAL pointers the implicit SAVE attribute, making the
+routine non-reentrant: a PARALLEL-HAZARD, manufactured by a
+campaign that exists partly to find them. Type components take
+default initialization; local pointers take an executable
+`nullify`. Check what a silencing edit actually means before
+making it.
+
 ## Findings ledger
 
-No findings recorded yet. Entries will be added here, ordered by
-severity (S1 first), as the phases proceed.
+Ordered by severity (S1 first).
+
+### BUG-001 -- list-node pointers had undefined association status
+- File:     `src/imago/bond3C.F90:16-52` (module O_Bond3C types),
+            uses at `:309`, `:371`
+- Variant:  [BOTH]
+- Category: PTR
+- Severity: S4  (+ the silencing edit had a PARALLEL-HAZARD trap)
+- Status:   fixed 2026-08-09
+- Evidence: `-Wmaybe-uninitialized` on `currentNode2` and
+            `currentNode3` in the audit build, twice each (once
+            per variant).
+- Analysis: **The warning was a false positive as a bug report,
+            and a true positive as a fragility report.** The three
+            linked-list types declared five pointer components
+            with no default initialization, so a freshly allocated
+            node had UNDEFINED association status -- and
+            `associated()` on an undefined pointer is undefined
+            behaviour, not a question with an answer. The code
+            compensated by nullifying every one by hand: all list
+            heads at `:259-261` before the main loop, and each new
+            node's components at `:331`, `:334`, `:412`. Verified
+            by reading that this covers every path, so the `else`
+            branches at `:309` and `:371` can never be reached
+            with an unset cursor. No defect in behaviour.
+- Fix:      `=> null()` on the four type COMPONENTS, making the
+            invariant structural. An executable
+            `nullify (currentNode2, currentNode3)` for the two
+            LOCAL pointers -- deliberately not `=> null()`, which
+            would confer implicit SAVE and break reentrancy.
+            Verified: both variants recompile with the warning
+            gone and no new diagnostic.
 
 <!-- Template -- copy for each new finding:
 

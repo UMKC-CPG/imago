@@ -13,8 +13,24 @@ module O_Bond3C
    public
 
    ! Begin list of module derived types.
+   ! The pointer components below carry "=> null()" so that every node
+   !   is born disassociated. Without it a freshly allocated node has
+   !   UNDEFINED association status, and asking associated() about an
+   !   undefined pointer is undefined behaviour rather than a question
+   !   with an answer. The code does nullify each one by hand as it
+   !   builds the lists, which is why it works today; default
+   !   initialization makes that structural instead of a habit any
+   !   future edit could forget, and it silences a
+   !   -Wmaybe-uninitialized warning that otherwise has to be
+   !   re-adjudicated by hand every time the audit build is run.
+   !
+   ! Note this is safe HERE because these are type COMPONENTS. The
+   !   same "=> null()" on a local pointer variable would implicitly
+   !   confer the SAVE attribute and make the procedure non-reentrant
+   !   -- a parallelization hazard. Local pointers are nullified with
+   !   an executable statement instead; see computeBond3C.
    type atom3Node
-      type(atom3Node), pointer :: next
+      type(atom3Node), pointer :: next => null()
       integer :: atomSiteNumber
       integer :: valeDimRangeMag
       integer, dimension (2) :: atom3Index ! valeDim beginning=1 ending=2
@@ -35,8 +51,8 @@ module O_Bond3C
    end type atom3Node
 
    type atom2Node
-      type(atom2Node), pointer :: next
-      type(atom3Node), pointer :: head
+      type(atom2Node), pointer :: next => null()
+      type(atom3Node), pointer :: head => null()
       integer :: atomSiteNumber
       integer :: valeDimRangeMag
       integer, dimension (2) :: atom2Index ! valeDim beginning=1 ending=2
@@ -46,7 +62,7 @@ module O_Bond3C
    end type atom2Node
 
    type atom1Node
-      type(atom2Node), pointer :: head
+      type(atom2Node), pointer :: head => null()
       integer :: valeDimRangeMag
       integer, dimension (2) :: atom1Index ! valeDim beginning=1 ending=2
    end type atom1Node
@@ -130,6 +146,15 @@ subroutine computeBond3C(inSCF)
    ! Log the date and time we start.
    call timeStampStart (26)
 
+   ! Give the two list cursors a DEFINED association status before any
+   !   branch can ask about them. Written as an executable nullify
+   !   rather than as "=> null()" on the declarations above, because a
+   !   local variable that carries an initializer implicitly acquires
+   !   the SAVE attribute in Fortran -- which would make this routine
+   !   non-reentrant and so a parallelization hazard. The type
+   !   COMPONENTS are default-initialized instead; see the note at the
+   !   type definitions.
+   nullify (currentNode2, currentNode3)
 
    ! Allocate arrays and matrices for this computation.
    allocate (BO3C            (numAtomSites))
