@@ -27,6 +27,14 @@ would force one severity scale onto two unrelated questions.
 - **Nothing built yet.** This document is an orientation written
   before the work starts, so that the situation does not have to
   be re-derived.
+- **This campaign is WAITING.** Sequencing settled 2026-08-09:
+  the bug campaign in `dev/DEBUG.md` goes first (see open question
+  1 below, and TODO PF5). Its Phases 1, 2 and 3 are the active
+  work.
+- **Install no profiling tools yet** (TODO PF6). `gprof` and
+  `callgrind` are already present and cover Phases P0 through P2.
+  The investigation into `perf` and `gperftools` is recorded below
+  so it does not have to be repeated.
 
 ## The situation, as of 2026-08-09
 
@@ -102,8 +110,71 @@ wrong first target.
   nvidia-smi           NOT on PATH
 ```
 
-`module` exists, so some of the missing tools may be loadable and
-that was not chased.
+### Can `perf` be obtained? Investigated 2026-08-09; answer: not
+### without root, and two plausible routes are traps
+
+**Policy is NOT the obstacle.** `/proc/sys/kernel/perf_event_paranoid`
+is **2** on this machine, which permits unprivileged USER-SPACE
+profiling and blocks only kernel profiling. For a compute-bound
+Fortran code user space is all anyone wants, so perf would work
+here the moment the binary existed.
+
+**Route 1, conda or pip: a trap.** There IS a package named `perf`
+on conda-forge and on PyPI. It is not this tool. Versions 1.5-1.6
+with `py27` / `py36` / `py37` build strings give it away: it is
+Victor Stinner's PYTHON microbenchmark library, since renamed
+`pyperf`. It cannot profile Fortran and installing it would waste
+an afternoon before anyone noticed.
+
+**Route 2, the real thing: needs root.** Linux perf ships in the
+`perf` RPM, built against kernel headers and versioned to the
+running kernel (here `4.18.0-553.141.2.el8_10`). `rpm -q perf`
+reports it is not installed. Being kernel-tied is exactly why
+conda-forge carries no such package -- there is no
+kernel-agnostic build to ship. So obtaining perf means asking a
+system administrator for a stock RHEL package. That is a
+reasonable request, and `paranoid = 2` means it would work on
+arrival; it simply is not self-service.
+
+### The gperftools module: sampler yes, reader no
+
+`module load gperftools/v2.17.2` resolves to a SPACK prefix that
+contains
+
+```
+  lib/libprofiler.so      the CPU sampler -- present
+  bin/                    EMPTY. there is no pprof.
+```
+
+Modern gperftools dropped its bundled Perl `pprof` and expects
+Google's Go `pprof` instead; the install even ships
+`share/doc/gperftools/pprof_integration.adoc` saying so. So it
+will sample happily and write a binary profile that nothing here
+can read. Conda-forge has `pprofile` (an unrelated PYTHON line
+profiler) but not Go pprof, and there is no `go` on the system,
+though `go-cgo` is installable from conda-forge if someone wanted
+to build it.
+
+**Keep gperftools in mind anyway**, for one specific reason: it
+samples through `SIGPROF` in user space and needs no kernel perf
+events at all. On a machine where `perf_event_paranoid` were 3 it
+would work where perf could not. That is insurance against a
+restriction this machine does not currently impose.
+
+### What this means for the plan
+
+**Install nothing yet.** `gprof` and `callgrind` are already
+present and cover Phases P0 through P2 completely -- the coarse
+map and the exact per-routine costs on a small deck -- without a
+single new package. perf's advantage is low overhead on large,
+long runs; gperftools' advantage is surviving stricter
+permissions than this machine imposes. Both answer problems not
+yet encountered.
+
+The moment to ask an administrator for the perf RPM is when a
+callgrind run on a production deck proves too slow to be
+practical. Then the request carries a measurement behind it
+instead of a preference.
 
 **The absence of `perf` is the one that constrains the plan.**
 Without it there is no low-overhead sampling profiler, which
@@ -131,15 +202,28 @@ lead into MPI.
 These are decisions, not tasks. They are written here so the next
 session can put them to the programmer rather than guess.
 
-1. **Bugs first, or performance first?** `dev/DEBUG.md` opens with
-   an explicit doctrine: "squash the bugs in the serial code
-   *before* a parallelized version is developed. Bugs are far
-   harder to find and reproduce in a parallel environment." That
-   argument is sound and the campaign it belongs to has produced
-   zero findings. Building performance tooling first does not
-   contradict it -- profiling finds no bugs -- but *acting* on the
-   findings by restructuring loops absolutely does. Decide whether
-   Phases 1-3 of the bug campaign run first, in parallel, or after.
+1. ~~**Bugs first, or performance first?**~~ **SETTLED
+   2026-08-09: bugs first.** The programmer confirmed the
+   `dev/DEBUG.md` doctrine holds -- squash the bugs in the serial
+   code *before* a parallelized version is developed, because bugs
+   are far harder to find and reproduce in a parallel environment.
+
+   So `dev/DEBUG.md` Phases 1, 2 and 3 are the active work and
+   this campaign waits behind them. Two consequences worth being
+   explicit about, because they are what the decision actually
+   costs and buys:
+
+   - **Nothing here is blocked from starting**, only from acting.
+     Profiling finds no bugs and changes no code, so PF1 (baseline
+     and benchmark decks) and PF4 (parallelization-hazard sweep)
+     can proceed alongside the bug hunt if there is appetite. What
+     must wait is RESTRUCTURING -- A3 through A6 -- since that
+     rewrites the very code the bug campaign is reading.
+   - **The benchmark decks are shared infrastructure.** Phase 3 of
+     the bug campaign needs representative inputs to run under
+     valgrind, and PF1 needs representative inputs to profile.
+     They are largely the same decks, so whichever campaign
+     designates them first should do it for both.
 
 2. **What is the benchmark deck set?** Optimization without a
    fixed, versioned set of representative inputs measures noise.

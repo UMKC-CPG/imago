@@ -8331,14 +8331,47 @@ is not carried only in conversation.
   time goes, so this is static work that can run in parallel with
   PF1-PF3 rather than behind them.
 
-- [ ] PF5. Settle the sequencing question: does the bug campaign
+- [x] PF5. Settle the sequencing question: does the bug campaign
   run before, alongside, or after the performance campaign?
-  `dev/DEBUG.md` opens with an explicit doctrine -- squash serial
-  bugs BEFORE parallelizing, because bugs are far harder to find
-  and reproduce in a parallel environment -- and that campaign has
-  produced zero findings so far.  Profiling finds no bugs and so
-  does not conflict; but ACTING on the findings by restructuring
-  loops absolutely does.  A decision, not a task.
+
+  **SETTLED 2026-08-09: BUGS FIRST.**  The `dev/DEBUG.md` doctrine
+  holds -- squash the bugs in the serial code before a parallel
+  version is developed, because bugs are far harder to find and
+  reproduce in a parallel environment.  So DEBUG.md Phases 1, 2
+  and 3 are the active work; this campaign waits behind them.
+
+  Nothing here is blocked from STARTING, only from ACTING.
+  Profiling finds no bugs and changes no code, so PF1 and PF4 can
+  run alongside the bug hunt if there is appetite.  What must wait
+  is restructuring -- A3 through A6 -- since that rewrites the
+  very code the bug campaign is reading.
+
+  Note the shared infrastructure: DEBUG.md Phase 3 needs
+  representative decks to run under valgrind and PF1 needs them to
+  profile.  They are largely the same decks, so whichever campaign
+  designates them first should do it for both.
+
+- [ ] PF6. Do NOT install profiling tools yet; investigated
+  2026-08-09 and the conclusion was to wait.  `gprof` and
+  `callgrind` are already present and cover P0 through P2 with no
+  new package.  Recorded here so the question is not reopened
+  from scratch:
+
+  - `perf_event_paranoid` is **2**, which PERMITS unprivileged
+    user-space profiling.  Policy is not the obstacle.
+  - The conda and pip package named `perf` is a TRAP: it is
+    Victor Stinner's Python microbenchmark library (versions
+    1.5-1.6, `py27`/`py36` builds), not Linux perf.
+  - Real perf ships in a kernel-versioned RPM and needs root.
+    A reasonable ask of an administrator, and it would work on
+    arrival -- but the moment to ask is when a callgrind run on a
+    production deck proves too slow, so the request carries a
+    measurement rather than a preference.
+  - The `gperftools/v2.17.2` module has `lib/libprofiler.so` but
+    an EMPTY `bin/` -- no `pprof`, so it samples into a file
+    nothing here can read.  Worth remembering anyway: it samples
+    via SIGPROF in user space and would survive a stricter
+    `perf_event_paranoid` than this machine sets.
 
 ## TOOLING (lint helpers)
 
