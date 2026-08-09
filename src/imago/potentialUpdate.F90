@@ -70,12 +70,12 @@ subroutine makeSCFPot (totalEnergy)
    use O_PotTypes, only: numPotTypes, potTypes
    use O_ExchangeCorrelation, only: maxNumRayPoints, radialWeight, exchRhoOp, &
          & exchCorrOverlap, numRayPoints
-   use O_ElectroStatics, only: nonLocalNeutQPot, localNeutQPot, localNucQPot, &
-         & nonLocalNucQPot, nonLocalResidualQ, potAlphaOverlap
+   use O_ElectroStatics, only: nonLocalNeutQPot, localNeutQPot, &
+         & nonLocalResidualQ, potAlphaOverlap
    use O_SCFExchCorrHDF5, only: numPoints_did, radialWeight_did, &
          & exchRhoOp_did, exchCorrOverlap_did, numPoints, points, potPoints
    use O_Potential, only: rel, spin, potDim, intgConsts, spinSplitFactor, &
-         & potAlphas, potCoeffs, currIteration, lastIteration, feedbackLevel, &
+         & potAlphas, potCoeffs, currIteration, feedbackLevel, &
          & relaxFactor, xcCode, converged, convgTest, GGA, numPlusUJAtoms, &
          & plusUJAtomID, plusUJ
    use O_SCFElecStatHDF5, only: potAlphaOverlap_did, coreChargeDensity_did, &
@@ -105,9 +105,6 @@ subroutine makeSCFPot (totalEnergy)
    integer :: potTypeFinIndex
    integer :: siteIndex
    integer :: potTermCount
-   integer :: currNumAlphas
-   integer :: maxFeedback
-   integer :: totalEnergyImprovement
    real (kind=double) :: fittedCharge
    real (kind=double) :: fittedSpinDiffCharge
    real (kind=double) :: spinDiffDifference
@@ -145,7 +142,6 @@ subroutine makeSCFPot (totalEnergy)
    real (kind=double) :: SYS
    real (kind=double) :: SZS
 
-   real (kind=double) :: blendingFactor
    real (kind=double) :: testableDelta
    real (kind=double) :: radialWeightSum
    real (kind=double) :: weightedPotDiff
@@ -169,9 +165,14 @@ subroutine makeSCFPot (totalEnergy)
    real (kind=double), allocatable, dimension (:)   :: averageDelta
    real (kind=double), allocatable, dimension (:)   :: maxDelta
    real (kind=double), allocatable, dimension (:)   :: typesMagneticMoment
-   real (kind=double), allocatable, dimension (:,:) :: potDifference ! Holds
-         ! the difference between the currently used potential coefficients and
-         ! the current guess for the next set of potential coefficients.
+   ! Commented out together with the convergence-measuring block that
+   !   uses it (search for potDifference below). The declaration is
+   !   kept rather than deleted so that re-enabling that block is one
+   !   uncomment rather than a reconstruction, and commented rather
+   !   than left live so it stops being reported as unused.
+   !real (kind=double), allocatable, dimension (:,:) :: potDifference ! Holds
+   !      ! the difference between the currently used potential coefficients
+   !      ! and the current guess for the next set of potential coefficients.
 
    real (kind=double) :: th1
    real (kind=double) :: th2
@@ -2031,7 +2032,7 @@ subroutine blendPotentialsSCF(firstTerm, numTerms, outCoeffs, inGuessedCoeffs,&
       & inUsedCoeffs, totalEnergyRecord)
 
    use O_Kinds
-   use O_Potential, only: spin,potDim,currIteration,feedbackLevel,relaxFactor
+   use O_Potential, only: currIteration,feedbackLevel,relaxFactor
    use O_ElectroStatics, only: potAlphaOverlap
    use O_LAPACKDPOSVX
 
@@ -2050,7 +2051,6 @@ subroutine blendPotentialsSCF(firstTerm, numTerms, outCoeffs, inGuessedCoeffs,&
    integer :: info
    integer :: i,j,k
    integer :: maxFeedback
-   integer, dimension(1) :: worstEnergyIndex
    real (kind=double), allocatable, dimension(:) :: theta ! The x from Ax=B.
    real (kind=double), allocatable, dimension(:) :: tempArray ! An intermediate
          ! array for constructing the final set of potential coefficients.
@@ -2317,8 +2317,7 @@ subroutine blendPotentialsTE(firstTerm, numTerms, outCoeffs, inGuessedCoeffs, &
       & inUsedCoeffs, totalEnergyRecord)
 
    use O_Kinds
-   use O_Potential, only: spin, currIteration, feedbackLevel, relaxFactor
-   use O_ElectroStatics, only: potAlphaOverlap
+   use O_Potential, only: currIteration, feedbackLevel, relaxFactor
    use O_LAPACKDPOSVX
 
    implicit none
@@ -2333,7 +2332,7 @@ subroutine blendPotentialsTE(firstTerm, numTerms, outCoeffs, inGuessedCoeffs, &
 
    ! Define the local variables.
    integer :: info
-   integer :: i,j,k
+   integer :: i,j
    integer :: maxFeedback
    real (kind=double) :: SCF_TE_weight
    real (kind=double), allocatable, dimension(:) :: theta ! The x from Ax=B.
@@ -2601,7 +2600,7 @@ subroutine blendJointPotentials(firstTerm, numJointTerms, outCoeffs,&
       & inGuessedCoeffs, inUsedCoeffs, totalEnergyRecord)
 
    use O_Kinds
-   use O_Potential, only: spin, currIteration, feedbackLevel, relaxFactor
+   use O_Potential, only: currIteration, feedbackLevel, relaxFactor
    use O_ElectroStatics, only: potAlphaOverlap
    use O_LAPACKDPOSVX
 
@@ -2617,7 +2616,7 @@ subroutine blendJointPotentials(firstTerm, numJointTerms, outCoeffs,&
 
    ! Define the local variables.
    integer :: info
-   integer :: i,j,k,l
+   integer :: j,k,l
    integer :: maxFeedback
    real (kind=double), allocatable, dimension(:) :: theta ! The x from Ax=B.
    real (kind=double), allocatable, dimension(:) :: tempArray ! An intermediate
@@ -3763,7 +3762,7 @@ subroutine pbe96(rho,rhox,rhoy,rhoz,rhoxx,rhoxy,rhoxz,rhoyy,rhoyz,rhozz,answer)
    real (kind=double) :: VCDN,DVCUP,DVCDN,G,PON,B,Q4,Q5,H,T
    real (kind=double) :: Beta,Gamm,DELT,ETA,GAM
    real (kind=double) :: correlationEnergy,correlationPotential
-   real (kind=double) :: Q0,Q2,Q3,BG,BEC,FAC,FACT2,Q9
+   real (kind=double) :: BG,BEC,FAC,FACT2,Q9
    real (kind=double) :: FACT1,FACT0,FACT5,FACT3,HRST,GZ
    real (kind=double) :: HB,HBT,HRS,HT,HZT,HTT,HZ,Q8,PREF
    real (kind=double) :: VV, UU, WW
@@ -4007,7 +4006,7 @@ subroutine darwinCorrection(generalRho,exchCorrPot,currentPot,darwinPot)
 
    ! Use necessary modules.
    use O_PotTypes, only: numPotTypes, potTypes
-   use O_Potential, only: spin, potDim, numAlphas, potAlphas
+   use O_Potential, only: spin, potDim, potAlphas
 
    ! Make sure that no funny variables are defined.
    implicit none
@@ -4061,8 +4060,8 @@ subroutine darwinCorrectionOnePotType(currentType,currentNumTerms,&
    ! Use necessary modules.
    use O_Kinds
    use O_Constants, only: pi, fineStructure
-   use O_PotTypes, only: numPotTypes, potTypes
-   use O_Potential, only: numAlphas, potAlphas, spin
+   use O_Potential, only: spin
+   use O_PotTypes, only: potTypes
 
    ! Make sure that no funny variables are defined.
    implicit none
@@ -4435,8 +4434,6 @@ subroutine gaussFit(darwinPot,rGrid,rGridSqrd,currentNumTerms,&
 
    ! Import necessary definitions.
    use O_Kinds
-   use O_Potential,only:  potAlphas, numAlphas
-   use O_PotTypes, only: numPotTypes, potTypes
 
    !  Make sure that no funny variables are defined
    implicit none 
@@ -4500,9 +4497,8 @@ subroutine gaussCalc(currentType,currentNumTerms,rGridSqrd,&
 
    ! Import necessary definitions.
    use O_Kinds
-   use O_Potential, only:  potAlphas, numAlphas
-   use O_PotTypes, only: numPotTypes, potTypes
-   
+   use O_PotTypes, only: potTypes
+
    ! Make sure that no funny variables are defined.
    implicit none
 
