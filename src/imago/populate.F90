@@ -197,7 +197,10 @@ subroutine populateStates
    !   whenever LAT is not in use.
    if (kPointIntgCode == 1) then
       call populateLAT
-   else if (thermalSigma /= 0.0_double) then
+   ! A smearing width is a non-negative quantity and zero means
+   !   "off", so "greater than zero" asks exactly what "not equal
+   !   to zero" asked, without drawing -Wcompare-reals.
+   else if (thermalSigma > 0.0_double) then
       call populateSmearing
    endif
 
@@ -617,7 +620,14 @@ subroutine populateSmearing
 
          ! Abort in the event that the fermi function is zero because all the
          !   remaining energy values will also be zero.
-         if (fermiFunction == 0.0_double) then
+         !
+         ! A Fermi occupation lies in [0,1], so "at most zero" and
+         !   "equal to zero" are the same test here, and the
+         !   ordered form does not draw -Wcompare-reals. The
+         !   equality really does fire in practice: the exponential
+         !   underflows to exactly zero well before the energies
+         !   run out.
+         if (fermiFunction <= 0.0_double) then
             exit
          endif
 

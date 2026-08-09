@@ -243,8 +243,12 @@ subroutine makeAlphaNucDist
 
       currElementID = potTypes(i)%elementID
 
-      ! Check if this element has been assigned yet.
-      if (elementNucAlpha(currElementID) == 0) then
+      ! Check if this element has been assigned yet. The array is
+      !   zeroed at allocation and a nuclear alpha is strictly
+      !   positive, so "not yet positive" and "still the zero this
+      !   was initialized to" are the same question -- and the
+      !   ordered form does not draw -Wcompare-reals.
+      if (elementNucAlpha(currElementID) <= 0.0_double) then
 
          ! Record the nuclear alpha for this element.
          elementNucAlpha(currElementID) = (potTypes(i)%nucAlpha)

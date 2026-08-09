@@ -584,6 +584,139 @@ Ordered by severity (S1 first).
             Verified: both variants recompile with the warning
             gone and no new diagnostic.
 
+### BUG-002 -- an unsound test recovers a boolean the caller knew
+- File:     `src/imago/integrals3Terms.F90:1057` and `:1377`
+            (gaussKOverlap and its sibling)
+- Variant:  [COMPLEX]
+- Category: NUM  (+ LOGIC)
+- Severity: S4 -- latent only; see the consequence note
+- Status:   open
+- Evidence: `-Wcompare-reals` on `sum(PlusG(:,:)) == 0.0_double`.
+- Analysis: `plusG` is a 3x3 matrix and the two callers pass
+            either `zeroVectors` or `recipVectors`. The routine
+            recovers WHICH call it is by summing all nine
+            components and testing against exactly zero. That is
+            unsound in principle: a reciprocal lattice whose
+            components cancel would sum to zero while being
+            nothing like the zero matrix, and the routine would
+            take the wrong branch.
+
+            **It is harmless today, and only because the two
+            branches are behaviourally IDENTICAL.** Both read the
+            same status attribute, both test it the same way, both
+            return the same way. They differ in the text of three
+            log and error strings and in nothing else. So taking
+            the wrong branch currently produces a misleading log
+            line and no wrong science.
+
+            That is exactly what makes it worth recording rather
+            than dismissing: the moment anyone makes the branches
+            differ, an unsound test becomes a real bug, and the
+            person making that change has no reason to suspect the
+            condition guarding it.
+- Fix:      Pass the distinction instead of deducing it. The
+            callers already know which case they are; a logical
+            argument, or two entry points, is correct by
+            construction and needs no floating-point comparison.
+
+### BUG-003 -- zgetrf is called without an explicit interface
+- File:     `src/imago/mtop.F90:847`
+- Variant:  [BOTH]
+- Category: IFACE
+- Severity: S3  (+ PARALLEL-HAZARD: none)
+- Status:   open
+- Evidence: `-Wimplicit-interface`. It is one of only two such
+            warnings left in the engine.
+- Analysis: Without an explicit interface the compiler cannot
+            check argument types, kinds, or shapes at the call
+            site, so a mismatch is silent and corrupts memory
+            rather than failing to compile. The call looks correct
+            as written; the hazard is that nothing enforces it.
+
+            **The codebase already has the convention this
+            violates.** `interfaces.F90` wraps seven LAPACK and
+            BLAS routines in explicit-interface modules --
+            `O_LAPACKZHEGV`, `O_LAPACKDSYGV`, `O_LAPACKDPOSVX`,
+            `O_BLASZHER`, `O_BLASDSYR`, `O_BLASZGERC` -- and
+            callers `use` them. `zgetrf` is the one that skips it.
+- Fix:      Add an `O_LAPACKZGETRF` module to `interfaces.F90`
+            following the existing pattern, and `use` it in
+            `mtop.F90`. Mechanical, and it brings the last
+            unwrapped call into line.
+
+### BUG-004 -- an explicit allocate defeated by auto-reallocation
+- File:     `src/imago/intgSaving.F90:779`; same class at
+            `src/imago/mtop.F90:370` and `:846`
+- Variant:  [BOTH]
+- Category: ALLOC
+- Severity: S4
+- Status:   open
+- Evidence: `-Wrealloc-lhs`.
+- Analysis: `currentPairGammaTranspose` is allocated to
+            `(maxNumStates,maxNumStates)` and then assigned
+            `transpose(currentPairGamma)`. In Fortran 2003 and
+            later, assigning to an allocatable whose shape differs
+            SILENTLY reallocates it to match the right-hand side.
+            So the explicit allocate does not constrain anything:
+            if the two shapes ever disagree the array quietly
+            becomes whatever the expression produced, and the
+            allocate reads as an intent the language then ignores.
+- Fix:      Either drop the allocate and let the assignment size
+            it, which is honest about what happens, or assign into
+            an explicit section so the shape is enforced. Choosing
+            between them needs a reader who knows whether the
+            declared shape is a requirement or a guess.
+
+### The rest of -Wcompare-reals: no defects, and now no warnings
+All eighteen of the remaining `-Wcompare-reals` sites were read.
+None was a defect. They share one pattern: a test against exactly
+zero where zero is a SENTINEL some earlier line assigned
+literally, not a computed value. `bondLength(i,j) /= 0` means "a
+bond was recorded here" in an array zeroed at allocation;
+`thermalSigma /= 0` tests an input field the user either set or
+left at zero; `multFactor == 0` tests a coefficient the caller
+passes as a literal. Comparing a float to a literal it was
+literally assigned is exact and safe.
+
+**They were corrected anyway, under the drive-to-zero doctrine.**
+A warning that has to be re-adjudicated by hand every sweep is
+the thing that doctrine exists to prevent, and "we checked, it is
+fine" does not survive into the next reader's head.
+
+The correction changes no behaviour, because gfortran draws this
+warning on `==` and `/=` but NOT on the ordered comparisons, and
+for these quantities an ordered form asks exactly the same
+question:
+
+```
+  non-negative quantity   x /= 0   ->  x > 0
+    (bond lengths, a smearing width, a Fermi occupation in
+     [0,1], a strictly positive nuclear alpha)
+  possibly-signed         x == 0   ->  abs(x) <= 0
+    (a bond projection, a matrix coefficient, a complex LU
+     pivot).  abs is never negative, so it is at most zero only
+     when it IS zero -- the same test, exactly.
+```
+
+Eight sites in five files: `bond.F90` (four), `matrixSubs.F90`
+(two), `gaussRelations.f90`, `populate.F90` (two). Each carries a
+comment saying which form was used and why, so the next reader
+does not undo it. Verified: both variants report zero
+`-Wcompare-reals`, and a full SCF through optical output is byte
+identical.
+
+The only two left are BUG-002's, which need the signature fix
+described there rather than a rewritten comparison.
+
+Two sites are still worth a look by someone interested in
+conditioning rather than correctness, and both are commented in
+place. `matrixSubs.F90:49` returns a zero determinant on an
+exactly-zero LU pivot, which is an early exit rather than a
+singularity test -- a pivot of 1e-300 multiplies through to the
+same answer anyway. `populate.F90:620` exits a loop when the
+Fermi function reaches exactly zero, which works because IEEE
+underflow really does reach exactly zero.
+
 <!-- Template -- copy for each new finding:
 
 ### BUG-001 -- <short title>

@@ -46,7 +46,15 @@ subroutine matrixDet(A, n, det)
          do k = 1, j-1
             sumi = sumi + L(i,k) * U(k,j)
          end do
-         if (U(j,j) == (0.0_double, 0.0_double)) then
+         ! A zero pivot makes the determinant zero, so stop early.
+         !   abs() of a complex number is its magnitude, which is
+         !   zero only when the number is, so this asks exactly
+         !   what "== (0,0)" asked without drawing
+         !   -Wcompare-reals. Note this catches only an EXACTLY
+         !   zero pivot; a merely tiny one still multiplies
+         !   through to a near-zero determinant on its own, so
+         !   this is an early exit rather than a singularity test.
+         if (abs(U(j,j)) <= 0.0_double) then
             det = (0.0_double, 0.0_double)
             return
          end if
@@ -369,7 +377,12 @@ subroutine readPackedMatrixAccum (datasetID,packedMatrix,tempPackedMatrix,&
    ! When reading the hamiltonian terms for the scf iterations, it is
    !   necessary to multiply each matrix by the appropriate coefficient.
    !   If the multFactor coefficient is not zero, then that is done here.
-   if (multFactor == 0.0_double) then
+   !   Tested as "abs(x) <= 0" rather than "x == 0": exactly the
+   !   same question, since abs is never negative and so reaches
+   !   zero only by being zero, but an ordered comparison does
+   !   not draw -Wcompare-reals. The coefficient may be negative,
+   !   so the abs is needed rather than a plain "> 0".
+   if (abs(multFactor) <= 0.0_double) then
       packedMatrix = packedMatrix + tempPackedMatrix
    else
       packedMatrix = packedMatrix + tempPackedMatrix * multFactor

@@ -747,7 +747,15 @@ subroutine computeBond (inSCF)
                !   operation R, preserving bond topology
                !   under symmetry.
                do l = 1, numAtomSites
-                  if (ibzBondProj(k, l) == 0.0_double) &
+                  ! Skip pairs with no projection. Written as
+                  !   "abs(x) <= 0" rather than "x == 0" because
+                  !   the two are exactly equivalent -- abs is
+                  !   never negative, so it is at most zero only
+                  !   when it IS zero -- and an ordered
+                  !   comparison does not draw -Wcompare-reals.
+                  !   A bond projection can be either sign, so
+                  !   the abs is doing real work here.
+                  if (abs(ibzBondProj(k, l)) <= 0.0_double) &
                         & cycle
                   permAtom2 = atomPerm(opIdx, l)
                   bondOrder(permAtom, permAtom2) = &
@@ -959,7 +967,7 @@ subroutine computeBond (inSCF)
          do j = 1, numAtomSites
 
             ! Only include bonds that exist in the statistics.
-            if (bondLength(i,j) /= 0.0_double) then
+            if (bondLength(i,j) > 0.0_double) then
 
                ! Accumulate the bond length and bond order for this atom pair
                !   to the type of the (i) atom.
@@ -1035,7 +1043,7 @@ subroutine computeBond (inSCF)
                   do k = 1, numAtomSites
 
                      ! Only include bonds that exist in the statistics.
-                     if (bondLength(j,k) /= 0.0_double) then
+                     if (bondLength(j,k) > 0.0_double) then
 
                         ! Record the first atom and second atom, the bond
                         !   length, and the bondOrder.
@@ -1107,7 +1115,7 @@ subroutine computeBond (inSCF)
             write (9+h,fmt=200) "NUM_BONDED_ATOMS ", numAtomsBonded(i)
             do j = i+1, numAtomSites
                ! Only include bonds that exist in the statistics.
-               if (bondLength(i,j) /= 0.0_double) then
+               if (bondLength(i,j) > 0.0_double) then
 
                   ! Record the bonded atom, the bond length in Angstroms,
                   !   and the bond order.
