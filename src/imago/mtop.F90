@@ -828,6 +828,8 @@ function matrixDet(A)
 
    ! Define modules to use.
    use O_Kinds
+   use O_LAPACKZGETRF ! Explicit interface so the zgetrf call is
+         ! checked by the compiler (argument types, kinds, shapes).
 
    ! Make sure no variables are accidentally declared.
    implicit none
@@ -846,7 +848,6 @@ function matrixDet(A)
    logical,              allocatable :: visited(:)
    real(kind=double), parameter :: tiny = 1.0d-14
    !real(kind=double), parameter :: tiny = 1.0d-300
-   external :: zgetrf
 
    matrixDet = (1.0d0,0.0d0)
 

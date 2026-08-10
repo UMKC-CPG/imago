@@ -299,6 +299,28 @@ end module O_LAPACKDPOSVX
 
 
 
+module O_LAPACKZGETRF
+
+   ! Explicit interface for zgetrf, the LAPACK LU factorization of a
+   !   general complex matrix (A = P*L*U with partial pivoting). Imago
+   !   forms a determinant from the factors' diagonal (mtop.F90).
+   !   Unlike the solver modules above, no wrapper subroutine is
+   !   provided: zgetrf takes no work arrays and needs no sizing
+   !   ceremony, so callers use the routine directly and this module
+   !   exists purely so the compiler can check the call.
+   interface
+      subroutine zgetrf(M,N,A,LDA,IPIV,INFO)
+         use O_Kinds
+         integer :: M
+         integer :: N
+         integer :: LDA
+         complex (kind=double), dimension (LDA,N) :: A
+         integer, dimension (min(M,N)) :: IPIV
+         integer :: INFO
+      end subroutine zgetrf
+   end interface
+end module O_LAPACKZGETRF
+
 module O_BLASZHER
    interface
       subroutine zher(UPLO,N,ALPHA,X,INCX,A,LDA)

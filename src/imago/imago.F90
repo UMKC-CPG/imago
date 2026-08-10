@@ -144,7 +144,10 @@ subroutine setupSCF
          & doMTOP_SCF, doSYBD_SCF
    use O_Input, only: parseInput, numStates
    use O_Lattice, only: initializeLattice, initializeFindVec, &
-         & cleanUpLattice, recipVectors
+         & cleanUpLattice
+! recipVectors is needed only by the commented plusG form of the
+!   gaussKOverlap calls below (BUG-010 in dev/DEBUG.md).
+!   use O_Lattice, only: recipVectors
    use O_KPoints, only: numKPoints, initializeKPoints
    use O_Basis, only: renormalizeBasis, cleanUpBasis
    use O_ExchangeCorrelation, only: maxNumRayPoints, getECMeshParameters, &
@@ -176,7 +179,9 @@ subroutine setupSCF
    implicit none
 
    ! Define local variables.
-   real (kind=double), dimension(3,3) :: zeroVectors
+! zeroVectors belongs to the commented plusG form of the
+!   gaussKOverlap calls below (BUG-010 in dev/DEBUG.md).
+!   real (kind=double), dimension(3,3) :: zeroVectors
 
    ! Define global mpi parameters
 !   integer :: myWorldPid
@@ -194,7 +199,7 @@ subroutine setupSCF
 !   integer :: mpierr
 
    ! Initialize local variables.
-   zeroVectors(:,:) = 0.0_double
+!   zeroVectors(:,:) = 0.0_double
 
    ! Initialize the MPI interface
 !   call MPI_INIT (mpierr)
@@ -343,11 +348,20 @@ subroutine setupSCF
       endif
 #ifndef GAMMA
       if (doMTOP_SCF == 1) then
+         ! The commented form carries the plusG matrix for the
+         !   +G-shifted overlap; see BUG-010 in dev/DEBUG.md before
+         !   re-instating it.
+!         call gaussKOverlap(packedVVDims,atomKOverlap_did(:,:,1),&
+!               & atomKOverlap_did(:,:,2),atomKOverlap_aid,zeroVectors,&
+!               & .false.)
+!         call gaussKOverlap(packedVVDims,atomKOverlapPlusG_did(:,:,1),&
+!               & atomKOverlapPlusG_did(:,:,2),atomKOverlapPlusG_aid,&
+!               & recipVectors,.true.)
          call gaussKOverlap(packedVVDims,atomKOverlap_did(:,:,1),&
-               & atomKOverlap_did(:,:,2),atomKOverlap_aid,zeroVectors)
+               & atomKOverlap_did(:,:,2),atomKOverlap_aid,.false.)
          call gaussKOverlap(packedVVDims,atomKOverlapPlusG_did(:,:,1),&
                & atomKOverlapPlusG_did(:,:,2),atomKOverlapPlusG_aid,&
-               & recipVectors)
+               & .true.)
       endif
 #endif
 
@@ -587,7 +601,10 @@ subroutine intgPSCF
          & atomHamOverlapPSCF_aid,atomDMOverlapPSCF_aid,atomMMOverlapPSCF_aid,&
          & atomKOverlapPSCF_aid, atomKOverlapPlusGPSCF_aid,&
          & numComponents,fullCVDimsPSCF,packedVVDimsPSCF
-   use O_Lattice, only: initializeLattice, initializeFindVec, recipVectors
+   use O_Lattice, only: initializeLattice, initializeFindVec
+! recipVectors is needed only by the commented plusG form of the
+!   gaussKOverlap calls below (BUG-010 in dev/DEBUG.md).
+!   use O_Lattice, only: recipVectors
    use O_KPoints, only: numKPoints, makePathKPoints, &
          & initializeKPoints
    use O_GaussianRelations, only: makeAlphaDist, makeAlphaNucDist,&
@@ -600,10 +617,12 @@ subroutine intgPSCF
    implicit none
 
    ! Define local variables.
-   real (kind=double), dimension(3,3) :: zeroVectors
+! zeroVectors belongs to the commented plusG form of the
+!   gaussKOverlap calls below (BUG-010 in dev/DEBUG.md).
+!   real (kind=double), dimension(3,3) :: zeroVectors
 
    ! Initialize local variables.
-   zeroVectors(:,:) = 0.0_double
+!   zeroVectors(:,:) = 0.0_double
 
    ! Open the potential file that will be read from
    !   in this program.
@@ -736,12 +755,23 @@ subroutine intgPSCF
       endif
 #ifndef GAMMA
       if (doMTOP_PSCF == 1) then
+         ! The commented form carries the plusG matrix for the
+         !   +G-shifted overlap; see BUG-010 in dev/DEBUG.md before
+         !   re-instating it.
+!         call gaussKOverlap(packedVVDimsPSCF,atomKOverlapPSCF_did(:,:,1),&
+!               & atomKOverlapPSCF_did(:,:,2),atomKOverlapPSCF_aid,&
+!               & zeroVectors,.false.)
+!         call gaussKOverlap(packedVVDimsPSCF,&
+!               & atomKOverlapPlusGPSCF_did(:,:,1),&
+!               & atomKOverlapPlusGPSCF_did(:,:,2),&
+!               & atomKOverlapPlusGPSCF_aid,recipVectors,.true.)
          call gaussKOverlap(packedVVDimsPSCF,atomKOverlapPSCF_did(:,:,1),&
-               & atomKOverlapPSCF_did(:,:,2),atomKOverlapPSCF_aid,zeroVectors)
+               & atomKOverlapPSCF_did(:,:,2),atomKOverlapPSCF_aid,&
+               & .false.)
          call gaussKOverlap(packedVVDimsPSCF,&
                & atomKOverlapPlusGPSCF_did(:,:,1),&
                & atomKOverlapPlusGPSCF_did(:,:,2),&
-               & atomKOverlapPlusGPSCF_aid,recipVectors)
+               & atomKOverlapPlusGPSCF_aid,.true.)
       endif
 #endif
 

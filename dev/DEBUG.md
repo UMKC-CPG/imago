@@ -61,21 +61,22 @@ the normal way, with the DEBUG entry left as a pointer.
      75  remaining
   ```
 
-  Remaining, recounted 2026-08-10 after the BUG-007 and BUG-008
-  resolutions, from a full clean recompile of both variants into
-  separate logs: **62 unique warning sites**, 73 warning lines (a
-  site flagged by both variants counts once as a site, twice as a
-  line). By class, on the unique-site basis -- and none of it is
-  mechanical:
+  Remaining, recounted 2026-08-10: after the BUG-007 and BUG-008
+  resolutions a full clean recompile of both variants into
+  separate logs gave **62 unique warning sites**, 73 warning lines
+  (a site flagged by both variants counts once as a site, twice as
+  a line). The BUG-002 and BUG-003 fixes later the same day
+  removed three more sites (both compare-reals, the one
+  implicit-interface), leaving **59 sites, 69 lines** -- that last
+  step by arithmetic over the incremental per-variant logs, whose
+  recompiled files were checked for new warnings and had none. By
+  class, on the unique-site basis -- and none of it is mechanical:
 
   ```
     39  -Wunused-variable        mostly single-variant; each needs
                                    a read against the other build
     19  -Wunused-dummy-argument  an argument passed but never used
                                    can mean the routine FORGOT it
-     2  -Wcompare-reals          BUG-002; needs a signature change
-     1  -Wimplicit-interface     BUG-003 (zgetrf, mtop.F90:863);
-                                   fix is specified
      1  gfortran "Extension" note: unary minus after `*` without
                                    parentheses (mtop.F90:1076)
   ```
@@ -134,9 +135,15 @@ the normal way, with the DEBUG entry left as a pointer.
   convergence effort to be revisited. Both changes verified
   numerically inert by the paired A/B protocol below.
 
-  *Two fixes that are specified and just need doing:* **BUG-002**
-  (pass the flag instead of testing `sum(plusG)`) and **BUG-003**
-  (wrap `zgetrf` in `interfaces.F90` like the other seven).
+  *BUG-002 and BUG-003 are FIXED (2026-08-10, same day, ledger
+  below).* Doing them surfaced two new open findings: **BUG-010**
+  (the KOverlapPlusG datasets duplicate plain KOverlap because the
+  +G shift is disabled -- a physics question for the programmer,
+  with the revival infrastructure kept commented in the source)
+  and **BUG-011** (the first live `-mtop` run ever recorded dies
+  silently after tetrahedron construction, printing uninitialized
+  values on the RESOLVED_KP_CLASSES line; pre-existing, verified
+  identical on the pre-fix binary).
 
   *The reading that remains, 58 warning sites:*
   - **19 unused dummy arguments.** Most sort by variant: the ones
@@ -149,6 +156,8 @@ the normal way, with the DEBUG entry left as a pointer.
     build read against the other. The per-variant logs finally
     make this tractable; do not attempt it from a single `-j8`
     log.
+  - Plus the one gfortran Extension note (`mtop.F90:1076`), a
+    one-line parenthesization whenever convenient.
 
   *How to VERIFY a change against the KNbO3 reference:* do not
   compare a fresh run against the accumulated outputs in
@@ -174,9 +183,10 @@ the normal way, with the DEBUG entry left as a pointer.
   dominated by compiling the 135k-line generated integral file
   twice.
 
-- **Phases 2 and 3 have not started. Findings ledger: 9 entries,
-  four of them real defects** (BUG-001, BUG-005, BUG-006, and
-  BUG-009's near miss). `build/gfortran-asan` was configured
+- **Phases 2 and 3 have not started. Findings ledger: 11 entries,
+  four real defects fixed** (BUG-001, BUG-005, BUG-006, and
+  BUG-009's near miss) **and two open** (BUG-010's physics
+  question, BUG-011's silent mtop death). `build/gfortran-asan` was configured
   2026-06-26 and predates months of source change; reconfigure
   before trusting it.
 - Phase 2 audit mechanism: multi-agent workflow (decided)
@@ -678,11 +688,11 @@ Ordered by severity (S1 first).
 
 ### BUG-002 -- an unsound test recovers a boolean the caller knew
 - File:     `src/imago/integrals3Terms.F90:1057` and `:1377`
-            (gaussKOverlap and its sibling)
+            (both inside gaussKOverlap)
 - Variant:  [COMPLEX]
 - Category: NUM  (+ LOGIC)
 - Severity: S4 -- latent only; see the consequence note
-- Status:   open
+- Status:   fixed 2026-08-10
 - Evidence: `-Wcompare-reals` on `sum(PlusG(:,:)) == 0.0_double`.
 - Analysis: `plusG` is a 3x3 matrix and the two callers pass
             either `zeroVectors` or `recipVectors`. The routine
@@ -693,30 +703,35 @@ Ordered by severity (S1 first).
             nothing like the zero matrix, and the routine would
             take the wrong branch.
 
-            **It is harmless today, and only because the two
-            branches are behaviourally IDENTICAL.** Both read the
-            same status attribute, both test it the same way, both
-            return the same way. They differ in the text of three
-            log and error strings and in nothing else. So taking
-            the wrong branch currently produces a misleading log
-            line and no wrong science.
-
-            That is exactly what makes it worth recording rather
-            than dismissing: the moment anyone makes the branches
-            differ, an unsound test becomes a real bug, and the
-            person making that change has no reason to suspect the
-            condition guarding it.
-- Fix:      Pass the distinction instead of deducing it. The
-            callers already know which case they are; a logical
-            argument, or two entry points, is correct by
-            construction and needs no floating-point comparison.
+            CORRECTED 2026-08-10: the original entry claimed both
+            branch pairs were behaviourally identical. That is true
+            only at the first site (log strings). At the second the
+            branches call `ortho3Terms(8,...)` versus
+            `ortho3Terms(9,...)`, and that code selects WHICH HDF5
+            dataset family the results are written under -- plain
+            KOverlap or KOverlapPlusG. The unsound test was already
+            load-bearing: a misfire would silently file results
+            under the wrong name.
+- Fix:      Pass the distinction instead of deducing it. Done: a
+            `plusGVariant` logical argument, set `.false.`/`.true.`
+            at the four call sites in `imago.F90`, replaces both
+            tests -- correct by construction, no floating-point
+            comparison. In the same change the `plusG` matrix
+            argument itself was commented out rather than deleted,
+            at the programmer's direction: the flag was its last
+            live use, but it belongs to the disabled +G pathway
+            whose physics is an open question (BUG-010), so the
+            full infrastructure -- argument, declarations, callers'
+            zeroVectors/recipVectors -- stays in the source,
+            commented and documented, ready to re-instate. Verified
+            by paired A/B: byte-identical data outputs.
 
 ### BUG-003 -- zgetrf is called without an explicit interface
 - File:     `src/imago/mtop.F90:847`
 - Variant:  [BOTH]
 - Category: IFACE
 - Severity: S3  (+ PARALLEL-HAZARD: none)
-- Status:   open
+- Status:   fixed 2026-08-10
 - Evidence: `-Wimplicit-interface`. It is one of only two such
             warnings left in the engine.
 - Analysis: Without an explicit interface the compiler cannot
@@ -735,6 +750,13 @@ Ordered by severity (S1 first).
             following the existing pattern, and `use` it in
             `mtop.F90`. Mechanical, and it brings the last
             unwrapped call into line.
+
+            Done: interface-only module (no solver wrapper --
+            zgetrf takes no work arrays, so unlike the seven
+            solver modules there is no ceremony worth hiding), the
+            `external :: zgetrf` declaration removed from
+            matrixDet, and the call now compiler-checked. The
+            engine's `-Wimplicit-interface` count is zero.
 
 ### BUG-004 -- an explicit allocate defeated by auto-reallocation
 - File:     `src/imago/intgSaving.F90:793`; same class at
@@ -939,6 +961,80 @@ Ordered by severity (S1 first).
             three call sites, with the reasoning recorded at the
             routine so the question cannot be re-asked from a
             signature that still offers them.
+
+### BUG-010 -- the KOverlapPlusG datasets duplicate plain KOverlap
+- File:     `src/imago/integrals3Terms.F90` (gaussKOverlap, the
+            disabled KOverlap2CIntg form); consumer at
+            `src/imago/mtop.F90:286-294` via matrix codes 6-8 in
+            `secularEqn.F90`
+- Variant:  [COMPLEX]
+- Category: LOGIC (possibly NUM if the answer is "wrong")
+- Severity: S2 if the wrap step needs the shift; S4 if redundant
+            -- UNRESOLVED, a physics question for the programmer
+- Status:   open; found 2026-08-10 while fixing BUG-002
+- Evidence: Reading, not a warning: the only line that ever used
+            the `plusG` argument physically -- adding it to the
+            k-displacement passed to KOverlap2CIntg -- is commented
+            out, and has been since before the OLCAO import (the
+            initial Imago commit already carries it disabled).
+- Analysis: With the shift disabled, both gaussKOverlap
+            invocations compute identical integrals, so the
+            KOverlapPlusG datasets are byte-duplicates of plain
+            KOverlap under a different name. Yet mtop reads the
+            PlusG datasets deliberately, at exactly one place: the
+            final link of each k-point string, where the walk
+            wraps across the Brillouin zone boundary and the true
+            displacement differs from an interior step by a full
+            reciprocal lattice vector. So either (1) the wrap step
+            uses an unshifted overlap where a G-shifted one
+            belongs -- a per-string error of just the sort the
+            BUG-005 unitarity check monitors -- or (2) the LCAO
+            phase convention makes the two matrices genuinely
+            equal, and the whole PlusG apparatus (second dataset
+            family, matrix codes 6-8, the duplicate invocation) is
+            redundant scaffolding.
+- Fix:      Blocked on the physics answer. The revival recipe is
+            preserved IN THE SOURCE, commented and documented, at
+            the programmer's direction: the alternative signature
+            and plusG declaration in gaussKOverlap, the plusG form
+            of the four calls in imago.F90 with their zeroVectors
+            and recipVectors support, and the shifted
+            KOverlap2CIntg call itself, each annotated with a
+            pointer here. A physics note above the KOverlap2CIntg
+            call carries the full explanation. If the answer is
+            (2), delete the apparatus instead. Note the question
+            cannot be settled by running mtop until BUG-011 is
+            fixed.
+
+### BUG-011 -- mtop dies silently after tetrahedron construction
+- File:     unknown; last output from `src/imago/kpoints.f90`
+            (the RESOLVED_KP_CLASSES emitter near `:1312`)
+- Variant:  [COMPLEX] (mtop is #ifndef GAMMA)
+- Category: LOGIC (+ a fail-loudly violation)
+- Severity: S2 -- the mtop feature is unusable on this deck
+- Status:   open; found 2026-08-10 by the first live `-mtop` run
+            ever recorded (no `command` file in the tree had one)
+- Evidence: `imago.py -mtop` on the KNbO3 reduced deck: the
+            Fortran run dies with no error message ("Fortran
+            success file missing" is all the user sees), and its
+            fort.20 ends immediately after the tetrahedron
+            construction check. The RESOLVED_KP_CLASSES line
+            prints `20 -1927434624 22014` on one run and
+            `20 -1615442304 22047` on the next -- values that
+            change between runs on the same binary are
+            uninitialized memory being printed.
+- Analysis: Not yet performed; recording the reproduction. The
+            failure is bit-identical in shape on the pre- and
+            post-BUG-002/003 binaries, so it is pre-existing and
+            unrelated to those fixes. Two independent defects are
+            visible already: whatever kills the run, and the
+            uninitialized values reaching a structured output line
+            that downstream tooling parses.
+- Fix:      Pending investigation. Start at the
+            RESOLVED_KP_CLASSES emitter in kpoints.f90 and at
+            whatever runs next after the construction check; an
+            IMAGO_CHECKS or asan build of the mtop path would
+            likely name the death site directly.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing

@@ -955,7 +955,12 @@ end subroutine gaussOverlapMM
 
 ! Two center K-Overlap integral.
 #ifndef GAMMA
-subroutine gaussKOverlap(valeValeDims,did1,did2,aid,plusG)
+! The commented form of this signature carries the plusG matrix used
+!   by the disabled +G-shifted overlap pathway documented at the
+!   KOverlap2CIntg call below; see BUG-010 in dev/DEBUG.md before
+!   re-instating it.
+!subroutine gaussKOverlap(valeValeDims,did1,did2,aid,plusG,plusGVariant)
+subroutine gaussKOverlap(valeValeDims,did1,did2,aid,plusGVariant)
 
    ! Import necessary modules.
    use O_Kinds
@@ -979,7 +984,16 @@ subroutine gaussKOverlap(valeValeDims,did1,did2,aid,plusG)
    integer(hsize_t), dimension(2), intent(in) :: valeValeDims
    integer(hid_t), dimension(numKPoints,3), intent(in) :: did1,did2
    integer(hid_t), intent(in) :: aid
-   real (kind=double), dimension(3,3), intent(in) :: plusG
+! plusG belongs to the disabled +G pathway: one column per axis,
+!   holding the zero matrix for the plain KOverlap datasets or
+!   recipVectors for the KOverlapPlusG datasets (BUG-010).
+!   real (kind=double), dimension(3,3), intent(in) :: plusG
+   logical, intent(in) :: plusGVariant ! True when this call computes
+         ! the KOverlapPlusG datasets; false for the plain KOverlap
+         ! datasets. The caller states this explicitly because
+         ! deducing it here from the plusG matrix needed a
+         ! floating-point comparison that a cancelling lattice could
+         ! fool (BUG-002 in dev/DEBUG.md).
 
    ! Define local variables for logging and loop control
    integer :: axis
@@ -1054,7 +1068,7 @@ subroutine gaussKOverlap(valeValeDims,did1,did2,aid,plusG)
    hdf5Status = 0
    attribIntDims(1) = 1
    call h5aread_f(aid,H5T_NATIVE_INTEGER,hdf5Status,attribIntDims,hdferr)
-   if (sum(PlusG(:,:)) == 0.0_double) then 
+   if (.not. plusGVariant) then
       if (hdferr /= 0) stop 'Failed to read atom KOverlap status.'
       if (hdf5Status == 1) then
          write(20,*) "Two-center KOverlap already exists. Skipping."
@@ -1285,6 +1299,33 @@ subroutine gaussKOverlap(valeValeDims,did1,did2,aid,plusG)
                         &(powerOfTwo(currentlmAlphaIndex(alphaIndex(2),2))))
 
                   ! Loop over each polarization direction.
+                  !
+                  ! PHYSICS NOTE (BUG-010 in dev/DEBUG.md). The
+                  !   commented form of this call adds plusG(:,axis)
+                  !   to the k-space displacement. That shift exists
+                  !   for the WRAP-AROUND step of a k-point string in
+                  !   the modern theory of polarization: mtop walks a
+                  !   string of k-points along an axis and needs the
+                  !   overlap for a displacement of one mesh step at
+                  !   every interior link, but at the final link the
+                  !   string crosses the Brillouin zone boundary back
+                  !   to its start, and that displacement differs
+                  !   from an interior step by a full reciprocal
+                  !   lattice vector. mtop reads the KOverlapPlusG
+                  !   datasets at exactly that wrap step (matrix
+                  !   codes 6-8 in secularEqn.F90).
+                  !
+                  ! With the shift disabled, BOTH gaussKOverlap
+                  !   invocations compute the same integrals, so the
+                  !   KOverlapPlusG datasets duplicate the plain
+                  !   KOverlap datasets and the wrap step uses an
+                  !   UNSHIFTED overlap. Whether that is wrong (the
+                  !   wrap needs the shifted matrix) or redundant
+                  !   (the LCAO phase convention makes the two
+                  !   matrices equal) is an open physics question --
+                  !   see BUG-010 before re-instating the commented
+                  !   form, which also needs the plusG argument
+                  !   restored to this subroutine and its callers.
                   do axis = 1,3
                      !call KOverlap2CIntg (currentAlphas(alphaIndex(1),1), &
                      !      & currentAlphas(alphaIndex(2),2), &
@@ -1373,8 +1414,10 @@ subroutine gaussKOverlap(valeValeDims,did1,did2,aid,plusG)
 
    deallocate (currentPair)
 
-   ! Perform orthogonalization and save the results to disk.
-   if (sum(plusG(:,:)) == 0.0_double) then
+   ! Perform orthogonalization and save the results to disk. The
+   !   matrix code (8 or 9) selects which dataset family the results
+   !   are written under: plain KOverlap or KOverlapPlusG.
+   if (.not. plusGVariant) then
       call ortho3Terms(8,valeValeDims,did1,did2,aid)
    else
       call ortho3Terms(9,valeValeDims,did1,did2,aid)
