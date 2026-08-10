@@ -367,7 +367,12 @@ valeValePsi(:,:,l) = cmplx(0.0_double,0.0_double,double)
             enddo ! j: maxOccupiedStates
 stepCount = stepCount + 1
 write(20,*) "UNITARY: i,h = ", i,h
-unitary = matmul(conjg(transpose(stateStateMat(:,:,1))),stateStatemat(:,:,1))
+! "(:,:)" so the allocated shape is enforced rather than silently
+!   replaced by whatever matmul returns. stateStateMat is allocated
+!   (maxOccupiedState,maxOccupiedState,spin) and unitary
+!   (maxOccupiedState,maxOccupiedState), so they agree today.
+unitary(:,:) = matmul(conjg(transpose(stateStateMat(:,:,1))), &
+      & stateStatemat(:,:,1))
 ! Compute the deviation from the identity matrix.
 idenDiff = 0.0_double
 do m = 1, maxOccupiedState
@@ -850,7 +855,11 @@ function matrixDet(A)
 
    allocate(Ac(n,n), ipiv(n), visited(n), stat=istat)
       if (istat/=0) stop "Allocate failed."
-   Ac = A
+   ! "(:,:)" so this cannot silently resize Ac out from under the
+   !   allocate above. A is already known square here -- the guard
+   !   above returns unless size(A,1) == size(A,2) -- and n is taken
+   !   from it, so the shapes agree by construction.
+   Ac(:,:) = A
    call zgetrf(n,n,Ac,n,ipiv,info); if (info/=0) then
       deallocate(Ac,ipiv,visited)
       write (20,*) "info=",info

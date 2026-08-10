@@ -789,8 +789,18 @@ subroutine saveCurrentPairGamma (i,j,currentPairGamma,&
    currentAtomType(2) = atomSites(j)%atomTypeAssn
 
    ! Create the transpose of the relevant currentPairGamma section.
+   !
+   ! The "(:,:)" on the left is deliberate. Assigning to a whole
+   !   ALLOCATABLE makes Fortran silently reallocate it to whatever
+   !   shape the right-hand side has, which would quietly overrule
+   !   the allocate on the line above and make that allocate an
+   !   intent the language ignores. A section assignment cannot
+   !   resize, so the declared shape is enforced and a future
+   !   mismatch becomes an error instead of a surprise. The shapes
+   !   do agree today: currentPairGamma is declared
+   !   (maxNumStates,maxNumStates), so its transpose is too.
    allocate (currentPairGammaTranspose(maxNumStates,maxNumStates))
-   currentPairGammaTranspose = transpose(currentPairGamma)
+   currentPairGammaTranspose(:,:) = transpose(currentPairGamma)
 !   currentPairGammaTranspose(1:valeStateNum(2)+coreStateNum(2),&
 !         & 1:valeStateNum(1)+coreStateNum(1)) = &
 !         & transpose(currentPairGamma(1:valeStateNum(1)+coreStateNum(1),&

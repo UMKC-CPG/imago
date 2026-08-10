@@ -645,12 +645,12 @@ Ordered by severity (S1 first).
             unwrapped call into line.
 
 ### BUG-004 -- an explicit allocate defeated by auto-reallocation
-- File:     `src/imago/intgSaving.F90:779`; same class at
-            `src/imago/mtop.F90:370` and `:846`
+- File:     `src/imago/intgSaving.F90:793`; same class at
+            `src/imago/mtop.F90:370` and `:853`
 - Variant:  [BOTH]
 - Category: ALLOC
 - Severity: S4
-- Status:   open
+- Status:   fixed 2026-08-09
 - Evidence: `-Wrealloc-lhs`.
 - Analysis: `currentPairGammaTranspose` is allocated to
             `(maxNumStates,maxNumStates)` and then assigned
@@ -661,11 +661,28 @@ Ordered by severity (S1 first).
             if the two shapes ever disagree the array quietly
             becomes whatever the expression produced, and the
             allocate reads as an intent the language then ignores.
-- Fix:      Either drop the allocate and let the assignment size
-            it, which is honest about what happens, or assign into
-            an explicit section so the shape is enforced. Choosing
-            between them needs a reader who knows whether the
-            declared shape is a requirement or a guess.
+- Fix:      A section assignment, `x(:,:) = ...`, at all three
+            sites. A section cannot resize, so the allocated shape
+            is enforced and any future mismatch becomes an error
+            rather than a silent resize -- which is what each
+            explicit `allocate` was trying to express in the first
+            place.
+
+            Choosing this over "drop the allocate" was possible
+            because all three shapes are provably equal today, and
+            that was checked rather than assumed:
+            `currentPairGamma` is DECLARED
+            `(maxNumStates,maxNumStates)` so its transpose is too;
+            `stateStateMat` is allocated
+            `(maxOccupiedState,maxOccupiedState,spin)` against a
+            `unitary` of `(maxOccupiedState,maxOccupiedState)`; and
+            `Ac = A` sits behind a guard that returns unless
+            `size(A,1) == size(A,2)`, with `n` taken from A. So the
+            edit preserves behaviour today and tightens what
+            happens tomorrow.
+
+            Verified: zero `-Wrealloc-lhs` in both variants, and a
+            full SCF through optical output byte identical.
 
 ### BUG-005 -- a unitarity check summed the wrong quantity
 - File:     `src/imago/mtop.F90:374` (computeMTOP)
