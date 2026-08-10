@@ -1871,6 +1871,20 @@ subroutine makeSCFPot (totalEnergy)
 
 end subroutine makeSCFPot
 
+! ==========================================================================
+! INACTIVE CODE, KEPT ON PURPOSE. The four subroutines below --
+!   blendPotentialsSCF, blendPotentialsTE, shiftPotentials and
+!   blendJointPotentials -- are excluded from compilation by the
+!   #if 0 / #endif guard that brackets them, and every one of their call
+!   sites (inside makeSCFPot above) is commented out as well. They belong
+!   to an effort to improve the SCF convergence behavior through Anderson
+!   mixing, described at length in the comments that follow, that never
+!   reached working form. We intend to return to this work, so the bodies
+!   are kept here rather than deleted: to reactivate them, delete the two
+!   guard lines and restore the call sites. The decision record is BUG-008
+!   in dev/DEBUG.md.
+! ==========================================================================
+
 ! Use the method of D. G. Anderson (J. Assoc. Comp. Mach. 12, 547 (1965)) to
 !   compute the potential coefficients for the next SCF iteration. The problem
 !   is that we have a non-linear optimization problem but that we have a
@@ -2030,6 +2044,7 @@ end subroutine makeSCFPot
 !   is, the 1 in usedPotCoeffs(:,1,:) refers to x^l, not x^l+1 or x^l-1.
 !   Further, if a 2 were there, that would be understood as x^l-1. A 3 index
 !   would be for x^l-2 etc.
+#if 0
 subroutine blendPotentialsSCF(firstTerm, numTerms, outCoeffs, inGuessedCoeffs,&
       & inUsedCoeffs, totalEnergyRecord)
 
@@ -2833,6 +2848,7 @@ subroutine blendJointPotentials(firstTerm, numJointTerms, outCoeffs,&
    deallocate (tempJointArray)
 
 end subroutine blendJointPotentials
+#endif
 
 
 

@@ -44,10 +44,10 @@ the normal way, with the DEBUG entry left as a pointer.
     `dev/`) documents every option and preset well enough to pick a
     build cold.
 - **Phase 1 (compiler sweep) is DONE, 2026-08-09.**
-  676 warnings in hand-written source at the start; **75** now,
-  with zero errors in either variant. An 89 percent reduction.
-  Counts taken from a FULL recompile of both variants into
-  separate logs, not from an incremental build.
+  676 warnings in hand-written source at the start; **75** at the
+  Phase 1 close, with zero errors in either variant. An 89 percent
+  reduction. Counts taken from a FULL recompile of both variants
+  into separate logs, not from an incremental build.
 
   ```
     676  at the start of Phase 1
@@ -61,17 +61,32 @@ the normal way, with the DEBUG entry left as a pointer.
      75  remaining
   ```
 
-  Remaining, by class -- and none of it is mechanical:
+  Remaining, recounted 2026-08-10 after the BUG-007 and BUG-008
+  resolutions, from a full clean recompile of both variants into
+  separate logs: **62 unique warning sites**, 73 warning lines (a
+  site flagged by both variants counts once as a site, twice as a
+  line). By class, on the unique-site basis -- and none of it is
+  mechanical:
 
   ```
-    37  -Wunused-variable        ALL single-variant; each needs a
-                                   read against the other build
-    33  -Wunused-dummy-argument  an argument passed but never used
+    39  -Wunused-variable        mostly single-variant; each needs
+                                   a read against the other build
+    19  -Wunused-dummy-argument  an argument passed but never used
                                    can mean the routine FORGOT it
-     2  -Wimplicit-interface     BUG-003; fix is specified
      2  -Wcompare-reals          BUG-002; needs a signature change
-     1  unclassified
+     1  -Wimplicit-interface     BUG-003 (zgetrf, mtop.F90:863);
+                                   fix is specified
+     1  gfortran "Extension" note: unary minus after `*` without
+                                   parentheses (mtop.F90:1076)
   ```
+
+  The earlier tally in this section (75 remaining; 37/33/2/2/1 by
+  class) was taken from logs that no longer exist, and its counting
+  basis was not recorded, so the two breakdowns cannot be compared
+  class by class. The basis is now stated so the next recount is
+  comparable. Of the deliberate change between the two, exactly
+  three warnings were removed: BUG-008's dummy-argument trio, gone
+  with the #if 0 guard.
 
   So what is left is exactly the part that needs a human rather
   than a rule. Every class that could be settled by inspection has
@@ -97,42 +112,56 @@ the normal way, with the DEBUG entry left as a pointer.
   a warning's variant is which FILE it is in. Rebuilt that way
   2026-08-09.
 
-- **This also makes the DIVERGE list real** rather than inferred:
-  29 sites appear only in the real build and 23 only in the
-  complex one. `field.F90` dominates both, and its pairing of
-  `valeValeOLGamma` (real only) against `valeValeOL` (complex
-  only) is the textbook case of each build using its own type.
-  More interesting are six `-Wconversion` sites in `field.F90`
-  present ONLY in the complex build: a real-to-complex conversion
-  that exists solely on the multi-k path.
+- **This also makes the DIVERGE list real** rather than inferred.
+  On the 2026-08-10 recount: 41 sites appear only in the real
+  build, 10 only in the complex one, and 11 in both. `imago.F90`
+  and `field.F90` dominate the real-only list, largely imports of
+  complex-path HDF5 handles and k-point machinery that the Gamma
+  build never touches -- the expected face of the #ifdef
+  divergence, but each one still needs its read against the other
+  build before it can be called expected.
 
-- **RESUME HERE (2026-08-09 end of day).** Phase 1's mechanical
-  work is finished; what is left needs reading, and two decisions
-  are waiting on the programmer.
-
-  *Two decisions, both recorded in the ledger below:*
-  - **BUG-008** -- delete the two unreachable potential-blending
-    routines (about 520 lines), or mark them as retained on
-    purpose. Not something to settle from a warning sweep.
-  - **BUG-007** -- can a fitted neutral-atom charge coefficient be
-    NEGATIVE? If it can, `field.F90` silently stores zero for it.
-    A physics question.
+- **RESUME HERE (2026-08-10).** Phase 1's mechanical work is
+  finished, and the two decisions that were waiting on the
+  programmer are now resolved and coded (ledger below): **BUG-007**
+  closed -- the programmer verified a fitted neutral-atom charge
+  coefficient can never be negative, so `field.F90` now takes a
+  plain real square root with the invariant recorded at the site --
+  and **BUG-008** resolved -- the four unreachable SCF-blending
+  routines (the ledger's two plus `shiftPotentials` and
+  `blendJointPotentials`, equally unreachable) sit inside an
+  `#if 0` guard with a banner marking them as an Anderson-mixing
+  convergence effort to be revisited. Both changes verified
+  numerically inert by the paired A/B protocol below.
 
   *Two fixes that are specified and just need doing:* **BUG-002**
   (pass the flag instead of testing `sum(plusG)`) and **BUG-003**
   (wrap `zgetrf` in `interfaces.F90` like the other seven).
 
-  *The reading that remains, roughly 73 warnings:*
-  - **18 unused dummy arguments.** Most sort by variant: the five
-    `numKPoints` and friends flagged in only ONE build are used by
-    the other and must stay -- expected `#ifdef` divergence, not
-    waste. The both-variant remainder is the HDF5 `attribInt*`
-    group across four files, which looks like a shared interface
-    convention and is worth checking as a SET rather than one at a
-    time.
-  - **37 single-variant unused variables.** Each needs one build
-    read against the other. The per-variant logs finally make this
-    tractable; do not attempt it from a single `-j8` log.
+  *The reading that remains, 58 warning sites:*
+  - **19 unused dummy arguments.** Most sort by variant: the ones
+    flagged in only ONE build are used by the other and must stay
+    -- expected `#ifdef` divergence, not waste. The both-variant
+    remainder is the HDF5 `attribInt*` group across four files,
+    which looks like a shared interface convention and is worth
+    checking as a SET rather than one at a time.
+  - **39 unused variables, mostly single-variant.** Each needs one
+    build read against the other. The per-variant logs finally
+    make this tractable; do not attempt it from a single `-j8`
+    log.
+
+  *How to VERIFY a change against the KNbO3 reference:* do not
+  compare a fresh run against the accumulated outputs in
+  `jobs/knbo3/o3/reduced` -- those grew through many restarts, and
+  a from-scratch rerun differs from them by up to 8.6 in pointwise
+  eps2 (converged-potential drift moving sharp peaks; protocol,
+  not defect). Instead make TWO fresh copies of the job, run one
+  with the old binary and one with the new, and byte-compare the
+  pair. Copies must live inside `jobs/`; imago.py sets the copied
+  `intermediate` link aside as `intermediateFIXME` and gives the
+  copy its own scratch, which is correct behavior. On 2026-08-10
+  this A/B came back byte-identical on every data file for the
+  BUG-007 + BUG-008 changes; only timestamps differed.
 
   *How to regenerate the evidence:*
   ```
@@ -554,6 +583,19 @@ the ledger drives the fix work and can be cross-linked into
   build-system work, with the stabilization doctrine above as the
   guaranteed off-ramp so the working compile process is never put
   at risk.
+- **BUG-007 physics answer (2026-08-10):** a fitted neutral-atom
+  charge coefficient can never be negative (programmer verified),
+  so the complex-sqrt detour in `field.F90` was unnecessary and is
+  now a plain real square root.
+- **BUG-008 disposition (2026-08-10):** the four unreachable
+  SCF-blending routines are RETAINED behind an `#if 0` guard, not
+  deleted -- they are an Anderson-mixing convergence effort the
+  programmer intends to return to. Guard chosen over per-line
+  commenting so the bodies stay byte-for-byte intact.
+- **Verification protocol (2026-08-10):** byte-identity is judged
+  between two fresh copies of the KNbO3 job run with the old and
+  new binaries -- never between a fresh run and the accumulated
+  reference outputs, which drift with every restart.
 
 ## Doctrine: drive the warning count to ZERO
 
@@ -788,8 +830,8 @@ Ordered by severity (S1 first).
 - File:     `src/imago/field.F90:2243`
 - Variant:  [COMPLEX]
 - Category: NUM (+ LOGIC)
-- Severity: S3 if reachable, S4 if not -- UNRESOLVED
-- Status:   open; the conversion made explicit, the question left
+- Severity: S4 -- the silent-zero hole was unreachable
+- Status:   closed 2026-08-10; physics question answered
 - Evidence: `-Wconversion`, COMPLEX(8) to REAL(8), surviving the
             BUG-006 fix.
 - Analysis: `accumWaveFnCoeffsNeut` is REAL, and it is assigned
@@ -807,11 +849,20 @@ Ordered by severity (S1 first).
             So the code is either doing something unnecessary or
             hiding a hole, and which one depends on whether a
             fitted neutral-atom charge coefficient can go below
-            zero. That is a physics question and is deliberately
-            not answered here.
-- Fix:      Pending the answer. The assignment now carries an
-            explicit `real(...)`, which changes nothing but states
-            what was already happening.
+            zero. That is a physics question and was deliberately
+            left to the programmer.
+
+            ANSWERED 2026-08-10: the programmer verified the
+            coefficient can never be negative -- which the site's
+            own construction agrees with, since each entry is an
+            electron count spread evenly over the QN_m orbitals of
+            one QN_l. The complex detour was unnecessary, not a
+            hole.
+- Fix:      The assignment is now a plain real `sqrt` with the
+            non-negativity invariant recorded in a comment at the
+            site. Verified numerically inert by the paired A/B
+            protocol (RESUME HERE above): byte-identical data
+            outputs against the pre-change binary.
 
 ### BUG-008 -- two potential-blending routines are unreachable
 - File:     `src/imago/potentialUpdate.F90:2033-2313`
@@ -820,7 +871,7 @@ Ordered by severity (S1 first).
 - Variant:  [BOTH]
 - Category: LOGIC (dead code)
 - Severity: S4 -- nothing misbehaves; roughly 520 lines mislead
-- Status:   open; NOT deleted, see below
+- Status:   resolved 2026-08-10; guarded out, kept for a return
 - Evidence: three `-Wunused-dummy-argument` warnings that made no
             sense -- `firstTerm` unused while `numTerms` is used,
             and `totalEnergyRecord` unused by a routine whose whole
@@ -842,6 +893,23 @@ Ordered by severity (S1 first).
             purpose. Deleting 520 lines of potential-blending logic
             is not something to do on the strength of a warning
             sweep.
+
+            DECIDED 2026-08-10: the routines are part of an effort
+            to improve SCF convergence (Anderson mixing) that never
+            reached working form and WILL be returned to, so they
+            are retained. The resolution also swept in
+            `shiftPotentials` and `blendJointPotentials`, whose
+            only call sites are commented out too -- the same
+            effort, found unreachable by the same search. All four
+            now sit inside a single `#if 0` / `#endif` guard with a
+            banner comment naming the effort, the reactivation
+            steps (delete the two guard lines, restore the call
+            sites) and this entry. The guard was chosen over
+            per-line commenting so the bodies stay byte-for-byte
+            intact; gfortran was verified to emit nothing for the
+            skipped block. The three nonsensical dummy-argument
+            warnings are gone, and the paired A/B run (RESUME HERE
+            above) confirmed the build is numerically unchanged.
 
 ### BUG-009 -- an unused argument that must NOT be "fixed"
 - File:     `src/imago/bond3C.F90:717` (compute3CBO)

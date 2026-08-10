@@ -2233,30 +2233,14 @@ subroutine makeNeutralCoeffs
    !   separate calculation for a neutral atom.  All we have available here is
    !   the total charge over all occupied atomic states.
    do i = 1, numKPoints
-      ! The third argument to cmplx is NOT optional decoration here.
-      !   Without a kind, cmplx returns DEFAULT kind -- single
-      !   precision -- whatever the kind of its arguments. So
-      !   neutralCoeffs, held in double, was being rounded to single
-      !   before the square root and only then widened back out. Every
-      !   digit past the seventh was being discarded silently.
-      ! real() states what the assignment was already doing: the
-      !   destination is real, so the imaginary part of this complex
-      !   square root was being discarded silently.
-      !
-      ! WORTH SETTLING, and deliberately not settled here. The
-      !   cmplx() wrapper only earns its place if neutralCoeffs can
-      !   be NEGATIVE -- that is the case a real sqrt cannot take.
-      !   But if it ever is negative, the square root is purely
-      !   imaginary and this line stores ZERO, losing the value
-      !   entirely rather than reporting anything. So either the
-      !   coefficients are non-negative and the complex detour is
-      !   unnecessary, or they are not and this is a silent hole.
-      !   Deciding which needs someone who knows whether a fitted
-      !   neutral-atom charge coefficient can go below zero. See
-      !   BUG-007.
-      accumWaveFnCoeffsNeut(:,i) = real( &
-         & sqrt(cmplx(neutralCoeffs(:),0.0_double,double) &
-         & / 2.0_double * kPointWeight(i)/real(spin,double)),double)
+      ! Every value under this square root is non-negative: each
+      !   neutral coefficient is an electron count spread evenly over
+      !   the QN_m orbitals of one QN_l (see the loop above), and the
+      !   k-point weights are positive. That guarantee is what lets a
+      !   plain real sqrt stand here; the verification record is
+      !   BUG-007 in dev/DEBUG.md.
+      accumWaveFnCoeffsNeut(:,i) = sqrt(neutralCoeffs(:) &
+         & / 2.0_double * kPointWeight(i)/real(spin,double))
 !         accumWaveFnCoeffsPsiWav(:,j+2,i) = &
 !               & cmplx(neutralCoeffs(:),0.0_double) / &
 !               & sqrt(dot_product(neutralCoeffs(:),neutralCoeffs(:)))

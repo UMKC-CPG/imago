@@ -925,6 +925,20 @@
   three.
   DESIGN 6.2.5; PSEUDOCODE 13.1 / 13.4 / 11.4.
 
+- [ ] D24. Revive the Anderson-mixing SCF convergence effort.
+  Four routines in `potentialUpdate.F90` (`blendPotentialsSCF`,
+  `blendPotentialsTE`, `shiftPotentials`, `blendJointPotentials`)
+  implement accelerated SCF convergence following D. G. Anderson
+  (J. Assoc. Comp. Mach. 12, 547 (1965)) but never reached working
+  form; as of 2026-08-10 they sit unreachable behind an `#if 0`
+  guard with every call site commented out (see BUG-008 in
+  `dev/DEBUG.md`, which records the decision to retain them).
+  Reviving them is design work before it is code work: diagnose
+  why the method failed to converge, write the algorithm into
+  DESIGN and PSEUDOCODE (the extensive comments above the guarded
+  block are the raw material), and only then delete the two guard
+  lines and restore the call sites.
+
 - [x] D16. Design the historical-guidance dataspace
   (VISION Goal 5, ARCHITECTURE §10).  Done 2026-05-28
   (categorical signature shape, Jaccard lookup); rewritten
