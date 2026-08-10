@@ -798,7 +798,9 @@ subroutine makeSCFPot (totalEnergy)
 
    ! The maxNumRayPoints was determined already in the access to the setup HDF5
    !   data.  Here we just copy the value from points(1).
-   maxNumRayPoints = points(1)
+   ! points comes from HDF5 and is an 8-byte integer; the explicit
+   !   int() says the narrowing is intended rather than accidental.
+   maxNumRayPoints = int(points(1))
 
    ! Allocate space to hold the charge used for computing the exchange
    !   correlation energy and potential (total and core), exchange

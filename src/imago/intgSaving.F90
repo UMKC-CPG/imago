@@ -182,8 +182,15 @@ subroutine applyPhaseFactors (currentPair,pairXBasisFn12,statesDim1,statesDim2,&
       do l = 1, numKPoints
          do m = 1, statesDim2
             do n = 1, statesDim1
-               currentPair(n,m,l) = currentPair(n,m,l) + cmplx(0.0_double,&
-                     & -1.0_double) * phaseFactor(l,k) * pairXBasisFn12(n,m)
+               ! The kind argument matters even though 0 and -1 are
+               !   exact in single precision: without it cmplx
+               !   returns default kind, and the habit is what
+               !   silently truncated a real computation elsewhere
+               !   in this code base (see field.F90's neutral
+               !   coefficients).
+               currentPair(n,m,l) = currentPair(n,m,l) &
+                     & + cmplx(0.0_double,-1.0_double,double) &
+                     & * phaseFactor(l,k) * pairXBasisFn12(n,m)
             enddo
          enddo
       enddo
@@ -231,8 +238,15 @@ subroutine cmplxApplyPhaseFactors (currentPair,pairXBasisFn12,statesDim1,&
       do l = 1, numKPoints
          do m = 1, statesDim2
             do n = 1, statesDim1
-               currentPair(n,m,l) = currentPair(n,m,l) + cmplx(0.0_double,&
-                     & -1.0_double) * phaseFactor(l,k) * pairXBasisFn12(n,m)
+               ! The kind argument matters even though 0 and -1 are
+               !   exact in single precision: without it cmplx
+               !   returns default kind, and the habit is what
+               !   silently truncated a real computation elsewhere
+               !   in this code base (see field.F90's neutral
+               !   coefficients).
+               currentPair(n,m,l) = currentPair(n,m,l) &
+                     & + cmplx(0.0_double,-1.0_double,double) &
+                     & * phaseFactor(l,k) * pairXBasisFn12(n,m)
             enddo
          enddo
       enddo

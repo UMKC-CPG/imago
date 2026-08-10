@@ -667,6 +667,108 @@ Ordered by severity (S1 first).
             between them needs a reader who knows whether the
             declared shape is a requirement or a guess.
 
+### BUG-005 -- a unitarity check summed the wrong quantity
+- File:     `src/imago/mtop.F90:374` (computeMTOP)
+- Variant:  [BOTH]
+- Category: NUM
+- Severity: S3 -- a diagnostic reports wrong, not the science
+- Status:   fixed 2026-08-09
+- Evidence: `-Wconversion`, COMPLEX(8) to REAL(8).
+- Analysis: The line read
+            `idenDiff = idenDiff + sqrt((1.0_double - unitary(m,m))**2)`
+            with `unitary` complex, under a comment saying "compute
+            the deviation from the identity matrix".
+
+            For a COMPLEX z, `sqrt(z**2)` is not `abs(z)`. It
+            returns plus or minus z on the principal branch, and
+            assigning that to the real `idenDiff` then discarded
+            the imaginary part. So the check accumulated
+            `Re(1-u)` -- a SIGNED quantity that can cancel across
+            the loop -- where it meant to accumulate a magnitude.
+            A badly non-unitary matrix could therefore report a
+            small deviation, which is the one thing a check like
+            this must never do.
+- Fix:      `abs(1.0_double - unitary(m,m))`, the magnitude the
+            check was always after.
+
+### BUG-006 -- cmplx() without a kind truncated to single precision
+- File:     `src/imago/field.F90:2237` (the neutral-atom
+            coefficients); the same idiom at `field.F90` x9 and
+            `intgSaving.F90` x2
+- Variant:  [COMPLEX]
+- Category: NUM
+- Severity: S2 at the one live site, S4 at the others
+- Status:   fixed 2026-08-09
+- Evidence: `-Wconversion`, "REAL(8) to default-kind COMPLEX(4)".
+- Analysis: `cmplx(a,b)` returns DEFAULT kind -- single precision
+            -- regardless of the kind of its arguments. The third
+            argument is not decoration.
+
+            At `field.F90:2237` the arguments were the
+            double-precision `neutralCoeffs`, so every digit past
+            the seventh was discarded before the square root and
+            only then widened back to double. That is a real loss
+            in a computed quantity.
+
+            The other eleven uses pass 0 and -1, which are exact
+            in single precision, so their VALUE never suffered.
+            They were fixed anyway: the habit is what produced the
+            live defect, and leaving eleven examples of it in the
+            tree invites the twelfth.
+- Fix:      `cmplx(..., double)` throughout.
+
+### BUG-007 -- a complex square root whose result is thrown away
+- File:     `src/imago/field.F90:2243`
+- Variant:  [COMPLEX]
+- Category: NUM (+ LOGIC)
+- Severity: S3 if reachable, S4 if not -- UNRESOLVED
+- Status:   open; the conversion made explicit, the question left
+- Evidence: `-Wconversion`, COMPLEX(8) to REAL(8), surviving the
+            BUG-006 fix.
+- Analysis: `accumWaveFnCoeffsNeut` is REAL, and it is assigned
+            `sqrt(cmplx(neutralCoeffs(:),0,double)/2 * weight/spin)`
+            -- a complex square root whose imaginary part is then
+            silently dropped.
+
+            The `cmplx()` detour only earns its place if
+            `neutralCoeffs` can be NEGATIVE, since that is the case
+            a real `sqrt` cannot take. But if it ever IS negative,
+            the complex square root is purely imaginary and this
+            line stores ZERO, losing the value rather than
+            reporting anything.
+
+            So the code is either doing something unnecessary or
+            hiding a hole, and which one depends on whether a
+            fitted neutral-atom charge coefficient can go below
+            zero. That is a physics question and is deliberately
+            not answered here.
+- Fix:      Pending the answer. The assignment now carries an
+            explicit `real(...)`, which changes nothing but states
+            what was already happening.
+
+### The rest of -Wconversion: implicit, justified, now explicit
+The remaining `-Wconversion` sites were all implicit narrowing
+that is correct but undocumented, and each now says so:
+
+  - `secularEqn.F90` x3 and `forces.F90` take the real part of a
+    DIAGONAL element of a Hermitian matrix, or of a force. Both
+    are real by construction, so the discard is exact. Written
+    with an explicit `real(..., double)`.
+  - `potentialUpdate.F90:801` narrows an 8-byte HDF5 integer to a
+    4-byte one; now an explicit `int()`.
+  - `mathSubs.f90:353` routed an integer through a real and back
+    (`halfk = real(twok)/2.0_double`) purely to truncate. Now
+    plain integer division, which truncates identically. Note it
+    still truncates when `twok` is odd; whether that can happen
+    depends on whether the m values are half-integral, and that
+    question was left where it was rather than settled by an edit
+    made for a warning.
+
+One incidental find: the `#ifndef GAMMA` around the `plusUJ`
+assignment in `secularEqn.F90` had two arms that were
+character-for-character IDENTICAL. The branch said nothing and is
+gone.
+
 ### The rest of -Wcompare-reals: no defects, and now no warnings
 All eighteen of the remaining `-Wcompare-reals` sites were read.
 None was a defect. They share one pattern: a test against exactly

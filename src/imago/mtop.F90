@@ -371,7 +371,14 @@ unitary = matmul(conjg(transpose(stateStateMat(:,:,1))),stateStatemat(:,:,1))
 ! Compute the deviation from the identity matrix.
 idenDiff = 0.0_double
 do m = 1, maxOccupiedState
-idenDiff = idenDiff + sqrt((1.0_double - unitary(m,m))**2)
+! abs(), not sqrt(z**2). For a COMPLEX z those are different
+!   functions: sqrt(z**2) returns +/-z on the principal branch, not
+!   the magnitude, and assigning that to a real idenDiff then threw
+!   the imaginary part away. So this accumulated Re(1-u) -- a signed
+!   quantity that can cancel across the loop -- where the comment
+!   above asks for the deviation from identity. abs() is the
+!   magnitude the check was always meant to sum.
+idenDiff = idenDiff + abs(1.0_double - unitary(m,m))
 enddo
 write(26+axis,*) stepCount, idenDiff
 

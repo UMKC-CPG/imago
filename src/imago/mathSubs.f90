@@ -350,7 +350,14 @@ function smalld (twoj, twom, twomp, theta)
 
    dsum = 0.0_double
    do twok = twokStart, twokEnd, 2
-      halfk = real(twok) / 2.0_double
+      ! Integer division, since halfk IS an integer and indexes the
+      !   factorial table below. Routing it through a real and back
+      !   truncated in exactly the same way while costing a
+      !   conversion and a warning. Note this still truncates when
+      !   twok is odd; whether twok can be odd here depends on
+      !   whether the m values are half-integral, and that question
+      !   is left where it was rather than settled by this edit.
+      halfk = twok / 2
       numerator = (-1.0d0)**halfk &
             & * cos_theta_2**(twoj - twok + (twom - twomp)/2) &
             & * sin_theta_2**(twok + (twomp - twom)/2)

@@ -679,13 +679,21 @@ subroutine update1UJ (currKPoint, valeValeRho)
          currUJSize = plusUJAtomSize(j)
 
          do k = 1, currUJSize ! Either 5 or 7
-#ifndef GAMMA
+            ! A DIAGONAL element of a Hermitian density matrix is
+            !   real by construction, so discarding the imaginary
+            !   part is exact rather than approximate. Said with an
+            !   explicit real() so a reader can see that is the
+            !   claim being made, instead of inferring it from an
+            !   implicit conversion.
+            !
+            ! The two arms of the old #ifndef GAMMA here were
+            !   character-for-character identical, so the branch
+            !   said nothing and is gone. In the real build
+            !   valeValeRho is already real and real() is the
+            !   identity.
             plusUJ(k,j,i,currKPoint) = &
-                  & valeValeRho(currUJIndex+k,currUJIndex+k,i)
-#else
-            plusUJ(k,j,i,currKPoint) = &
-                  & valeValeRho(currUJIndex+k,currUJIndex+k,i)
-#endif
+                  & real(valeValeRho(currUJIndex+k,currUJIndex+k,i),&
+                  & double)
          enddo
       enddo
    enddo
@@ -787,8 +795,11 @@ subroutine update2AndApplyUJ(currKPoint,spinDirection)
          sum1 = 0.0_double
          do k = 1, currUJSize
 #ifndef GAMMA
+            ! Diagonal of a Hermitian overlap: real by construction,
+            !   so real() here is exact and states that claim.
             sum1 = sum1 + plusUJ(k,i,oppositeSpin,currKPoint) * &
-                  & valeValeOL(currUJIndex+k,currUJIndex+k) - &
+                  & real(valeValeOL(currUJIndex+k,currUJIndex+k),&
+                  & double) - &
                   & plusUJAtomGSElectrons(i) / (2.0_double * &
                   & real(currUJSize,double)) * kPointWeight(currKPoint) / &
                   & real(spin,double)
@@ -813,8 +824,10 @@ subroutine update2AndApplyUJ(currKPoint,spinDirection)
 
             ! Accumulate summation terms.
 #ifndef GAMMA
+            ! Diagonal of a Hermitian overlap, as above.
             sum2 = sum2 + plusUJ(k,i,spinDirection,currKPoint) * &
-                  & valeValeOL(currUJIndex+k,currUJIndex+k) - &
+                  & real(valeValeOL(currUJIndex+k,currUJIndex+k),&
+                  & double) - &
                   & plusUJAtomGSElectrons(i) / (2.0_double * &
                   & real(currUJSize,double)) * kPointWeight(currKPoint) / &
                   & real(spin,double)

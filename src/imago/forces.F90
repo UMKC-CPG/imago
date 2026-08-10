@@ -965,8 +965,14 @@ subroutine computeForce(valeValeRho, kPoint, currSpin, currAxis)
          do k = 1, numAtomSites
             do l = 1, atomTypes(atomSites(k)%atomTypeAssn)%numValeStates
                counter2 = counter2 + 1
-               atomSum(i,k) = atomSum(i,k) + &
-                     & valeValeF(counter1,counter2,kPoint,currSpin,currAxis)
+               ! A force is a real observable, so taking the real
+               !   part is the intended operation rather than a
+               !   lossy accident. Stated explicitly so the reader
+               !   is not left to infer it from a silent
+               !   complex-to-real assignment.
+               atomSum(i,k) = atomSum(i,k) + real( &
+                     & valeValeF(counter1,counter2,kPoint,currSpin,&
+                     & currAxis),double)
             enddo
          enddo
       enddo

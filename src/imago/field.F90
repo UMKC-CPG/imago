@@ -437,15 +437,15 @@ allocate (currNumElec (numKPoints,spin))
 !allocate (identity(numStates,numStates))
    if (doPsiFIELD == 1) then
       allocate (accumWaveFnCoeffsPsi(valeDim,spin+2,numKPoints))
-      accumWaveFnCoeffsPsi(:,:,:) = cmplx(0.0_double,0.0_double)
+      accumWaveFnCoeffsPsi(:,:,:) = cmplx(0.0_double,0.0_double,double)
    endif
    if (doWavFIELD == 1) then
       allocate (accumWaveFnCoeffsWav(valeDim,numStates,spin+2,numKPoints))
-      accumWaveFnCoeffsWav(:,:,:,:) = cmplx(0.0_double,0.0_double)
+      accumWaveFnCoeffsWav(:,:,:,:) = cmplx(0.0_double,0.0_double,double)
    endif
    if (doRhoFIELD == 1) then
       allocate (accumWaveFnCoeffsRho(valeDim,numStates,spin+2,numKPoints))
-      accumWaveFnCoeffsRho(:,:,:,:) = cmplx(0.0_double,0.0_double)
+      accumWaveFnCoeffsRho(:,:,:,:) = cmplx(0.0_double,0.0_double,double)
    endif
    allocate (accumWaveFnCoeffsNeut(valeDim,numKPoints))
    accumWaveFnCoeffsNeut(:,:) = 0.0_double
@@ -546,7 +546,7 @@ write (20,*) "i,j,currNumElec(i,j) = ",i,j,currNumElec(i,j)
 write(20,*) "min,max=",minStateIndex,maxStateIndex
          do k = minStateIndex(j,i), maxStateIndex(j,i)
 
-!tempPointValue(:)=cmplx(0.0_double,0.0_double)
+!tempPointValue(:)=cmplx(0.0_double,0.0_double,double)
 !do l = 1, valeDim
 !do m = 1, valeDim
 !tempPointValue(1) = tempPointValue(1) + &
@@ -606,7 +606,7 @@ call flush (20)
 write (20,*) "accumCharge=",accumCharge(j,i)
 accumChargeKP = accumChargeKP + accumCharge(j,i)
 !write (20,*) "before divide aWFC=",accumWaveFnCoeffs(:,j,i)
-!tempPointValue(1)=cmplx(0.0_double,0.0_double)
+!tempPointValue(1)=cmplx(0.0_double,0.0_double,double)
 !do k = 1, valeDim
 !!do l = 1, valeDim
 !tempPointValue(1) = tempPointValue(1) + &
@@ -627,7 +627,7 @@ accumChargeKP = accumChargeKP + accumCharge(j,i)
 !& accumWaveFnCoeffs(:,j,i)))
 
 !write (20,*) "after divide aWFC=",accumWaveFnCoeffs(:,j,i)
-!tempPointValue(1)=cmplx(0.0_double,0.0_double)
+!tempPointValue(1)=cmplx(0.0_double,0.0_double,double)
 !do k = 1, valeDim
 !!do l = 1, valeDim
 !tempPointValue(1) = tempPointValue(1) + &
@@ -850,21 +850,21 @@ write (20,*) "accumChargeKP=",accumChargeKP
       ! Initialize the evaluation of the wave function on this mesh point.
       if (doPsiFIELD == 1) then
 #ifndef GAMMA
-         waveFnEvalPsi(:,:) = cmplx(0.0_double,0.0_double)
+         waveFnEvalPsi(:,:) = cmplx(0.0_double,0.0_double,double)
 #else
          waveFnEvalPsiGamma(:) = 0.0_double
 #endif
       endif
       if (doWavFIELD == 1) then
 #ifndef GAMMA
-         waveFnEvalWav(:,:,:) = cmplx(0.0_double,0.0_double)
+         waveFnEvalWav(:,:,:) = cmplx(0.0_double,0.0_double,double)
 #else
          waveFnEvalWavGamma(:,:) = 0.0_double
 #endif
       endif
       if (doRhoFIELD == 1) then
 #ifndef GAMMA
-         waveFnEvalRho(:,:,:) = cmplx(0.0_double,0.0_double)
+         waveFnEvalRho(:,:,:) = cmplx(0.0_double,0.0_double,double)
 #else
          waveFnEvalRhoGamma(:,:) = 0.0_double
 #endif
@@ -2233,9 +2233,30 @@ subroutine makeNeutralCoeffs
    !   separate calculation for a neutral atom.  All we have available here is
    !   the total charge over all occupied atomic states.
    do i = 1, numKPoints
-      accumWaveFnCoeffsNeut(:,i) = &
-         & sqrt(cmplx(neutralCoeffs(:),0.0_double) / 2.0_double * &
-         & kPointWeight(i)/real(spin,double))
+      ! The third argument to cmplx is NOT optional decoration here.
+      !   Without a kind, cmplx returns DEFAULT kind -- single
+      !   precision -- whatever the kind of its arguments. So
+      !   neutralCoeffs, held in double, was being rounded to single
+      !   before the square root and only then widened back out. Every
+      !   digit past the seventh was being discarded silently.
+      ! real() states what the assignment was already doing: the
+      !   destination is real, so the imaginary part of this complex
+      !   square root was being discarded silently.
+      !
+      ! WORTH SETTLING, and deliberately not settled here. The
+      !   cmplx() wrapper only earns its place if neutralCoeffs can
+      !   be NEGATIVE -- that is the case a real sqrt cannot take.
+      !   But if it ever is negative, the square root is purely
+      !   imaginary and this line stores ZERO, losing the value
+      !   entirely rather than reporting anything. So either the
+      !   coefficients are non-negative and the complex detour is
+      !   unnecessary, or they are not and this is a silent hole.
+      !   Deciding which needs someone who knows whether a fitted
+      !   neutral-atom charge coefficient can go below zero. See
+      !   BUG-007.
+      accumWaveFnCoeffsNeut(:,i) = real( &
+         & sqrt(cmplx(neutralCoeffs(:),0.0_double,double) &
+         & / 2.0_double * kPointWeight(i)/real(spin,double)),double)
 !         accumWaveFnCoeffsPsiWav(:,j+2,i) = &
 !               & cmplx(neutralCoeffs(:),0.0_double) / &
 !               & sqrt(dot_product(neutralCoeffs(:),neutralCoeffs(:)))
