@@ -106,9 +106,50 @@ the normal way, with the DEBUG entry left as a pointer.
   present ONLY in the complex build: a real-to-complex conversion
   that exists solely on the multi-k path.
 
-- **Phases 2 and 3 have not started. Findings ledger: 1 entry.**
-  `build/gfortran-asan` was configured 2026-06-26 and predates
-  months of source change; reconfigure before trusting it.
+- **RESUME HERE (2026-08-09 end of day).** Phase 1's mechanical
+  work is finished; what is left needs reading, and two decisions
+  are waiting on the programmer.
+
+  *Two decisions, both recorded in the ledger below:*
+  - **BUG-008** -- delete the two unreachable potential-blending
+    routines (about 520 lines), or mark them as retained on
+    purpose. Not something to settle from a warning sweep.
+  - **BUG-007** -- can a fitted neutral-atom charge coefficient be
+    NEGATIVE? If it can, `field.F90` silently stores zero for it.
+    A physics question.
+
+  *Two fixes that are specified and just need doing:* **BUG-002**
+  (pass the flag instead of testing `sum(plusG)`) and **BUG-003**
+  (wrap `zgetrf` in `interfaces.F90` like the other seven).
+
+  *The reading that remains, roughly 73 warnings:*
+  - **18 unused dummy arguments.** Most sort by variant: the five
+    `numKPoints` and friends flagged in only ONE build are used by
+    the other and must stay -- expected `#ifdef` divergence, not
+    waste. The both-variant remainder is the HDF5 `attribInt*`
+    group across four files, which looks like a shared interface
+    convention and is worth checking as a SET rather than one at a
+    time.
+  - **37 single-variant unused variables.** Each needs one build
+    read against the other. The per-variant logs finally make this
+    tractable; do not attempt it from a single `-j8` log.
+
+  *How to regenerate the evidence:*
+  ```
+    cmake --preset gfortran-audit
+    cd build/gfortran-audit
+    make -j8 imagoG > real.log 2>&1
+    make -j8 imago  > complex.log 2>&1
+  ```
+  Separate logs, never one combined log. About 20 minutes,
+  dominated by compiling the 135k-line generated integral file
+  twice.
+
+- **Phases 2 and 3 have not started. Findings ledger: 9 entries,
+  four of them real defects** (BUG-001, BUG-005, BUG-006, and
+  BUG-009's near miss). `build/gfortran-asan` was configured
+  2026-06-26 and predates months of source change; reconfigure
+  before trusting it.
 - Phase 2 audit mechanism: multi-agent workflow (decided)
 
 ### Tool inventory on this machine (measured 2026-08-09)
