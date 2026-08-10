@@ -43,9 +43,11 @@ the normal way, with the DEBUG entry left as a pointer.
   - *0e* -- `BUILD.md` (140 lines, at the repository root, NOT in
     `dev/`) documents every option and preset well enough to pick a
     build cold.
-- **Phase 1 (compiler sweep) is SUBSTANTIALLY DONE, 2026-08-09.**
-  676 warnings in hand-written source at the start; **116** now,
-  with zero errors in either variant. An 83 percent reduction.
+- **Phase 1 (compiler sweep) is DONE, 2026-08-09.**
+  676 warnings in hand-written source at the start; **75** now,
+  with zero errors in either variant. An 89 percent reduction.
+  Counts taken from a FULL recompile of both variants into
+  separate logs, not from an incremental build.
 
   ```
     676  at the start of Phase 1
@@ -53,20 +55,27 @@ the normal way, with the DEBUG entry left as a pointer.
           rather than fixed -- they are a cost, not a defect
    -373  unused entities removed (imports, locals, whole dead
           "use" statements) across 26 files
-    116  remaining, per the counts below
+    -41  the hazard classes: compare-reals, conversion and
+          realloc-lhs driven to zero, yielding BUG-004 through
+          BUG-007
+     75  remaining
   ```
 
-  Remaining, by class:
+  Remaining, by class -- and none of it is mechanical:
 
   ```
-    37  -Wunused-variable        all single-variant; need reading
+    37  -Wunused-variable        ALL single-variant; each needs a
+                                   read against the other build
     33  -Wunused-dummy-argument  an argument passed but never used
                                    can mean the routine FORGOT it
-    20  -Wcompare-reals          genuine hazard class
-    19  -Wconversion             precision / kind, bears on A3
-     4  -Wrealloc-lhs            silent shape change on assignment
-     2  -Wimplicit-interface
+     2  -Wimplicit-interface     BUG-003; fix is specified
+     2  -Wcompare-reals          BUG-002; needs a signature change
+     1  unclassified
   ```
+
+  So what is left is exactly the part that needs a human rather
+  than a rule. Every class that could be settled by inspection has
+  been.
 
   Note `-Wimplicit-interface` fell from 22 to 2 not through any
   fix but because the other 20 are in AUXILIARY programs, which
