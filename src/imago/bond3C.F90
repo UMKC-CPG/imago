@@ -483,15 +483,15 @@ subroutine computeBond3C(inSCF)
                      !   order between each pair of atoms: 1=atoms 1,2;
                      !   2=atoms 1,3; 3=atoms 2,3. This will be used to compute
                      !   the weighted centroid.
-                     call compute3CBO(kPointWeight(i),real(spin,double),&
+                     call compute3CBO(&
                            & chargeScaleFactor,j,currentNode2%valeDimRangeMag,&
                            & BO3C(k)%atom1Index(:),currentNode2%atom2Index(:),&
                            & currentNode3%bondOrder3C,1)
-                     call compute3CBO(kPointWeight(i),real(spin,double),&
+                     call compute3CBO(&
                            & chargeScaleFactor,j,currentNode3%valeDimRangeMag,&
                            & BO3C(k)%atom1Index(:),currentNode3%atom3Index(:),&
                            & currentNode3%bondOrder3C,2)
-                     call compute3CBO(kPointWeight(i),real(spin,double),&
+                     call compute3CBO(&
                            & chargeScaleFactor,j,currentNode3%valeDimRangeMag,&
                            & currentNode2%atom2Index(:),&
                            & currentNode3%atom3Index(:),&
@@ -714,7 +714,24 @@ subroutine getMinDist (i,j,minDistCount,latticeIndices,minDist)
 end subroutine getMinDist
 
 
-subroutine compute3CBO (kPointWeight,spin,chargeScaleFactor,j,index2Mag,&
+! Accumulate one atom pair's contribution to a three-centre bond
+!   order.
+!
+! IT TAKES NO k-POINT WEIGHT AND NO SPIN FACTOR, and that is
+!   deliberate rather than an omission. The weighting is already
+!   inside chargeScaleFactor, which the caller sets from
+!   electronPopulation -- an array that carries the factor
+!   kPointWeight/spin within it. The optical code makes the same
+!   fact visible from the other side: computePairs DIVIDES by
+!   kPointWeight/spin to recover a plain zero-to-one occupancy from
+!   the same array.
+!
+! So anyone "fixing" this by multiplying through by kPointWeight
+!   would count the weight TWICE and silently corrupt every bond
+!   order on a multi-k calculation. The two arguments were passed in
+!   and never used; they are gone so that the question cannot be
+!   asked again from the signature.
+subroutine compute3CBO (chargeScaleFactor,j,index2Mag,&
       & index1,index2,bondOrder3C,atomPairCode)
 
    ! Import necessary modules.
@@ -729,8 +746,6 @@ subroutine compute3CBO (kPointWeight,spin,chargeScaleFactor,j,index2Mag,&
    implicit none
 
    ! Define passed parameters.
-   real (kind=double), intent (in) :: kPointWeight
-   real (kind=double), intent (in) :: spin
    real (kind=double), intent (in) :: chargeScaleFactor
    integer, intent (in) :: j ! State index number
    integer, intent (in) :: index2Mag ! Magnitude of the valeDim index2 range

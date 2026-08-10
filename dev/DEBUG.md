@@ -772,6 +772,65 @@ Ordered by severity (S1 first).
             explicit `real(...)`, which changes nothing but states
             what was already happening.
 
+### BUG-008 -- two potential-blending routines are unreachable
+- File:     `src/imago/potentialUpdate.F90:2033-2313`
+            (blendPotentialsSCF) and `:2318-2557`
+            (blendPotentialsTE)
+- Variant:  [BOTH]
+- Category: LOGIC (dead code)
+- Severity: S4 -- nothing misbehaves; roughly 520 lines mislead
+- Status:   open; NOT deleted, see below
+- Evidence: three `-Wunused-dummy-argument` warnings that made no
+            sense -- `firstTerm` unused while `numTerms` is used,
+            and `totalEnergyRecord` unused by a routine whose whole
+            purpose is blending by total energy.
+- Analysis: The explanation is that neither routine is ever
+            called. Every call site is commented out
+            (`potentialUpdate.F90:1540, 1544, 1550, 1559, 1573`)
+            and a search of the whole tree finds nothing but the
+            definitions and their `end subroutine` lines.
+
+            That also explains `firstTerm` specifically: the dead
+            call sites all pass a literal 1, so a body that ignores
+            it and starts from 1 was never wrong.
+
+            The hazard is not misbehaviour, it is 520 lines of
+            plausible physics that a reader will assume runs.
+- Fix:      A decision rather than an edit, and the programmer's to
+            make: delete them, or mark them clearly as retained on
+            purpose. Deleting 520 lines of potential-blending logic
+            is not something to do on the strength of a warning
+            sweep.
+
+### BUG-009 -- an unused argument that must NOT be "fixed"
+- File:     `src/imago/bond3C.F90:717` (compute3CBO)
+- Variant:  [BOTH]
+- Category: IFACE
+- Severity: S4 as found; S2 if someone had corrected it wrongly
+- Status:   fixed 2026-08-09
+- Evidence: `-Wunused-dummy-argument` on `kPointWeight` and `spin`
+            in a bond-order routine -- which reads like the routine
+            forgot to weight its result.
+- Analysis: **It did not.** The weighting is already inside
+            `chargeScaleFactor`, which the caller sets from
+            `electronPopulation`, and that array carries the factor
+            `kPointWeight/spin` within it. The optical code shows
+            the same fact from the other side: `computePairs`
+            DIVIDES by `kPointWeight/spin` to recover a plain
+            zero-to-one occupancy from the same array.
+
+            This is the reason the bucket was read rather than
+            cleared mechanically. The obvious "fix" -- multiply the
+            accumulation by `kPointWeight` since it is right there
+            unused -- would count the weight TWICE and silently
+            corrupt every bond order on a multi-k run. An unused
+            argument can be an invitation to a bug rather than
+            evidence of one.
+- Fix:      Both arguments removed from the signature and from the
+            three call sites, with the reasoning recorded at the
+            routine so the question cannot be re-asked from a
+            signature that still offers them.
+
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing
 that is correct but undocumented, and each now says so:
