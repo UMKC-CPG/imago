@@ -129435,7 +129435,7 @@ end if
    real (kind=double), dimension (3) :: P, PA, PB, d
    !real (kind=double), dimension (3,3) :: Ki, Kf
    real (kind=double) :: zeta, inv_2zeta, xi
-   complex (kind=double), dimension (3) :: preFactorko, preFactorko1, preFactorko2
+   complex (kind=double), dimension (3) :: preFactorko
    real (kind=double), dimension (3) :: hermite_r
    real (kind=double), dimension (6,3) :: Hn
    complex (kind=double), dimension (6,3) :: hermite_term

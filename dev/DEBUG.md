@@ -128,13 +128,27 @@ the normal way, with the DEBUG entry left as a pointer.
   and against the other build. Both variants compile clean with
   **six unique warning sites**, every one explained in place:
 
-  - **Two in generated code** (`gaussIntegrals.f90:129438`,
-    `prefactorKO1`/`prefactorKO2` unused) -- the one class left
-    to DO. The fix belongs in whatever GENERATOR emits the 135k
-    line file, not in the file. The KO name is the same KOverlap
-    machinery whose +G shift is disabled (BUG-010), so read that
-    entry first: the unused prefactors may be another face of the
-    same disabling rather than an independent oversight.
+  - **The generated-code pair is CLEARED (2026-08-12).** The
+    current generator (`src/scripts/osrecurintgana.py`, its
+    KOverlap printer) already emits a single, used `preFactorKO`;
+    only the checked-in artifact carried the two dead names,
+    inherited from whatever older generator state produced it
+    before the initial Imago commit. A statement-level
+    comparison (continuations joined, spaces stripped, case
+    folded) of the artifact's KOverlap subroutine against a
+    fresh `-p -ko` generation shows the two texts identical in
+    all 2197 statements EXCEPT that declaration -- so the
+    artifact's single declaration line was synced to what the
+    generator emits, and nothing else. The regeneration work
+    also settled two things worth keeping (ledger below):
+    **BUG-013** records that `-a` crashes on a missing
+    `nuclearbb` function -- known to the programmer, deferred --
+    and that the working invocation is the explicit integral
+    list, which reproduced the artifact statement-for-statement
+    (58,876 statements) except for one loop bound; that bound is
+    **BUG-014**, a Boys-order issue the programmer has deferred
+    until g-type orbitals join the method, and it must NOT be
+    cleared by syncing the artifact to the generator.
   - **Four accepted and documented at the site**: readDataSCF's
     `h` and `numStates` (its argument list deliberately mirrors
     readDataPSCF, which needs both in both builds), ortho3Terms'
@@ -229,11 +243,13 @@ the normal way, with the DEBUG entry left as a pointer.
   dominated by compiling the 135k-line generated integral file
   twice.
 
-- **Phases 2 and 3 have not started. Findings ledger: 12 entries,
+- **Phases 2 and 3 have not started. Findings ledger: 14 entries,
   four real defects fixed** (BUG-001, BUG-005, BUG-006, and
-  BUG-009's near miss) **and two open** (BUG-010's physics
-  question, BUG-011's silent mtop death). `build/gfortran-asan`
-  was configured 2026-06-26 and predates months of source change;
+  BUG-009's near miss), **two open** (BUG-010's physics question,
+  BUG-011's silent mtop death), **and two known-deferred by the
+  programmer** (BUG-013's -a path, BUG-014's eighth Boys order,
+  waiting on the g-orbital work). `build/gfortran-asan` was
+  configured 2026-06-26 and predates months of source change;
   reconfigure before trusting it.
 - Phase 2 audit mechanism: multi-agent workflow (decided)
 
@@ -1105,6 +1121,94 @@ Ordered by severity (S1 first).
 - Fix:      Routine deleted. The inline allocations in
             computeForceIntg are unchanged and remain the single
             allocation site for the force matrices.
+
+### BUG-013 -- the generator's -a path is broken (known, deferred)
+- File:     `src/scripts/osrecurintg.py:1385` (main) against
+            `src/scripts/osrecurintgana.py`; artifact is
+            `src/imago/gaussIntegrals.f90`
+- Variant:  [BOTH] (build tooling, not the engine)
+- Category: IFACE
+- Severity: S4 -- the working invocation is the explicit list
+- Status:   recorded 2026-08-12; the programmer confirmed the
+            breakage is known and will be resolved later. Not an
+            open engine defect.
+- Evidence: `osrecurintg.py -p -a` (production output, all
+            integral types) dies with AttributeError: module
+            'osrecurintgana' has no attribute 'nuclearbb'.
+            Per the programmer, `-a` is not how the artifact is
+            produced: the program is called with an explicit
+            list of the required integrals. The invocation that
+            matches the artifact's twelve subroutines, verified
+            2026-08-12 to run to completion and reproduce them
+            in the same order, is:
+            `osrecurintg.py -p -o -k -e -n -m -mv -d -dk -dncb
+            -decb -ko`
+- Analysis: with that explicit regeneration in hand, the whole
+            135k-line artifact was compared against it at
+            normalized statement level (continuations joined,
+            spaces stripped, case folded): all 58,876 statements
+            are IDENTICAL except two. One was the KOverlap
+            prefactor declaration -- the Class 4 warning pair,
+            synced to the generator's form. The other is a loop
+            bound in dnuclear3CIntgCB where the artifact and the
+            generator are BOTH defective in different ways; that
+            is BUG-014, and it must NOT be "fixed" by syncing
+            the artifact to the generator. The case and
+            line-wrap style of the KOverlap section also differs
+            from the current generator's output (the artifact
+            predates the initial commit), which any future
+            regeneration diff will show as bulk churn.
+- Fix:      Deferred by the programmer. Until then, regenerate
+            with the explicit list above, never `-a`.
+
+### BUG-014 -- dnuclear3CIntgCB's eighth Boys order (deferred to g)
+- File:     `src/imago/gaussIntegrals.f90:88127` (the m loop in
+            dnuclear3CIntgCB) and the `boys` routine above it;
+            generator side in `src/scripts/osrecurintgana.py`
+- Variant:  [BOTH]
+- Category: UNINIT (artifact) / BOUNDS (generator output)
+- Severity: S4 today by the programmer's determination; S2 the
+            day g-type orbitals join the basis
+- Status:   recorded 2026-08-12; known to the programmer,
+            deferred until g-type orbitals are added to the
+            Imago method (not for a while)
+- Evidence: the single semantic difference the BUG-013
+            statement-level comparison found in 58,876
+            statements: the artifact initializes the Boys-order
+            prefactors with `do m = 1, 7` where the current
+            generator emits `do m = 1, 8`. In the artifact,
+            `preFactorN` is dimensioned (8), filled to 7, and
+            READ at index 8 in three statements of the final
+            l1l2switch branch (switch 136), so those three
+            products draw an uninitialized value. The
+            generator's form is no fix: its loop reads `F(8)`
+            while `F` is dimensioned (7) and `boys` exports only
+            seven orders -- an out-of-bounds read in place of an
+            uninitialized one. Inside `boys`, the small-T series
+            path computes an eighth order internally (local `S`
+            is dimension (8)) but discards it, and the analytic
+            large-T path has closed-form expressions only
+            through `F(7)`, so exporting order 8 requires
+            deriving that expression, not just widening arrays.
+            Corroboration: the optimized release build's
+            `-Wmaybe-uninitialized` independently flags the
+            artifact's read (`gaussIntegrals.f90:104198`) in
+            both variants' compiles.
+- Analysis: the programmer knows this issue: the top-order terms
+            exist to support the derivative recursion's raised
+            angular momentum, and the defect only becomes live
+            once g-type orbitals are included in the method,
+            which is future work. Until then the affected
+            entries do not reach the returned integrals. Note
+            the force path that calls dnuclear3CIntgCB is also
+            currently unexercised by any recorded run.
+- Fix:      Deferred with the g-orbital work, as one coordinated
+            change: derive the analytic F(8), export eight
+            orders from `boys` with `F` dimensioned (8), keep
+            the generator's `do m = 1, 8`, and regenerate. Do
+            NOT sync the artifact's loop bound to the generator
+            before `boys` is extended -- that converts the
+            uninitialized read into an out-of-bounds read.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing
