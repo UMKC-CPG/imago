@@ -192,8 +192,9 @@ the normal way, with the DEBUG entry left as a pointer.
 
   **Verification status: the paired A/B PASSED (2026-08-12).**
   Twin copies of the reduced KNbO3 deck
-  (`jobs/knbo3/o3/ab_unusedsweep_{old,new}`, left in place as
-  evidence) ran `imago.py -optc` TWICE each -- the second pass
+  (`jobs/knbo3/o3/ab_unusedsweep_{old,new}`, since inspected and
+  deleted along with their scratch) ran `imago.py -optc` TWICE
+  each -- the second pass
   deliberately exercises the restart path this batch touched
   (the "already exists, skipping" branch, the access-side HDF5
   routines, the readDataSCF re-reads). Old side used the
