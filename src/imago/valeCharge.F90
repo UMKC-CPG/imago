@@ -74,8 +74,22 @@ subroutine makeValenceRho(inSCF)
    integer, intent(in) :: inSCF
 
    ! Define the local variables used in this subroutine.
-   integer :: h,i,j,k,l ! Loop index variables
+   integer :: i,j,k ! Loop index variables
+! The l index belongs to the commented-out force-matrix symmetrization
+!   code in the force block near the end of this subroutine; restore
+!   this declaration together with that code.
+!   integer :: l
+#ifndef GAMMA
+   ! These two exist only for the multi-k eigenvector re-read below:
+   !   valeVale holds one k-point at a time, so each k-point's wave
+   !   functions must be read back from disk (h indexes the spin of
+   !   that read), and k-points with negligible occupation are skipped
+   !   (skipKP). The gamma build keeps its single k-point resident in
+   !   memory, so it never re-reads. Spin polarization itself is NOT
+   !   variant-dependent: the do-k=1,spin loops below are shared.
+   integer :: h
    integer :: skipKP
+#endif
    integer :: dim1
    integer :: energyLevelCounter
    real (kind=double) :: sumElecEnergy

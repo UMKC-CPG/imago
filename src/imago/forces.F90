@@ -36,37 +36,17 @@ module O_Force
 contains
 
 
-subroutine allocateIntegralsForce(coreDim,valeDim,numKPoints,spin)
-
-   implicit none
-
-   ! Define passed dummy parameters.
-   integer, intent(in) :: coreDim
-   integer, intent(in) :: valeDim
-   integer, intent(in) :: numKPoints
-   integer, intent(in) :: spin
-
-#ifndef GAMMA
-   allocate (valeValeF (valeDim,valeDim,numKPoints,spin,3))
-   allocate (coreCoreF (coreDim,coreDim,numKPoints,spin,3))
-   allocate (coreValeF (coreDim,valeDim,numKPoints,spin,3))
-#else
-   allocate (valeValeFGamma (valeDim,valeDim,spin,3))
-   allocate (coreCoreFGamma (coreDim,coreDim,spin,3))
-   allocate (coreValeFGamma (coreDim,valeDim,spin,3))
-#endif
-
-end subroutine allocateIntegralsForce
-
-
-
 subroutine computeForceIntg(totalEnergy)
 
    ! Import necessary modules.
    use O_Kinds
    use O_TimeStamps
    use O_Constants,    only: dim3
+#ifndef GAMMA
+   ! The force integral accumulators carry a k-point axis only on the
+   !   multi-k path; the gamma build allocates them without one.
    use O_KPoints, only: numKPoints
+#endif
    use O_PotTypes,     only: potTypes
    use O_AtomicSites,  only: numAtomSites, valeDim, coreDim
    use O_Potential,    only: spin, potCoeffs
@@ -917,7 +897,7 @@ subroutine computeForce(valeValeRho, kPoint, currSpin, currAxis)
          & intent(inout) :: valeValeRho
    integer, intent(in) :: kPoint, currSpin, currAxis
 
-   integer :: i,j,k,l,m
+   integer :: i,j,k,l
    integer :: counter1, counter2
    real (kind=double), allocatable, dimension(:,:) :: atomSum
    real (kind=double) :: theta
@@ -1032,7 +1012,7 @@ subroutine computeForceGamma(valeValeRhoGamma, currSpin, currAxis)
    integer, intent(in) :: currSpin, currAxis
 
    ! Define local variables.
-   integer :: i,j,k,l,m
+   integer :: i,j,k,l
    integer :: counter1, counter2
    real (kind=double), allocatable, dimension(:,:) :: atomSum
    real (kind=double) :: theta
@@ -1073,7 +1053,7 @@ subroutine computeForceGamma(valeValeRhoGamma, currSpin, currAxis)
 
    do i = 1, numAtomSites
       do j = i+1, numAtomSites
-         atomSum(j,i) = atomSum(i,j) * -1.0_double
+         atomSum(j,i) = -atomSum(i,j)
       enddo
    enddo
 

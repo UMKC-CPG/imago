@@ -29,23 +29,32 @@ subroutine computeDIMO (inSCF)
 #ifndef GAMMA
    use O_BLASZHER
    use O_MatrixSubs, only: readPackedMatrix,matrixElementMult,packMatrix
-   use O_SecularEquation, only: valeVale,energyEigenValues,&
-         & readDataSCF, readDataPSCF
+   use O_SecularEquation, only: valeVale, readDataSCF, readDataPSCF
 #else
    use O_BLASDSYR
    use O_MatrixSubs, only: readPackedMatrix, &
          & matrixElementMultGamma,packMatrixGamma
-   use O_SecularEquation, only: valeValeGamma,energyEigenValues,&
-         & readDataSCF, readDataPSCF
+   use O_SecularEquation, only: valeValeGamma, readDataSCF, readDataPSCF
 #endif
 
    ! Define passed parameters.
    integer :: inSCF
 
    ! Define local variables.
-   integer :: h,i,j,k
-   integer :: dim1
+   integer :: i,j,k
+#ifndef GAMMA
+   ! These two exist only for the multi-k eigenvector re-read below:
+   !   valeVale holds one k-point at a time, so each k-point's wave
+   !   functions must be read back from disk (h indexes the spin of
+   !   that read), and k-points with negligible occupation are skipped
+   !   (skipKP). The gamma build keeps its single k-point resident in
+   !   memory, so it never re-reads. Spin polarization itself is NOT
+   !   variant-dependent: the do-k=1,spin accumulation loops below are
+   !   shared by both builds.
+   integer :: h
    integer :: skipKP
+#endif
+   integer :: dim1
    integer :: energyLevelCounter
    real (kind=double), allocatable, dimension (:) :: tempDensity
    real (kind=double), allocatable, dimension (:,:) :: dipoleMomentTrace

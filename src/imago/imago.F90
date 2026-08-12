@@ -134,12 +134,18 @@ subroutine setupSCF
    use O_SCFHDF5, only: initHDF5_SCF
    use O_SCFIntegralsHDF5, only: atomOverlap_did, atomOverlapCV_did, &
          & atomKEOverlap_did, atomMVOverlap_did, atomNPOverlap_did, &
-         & atomDMOverlap_did, atomMMOverlap_did, atomKOverlap_did, &
-         & atomKOverlapPlusG_did, atomPotOverlap_did, atomOverlap_aid, &
-         & atomKEOverlap_aid, atomMVOverlap_aid, atomNPOverlap_aid, &
-         & atomDMOverlap_aid, atomMMOverlap_aid, atomKOverlap_aid, &
-         & atomKOverlapPlusG_aid, atomPotTermOL_aid, &
-         & numComponents, fullCVDims, packedVVDims
+         & atomDMOverlap_did, atomMMOverlap_did, atomPotOverlap_did, &
+         & atomOverlap_aid, atomKEOverlap_aid, atomMVOverlap_aid, &
+         & atomNPOverlap_aid, atomDMOverlap_aid, atomMMOverlap_aid, &
+         & atomPotTermOL_aid, numComponents, fullCVDims, packedVVDims
+#ifndef GAMMA
+   ! The k-point overlap dataset handles feed the gaussKOverlap calls
+   !   below. The gamma-only build works at a single k-point and never
+   !   computes those matrices, so these names exist only in the
+   !   multi-k (complex) build.
+   use O_SCFIntegralsHDF5, only: atomKOverlap_did, atomKOverlap_aid, &
+         & atomKOverlapPlusG_did, atomKOverlapPlusG_aid
+#endif
       use O_CommandLine, only: doDIMO_SCF, doOPTC_SCF, doField_SCF, &
          & doMTOP_SCF, doSYBD_SCF
    use O_Input, only: parseInput, numStates
@@ -148,17 +154,28 @@ subroutine setupSCF
 ! recipVectors is needed only by the commented plusG form of the
 !   gaussKOverlap calls below (BUG-010 in dev/DEBUG.md).
 !   use O_Lattice, only: recipVectors
+#ifndef GAMMA
    use O_KPoints, only: numKPoints, initializeKPoints
+#else
+   use O_KPoints, only: initializeKPoints
+#endif
    use O_Basis, only: renormalizeBasis, cleanUpBasis
    use O_ExchangeCorrelation, only: maxNumRayPoints, getECMeshParameters, &
          & makeECMeshAndOverlap, cleanUpExchCorr
    use O_ElectroStatics, only: makeElectrostatics
    use O_GaussianRelations, only: makeAlphaDist, makeAlphaNucDist, &
          & makeAlphaPotDist, cleanUpGaussRelations
+#ifndef GAMMA
    use O_Integrals,   only: allocateIntegralsSCF, gaussOverlapOL, &
          & gaussOverlapKE, gaussOverlapMV, gaussOverlapNP, &
          & elecPotGaussOverlap, cleanUpIntegrals, &
          & secondCleanUpIntegrals
+#else
+   use O_Integrals,   only: allocateIntegralsSCFGamma, gaussOverlapOL, &
+         & gaussOverlapKE, gaussOverlapMV, gaussOverlapNP, &
+         & elecPotGaussOverlap, cleanUpIntegrals, &
+         & secondCleanUpIntegrals
+#endif
    use O_Integrals3Terms ! Use all so we can exclude gaussKOverlap
    use O_AtomicSites, only: coreDim, valeDim, &
          & cleanUpAtomSites, buildAtomPerm, &
@@ -287,7 +304,11 @@ subroutine setupSCF
 
 
    ! Allocate space to be used for each of the single matrix integrals.
+#ifndef GAMMA
    call allocateIntegralsSCF(coreDim,valeDim,numKPoints)
+#else
+   call allocateIntegralsSCFGamma(coreDim,valeDim)
+#endif
 
 
    ! Calculate the matrix elements of the overlap between all LCAO basis fns.
@@ -337,7 +358,11 @@ subroutine setupSCF
 
       ! Consider in the future an option to do the XYZ independently to
       !   conserve memory if that becomes a problem.
+#ifndef GAMMA
       call allocateIntegrals3Terms(coreDim,valeDim,numKPoints)
+#else
+      call allocateIntegrals3TermsGamma(coreDim,valeDim)
+#endif
 
       ! Do the relevant integrals.
       if (doDIMO_SCF == 1) then
@@ -589,24 +614,41 @@ subroutine intgPSCF
          & doMTOP_PSCF, doField_PSCF
    use O_Potential, only: initPotCoeffs, spin
    use O_Basis, only: renormalizeBasis, cleanUpBasis
+#ifndef GAMMA
    use O_Integrals, only: allocateIntegralsPSCF, gaussOverlapOL,&
          & gaussOverlapHamPSCF, cleanUpIntegrals, secondCleanUpIntegrals, &
          & cleanUpHamIntegrals, reallocateIntegralsPSCF
+#else
+   use O_Integrals, only: allocateIntegralsPSCFGamma, gaussOverlapOL,&
+         & gaussOverlapHamPSCF, cleanUpIntegrals, secondCleanUpIntegrals, &
+         & cleanUpHamIntegrals, reallocateIntegralsPSCFGamma
+#endif
    use O_Integrals3Terms ! Use all so we can exclude gaussKOverlap
    use O_PSCFHDF5, only: initHDF5_PSCF
    use O_PSCFIntegralsHDF5, only: atomOverlapPSCF_did, atomOverlapCV_PSCF_did,&
          & atomHamOverlapPSCF_did, atomDMOverlapPSCF_did,&
-         & atomMMOverlapPSCF_did, atomKOverlapPSCF_did,&
-         & atomKOverlapPlusGPSCF_did,atomOverlapPSCF_aid,&
+         & atomMMOverlapPSCF_did, atomOverlapPSCF_aid,&
          & atomHamOverlapPSCF_aid,atomDMOverlapPSCF_aid,atomMMOverlapPSCF_aid,&
-         & atomKOverlapPSCF_aid, atomKOverlapPlusGPSCF_aid,&
          & numComponents,fullCVDimsPSCF,packedVVDimsPSCF
+#ifndef GAMMA
+   ! The k-point overlap dataset handles feed the gaussKOverlap calls
+   !   below. The gamma-only build works at a single k-point and never
+   !   computes those matrices, so these names exist only in the
+   !   multi-k (complex) build.
+   use O_PSCFIntegralsHDF5, only: atomKOverlapPSCF_did, &
+         & atomKOverlapPSCF_aid, atomKOverlapPlusGPSCF_did, &
+         & atomKOverlapPlusGPSCF_aid
+#endif
    use O_Lattice, only: initializeLattice, initializeFindVec
 ! recipVectors is needed only by the commented plusG form of the
 !   gaussKOverlap calls below (BUG-010 in dev/DEBUG.md).
 !   use O_Lattice, only: recipVectors
+#ifndef GAMMA
    use O_KPoints, only: numKPoints, makePathKPoints, &
          & initializeKPoints
+#else
+   use O_KPoints, only: makePathKPoints, initializeKPoints
+#endif
    use O_GaussianRelations, only: makeAlphaDist, makeAlphaNucDist,&
          & makeAlphaPotDist, cleanUpGaussRelations
    use O_AtomicSites, only: coreDim, valeDim, &
@@ -701,7 +743,11 @@ subroutine intgPSCF
 
 
    ! Allocate space for the integral results.
-   call allocateIntegralsPSCF(coreDim,ValeDim,numKPoints)
+#ifndef GAMMA
+   call allocateIntegralsPSCF(coreDim,valeDim,numKPoints)
+#else
+   call allocateIntegralsPSCFGamma(coreDim,valeDim)
+#endif
 
 
    ! Read the provided potential coefficients.
@@ -722,7 +768,11 @@ subroutine intgPSCF
 
 
    ! Reallocate integrals from the overlap to the hamiltonian.
+#ifndef GAMMA
    call reallocateIntegralsPSCF(coreDim,valeDim,numKPoints,spin)
+#else
+   call reallocateIntegralsPSCFGamma(coreDim,valeDim,spin)
+#endif
 
 
    ! Compute the hamiltonian matrix elements.
@@ -742,7 +792,11 @@ subroutine intgPSCF
 
       ! Consider in the future an option to do the XYZ independently to
       !   conserve memory if that becomes a problem.
+#ifndef GAMMA
       call allocateIntegrals3Terms(coreDim,valeDim,numKPoints)
+#else
+      call allocateIntegrals3TermsGamma(coreDim,valeDim)
+#endif
 
       ! Do the relevant integrals.
       if (doDIMO_PSCF == 1) then
@@ -1389,11 +1443,22 @@ subroutine mtop(inSCF)
    ! Make sure that no funny variables are defined.
    implicit none
 
-   ! Declare passed parameters.
+   ! Declare passed parameters. The inSCF selector is consumed only by
+   !   the computeMTOPPolarization call, which exists in the multi-k
+   !   build alone, so the gamma compile reports it unused. It is kept
+   !   anyway: both builds share the dispatch code that calls mtop.
+   !   That warning is accepted.
    integer, intent(in) :: inSCF
 
    ! Declare local variables.
+#ifndef GAMMA
+   ! The polarization result comes from computeMTOPPolarization, which
+   !   exists only in the multi-k build: the modern theory of
+   !   polarization accumulates a Berry phase along strings of
+   !   k-points, and the single-k-point gamma build has no strings to
+   !   walk.
    real(kind=double), dimension(3,2) :: xyzP
+#endif
 
    ! Open the MTOP files that will be written to.  If a spin polarized
    !   calculation is being done, then 180 holds spin up and 181 holds

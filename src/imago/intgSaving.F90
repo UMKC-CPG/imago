@@ -435,7 +435,7 @@ currentPairDagger(:,:,:) = 0.0_double
       call valeValeSaving (i,j,kPointCount,valeStateIndex,valeStateNum,&
             & valeVale,currentPair)
    else
-      call valeValeSavingFull (i,j,kPointCount,valeStateIndex,valeStateNum,&
+      call valeValeSavingFull (kPointCount,valeStateIndex,valeStateNum,&
             & valeVale,currentPair,currentPairDagger)
    endif
 
@@ -466,7 +466,7 @@ currentPairDagger(:,:,:) = 0.0_double
       call coreCoreSaving (i,j,kPointCount,valeStateNum,coreStateIndex,&
             & coreStateNum,coreCore,currentPair,currentPairDagger)
    else
-      call coreCoreSavingFull (i,j,kPointCount,valeStateNum,coreStateIndex,&
+      call coreCoreSavingFull (kPointCount,valeStateNum,coreStateIndex,&
             & coreStateNum,coreCore,currentPair,currentPairDagger)
    endif
 
@@ -527,7 +527,11 @@ end subroutine valeValeSaving
 
 
 
-subroutine valeValeSavingFull (atom1,atom2,kPointCount,valeStateIndex,&
+! Unlike the triangle-packed valeValeSaving above, this full-matrix
+!   form writes both the (atom1,atom2) block and its dagger partner
+!   explicitly, so it never needs to know which atoms it is saving and
+!   takes no atom indices.
+subroutine valeValeSavingFull (kPointCount,valeStateIndex,&
       & valeStateNum,valeVale,currentPair,currentPairDagger)
 
    ! Import the necessary modules
@@ -542,8 +546,6 @@ subroutine valeValeSavingFull (atom1,atom2,kPointCount,valeStateIndex,&
    implicit none
 
    ! Define variables passed to this subroutine
-   integer :: atom1
-   integer :: atom2
    integer :: kPointCount
    integer, dimension (2) :: valeStateIndex
    integer, dimension (2) :: valeStateNum
@@ -672,7 +674,11 @@ subroutine coreCoreSaving (atom1,atom2,kPointCount,valeStateNum,&
 end subroutine coreCoreSaving
 
 
-subroutine coreCoreSavingFull (atom1,atom2,kPointCount,valeStateNum,&
+! Unlike the triangle-packed coreCoreSaving above, this full-matrix
+!   form writes both the (atom1,atom2) block and its dagger partner
+!   explicitly, so it never needs to know which atoms it is saving and
+!   takes no atom indices.
+subroutine coreCoreSavingFull (kPointCount,valeStateNum,&
       & coreStateIndex,coreStateNum,coreCore,currentPair,currentPairDagger)
 
    ! Import the necessary modules
@@ -687,8 +693,6 @@ subroutine coreCoreSavingFull (atom1,atom2,kPointCount,valeStateNum,&
    implicit none
 
    ! Define variables passed to this subroutine
-   integer :: atom1
-   integer :: atom2
    integer :: kPointCount
    integer, dimension (2) :: valeStateNum
    integer, dimension (2) :: coreStateIndex

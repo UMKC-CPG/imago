@@ -169,8 +169,11 @@ subroutine initSCFEigVecHDF5 (scf_fid,attribInt_dsid,attribIntDims,numStates)
 end subroutine initSCFEigVecHDF5 
 
 
-subroutine accessSCFEigVecHDF5 (scf_fid,attribInt_dsid,attribIntDims,&
-      & numStates)
+! Unlike initSCFEigVecHDF5 above, accessing an existing file only
+!   opens datasets and attributes that were already created, so this
+!   routine has no need for the integer attribute dataspace handles
+!   that the init routine uses to create them.
+subroutine accessSCFEigVecHDF5 (scf_fid,numStates)
 
    ! Import any necessary definition modules.
    use HDF5
@@ -186,8 +189,6 @@ subroutine accessSCFEigVecHDF5 (scf_fid,attribInt_dsid,attribIntDims,&
 
    ! Define the passed parameters.
    integer(hid_t) :: scf_fid
-   integer(hid_t) :: attribInt_dsid
-   integer(hsize_t), dimension (1) :: attribIntDims
    integer, intent(in) :: numStates
 
    ! Define local variables.

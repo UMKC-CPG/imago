@@ -42,6 +42,15 @@ module O_Integrals3Terms
    contains
 
 
+! This allocation routine comes as a variant-specific pair, one member
+!   per build, following the same convention as readMatrix and
+!   readMatrixGamma. The multi-k arrays carry a k-point axis that the
+!   gamma-point arrays do not have, so the two forms take honestly
+!   different argument lists: the gamma form has no use for numKPoints
+!   and therefore does not accept it. Callers select the correct name
+!   under the same preprocessor guard that selects everything else
+!   variant-specific.
+#ifndef GAMMA
 subroutine allocateIntegrals3Terms(coreDim,valeDim,numKPoints)
 
    implicit none
@@ -51,15 +60,24 @@ subroutine allocateIntegrals3Terms(coreDim,valeDim,numKPoints)
    integer, intent(in) :: valeDim
    integer, intent(in) :: numKPoints
 
-#ifndef GAMMA
    allocate (coreCore (coreDim,coreDim,numKPoints,3))
    allocate (valeVale (valeDim,valeDim,numKPoints,3))
-#else
-   allocate (coreCoreGamma (coreDim,coreDim,3))
-   allocate (valeValeGamma (valeDim,valeDim,3))
-#endif
 
 end subroutine allocateIntegrals3Terms
+#else
+subroutine allocateIntegrals3TermsGamma(coreDim,valeDim)
+
+   implicit none
+
+   ! Define passed dummy parameters.
+   integer, intent(in) :: coreDim
+   integer, intent(in) :: valeDim
+
+   allocate (coreCoreGamma (coreDim,coreDim,3))
+   allocate (valeValeGamma (valeDim,valeDim,3))
+
+end subroutine allocateIntegrals3TermsGamma
+#endif
 
 
 
@@ -966,7 +984,6 @@ subroutine gaussKOverlap(valeValeDims,did1,did2,aid,plusGVariant)
    use O_Kinds
    use O_TimeStamps
    use O_Constants, only: dim3
-   use O_Input, only: dipoleCenter
    use O_KPoints, only: numKPoints, numAxialKPoints
    use O_GaussianRelations, only: alphaDist
    use O_AtomicSites, only: valeDim, coreDim, numAtomSites
@@ -1449,6 +1466,12 @@ subroutine ortho3Terms (opCode,valeValeDims,did1,did2,aid)
    ! Define passed dummy parameters.
    integer, intent(in) :: opCode
    integer(hsize_t), dimension(2), intent(in) :: valeValeDims
+   ! The did2 dataset identifiers are written only on the multi-k
+   !   path (the imaginary-part datasets of the results saved below),
+   !   so the gamma compile reports did2 unused. It is kept anyway:
+   !   this routine's body is mostly shared between the builds and all
+   !   of its callers pass both identifier families. That warning is
+   !   accepted.
    integer(hid_t), dimension(numKPoints,3), intent(in) :: did1,did2
    integer(hid_t), intent(in) :: aid
 

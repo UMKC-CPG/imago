@@ -122,42 +122,88 @@ the normal way, with the DEBUG entry left as a pointer.
   divergence, but each one still needs its read against the other
   build before it can be called expected.
 
-- **RESUME HERE (2026-08-10).** Phase 1's mechanical work is
-  finished, and the two decisions that were waiting on the
-  programmer are now resolved and coded (ledger below): **BUG-007**
-  closed -- the programmer verified a fitted neutral-atom charge
-  coefficient can never be negative, so `field.F90` now takes a
-  plain real square root with the invariant recorded at the site --
-  and **BUG-008** resolved -- the four unreachable SCF-blending
-  routines (the ledger's two plus `shiftPotentials` and
-  `blendJointPotentials`, equally unreachable) sit inside an
-  `#if 0` guard with a banner marking them as an Anderson-mixing
-  convergence effort to be revisited. Both changes verified
-  numerically inert by the paired A/B protocol below.
+- **RESUME HERE (2026-08-12).** The Phase 1 warning residue is now
+  READ, not just counted: every remaining `-Wunused` site was
+  adjudicated in classes this session, each against its callers
+  and against the other build. Both variants compile clean with
+  **six unique warning sites**, every one explained in place:
 
-  *BUG-002 and BUG-003 are FIXED (2026-08-10, same day, ledger
-  below).* Doing them surfaced two new open findings: **BUG-010**
-  (the KOverlapPlusG datasets duplicate plain KOverlap because the
-  +G shift is disabled -- a physics question for the programmer,
-  with the revival infrastructure kept commented in the source)
-  and **BUG-011** (the first live `-mtop` run ever recorded dies
-  silently after tetrahedron construction, printing uninitialized
-  values on the RESOLVED_KP_CLASSES line; pre-existing, verified
-  identical on the pre-fix binary).
+  - **Two in generated code** (`gaussIntegrals.f90:129438`,
+    `prefactorKO1`/`prefactorKO2` unused) -- the one class left
+    to DO. The fix belongs in whatever GENERATOR emits the 135k
+    line file, not in the file. The KO name is the same KOverlap
+    machinery whose +G shift is disabled (BUG-010), so read that
+    entry first: the unused prefactors may be another face of the
+    same disabling rather than an independent oversight.
+  - **Four accepted and documented at the site**: readDataSCF's
+    `h` and `numStates` (its argument list deliberately mirrors
+    readDataPSCF, which needs both in both builds), ortho3Terms'
+    `did2`, and mtop's `inSCF`. Each is a shared routine whose
+    argument only the multi-k build consumes; each declaration
+    now carries a comment saying which build uses it, why it
+    stays, and that the warning is accepted. The gamma log will
+    always show these four; that is the recorded end state.
 
-  *The reading that remains, 58 warning sites:*
-  - **19 unused dummy arguments.** Most sort by variant: the ones
-    flagged in only ONE build are used by the other and must stay
-    -- expected `#ifdef` divergence, not waste. The both-variant
-    remainder is the HDF5 `attribInt*` group across four files,
-    which looks like a shared interface convention and is worth
-    checking as a SET rather than one at a time.
-  - **39 unused variables, mostly single-variant.** Each needs one
-    build read against the other. The per-variant logs finally
-    make this tractable; do not attempt it from a single `-j8`
-    log.
-  - Plus the one gfortran Extension note (`mtop.F90:1076`), a
-    one-line parenthesization whenever convenient.
+  *What the reading changed (2026-08-12, coded, ledger below):*
+  - The unused-variable classes went first: true dead locals
+    deleted, variant-divergent locals (`h`, `skipKP`, `xyzP`, the
+    readMatrix staging buffers) moved under the guard of the
+    build that uses them, with the eigenvector re-read comments
+    corrected to say what the variables are actually for.
+  - The four k-point allocators were then variant-split into
+    honest-signature pairs (`allocateIntegralsSCF` /
+    `allocateIntegralsSCFGamma`, likewise PSCF, reallocatePSCF,
+    and allocateIntegrals3Terms), matching the readMatrix pair
+    convention: the gamma form no longer accepts a `numKPoints`
+    it cannot use. The five call sites in `imago.F90` select
+    under the same guard, and the gamma-side `numKPoints`
+    imports those calls had justified are guarded too.
+  - **BUG-012**: `allocateIntegralsForce` had NO callers at all
+    (computeForceIntg allocates the same arrays inline) and is
+    removed.
+  - True dead arguments removed through their call chains:
+    `atom1`/`atom2` from the two Full-saving routines in
+    `intgSaving.F90` (the Full forms write both triangle blocks
+    explicitly, so the diagonal test that needed atom identity
+    vanished with the packing), `weight` from `gaussCalc` (only
+    its square is consumed), and the `attribInt*` handles from
+    the three HDF5 routines that never create attributes -- the
+    two access-side EigVec routines and the unused dims of the
+    ElecStat init. Dropping the uniform attribInt argument
+    bundle across the hdf5 files was an explicit programmer
+    decision (2026-08-12), not an oversight.
+  - The lone gfortran Extension note (unary minus directly after
+    `*` in computeForceGamma) is rewritten as a plain negation,
+    which is algebraically identical.
+
+  **Verification status: the paired A/B PASSED (2026-08-12).**
+  Twin copies of the reduced KNbO3 deck
+  (`jobs/knbo3/o3/ab_unusedsweep_{old,new}`, left in place as
+  evidence) ran `imago.py -optc` TWICE each -- the second pass
+  deliberately exercises the restart path this batch touched
+  (the "already exists, skipping" branch, the access-side HDF5
+  routines, the readDataSCF re-reads). Old side used the
+  installed Aug-10 binaries; new side used a fresh release build
+  of the working tree via `IMAGO_BIN` pointed at a staging dir
+  (`jobs/knbo3/o3/ab_stage_bin`). Every physics output
+  (all `.plot` and `.dat` files) is byte-identical; the text
+  logs differ only in dates and wall-clock lines. The two HDF5
+  intermediates differ at the raw-byte level (embedded object
+  metadata), so they were adjudicated at CONTENT level instead:
+  `h5diff` reports zero differences, and a structural walk of
+  all 695 datasets in the two file pairs confirms identical
+  trees, shapes, dtypes, and per-dataset allocated storage --
+  including that h5diff's 348 "not comparable" objects are
+  datasets empty on BOTH sides (declared, never written).
+
+  Coverage caveat, same as every prior A/B on this deck: the
+  4 k-point job runs the COMPLEX binary only, so the gamma
+  build's changes (its allocator pair members, the negation
+  rewrite in computeForceGamma) are verified by clean
+  compilation, not by execution; and no force run exists to
+  exercise forces.F90 at runtime. The negation rewrite is
+  IEEE-exact regardless (sign-bit change vs multiply by -1.0
+  are the same operation).
 
   *How to VERIFY a change against the KNbO3 reference:* do not
   compare a fresh run against the accumulated outputs in
@@ -183,12 +229,12 @@ the normal way, with the DEBUG entry left as a pointer.
   dominated by compiling the 135k-line generated integral file
   twice.
 
-- **Phases 2 and 3 have not started. Findings ledger: 11 entries,
+- **Phases 2 and 3 have not started. Findings ledger: 12 entries,
   four real defects fixed** (BUG-001, BUG-005, BUG-006, and
   BUG-009's near miss) **and two open** (BUG-010's physics
-  question, BUG-011's silent mtop death). `build/gfortran-asan` was configured
-  2026-06-26 and predates months of source change; reconfigure
-  before trusting it.
+  question, BUG-011's silent mtop death). `build/gfortran-asan`
+  was configured 2026-06-26 and predates months of source change;
+  reconfigure before trusting it.
 - Phase 2 audit mechanism: multi-agent workflow (decided)
 
 ### Tool inventory on this machine (measured 2026-08-09)
@@ -1035,6 +1081,30 @@ Ordered by severity (S1 first).
             whatever runs next after the construction check; an
             IMAGO_CHECKS or asan build of the mtop path would
             likely name the death site directly.
+
+### BUG-012 -- a public allocator no caller has ever used
+- File:     `src/imago/forces.F90:39` (allocateIntegralsForce)
+- Variant:  [BOTH]
+- Category: IFACE
+- Severity: S4
+- Status:   fixed 2026-08-12 (removed)
+- Evidence: `-Wunused-dummy-argument` on `numKPoints` led to the
+            caller read the dummy-argument class requires, and
+            the read found NO callers anywhere in the tree,
+            case-insensitive.
+- Analysis: computeForceIntg performs the identical three force
+            matrix allocations inline (`forces.F90:212`-`218` at
+            the time of removal), so the routine was superseded
+            plumbing that survived because nothing referenced it.
+            Read as a warning site alone it would have passed for
+            one more variant-divergence dummy -- `numKPoints` IS
+            used by its multi-k arm -- and the accepted-warning
+            comment it would have received would have documented
+            a routine that does not exist in any execution path.
+            Only the caller search showed the truth.
+- Fix:      Routine deleted. The inline allocations in
+            computeForceIntg are unchanged and remain the single
+            allocation site for the force matrices.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing

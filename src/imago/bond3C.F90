@@ -86,7 +86,10 @@ subroutine computeBond3C(inSCF)
    use O_Constants,   only: smallThresh
    use O_Lattice,     only: realVectors
    use O_Populate,    only: electronPopulation
-   use O_KPoints,     only: numKPoints, kPointWeight
+   ! Note that kPointWeight is deliberately NOT imported here: the
+   !   weighting rides inside electronPopulation already, as the block
+   !   comment above compute3CBO explains at length.
+   use O_KPoints,     only: numKPoints
    use O_AtomicSites, only: valeDim, numAtomSites, atomSites
    use O_AtomicTypes, only: numAtomTypes, atomTypes, maxNumValeStates
 #ifndef GAMMA

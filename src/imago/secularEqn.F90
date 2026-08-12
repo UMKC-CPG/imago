@@ -1041,16 +1041,29 @@ subroutine readDataSCF(h,i,numStates,matrixCode)
 
    ! Import necessary data modules.
    use O_AtomicSites, only: valeDim
-   use O_SCFIntegralsHDF5, only: packedVVDims,fullVVDims,atomOverlap_did,&
-         & atomMMOverlap_did, atomKOverlap_did, atomKOverlapPlusG_did
+   use O_SCFIntegralsHDF5, only: packedVVDims,atomOverlap_did,&
+         & atomMMOverlap_did
 #ifndef GAMMA
+   ! The k-point overlap datasets (matrix codes 3 through 8) are full,
+   !   unpacked matrices read only on the multi-k path; the gamma build
+   !   reads nothing but the packed datasets above, so these names and
+   !   the full-matrix dimensions exist only in the complex build.
+   use O_SCFIntegralsHDF5, only: fullVVDims, atomKOverlap_did, &
+         & atomKOverlapPlusG_did
    use O_SCFEigVecHDF5, only: valeStates,eigenVectors_did
    use O_MatrixSubs, only: readMatrix,readPackedMatrix,unpackMatrix
 #else
    use O_MatrixSubs, only: readPackedMatrix,unpackMatrixGamma
 #endif
 
-   ! Define passed parameters.
+   ! Define passed parameters. The h and numStates arguments feed only
+   !   the matrixCode 0 eigenvector re-read below, which exists in the
+   !   multi-k build alone because the gamma build keeps its single
+   !   k-point's eigenvectors resident in memory. The gamma compile
+   !   therefore reports both arguments unused. They are kept anyway:
+   !   this routine is shared by both builds, and its argument list
+   !   deliberately mirrors readDataPSCF, which needs h and numStates
+   !   in both builds. That warning is accepted.
    integer, intent(in) :: h ! Spin variable.
    integer, intent(in) :: i ! KPoint variable
    integer, intent(in) :: numStates
@@ -1173,11 +1186,16 @@ subroutine readDataPSCF(h,i,numStates,matrixCode)
    ! Use necessary modules.
 !   use O_KPoints, only: numKPoints
    use O_AtomicSites, only: valeDim
-   use O_PSCFIntegralsHDF5, only: packedVVDimsPSCF,fullVVDimsPSCF,&
-         & atomOverlapPSCF_did,atomMMOverlapPSCF_did,atomKOverlapPSCF_did,&
-         & atomKOverlapPlusGPSCF_did
+   use O_PSCFIntegralsHDF5, only: packedVVDimsPSCF,&
+         & atomOverlapPSCF_did,atomMMOverlapPSCF_did
    use O_PSCFEigVecHDF5, only: valeStatesPSCF,eigenVectorsPSCF_did
 #ifndef GAMMA
+   ! The k-point overlap datasets (matrix codes 3 through 8) are full,
+   !   unpacked matrices read only on the multi-k path; the gamma build
+   !   reads nothing but the packed datasets above, so these names and
+   !   the full-matrix dimensions exist only in the complex build.
+   use O_PSCFIntegralsHDF5, only: fullVVDimsPSCF, atomKOverlapPSCF_did, &
+         & atomKOverlapPlusGPSCF_did
    use O_MatrixSubs, only: readMatrix, readPackedMatrix, unpackMatrix
 #else
    use O_MatrixSubs, only: readMatrixGamma, readPackedMatrix, &

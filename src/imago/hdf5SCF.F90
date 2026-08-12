@@ -164,8 +164,7 @@ subroutine initHDF5_SCF (maxNumRayPoints, numStates)
 
          ! Access the groups of the HDF5 file.
          call accessSCFIntegralHDF5 (kPoint_gid)
-         call accessSCFEigVecHDF5 (kPoint_gid,attribInt_dsid,attribIntDims,&
-               & numStates)
+         call accessSCFEigVecHDF5 (kPoint_gid,numStates)
          call accessSCFEigValHDF5 (kPoint_gid,numStates)
       else
 
@@ -216,7 +215,7 @@ subroutine initHDF5_SCF (maxNumRayPoints, numStates)
       call initSCFIntegralHDF5 (kPoint_gid,attribInt_dsid,attribIntDims)
       call initSCFEigVecHDF5 (kPoint_gid,attribInt_dsid,attribIntDims,numStates)
       call initSCFEigValHDF5 (kPoint_gid,numStates)
-      call initSCFElecStatHDF5 (scf_fid,attribInt_dsid,attribIntDims)
+      call initSCFElecStatHDF5 (scf_fid,attribInt_dsid)
       call initSCFExchCorrHDF5 (scf_fid,attribInt_dsid,attribIntDims,&
             & maxNumRayPoints)
       call initSCFPotRhoHDF5 (scf_fid)

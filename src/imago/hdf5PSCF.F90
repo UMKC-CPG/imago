@@ -160,8 +160,7 @@ subroutine initHDF5_PSCF (numStates)
 
          ! Access the groups of the HDF5 file.
          call accessPSCFIntegralHDF5 (kPoint_gid)
-         call accessPSCFEigVecHDF5 (kPoint_gid,attribInt_dsid,attribIntDims,&
-               & numStates)
+         call accessPSCFEigVecHDF5 (kPoint_gid,numStates)
          call accessPSCFEigValHDF5 (kPoint_gid,numStates)
       else
 

@@ -97,7 +97,7 @@ subroutine computeFieldMesh(inSCF)
    use O_PotTypes,     only: maxNumPotAlphas, potTypes
    use O_AtomicSites,  only: valeDim, numAtomSites, atomSites, &
          & computeIonicMoment
-   use O_Kpoints,      only: numKPoints, kPointWeight, phaseFactor
+   use O_Kpoints,      only: numKPoints, kPointWeight
    use O_Input,        only: numStates, doProfileField, &
          & eminFIELD, emaxFIELD, doPsiFIELD, doWavFIELD, doRhoFIELD, &
          & doPotFIELD, doXDMFField, doDipoleField
@@ -107,18 +107,24 @@ subroutine computeFieldMesh(inSCF)
    use O_Lattice,      only: logBasisFnThresh, numCellsReal, cellSizesReal, &
          & cellDimsReal, numMeshPoints, realVectors, realFractStrideLength, &
          & findLatticeVector, realCellVolume
-   use O_FieldHDF5,    only: psiR_did, psiI_did, wav_did, rho_did, pot_did, &
+   use O_FieldHDF5,    only: psiR_did, wav_did, rho_did, pot_did, &
          & mesh_did, triggerAxis, meshTriggerAxis, fieldDimsChunk, &
          & meshDimsChunk, memMeshChunk_dsid, field_dsid, &
          & mesh_dsid
 #ifndef GAMMA
+   ! The k-point phase factors and the imaginary-part field dataset
+   !   matter only when the wave functions are complex. The gamma
+   !   build's wave functions are purely real, so it applies no phases
+   !   and writes no imaginary field component.
+   use O_Kpoints,      only: phaseFactor
+   use O_FieldHDF5,    only: psiI_did
    use O_MatrixSubs,      only: readMatrix
    use O_SecularEquation, only: valeVale, energyEigenValues, readDataSCF, &
-         & readDataPSCF, valeValeOL
+         & readDataPSCF
 #else
    use O_MatrixSubs,      only: readMatrixGamma
    use O_SecularEquation, only: valeValeGamma, energyEigenValues, &
-         & readDataSCF, readDataPSCF, valeValeOLGamma
+         & readDataSCF, readDataPSCF
 #endif
 
    ! Make sure that no variables are accidentally defined.
@@ -2089,7 +2095,12 @@ subroutine makeNeutralCoeffs
    use O_Kinds
    use O_Constants,   only: lAngMomCount
    use O_ElementData, only: coreCharge, valeCharge
+#ifndef GAMMA
+   ! The neutral-atom coefficients are spread across k-points with
+   !   their weights only on the multi-k path; the gamma build has a
+   !   single implicit k-point of weight one and needs neither name.
    use O_KPoints,     only: numKPoints, kPointWeight
+#endif
    use O_AtomicSites, only: valeDim, numAtomSites, atomSites
    use O_AtomicTypes, only: atomTypes
    use O_PotTypes,    only: potTypes

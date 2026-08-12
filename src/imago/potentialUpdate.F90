@@ -4501,7 +4501,7 @@ subroutine gaussFit(darwinPot,rGrid,rGridSqrd,currentNumTerms,&
    ! Computing the coefficients that will best fit the numerical darwinPot
    !   data. The resulting coefficients are stored in the fittedPot array.
    call gaussCalc(currentType,currentNumTerms,rGridSqrd,&
-         & weightSqrd,darwinPot,numPoints,fittedPot,weight)
+         & weightSqrd,darwinPot,numPoints,fittedPot)
 
    ! Deallocate unnecessary arrays.
    deallocate(weight)
@@ -4511,7 +4511,7 @@ end subroutine gaussFit
 
 
 subroutine gaussCalc(currentType,currentNumTerms,rGridSqrd,&
-      & weightSqrd,darwinPot,numPoints,fittedPot,weight)
+      & weightSqrd,darwinPot,numPoints,fittedPot)
 
    ! Import necessary definitions.
    use O_Kinds
@@ -4532,8 +4532,6 @@ subroutine gaussCalc(currentType,currentNumTerms,rGridSqrd,&
    integer :: numPoints
    real (kind=double), dimension (currentNumTerms) :: fittedPot ! List of the
         ! coefficients to the gaussian functions.  Dim=currentNumTerms
-   real (kind=double), dimension (numPoints) :: weight ! Weighting
-        ! factors for integration.  Dim=numPoints
 
    ! Define local variables 
    real (kind=double), allocatable, dimension (:,:) :: gaussFn ! Numerical

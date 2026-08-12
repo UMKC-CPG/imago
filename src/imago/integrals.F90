@@ -79,6 +79,15 @@ module O_Integrals
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    contains
 
+! The allocation routines below come in variant-specific pairs, one
+!   member per build, following the same convention as readMatrix and
+!   readMatrixGamma. The multi-k arrays carry a k-point axis that the
+!   gamma-point arrays do not have, so the two forms take honestly
+!   different argument lists: the gamma form has no use for numKPoints
+!   and therefore does not accept it. Callers select the correct name
+!   under the same preprocessor guard that selects everything else
+!   variant-specific.
+#ifndef GAMMA
 subroutine allocateIntegralsSCF(coreDim,valeDim,numKPoints)
 
    implicit none
@@ -88,19 +97,29 @@ subroutine allocateIntegralsSCF(coreDim,valeDim,numKPoints)
    integer, intent(in) :: valeDim
    integer, intent(in) :: numKPoints
 
-#ifndef GAMMA
    allocate (coreCore   (coreDim,coreDim,numKPoints))
    allocate (coreValeOL (coreDim,valeDim,numKPoints)) ! Used for all ortho
    allocate (valeVale   (valeDim,valeDim,numKPoints))
+
+end subroutine allocateIntegralsSCF
 #else
+subroutine allocateIntegralsSCFGamma(coreDim,valeDim)
+
+   implicit none
+
+   ! Define passed dummy parameters.
+   integer, intent(in) :: coreDim
+   integer, intent(in) :: valeDim
+
    allocate (coreCoreGamma   (coreDim,coreDim))
    allocate (coreValeOLGamma (coreDim,valeDim)) ! Used for all ortho
    allocate (valeValeGamma   (valeDim,valeDim))
+
+end subroutine allocateIntegralsSCFGamma
 #endif
 
-end subroutine allocateIntegralsSCF
 
-
+#ifndef GAMMA
 subroutine allocateIntegralsPSCF(coreDim,valeDim,numKPoints)
 
    implicit none
@@ -110,19 +129,29 @@ subroutine allocateIntegralsPSCF(coreDim,valeDim,numKPoints)
    integer, intent(in) :: valeDim
    integer, intent(in) :: numKPoints
 
-#ifndef GAMMA
    allocate (coreCore   (coreDim,coreDim,numKPoints))
    allocate (coreValeOL (coreDim,valeDim,numKPoints))
    allocate (valeVale   (valeDim,valeDim,numKPoints))
+
+end subroutine allocateIntegralsPSCF
 #else
+subroutine allocateIntegralsPSCFGamma(coreDim,valeDim)
+
+   implicit none
+
+   ! Define passed dummy parameters.
+   integer, intent(in) :: coreDim
+   integer, intent(in) :: valeDim
+
    allocate (coreCoreGamma   (coreDim,coreDim))
    allocate (coreValeOLGamma (coreDim,valeDim))
    allocate (valeValeGamma   (valeDim,valeDim))
+
+end subroutine allocateIntegralsPSCFGamma
 #endif
 
-end subroutine allocateIntegralsPSCF
 
-
+#ifndef GAMMA
 subroutine reallocateIntegralsPSCF(coreDim,valeDim,numKPoints,spin)
 
    implicit none
@@ -133,21 +162,31 @@ subroutine reallocateIntegralsPSCF(coreDim,valeDim,numKPoints,spin)
    integer, intent(in) :: numKPoints
    integer, intent(in) :: spin
 
-#ifndef GAMMA
    deallocate(coreCore)
    deallocate(valeVale)
    allocate (coreCoreHam (coreDim,coreDim,numKPoints,spin))
    allocate (coreValeHam (coreDim,valeDim,numKPoints,spin))
    allocate (valeValeHam (valeDim,valeDim,numKPoints,spin))
+
+end subroutine reallocateIntegralsPSCF
 #else
+subroutine reallocateIntegralsPSCFGamma(coreDim,valeDim,spin)
+
+   implicit none
+
+   ! Define passed dummy parameters.
+   integer, intent(in) :: coreDim
+   integer, intent(in) :: valeDim
+   integer, intent(in) :: spin
+
    deallocate(coreCoreGamma)
    deallocate(valeValeGamma)
    allocate (coreCoreHamGamma (coreDim,coreDim,spin))
    allocate (coreValeHamGamma (coreDim,valeDim,spin))
    allocate (valeValeHamGamma (valeDim,valeDim,spin))
-#endif
 
-end subroutine reallocateIntegralsPSCF
+end subroutine reallocateIntegralsPSCFGamma
+#endif
 
 
 ! Standard two center overlap integral.
@@ -251,8 +290,14 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
    ! Define variables used only if the overlap was already done and now we
    !   just need to read in the coreValeOL result to help with
    !   orthogonalization of other integral matrices in the future.
+#ifndef GAMMA
+   ! These staging buffers exist only in the multi-k build: readMatrix
+   !   fills separate real and imaginary parts before combining them
+   !   into the complex coreValeOL, while the gamma build's
+   !   readMatrixGamma reads its purely real matrix directly.
    real (kind=double), allocatable, dimension(:,:) :: tempRealCoreVale
    real (kind=double), allocatable, dimension(:,:) :: tempImagCoreVale
+#endif
 
    ! Define variables for gauss integrals
    integer :: l1l2Switch

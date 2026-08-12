@@ -61,7 +61,7 @@ module O_SCFElecStatHDF5
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    contains
 
-subroutine initSCFElecStatHDF5 (scf_fid,attribInt_dsid,attribIntDims)
+subroutine initSCFElecStatHDF5 (scf_fid,attribInt_dsid)
 
    ! Import any necessary definition modules.
    use HDF5
@@ -72,7 +72,6 @@ subroutine initSCFElecStatHDF5 (scf_fid,attribInt_dsid,attribIntDims)
    ! Define the passed parameters.
    integer(hid_t) :: scf_fid
    integer(hid_t) :: attribInt_dsid
-   integer(hsize_t), dimension (1) :: attribIntDims
 
    ! Define local variables.
    integer :: hdferr

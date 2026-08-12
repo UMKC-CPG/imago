@@ -170,8 +170,11 @@ subroutine initPSCFEigVecHDF5 (pscf_fid,attribIntPSCF_dsid,&
 end subroutine initPSCFEigVecHDF5 
 
 
-subroutine accessPSCFEigVecHDF5 (pscf_fid,attribIntPSCF_dsid,&
-      & attribIntDimsPSCF,numStates)
+! Unlike initPSCFEigVecHDF5 above, accessing an existing file only
+!   opens datasets and attributes that were already created, so this
+!   routine has no need for the integer attribute dataspace handles
+!   that the init routine uses to create them.
+subroutine accessPSCFEigVecHDF5 (pscf_fid,numStates)
 
    ! Import any necessary definition modules.
    use HDF5
@@ -187,8 +190,6 @@ subroutine accessPSCFEigVecHDF5 (pscf_fid,attribIntPSCF_dsid,&
 
    ! Define the passed parameters.
    integer(hid_t) :: pscf_fid
-   integer(hid_t) :: attribIntPSCF_dsid
-   integer(hsize_t), dimension (1) :: attribIntDimsPSCF
    integer, intent(in) :: numStates
 
    ! Define local variables.
