@@ -122,11 +122,49 @@ the normal way, with the DEBUG entry left as a pointer.
   divergence, but each one still needs its read against the other
   build before it can be called expected.
 
-- **RESUME HERE (2026-08-12).** The Phase 1 warning residue is now
-  READ, not just counted: every remaining `-Wunused` site was
-  adjudicated in classes this session, each against its callers
-  and against the other build. Both variants compile clean with
-  **six unique warning sites**, every one explained in place:
+- **RESUME HERE (2026-08-12, end of session).** Where things
+  stand and what is next, in order:
+
+  1. **Phase 1 is CLOSED** (commits `8c68021`, `478d1dd`,
+     `3e170d6`): audit-build warnings at their recorded end
+     state of four accepted-and-documented sites; A/B passed;
+     binaries installed.
+  2. **Phase 2 was resequenced** (decisions log): tool-seeded
+     evidence before open-ended reading. Step 1 -- the
+     release-build `-Wuninitialized` tranche -- is DONE
+     (section above): 34 groups adjudicated, 30 benign or
+     already known, three accepted into the ledger as
+     **BUG-015 (ETA), BUG-016 (gamma force dump), BUG-017
+     (spin clamp)**. The ledger updates are committed; nothing
+     in the working tree is uncommitted.
+  3. **NEXT ACTION: fix BUG-015/016/017.** 016 and 017 are
+     one-liners with the fix shape recorded in their entries.
+     015 needs one programmer decision first: initialize
+     `ETA = 1.D-12` as the Burke reference does, or write the
+     spin-restricted specialization honestly as `GZ = 0`.
+     Then A/B per the protocol below (015/017 sit on the SCF
+     path; 016 is gamma-forces, compile-verified only).
+  4. **Then Phase 2 step 2: Phase 3 runtime instrumentation.**
+     `build/gfortran-asan`, `build/debug`, and `build/_0d_asan`
+     were deleted in the 2026-08-12 space cleanup -- reconfigure
+     from the presets (`cmake --preset gfortran-asan`). Run the
+     KNbO3 decks under asan/valgrind and SNaN+FPE, both
+     variants.
+  5. **Then reassess the shrunken fan-out** (step 3 of the
+     resequencing). The preprocessed variant texts prepared for
+     it lived in session scratch and are gone; regenerate with
+     `gfortran -cpp -E [-DGAMMA] <file>` per variant when
+     needed.
+
+  Evidence locations: uninit tranche logs in
+  `build/release/uninit_{real,complex}.log`; the Phase 1 class
+  logs in `build/gfortran-audit/class*_{real,complex}.log`.
+
+  *The Phase 1 record (kept for reference):* every remaining
+  `-Wunused` site was adjudicated in classes, each against its
+  callers and against the other build. Both variants compile
+  clean with six unique warning sites at the time of closure,
+  every one explained in place:
 
   - **The generated-code pair is CLEARED (2026-08-12).** The
     current generator (`src/scripts/osrecurintgana.py`, its
@@ -244,14 +282,17 @@ the normal way, with the DEBUG entry left as a pointer.
   dominated by compiling the 135k-line generated integral file
   twice.
 
-- **Phases 2 and 3 have not started. Findings ledger: 14 entries,
-  four real defects fixed** (BUG-001, BUG-005, BUG-006, and
-  BUG-009's near miss), **two open** (BUG-010's physics question,
-  BUG-011's silent mtop death), **and two known-deferred by the
+- **Phase 2 step 1 (release-uninit tranche) is DONE. Findings
+  ledger: 17 entries, four real defects fixed** (BUG-001,
+  BUG-005, BUG-006, and BUG-009's near miss), **five open**
+  (BUG-010's physics question, BUG-011's silent mtop death, and
+  the tranche's three: BUG-015 ETA, BUG-016 gamma force dump,
+  BUG-017 spin-clamp guard), **and two known-deferred by the
   programmer** (BUG-013's -a path, BUG-014's eighth Boys order,
-  waiting on the g-orbital work). `build/gfortran-asan` was
-  configured 2026-06-26 and predates months of source change;
-  reconfigure before trusting it.
+  waiting on the g-orbital work). Next: fix the accepted three,
+  then Phase 3 runtime instrumentation. `build/gfortran-asan`
+  was deleted in the 2026-08-12 cleanup; reconfigure from the
+  preset when Phase 3 needs it.
 - Phase 2 audit mechanism: multi-agent workflow (decided)
 
 ### Tool inventory on this machine (measured 2026-08-09)
@@ -642,10 +683,71 @@ assign final severities and IDs, and order by severity. From there
 the ledger drives the fix work and can be cross-linked into
 `TODO.md`.
 
+## Release-build uninitialized tranche (harvested 2026-08-12)
+
+The resequenced Phase 2's step 1. Fresh from-scratch release
+(-O3) builds of both variants, separate logs
+(`build/release/uninit_{real,complex}.log`), yield 45 raw
+`-Wuninitialized`/`-Wmaybe-uninitialized` sites that collapse to
+**34 (file, variable) groups**: 1 definite, 33 maybes. Group
+counts by file: field.F90 21, potentialUpdate.F90 5, forces.F90
+2, optcSpectra.F90 2, and one each in optc.F90, bond.F90,
+dos.F90, gaussIntegrals.f90 (that last is BUG-014's
+`preFactorN`, already adjudicated). The full grouped table is
+reproducible by re-parsing the two logs.
+
+Adjudication complete (2026-08-12). The programmer reviewed the
+three candidates and accepted all three into the ledger:
+
+- `ETA` uninitialized in the PBE correlation copy -> **BUG-015**
+- gamma force dump's stale-index OOB read -> **BUG-016**
+- SXS/SYS/SZS clamp missing its spin guard -> **BUG-017**
+- **28 remaining maybes adjudicated BENIGN, plus one already
+  known (gaussIntegrals `preFactorN` = BUG-014).** Every benign
+  group is the same flow-analysis blind spot: setup and use
+  guarded by the same module-variable condition, which the
+  optimizer must assume could change between reads. The
+  clusters: all 21 field.F90 groups (allocation, initialization,
+  accumulation, and deallocation each under matching
+  `doPsiFIELD`/`doWavFIELD`/`doRhoFIELD`/`doPotFIELD` tests, or
+  scalars set and used under the OR of those flags);
+  potentialUpdate `currentPot` (`rel == 1` on allocate, use, and
+  deallocate); optc `momentPairTemp` (allocated for
+  `numStoredCompPOPTC > 1`, written in the `else` of `== 1`,
+  read under `> 1`, deallocated behind `allocated()`); forces
+  `zFactor` (assigned and consumed inside the same
+  nuclear-potential branch of the term loop); optcSpectra
+  `sigma`/`energyDelta` (assigned for doOPTC 1 and 2; the
+  routine's comment documents that Sigma(E) runs never call it);
+  dos `pdosAccum` (Gaussian path allocates and uses; the LAT
+  path allocates its own inside computeProjections_LAT, as
+  commented at the allocation); bond `bondCompleteAtom`
+  (`excitedAtomPACS /= 0` guards allocation, zeroing, and
+  output).
+
 ## Decisions log
 
 - **Phase 2 mechanism:** multi-agent workflow (parallel subagent
   fan-out), chosen 2026-06-25.
+- **Phase 2 resequenced (2026-08-12):** the open-ended nine-group
+  fan-out is deferred behind cheaper evidence. Rationale: every
+  ledger finding to date was SEEDED by a tool (a warning, a live
+  run, a generator comparison) and settled by targeted reading
+  around the seed; none came from open-ended reading. New order:
+  (1) harvest the RELEASE-build `-Wuninitialized` and
+  `-Wmaybe-uninitialized` tranche -- the optimizer's flow
+  analysis fires only at -O2 and above, so the audit-build logs
+  Phase 1 was scored on never contained this family -- and
+  adjudicate those sites seed-first, definite hits before
+  maybes; (2) run Phase 3 runtime instrumentation (asan,
+  valgrind, SNaN+FPE) ahead of any fan-out, since it hunts the
+  leak/uninit classes better than static reading and its
+  findings are observed rather than inferred; (3) only then
+  reassess a SHRUNKEN Phase 2: a mechanical diff of the
+  preprocessed real-vs-complex texts feeding a small
+  verification pass, an HDF5 handle-balance check, and the
+  parallel-hazard inventory. Candidate findings are reviewed by
+  the programmer BEFORE receiving BUG numbers.
 - **Generated integral files:** `gaussIntegrals.f90` (135K lines)
   and `gaussIntegrals.vec.f90` (39K lines) are machine-generated
   and treated as *trusted*. They receive only a structural
@@ -1210,6 +1312,105 @@ Ordered by severity (S1 first).
             NOT sync the artifact's loop bound to the generator
             before `boys` is extended -- that converts the
             uninitialized read into an out-of-bounds read.
+
+### BUG-015 -- ETA is never set in the PBE correlation potential
+- File:     `src/imago/potentialUpdate.F90:3913` (the PBE
+            correlation section; declared at `:3781`)
+- Variant:  [BOTH]
+- Category: UNINIT
+- Severity: S2 -- silently right by luck, NaN-poisons the SCF on
+            the wrong stack bits
+- Status:   open; found 2026-08-12 by the release-build
+            `-Wuninitialized` harvest (the tranche above),
+            accepted by the programmer 2026-08-12
+- Evidence: gfortran's definite (not "maybe") flow verdict: ETA
+            is read at :3913 and assigned nowhere. Both
+            variants' compiles agree.
+- Analysis: the section is a copy of the Burke reference CORPBE
+            routine, where `ETA=1.D-12` is a regularization
+            constant inside `((1+/-ZET)**2+ETA)**(-1/6)` guarding
+            the spin-polarization derivative at |ZET| = 1. This
+            copy is the spin-restricted (ZET = 0) specialization:
+            both terms collapsed to `(1D0+ETA)`, and the ETA
+            assignment was dropped. So
+            `GZ = ((1+ETA)**(-1/6) - (1+ETA)**(-1/6))/3`
+            subtracts two textually identical terms: for any
+            garbage with 1+ETA > 0 they cancel EXACTLY, GZ = 0,
+            which is the correct spin-restricted value -- results
+            are right, by luck, almost always. If the stack frame
+            ever holds bits with 1+ETA < 0 (or a NaN pattern),
+            the fractional power is NaN, GZ = NaN, and it
+            propagates through HZ into the correlation potential
+            and the whole SCF cycle.
+- Fix:      Pending the programmer's choice of shape: initialize
+            `ETA = 1.D-12` as the reference does (keeps the
+            formula's lineage visible), or state the ZET = 0
+            specialization honestly as `GZ = 0` with a comment
+            (removes the dead algebra). Either ends the
+            uninitialized read; both are numerically identical
+            for sane ETA.
+
+### BUG-016 -- gamma force dump reads stale loop indices
+- File:     `src/imago/forces.F90:850` (end-of-routine force
+            matrix print, gamma branch)
+- Variant:  [GAMMA]
+- Category: BOUNDS
+- Severity: S2 -- memory-unsafe reads and garbage output
+            whenever the gamma force path runs (currently
+            unexercised by any recorded run)
+- Status:   open; found 2026-08-12 adjudicating the
+            `-Wmaybe-uninitialized` tranche ('q' may be used
+            uninitialized), accepted by the programmer
+            2026-08-12
+- Evidence: the complex branch of the same print block writes
+            `valeValeF(m,l,k,j,i)` using its own loop indices.
+            The gamma branch loops over i (xyz), j (spin), and l
+            but prints `valeValeFGamma(:,l,q,r)` -- and q, r are
+            not loop variables there. They hold whatever the
+            save loops above left behind: a completed
+            `do q = 1, spin` / `do r = 1, 3` exits with
+            q = spin+1, r = 4.
+- Analysis: every print statement therefore reads
+            `valeValeFGamma(:,l,spin+1,4)` -- out of bounds on
+            BOTH trailing dimensions of the
+            (valeDim,valeDim,spin,3) array -- and emits the same
+            wrong slice for every (i,j) combination instead of
+            walking the spin and direction axes. A `-fcheck=all`
+            build aborts here the first time the gamma force
+            dump executes. The compiler surfaced it as
+            "maybe-uninitialized" only because the zero-trip
+            possibility of the atom loops is the one path where
+            q is never assigned at all.
+- Fix:      Pending: the intended reference is plainly
+            `valeValeFGamma(:,l,j,i)`, mirroring the complex
+            branch's index use.
+
+### BUG-017 -- the GGA spin-gradient clamp misses its spin guard
+- File:     `src/imago/potentialUpdate.F90:958-966` (GGA
+            ray-point loop)
+- Variant:  [BOTH]
+- Category: UNINIT
+- Severity: S4 -- a real uninitialized read, consequence-free
+            today
+- Status:   open; found 2026-08-12 adjudicating the
+            `-Wmaybe-uninitialized` tranche, accepted by the
+            programmer 2026-08-12
+- Evidence: the spin-difference gradient sums SXS/SYS/SZS are
+            assigned under `if (spin == 2)` and consumed
+            (written into exchCorrRhoSpin) under
+            `if (spin == 2)`, but the smallThresh clamp between
+            those sits under `if (GGA == 1)` alone. Every
+            spin-restricted GGA ray point therefore compares
+            three garbage values against smallThresh.
+- Analysis: consequence-free as written: the clamp writes back
+            only to the locals, and nothing reads them when
+            spin == 1 (a NaN bit pattern simply skips the
+            clamp). But it is undefined behavior standing one
+            refactor away from mattering, and it is exactly the
+            read the compiler flagged.
+- Fix:      Pending: put the three clamps under the same
+            `spin == 2` guard their assignments and their
+            consumers already have.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing
