@@ -847,7 +847,7 @@ subroutine computeForceIntg(totalEnergy)
          write (97+j,*) "i(x,y,z)=",i
          write (97+j,*) "j(spin)=",j
          do l = 1, valeDim
-            write (97+j,*) valeValeFGamma(:,l,q,r)
+            write (97+j,*) valeValeFGamma(:,l,j,i)
          enddo
       enddo
    enddo

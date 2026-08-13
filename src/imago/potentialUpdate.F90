@@ -955,14 +955,19 @@ subroutine makeSCFPot (totalEnergy)
             if (SZC < smallThresh) then
                SZC = smallThresh
             endif
-             if (SXS < smallThresh) then
-               SXS = smallThresh
-            endif
-            if (SYS < smallThresh) then
-               SYS = smallThresh
-            endif
-            if (SZS < smallThresh) then
-               SZS = smallThresh
+            ! The spin-difference sums SXS/SYS/SZS are assigned and
+            !   consumed only when spin == 2, so their clamp carries
+            !   the same guard.
+            if (spin == 2) then
+               if (SXS < smallThresh) then
+                  SXS = smallThresh
+               endif
+               if (SYS < smallThresh) then
+                  SYS = smallThresh
+               endif
+               if (SZS < smallThresh) then
+                  SZS = smallThresh
+               endif
             endif
          endif
 
@@ -3778,7 +3783,10 @@ subroutine pbe96(rho,rhox,rhoy,rhoz,rhoxx,rhoxy,rhoxz,rhoyy,rhoyz,rhozz,answer)
    ! Variables used for correlation energy and potential
    real (kind=double) :: FZZ,F,EC,ECRS,FZ,ECZET,COMM,COMM2,COMM3,VCUP
    real (kind=double) :: VCDN,DVCUP,DVCDN,G,PON,B,Q4,Q5,H,T
-   real (kind=double) :: Beta,Gamm,DELT,ETA,GAM
+   real (kind=double) :: Beta,Gamm,DELT,GAM
+   ! ETA belongs to the commented general GZ form in the PBE correlation
+   !   potential section below; declare and set it when restoring that form.
+   !real (kind=double) :: ETA
    real (kind=double) :: correlationEnergy,correlationPotential
    real (kind=double) :: BG,BEC,FAC,FACT2,Q9
    real (kind=double) :: FACT1,FACT0,FACT5,FACT3,HRST,GZ
@@ -3909,8 +3917,21 @@ subroutine pbe96(rho,rhox,rhoy,rhoz,rhoxx,rhoxy,rhoxz,rhoyy,rhoyz,rhozz,answer)
 
    WW= 0D0
 
-   GZ=((1D0+ETA)**(-1D0/6D0)- &
-      & (1D0+ETA)**(-1/6D0))/3D0
+   ! GZ is the zeta-derivative of phi(zeta), the PBE spin-scaling function
+   !!    phi(zeta) = ((1+zeta)**(2/3) + (1-zeta)**(2/3)) / 2
+   ! evaluated here in the spin-restricted specialization at zeta = 0.
+   ! Phi is even in zeta -- swapping the up and down spin densities cannot
+   ! change the correlation energy -- so its derivative vanishes exactly
+   ! by symmetry; we assign that zero directly.  The commented form below
+   ! is the derivative as Burke's reference CORPBE writes it, collapsed
+   ! to zeta = 0: there ETA = 1.D-12 regulates a divergence at complete
+   ! polarization (|zeta| = 1), a point this path cannot reach, and the
+   ! two identical terms cancel to zero for any ETA.  Restoring the general
+   ! formula also means re-enabling the commented ETA declaration among the
+   ! correlation locals and assigning it (ledger entry BUG-015 in dev/DEBUG.md).
+   !GZ=((1D0+ETA)**(-1D0/6D0)- &
+   !   & (1D0+ETA)**(-1/6D0))/3D0
+   GZ=0D0
    FAC=DELT/B+1D0
    BG=-3D0*(B**2D0)*EC*FAC/(Beta*(G**4D0))
    BEC=(B**2D0)*FAC/(Beta*(G**3D0))

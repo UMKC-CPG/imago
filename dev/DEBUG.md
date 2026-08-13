@@ -135,16 +135,28 @@ the normal way, with the DEBUG entry left as a pointer.
      (section above): 34 groups adjudicated, 30 benign or
      already known, three accepted into the ledger as
      **BUG-015 (ETA), BUG-016 (gamma force dump), BUG-017
-     (spin clamp)**. The ledger updates are committed; nothing
-     in the working tree is uncommitted.
-  3. **NEXT ACTION: fix BUG-015/016/017.** 016 and 017 are
-     one-liners with the fix shape recorded in their entries.
-     015 needs one programmer decision first: initialize
-     `ETA = 1.D-12` as the Burke reference does, or write the
-     spin-restricted specialization honestly as `GZ = 0`.
-     Then A/B per the protocol below (015/017 sit on the SCF
-     path; 016 is gamma-forces, compile-verified only).
-  4. **Then Phase 2 step 2: Phase 3 runtime instrumentation.**
+     (spin clamp)**.
+  3. **BUG-015/016/017 are FIXED and A/B-VERIFIED 2026-08-12.**
+     015 became `GZ = 0` with the reference form and the ETA
+     declaration retained as commented-out code (programmer's
+     choice); 016 became the `(:,l,j,i)` index fix, compile-
+     verified only since no recorded run reaches the gamma force
+     dump; 017 gained the `spin == 2` guard. The post-fix release
+     rebuild is clean of all three warnings
+     (`build/release/uninit_{real,complex}_postfix.log`). The
+     paired `-optc` x2 A/B (`jobs/knbo3/o3/ab_uninit_{old,new}`,
+     staged bin `jobs/ab_stage_bin`) was byte-identical on every
+     data file with only wall-clock timestamps differing, and the
+     HDF5 files content-identical: h5diff clean, structural walks
+     matched at 143 and 676 objects, and every "not comparable"
+     object is an empty dataset present identically in both
+     files. Verified binaries installed to `$IMAGO_DIR/bin`,
+     cmp-identical to the A/B builds. The evidence copies
+     (`ab_uninit_{old,new}`, `ab_stage_bin`, and their scratch
+     dirs) were deleted at the programmer's direction
+     2026-08-12; the post-fix warning logs are retained.
+  4. **NEXT ACTION: Phase 2 step 2 = Phase 3 runtime
+     instrumentation.**
      `build/gfortran-asan`, `build/debug`, and `build/_0d_asan`
      were deleted in the 2026-08-12 space cleanup -- reconfigure
      from the presets (`cmake --preset gfortran-asan`). Run the
@@ -282,17 +294,18 @@ the normal way, with the DEBUG entry left as a pointer.
   dominated by compiling the 135k-line generated integral file
   twice.
 
-- **Phase 2 step 1 (release-uninit tranche) is DONE. Findings
-  ledger: 17 entries, four real defects fixed** (BUG-001,
-  BUG-005, BUG-006, and BUG-009's near miss), **five open**
-  (BUG-010's physics question, BUG-011's silent mtop death, and
-  the tranche's three: BUG-015 ETA, BUG-016 gamma force dump,
-  BUG-017 spin-clamp guard), **and two known-deferred by the
-  programmer** (BUG-013's -a path, BUG-014's eighth Boys order,
-  waiting on the g-orbital work). Next: fix the accepted three,
-  then Phase 3 runtime instrumentation. `build/gfortran-asan`
-  was deleted in the 2026-08-12 cleanup; reconfigure from the
-  preset when Phase 3 needs it.
+- **Phase 2 step 1 (release-uninit tranche) is DONE and its
+  three findings are FIXED. Findings ledger: 17 entries, seven
+  real defects fixed** (BUG-001, BUG-005, BUG-006, BUG-009's
+  near miss, and the tranche's three: BUG-015 ETA, BUG-016
+  gamma force dump, BUG-017 spin-clamp guard -- fixed and
+  A/B-verified 2026-08-12, binaries installed), **two open**
+  (BUG-010's physics question, BUG-011's silent mtop death),
+  **and two known-deferred by the programmer** (BUG-013's -a
+  path, BUG-014's eighth Boys order, waiting on the g-orbital
+  work). Next: Phase 3 runtime instrumentation.
+  `build/gfortran-asan` was deleted in the 2026-08-12 cleanup;
+  reconfigure from the preset when Phase 3 needs it.
 - Phase 2 audit mechanism: multi-agent workflow (decided)
 
 ### Tool inventory on this machine (measured 2026-08-09)
@@ -1320,9 +1333,11 @@ Ordered by severity (S1 first).
 - Category: UNINIT
 - Severity: S2 -- silently right by luck, NaN-poisons the SCF on
             the wrong stack bits
-- Status:   open; found 2026-08-12 by the release-build
-            `-Wuninitialized` harvest (the tranche above),
-            accepted by the programmer 2026-08-12
+- Status:   FIXED and A/B-VERIFIED 2026-08-12 (paired `-optc` x2
+            runs byte-identical, timestamps aside); found
+            2026-08-12 by the release-build `-Wuninitialized`
+            harvest (the tranche above), accepted by the
+            programmer 2026-08-12
 - Evidence: gfortran's definite (not "maybe") flow verdict: ETA
             is read at :3913 and assigned nowhere. Both
             variants' compiles agree.
@@ -1334,21 +1349,25 @@ Ordered by severity (S1 first).
             both terms collapsed to `(1D0+ETA)`, and the ETA
             assignment was dropped. So
             `GZ = ((1+ETA)**(-1/6) - (1+ETA)**(-1/6))/3`
-            subtracts two textually identical terms: for any
-            garbage with 1+ETA > 0 they cancel EXACTLY, GZ = 0,
+            subtracts two identical terms (the source spells the
+            exponents `-1D0/6D0` and `-1/6D0`, but both evaluate
+            to -1/6): for any garbage with 1+ETA > 0 they cancel
+            EXACTLY, GZ = 0,
             which is the correct spin-restricted value -- results
             are right, by luck, almost always. If the stack frame
             ever holds bits with 1+ETA < 0 (or a NaN pattern),
             the fractional power is NaN, GZ = NaN, and it
             propagates through HZ into the correlation potential
             and the whole SCF cycle.
-- Fix:      Pending the programmer's choice of shape: initialize
-            `ETA = 1.D-12` as the reference does (keeps the
-            formula's lineage visible), or state the ZET = 0
-            specialization honestly as `GZ = 0` with a comment
-            (removes the dead algebra). Either ends the
-            uninitialized read; both are numerically identical
-            for sane ETA.
+- Fix:      APPLIED 2026-08-12, shape chosen by the programmer:
+            `GZ = 0D0` stated directly, with a comment giving the
+            symmetry argument (phi(zeta) is even in zeta, so its
+            derivative vanishes at zeta = 0). At the programmer's
+            direction the reference form is RETAINED as
+            commented-out code, and ETA's declaration is likewise
+            retained commented-out beside the other correlation
+            locals with a pointer to that block, so restoring the
+            general formula restores both together.
 
 ### BUG-016 -- gamma force dump reads stale loop indices
 - File:     `src/imago/forces.F90:850` (end-of-routine force
@@ -1358,10 +1377,12 @@ Ordered by severity (S1 first).
 - Severity: S2 -- memory-unsafe reads and garbage output
             whenever the gamma force path runs (currently
             unexercised by any recorded run)
-- Status:   open; found 2026-08-12 adjudicating the
-            `-Wmaybe-uninitialized` tranche ('q' may be used
-            uninitialized), accepted by the programmer
-            2026-08-12
+- Status:   FIXED 2026-08-12, compile-verified only -- no
+            recorded run reaches the gamma force dump, though the
+            fixed binary passed the SCF-path A/B; found
+            2026-08-12 adjudicating the `-Wmaybe-uninitialized`
+            tranche ('q' may be used uninitialized), accepted by
+            the programmer 2026-08-12
 - Evidence: the complex branch of the same print block writes
             `valeValeF(m,l,k,j,i)` using its own loop indices.
             The gamma branch loops over i (xyz), j (spin), and l
@@ -1381,7 +1402,7 @@ Ordered by severity (S1 first).
             "maybe-uninitialized" only because the zero-trip
             possibility of the atom loops is the one path where
             q is never assigned at all.
-- Fix:      Pending: the intended reference is plainly
+- Fix:      APPLIED 2026-08-12: the print now reads
             `valeValeFGamma(:,l,j,i)`, mirroring the complex
             branch's index use.
 
@@ -1392,9 +1413,10 @@ Ordered by severity (S1 first).
 - Category: UNINIT
 - Severity: S4 -- a real uninitialized read, consequence-free
             today
-- Status:   open; found 2026-08-12 adjudicating the
-            `-Wmaybe-uninitialized` tranche, accepted by the
-            programmer 2026-08-12
+- Status:   FIXED and A/B-VERIFIED 2026-08-12 (paired `-optc` x2
+            runs byte-identical, timestamps aside); found
+            2026-08-12 adjudicating the `-Wmaybe-uninitialized`
+            tranche, accepted by the programmer 2026-08-12
 - Evidence: the spin-difference gradient sums SXS/SYS/SZS are
             assigned under `if (spin == 2)` and consumed
             (written into exchCorrRhoSpin) under
@@ -1408,9 +1430,9 @@ Ordered by severity (S1 first).
             clamp). But it is undefined behavior standing one
             refactor away from mattering, and it is exactly the
             read the compiler flagged.
-- Fix:      Pending: put the three clamps under the same
-            `spin == 2` guard their assignments and their
-            consumers already have.
+- Fix:      APPLIED 2026-08-12: the three clamps now sit under
+            the same `spin == 2` guard their assignments and
+            their consumers carry, with a comment saying why.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing
