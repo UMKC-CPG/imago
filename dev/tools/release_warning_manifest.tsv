@@ -1,0 +1,50 @@
+# Expected release-build warnings, one row per (variant, file,
+#   warning class, variable) group.  Every row is an adjudicated
+#   entry recorded in dev/DEBUG.md's release-build uninitialized
+#   tranche or Phase 1 accepted-warning notes.  Refresh only via
+#   check_release_warnings.py --write-manifest, after the change
+#   in the expected set has been reviewed and recorded there.
+complex	bond.F90	-Wmaybe-uninitialized	bondcompleteatom
+complex	dos.F90	-Wmaybe-uninitialized	pdosaccum
+complex	field.F90	-Wmaybe-uninitialized	atomicorbitalpsi
+complex	field.F90	-Wmaybe-uninitialized	atomicorbitalrho
+complex	field.F90	-Wmaybe-uninitialized	atomicorbitalwav
+complex	field.F90	-Wmaybe-uninitialized	lastcontribalphaindex
+complex	field.F90	-Wmaybe-uninitialized	lastcontribpotalphaindex
+complex	field.F90	-Wmaybe-uninitialized	modifiedbasisfnspsi
+complex	field.F90	-Wmaybe-uninitialized	modifiedbasisfnsrho
+complex	field.F90	-Wmaybe-uninitialized	modifiedbasisfnswav
+complex	field.F90	-Wmaybe-uninitialized	orbitalcount
+complex	field.F90	-Wmaybe-uninitialized	wavefnevalpsi
+complex	field.F90	-Wmaybe-uninitialized	wavefnevalrho
+complex	field.F90	-Wmaybe-uninitialized	wavefnevalwav
+complex	forces.F90	-Wmaybe-uninitialized	zfactor
+complex	gaussIntegrals.f90	-Wmaybe-uninitialized	prefactorn
+complex	optc.F90	-Wmaybe-uninitialized	momentpairtemp
+complex	optcSpectra.F90	-Wmaybe-uninitialized	energydelta
+complex	optcSpectra.F90	-Wmaybe-uninitialized	sigma
+complex	potentialUpdate.F90	-Wmaybe-uninitialized	currentpot
+real	bond.F90	-Wmaybe-uninitialized	bondcompleteatom
+real	dos.F90	-Wmaybe-uninitialized	pdosaccum
+real	field.F90	-Wmaybe-uninitialized	atomicorbitalpsigamma
+real	field.F90	-Wmaybe-uninitialized	atomicorbitalrhogamma
+real	field.F90	-Wmaybe-uninitialized	atomicorbitalwavgamma
+real	field.F90	-Wmaybe-uninitialized	lastcontribalphaindex
+real	field.F90	-Wmaybe-uninitialized	lastcontribpotalphaindex
+real	field.F90	-Wmaybe-uninitialized	modifiedbasisfnspsigamma
+real	field.F90	-Wmaybe-uninitialized	modifiedbasisfnsrhogamma
+real	field.F90	-Wmaybe-uninitialized	modifiedbasisfnswavgamma
+real	field.F90	-Wmaybe-uninitialized	orbitalcount
+real	field.F90	-Wmaybe-uninitialized	wavefnevalpsigamma
+real	field.F90	-Wmaybe-uninitialized	wavefnevalrhogamma
+real	field.F90	-Wmaybe-uninitialized	wavefnevalwavgamma
+real	forces.F90	-Wmaybe-uninitialized	zfactor
+real	gaussIntegrals.f90	-Wmaybe-uninitialized	prefactorn
+real	imago.F90	-Wunused-dummy-argument	inscf
+real	integrals3Terms.F90	-Wunused-dummy-argument	did2
+real	optc.F90	-Wmaybe-uninitialized	momentpairtemp
+real	optcSpectra.F90	-Wmaybe-uninitialized	energydelta
+real	optcSpectra.F90	-Wmaybe-uninitialized	sigma
+real	potentialUpdate.F90	-Wmaybe-uninitialized	currentpot
+real	secularEqn.F90	-Wunused-dummy-argument	h
+real	secularEqn.F90	-Wunused-dummy-argument	numstates

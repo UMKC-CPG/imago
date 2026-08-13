@@ -142,8 +142,7 @@ the normal way, with the DEBUG entry left as a pointer.
      choice); 016 became the `(:,l,j,i)` index fix, compile-
      verified only since no recorded run reaches the gamma force
      dump; 017 gained the `spin == 2` guard. The post-fix release
-     rebuild is clean of all three warnings
-     (`build/release/uninit_{real,complex}_postfix.log`). The
+     rebuild is clean of all three warnings. The
      paired `-optc` x2 A/B (`jobs/knbo3/o3/ab_uninit_{old,new}`,
      staged bin `jobs/ab_stage_bin`) was byte-identical on every
      data file with only wall-clock timestamps differing, and the
@@ -154,23 +153,40 @@ the normal way, with the DEBUG entry left as a pointer.
      cmp-identical to the A/B builds. The evidence copies
      (`ab_uninit_{old,new}`, `ab_stage_bin`, and their scratch
      dirs) were deleted at the programmer's direction
-     2026-08-12; the post-fix warning logs are retained.
-  4. **NEXT ACTION: Phase 2 step 2 = Phase 3 runtime
+     2026-08-12; the from-clean rebuild of `build/release`
+     (2026-08-13) replaced the post-fix logs with the current
+     `uninit_{real,complex}.log` pair.
+  4. **The standing release-warning list is machine-guarded
+     (2026-08-13).** Decision recorded in the log below: the
+     release build's adjudicated-benign `-Wmaybe-uninitialized`
+     groups plus the four accepted unused-dummy sites are
+     encoded in `dev/tools/release_warning_manifest.tsv` (44
+     per-variant rows: 29 distinct uninit groups union'd across
+     variants, 4 dummy sites, gamma build only), and
+     `dev/tools/check_release_warnings.py` diffs a fresh
+     per-variant from-clean build log against it -- any new or
+     vanished warning prints loudly and exits nonzero. The
+     2026-08-13 logs match the manifest, and both failure
+     directions were test-fired with doctored logs.
+  5. **NEXT ACTION: Phase 2 step 2 = Phase 3 runtime
      instrumentation.**
      `build/gfortran-asan`, `build/debug`, and `build/_0d_asan`
      were deleted in the 2026-08-12 space cleanup -- reconfigure
      from the presets (`cmake --preset gfortran-asan`). Run the
      KNbO3 decks under asan/valgrind and SNaN+FPE, both
      variants.
-  5. **Then reassess the shrunken fan-out** (step 3 of the
+  6. **Then reassess the shrunken fan-out** (step 3 of the
      resequencing). The preprocessed variant texts prepared for
      it lived in session scratch and are gone; regenerate with
      `gfortran -cpp -E [-DGAMMA] <file>` per variant when
      needed.
 
-  Evidence locations: uninit tranche logs in
-  `build/release/uninit_{real,complex}.log`; the Phase 1 class
-  logs in `build/gfortran-audit/class*_{real,complex}.log`.
+  Evidence locations: the current release warning logs
+  (post-BUG-015/016/017 state, regenerated from clean
+  2026-08-13) in `build/release/uninit_{real,complex}.log` --
+  the pre-fix tranche content survives as the grouped table in
+  the tranche section below; the Phase 1 class logs in
+  `build/gfortran-audit/class*_{real,complex}.log`.
 
   *The Phase 1 record (kept for reference):* every remaining
   `-Wunused` site was adjudicated in classes, each against its
@@ -738,6 +754,14 @@ three candidates and accepted all three into the ledger:
   (`excitedAtomPACS /= 0` guards allocation, zeroing, and
   output).
 
+Post-fix standing list (2026-08-13): with BUG-015/016/017
+fixed, the union across variants is **29 (file, variable)
+groups** -- the 34 above minus ETA, forces `q`, and
+SXS/SYS/SZS. That list, plus the four Phase 1 unused-dummy
+sites, is encoded per variant in
+`dev/tools/release_warning_manifest.tsv` and checked by
+`dev/tools/check_release_warnings.py` (decision below).
+
 ## Decisions log
 
 - **Phase 2 mechanism:** multi-agent workflow (parallel subagent
@@ -761,6 +785,31 @@ three candidates and accepted all three into the ledger:
   verification pass, an HDF5 handle-balance check, and the
   parallel-hazard inventory. Candidate findings are reviewed by
   the programmer BEFORE receiving BUG numbers.
+- **Standing release-build warnings: manifest, not source
+  separation (2026-08-13).** The `-Wmaybe-uninitialized` family
+  fires only at -O2 and above, so the release build permanently
+  shows the adjudicated-benign tranche groups that the audit
+  build -- the tree the zero-warning doctrine was scored on --
+  can never show. Leaving that standing list unguarded is
+  exactly what the doctrine forbids, so route 3 (move the class
+  out of the audit) is made checkable:
+  `dev/tools/release_warning_manifest.tsv` records the expected
+  (variant, file, class, variable) groups, and
+  `dev/tools/check_release_warnings.py` diffs fresh per-variant
+  from-clean build logs against it, printing loudly and exiting
+  nonzero on any NEW or VANISHED warning. The manifest is
+  refreshed only via `--write-manifest`, after the change to the
+  expected set has been reviewed and recorded here. The tool
+  lives under `dev/tools/` as campaign harness, beside the
+  document that governs it, not under `src/`. A full
+  gamma/non-gamma source separation was considered for the same
+  problem and REJECTED: measurement showed the benign groups
+  are guard-condition optimizer blind spots orthogonal to the
+  variant split (a potentialUpdate.F90 home to several of them
+  never branches on GAMMA, and both separated trees would keep
+  the whole list), while the split would duplicate roughly 22k
+  lines of shared physics across 22 GAMMA-branching files to
+  dissolve only the four unused-dummy sites.
 - **Generated integral files:** `gaussIntegrals.f90` (135K lines)
   and `gaussIntegrals.vec.f90` (39K lines) are machine-generated
   and treated as *trusted*. They receive only a structural
