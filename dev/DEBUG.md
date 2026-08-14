@@ -122,7 +122,7 @@ the normal way, with the DEBUG entry left as a pointer.
   divergence, but each one still needs its read against the other
   build before it can be called expected.
 
-- **RESUME HERE (2026-08-12, end of session).** Where things
+- **RESUME HERE (2026-08-13, end of session).** Where things
   stand and what is next, in order:
 
   1. **Phase 1 is CLOSED** (commits `8c68021`, `478d1dd`,
