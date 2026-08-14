@@ -168,13 +168,29 @@ the normal way, with the DEBUG entry left as a pointer.
      vanished warning prints loudly and exits nonzero. The
      2026-08-13 logs match the manifest, and both failure
      directions were test-fired with doctored logs.
-  5. **NEXT ACTION: Phase 2 step 2 = Phase 3 runtime
-     instrumentation.**
-     `build/gfortran-asan`, `build/debug`, and `build/_0d_asan`
-     were deleted in the 2026-08-12 space cleanup -- reconfigure
-     from the presets (`cmake --preset gfortran-asan`). Run the
-     KNbO3 decks under asan/valgrind and SNaN+FPE, both
-     variants.
+  5. **Phase 3 runtime instrumentation is IN PROGRESS
+     (2026-08-13; the harvest section below carries the full
+     detail). THREE CANDIDATES await programmer review** -- the
+     PSCF radial-fn leak, the PACS uninitialized conversion,
+     and the stale `check_gamma_kp` offsets that route every
+     run to the complex binary. What ran: the asan+lsan sweep
+     of both decks (complex binary only -- the third candidate
+     means `imagoG` has had no runtime coverage), and the
+     SNaN+FPE pass, which traps at parse on every deck (the
+     PACS candidate) and can go no deeper until it is fixed.
+     Harness in place: `build/gfortran-asan`,
+     `build/gfortran-debug`, and `build/gfortran-snan` all
+     built clean; overlay bins `jobs/phase3_stage_bin` (asan)
+     and `jobs/phase3_snan_bin`; evidence decks
+     `jobs/knbo3/{cubic,o3}/phase3_{asan,snan}` (the cubic
+     copies carry inputs regenerated 2026-08-13 -- the Jun 26
+     `imago.dat` predated the O3/O11 fields and no longer
+     parses). **NEXT: adjudicate the three candidates, fix,
+     then rerun SNaN past parse, cover every `imagoG` cell,
+     and run the valgrind pass** (the debug tree is built for
+     it; the valgrind overlay was NOT yet created -- wrapper
+     scripts that exec valgrind on the debug binaries were
+     awaiting approval when the session ended).
   6. **Then reassess the shrunken fan-out** (step 3 of the
      resequencing). The preprocessed variant texts prepared for
      it lived in session scratch and are gone; regenerate with
@@ -761,6 +777,115 @@ SXS/SYS/SZS. That list, plus the four Phase 1 unused-dummy
 sites, is encoded per variant in
 `dev/tools/release_warning_manifest.tsv` and checked by
 `dev/tools/check_release_warnings.py` (decision below).
+
+## Phase 3 runtime harvest (started 2026-08-13, in progress)
+
+Harness: asan binaries rebuilt from the `gfortran-asan` preset
+(both variants link clean, 676/677 asan symbols), run through an
+overlay bin (`jobs/phase3_stage_bin` -- symlinks to the install
+with only `imagoG`/`imago` replaced, selected via `IMAGO_BIN`) on
+fresh deck copies `jobs/knbo3/cubic/phase3_asan` (from
+`cubic/debug`) and `jobs/knbo3/o3/phase3_asan` (from
+`o3/reduced`). Leak detection ON -- Phase 0d had it explicitly
+off. Two operational notes from getting the decks running: an
+`imago.dat` generated before the O3/O11 optical-direction fields
+(2026-08-08) no longer parses -- old decks need `makeinput.py`
+rerun before reuse -- and a copied deck restarts from its
+converged `gs_scfV` file, so scratch-coverage runs must set that
+file aside or they exercise a single iteration.
+
+AddressSanitizer + LeakSanitizer results (KNbO3 decks). NOTE:
+all four runs exercised the COMPLEX binary -- including the two
+on the cubic deck that were briefly recorded here as gamma runs
+-- because `imago.py` never selects `imagoG` anymore (the
+executable-selection candidate below). `imagoG` therefore has
+had NO runtime coverage yet in this phase.
+
+- cubic deck SCF, fresh 13-iteration run to convergence: CLEAN.
+- o3 deck SCF, fresh 15-iteration run to convergence: CLEAN.
+- o3 deck `-optc` (pscf+optc, 4m02s): **one leak** (below).
+- cubic deck `-optc`: the SAME leak, byte-for-byte (6480 bytes
+  in 6 allocations), so the defect is path-dependent (SCF clean,
+  PSCF leaks). Whether it is also variant-independent is
+  UNVERIFIED until `imagoG` can actually be run, though the
+  implicated code (`atomicTypes.f90`, `cleanUpPSCF`) is shared
+  between the variants.
+
+**CANDIDATE (awaiting programmer review, no BUG number): every
+PSCF-family run leaks the atomic-type radial-function arrays.**
+`readAtomicTypes` allocates the pointer components
+`coreRadialFns` and `valeRadialFns` per atomic type
+(`atomicTypes.f90:240` and `:265`; 3 types x 2 arrays = the 6
+leaked allocations). On the SCF path they are freed mid-setup by
+`cleanUpRadialFns`, called only from `setupSCF`
+(`imago.F90:414`). The PSCF path never calls it, and
+`cleanUpPSCF` then calls `cleanUpAtomTypes`, which deallocates
+`atomTypes` itself (`atomicTypes.f90:530`) without touching the
+two radial-fn components -- the pointers are orphaned and
+LeakSanitizer reports a direct leak. Exit-time and small on this
+deck, but structural: it scales with atom-type count and would
+bite any future path that tears down and re-reads types inside
+one process. Likely fix shape: free the radial fns in
+`cleanUpAtomTypes` behind `associated()` guards (or call
+`cleanUpRadialFns` from `cleanUpPSCF`); the split exists so the
+SCF can shed them early, and that early free can stay.
+
+SNaN+FPE results (`build/gfortran-snan`, configured Debug +
+`IMAGO_CHECKS` + `IMAGO_FPE_TRAP` + `IMAGO_INIT_SNAN`; decks
+copied to `phase3_snan` with converged potentials set aside):
+every run on both decks traps at PARSE TIME, at the same site,
+so the pass cannot see past input reading until that candidate
+is adjudicated and fixed. The trap is the finding:
+
+**CANDIDATE (awaiting programmer review): `readPACSControl`
+converts an uninitialized real when PACS is off.** The unit
+conversion `totalEnergyDiffPACS = totalEnergyDiffPACS / hartree`
+(`input.f90:785`) runs unconditionally, but the variable is only
+assigned inside the core-state loop above it, and only for the
+entry matching the excited QN pair. With PACS off (these decks:
+`excitedAtomPACS = 0`, `numCorePACS = 0`) the loop never runs,
+so the conversion reads an uninitialized real -- a SIGFPE under
+SNaN init, silently-stored garbage in production builds. Benign
+today only if nothing reads the value when PACS is off; the same
+shape as BUG-015's silently-right-by-luck ETA. Fix shape:
+initialize `totalEnergyDiffPACS` (and review its three sibling
+`*PACS` state variables) before the loop, or guard the
+conversions on a matched entry.
+
+**CANDIDATE (awaiting programmer review): `imago.py` can no
+longer select `imagoG` -- every run since the July k-point
+format change silently uses the complex binary.** The k-point
+file grammar gained `NUM_TETRA_DIAGONALS` and
+`SYMMETRIZE_LAT_PARTIALS` for ALL style codes (`readKPoints`,
+`kpoints.f90:274-276`, read before the style branch), shifting
+every later field down four lines. `check_gamma_kp` in
+`imago.py` still reads the mesh counts and shift at their old
+fixed offsets (`lines[5]`, `lines[7]`), so a style-1 gamma file
+(`1 1 1`, zero shift) is misread as `[4]` vs `[1,1,1]` and the
+function returns False; style-0 files misread the same way. The
+docstring says the layouts are mirrored from `readKPoints` --
+they no longer are. Consequences: gamma decks silently run the
+slower complex binary (results correct, speed lost), and the
+gamma executable has had zero live coverage since the change.
+Worse, with `-scftetradiag 1` a style-0 file would make
+`check_gamma_kp` read the SYMMETRIZE value line as a k-point
+line and crash on a missing token. Fix shape: parse the file by
+LABEL rather than fixed line offsets, so the next grammar change
+cannot silently break the mirror again. Found because the
+SNaN crash line printed the invoked command
+(`.../imago 2 0 0 0 0 0`) for a deck regenerated with
+`-kp 0 0 0`.
+
+Operational corollary, recorded for honesty: Phase 0d's June
+validation ran `imagoG` only because the old grammar predated
+the drift; and this phase's cubic-deck runs are complex-binary
+runs (labels corrected above).
+
+Still to run in this phase: valgrind `--leak-check=full` passes
+on the o3 deck (debug tree built from its preset for line
+info), and -- once the two candidates above are adjudicated and
+fixed -- the SNaN+FPE runs past parse and every `imagoG`
+runtime cell (asan, valgrind, SNaN), both decks.
 
 ## Decisions log
 
