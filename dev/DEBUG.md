@@ -200,10 +200,11 @@ the normal way, with the DEBUG entry left as a pointer.
      candidate of the wave, the stale SYBD gamma demotion, is
      **BUG-023 (FIXED 2026-08-16, verified live: a gamma-deck
      band structure now completes on the general binary)**.
-     BUG-018..022 are committed (`6377ba9`); BUG-023 follows in
-     its own commit; NOTHING IS INSTALLED YET (`$IMAGO_DIR/bin`
-     still holds the 2026-08-12 binaries and the stale
-     `imago.py`). The harvest section also records the coverage
+     BUG-018..022 are committed (`6377ba9`) and BUG-023
+     (`0ba89ff`); both binaries and `imago.py` were INSTALLED
+     and the commits PUSHED by the programmer 2026-08-16 (the
+     installed complex binary verified Gamma-centred on a
+     3x3x3 mesh). The harvest section also records the coverage
      matrix (plan of record: twelve job families x two forms x
      two variants, of which instrumentation has touched two
      families), three harness traps (`$IMAGO_BIN` must be
@@ -213,11 +214,12 @@ the normal way, with the DEBUG entry left as a pointer.
      re-created deck of the same name silently inherits the
      dead deck's scratch), and the discovery that `imago.py`
      has a built-in valgrind mechanism that may settle the
-     still-undecided valgrind approach. **NEXT: install the
-     verified binaries + `imago.py`; extend asan and SNaN
-     coverage across the runnable job families (no candidate is
-     pending, so the matrix is the work); decide the valgrind
-     approach.**
+     still-undecided valgrind approach. **NEXT: extend asan
+     and SNaN coverage across the runnable job families (no
+     candidate is pending, so the matrix is the work; the
+     overlay bins must be re-copied from the instrumented trees
+     after rebuilding them from the committed source); decide
+     the valgrind approach.**
   6. **Then reassess the shrunken fan-out** (step 3 of the
      resequencing). The preprocessed variant texts prepared for
      it lived in session scratch and are gone; regenerate with
