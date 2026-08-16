@@ -196,23 +196,28 @@ the normal way, with the DEBUG entry left as a pointer.
      binary. Given a true Gamma point the complex binary
      reproduces imagoG line for line -- imagoG's numerics are
      validated for the first time -- and the Gamma-only SCF
-     oscillation is real behaviour of that sampling. **ONE
-     CANDIDATE still awaits programmer review**: the stale SYBD
-     gamma demotion in `imago.py`. The harvest section
-     also records the coverage matrix (plan of record: twelve
-     job families x two forms x two variants, of which
-     instrumentation has touched two families), the two
-     harness traps (`$IMAGO_BIN` must be exported for every
-     overlay run -- three void "verification" runs happened
-     without it -- and the overlay bins hold COPIES that must
-     be refreshed after each rebuild), and the discovery that
-     `imago.py` has a built-in valgrind mechanism that may
-     settle the still-undecided valgrind approach. **NEXT:
-     adjudicate the SYBD demotion candidate, then extend asan
-     and SNaN coverage across the runnable job families,
-     decide the valgrind approach, and close with commit +
-     install (the batch A/B for BUG-018/019/021 is done;
-     BUG-022 carries its own three-check verification).**
+     oscillation is real behaviour of that sampling. The last
+     candidate of the wave, the stale SYBD gamma demotion, is
+     **BUG-023 (FIXED 2026-08-16, verified live: a gamma-deck
+     band structure now completes on the general binary)**.
+     BUG-018..022 are committed (`6377ba9`); BUG-023 follows in
+     its own commit; NOTHING IS INSTALLED YET (`$IMAGO_DIR/bin`
+     still holds the 2026-08-12 binaries and the stale
+     `imago.py`). The harvest section also records the coverage
+     matrix (plan of record: twelve job families x two forms x
+     two variants, of which instrumentation has touched two
+     families), three harness traps (`$IMAGO_BIN` must be
+     exported for every overlay run -- three void
+     "verification" runs happened without it; the overlay bins
+     hold COPIES that must be refreshed after each rebuild; a
+     re-created deck of the same name silently inherits the
+     dead deck's scratch), and the discovery that `imago.py`
+     has a built-in valgrind mechanism that may settle the
+     still-undecided valgrind approach. **NEXT: install the
+     verified binaries + `imago.py`; extend asan and SNaN
+     coverage across the runnable job families (no candidate is
+     pending, so the matrix is the work); decide the valgrind
+     approach.**
   6. **Then reassess the shrunken fan-out** (step 3 of the
      resequencing). The preprocessed variant texts prepared for
      it lived in session scratch and are gone; regenerate with
@@ -981,16 +986,17 @@ open scope question.
     -dimo     deck        deck        deck         deck
     -field    deck        deck        deck         deck
 
-Notes tying rows to the ledger: `-sybd` intersects the stale
-gamma-demotion candidate below; `-mtop` is BUG-011's
+Notes tying rows to the ledger: `-sybd` on a gamma deck was
+BUG-023 (fixed; the row is now runnable); `-mtop` is BUG-011's
 silent-death path and an instrumented run is the cheapest probe
 for it; `-force` reaches BUG-016's gamma force dump, which was
 fixed by inspection only; `-pacs` is where BUG-019's variable
 becomes live, and needs an excited-atom deck the KNbO3
 skeletons do not provide.
 
-**CANDIDATE (awaiting programmer review, no BUG number): the
-SYBD gamma demotion tests the legacy executable name.**
+**ACCEPTED as BUG-023 and FIXED 2026-08-16 (ledger entry; the
+decision moved into `init_exes`): the SYBD gamma demotion tests
+the legacy executable name.**
 `imago.py:1533`: before a band-structure job (job_id 108/208)
 the script demotes the gamma executable to the general one via
 `if exe.startswith('g'): exe = exe[1:]` -- the old OLCAO
@@ -2179,6 +2185,53 @@ Ordered by severity (S1 first).
             entry). The Gamma-only SCF oscillation on the cubic
             KNbO3 cell is real behaviour of that sampling in both
             variants, not a defect.
+
+### BUG-023 -- the SYBD gamma demotion tested the legacy binary
+### name; a gamma-deck band structure ran on imagoG and died
+- File:     `src/scripts/imago.py` (`init_exes`,
+            `execute_program`)
+- Variant:  selection layer (script) -- gates which variant runs
+- Category: STALE-MIRROR (a rule written against the old
+            `g`-prefixed OLCAO binary name)
+- Severity: S3 -- a `-sybd`/`-scfsybd` job on any gamma deck
+            failed outright (`DSYGV error code = 80` in the
+            secular equation, then `makeSYBD.py` crashing on the
+            missing `fort.31`); no wrong numbers, no silent
+            path. Unreachable while BUG-020 stood, live once
+            imagoG was selectable again.
+- Status:   FIXED 2026-08-16; found 2026-08-14 reading around
+            the BUG-020 fix, accepted 2026-08-16
+- Evidence: `execute_program` demoted the gamma executable for
+            job 108/208 with `if exe.startswith('g'): exe =
+            exe[1:]`; the current name is `imagoG`, so the test
+            never fired. Live probe
+            (`jobs/knbo3/cubic/sybd_gamma_probe`): `-sybd` on the
+            canonical Gamma deck invoked the gamma binary (the
+            log shows the real-symmetric solver `DSYGV`; the
+            general binary calls `ZHEGV`), which announced 297
+            path k-points and died in the first diagonalization.
+- Fix:      APPLIED 2026-08-16, the programmer's choice of two
+            shapes: the executable is now decided ONCE, in
+            `init_exes`, where the rule is stated in words -- a
+            band-structure job (108/208) always runs on the
+            general executable, whatever the k-point files say,
+            because the path k-points are generated inside imago
+            and only the complex arithmetic can evaluate them;
+            the k-point files decide every other job as before.
+            The name-prefix demotion in `execute_program` is
+            deleted, so no second place re-decides and no
+            spelling of the binary name is tested anywhere.
+            Verified live: the same probe deck rerun through the
+            fixed script completes on the general binary -- exit
+            0, `gs_sybd-fb.plot` with all 297 path points, no
+            solver error -- with the SCF potential from a Gamma
+            SCF, confirming the gamma-SCF-then-general-band-
+            structure sequence works (the potential file is the
+            same text file either executable writes). The nine
+            gamma-detector tests stay green.
+- Note:     with this the -sybd row of the coverage matrix has
+            no ledger dependency left; the SYBD path itself has
+            not yet been run under asan/SNaN.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing

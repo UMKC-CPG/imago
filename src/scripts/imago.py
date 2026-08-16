@@ -1213,7 +1213,13 @@ def init_exes(settings, fn, inputs):
 
     Determines whether to use the gamma-point version
     (imagoG) or the general k-point version (imago) of
-    the executable based on the kpoint files.
+    the executable.  This is the ONE place that decision is
+    made: the k-point files decide it in general, and a
+    band-structure job overrides them, because a symmetric
+    band structure walks a path of k-points that only the
+    general (complex) executable can evaluate -- the gamma
+    executable's integrals are real and hold for the origin
+    alone.
 
     Returns:
         tuple: (executable, exe_mechanism, sub_mechanism)
@@ -1229,9 +1235,22 @@ def init_exes(settings, fn, inputs):
         f"{fn.kp_pscf}{fn.dat}", inputs
     )
 
-    # Determine if the calculation is going to use the gamma
-    #   kpoint and assign the executable accordingly.
-    if do_gamma_scf and do_gamma_pscf:
+    # A symmetric band structure (job 108 = SCF+SYBD, 208 =
+    #   PSCF SYBD) always runs on the general executable,
+    #   whatever the k-point files say: the path k-points are
+    #   generated inside imago from the band-path input, and
+    #   the gamma executable cannot evaluate them.  (The SCF
+    #   potential a PSCF band-structure job reads is the same
+    #   file either executable writes, so a gamma SCF followed
+    #   by a general-executable band structure is a valid
+    #   sequence.)
+    if settings.job_id in (108, 208):
+        executable = "imago"
+
+    # Otherwise the k-point files decide: gamma in both
+    #   groups selects the gamma executable, general in both
+    #   selects the general one, and a mix is refused below.
+    elif do_gamma_scf and do_gamma_pscf:
         executable = "imagoG"
     elif not do_gamma_scf and not do_gamma_pscf:
         executable = "imago"
@@ -1526,19 +1545,12 @@ def execute_program(job_clp, settings, fn, bin_dir,
     the Fortran executable completed without abortive error.
     """
 
-    # If we want to run symmetric band structure calculations,
-    #   then we cannot use the gamma k-point version of the
-    #   program.
-    exe = executable
-    if (exe.startswith('g')
-            and (settings.job_id == 108
-                 or settings.job_id == 208)):
-        exe = exe[1:]
-
-    # Call the executable.
+    # Call the executable.  Which executable (gamma or general)
+    #   was decided once, in init_exes, including the band-
+    #   structure override; nothing is re-decided here.
     cmd = (
         f"{sub_mechanism} {exe_mechanism} "
-        f"{bin_dir}/{exe} {job_clp}"
+        f"{bin_dir}/{executable} {job_clp}"
     )
     result = subprocess.run(
         cmd, shell=True,
