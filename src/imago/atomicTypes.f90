@@ -45,14 +45,20 @@ module O_AtomicTypes
       !   will be expanded upon with the m_QN into the full basis function.
       integer :: numCoreRadialFns ! # of core radial fns given in imago.dat.
       integer :: numValeRadialFns ! # of vale radial fns given in imago.dat.
-      real (kind=double), pointer, dimension (:,:) :: coreRadialFns ! The radial
-            !   basis functions of the core orbitals.  The first dimension holds
-            !   the radial function coefficients while the second dimension
-            !   indexes the number of core radial functions.
-      real (kind=double), pointer, dimension (:,:) :: valeRadialFns ! The radial
-            !   basis functions of the valence orbitals.  The first dimension
-            !   holds the radial function coefficients while the second
-            !   dimension indexes the number of valence radial functions.
+      real (kind=double), pointer, dimension (:,:) :: &
+            & coreRadialFns => null() ! The radial basis functions of the
+            !   core orbitals.  The first dimension holds the radial
+            !   function coefficients while the second dimension indexes
+            !   the number of core radial functions.  Initialized to null
+            !   so the association status is defined from the moment the
+            !   atomTypes array is allocated; teardown code relies on
+            !   associated() to tell whether this array is still live.
+      real (kind=double), pointer, dimension (:,:) :: &
+            & valeRadialFns => null() ! The radial basis functions of the
+            !   valence orbitals.  The first dimension holds the radial
+            !   function coefficients while the second dimension indexes
+            !   the number of valence radial functions.  Initialized to
+            !   null for the same teardown reason as coreRadialFns above.
 
 
       ! Alpha information
@@ -500,9 +506,16 @@ subroutine cleanUpRadialFns
    ! Define local variables.
    integer :: i
 
+   ! Nullify after each deallocation so the pointers carry a defined
+   !   "gone" association status.  The SCF path calls this routine to
+   !   shed the radial functions early (they are no longer needed once
+   !   the gaussian integrals are formed), and cleanUpAtomTypes later
+   !   uses associated() to decide whether they still need freeing.
    do i = 1, numAtomTypes
       deallocate (atomTypes(i)%coreRadialFns)
+      nullify (atomTypes(i)%coreRadialFns)
       deallocate (atomTypes(i)%valeRadialFns)
+      nullify (atomTypes(i)%valeRadialFns)
    enddo
 
 end subroutine cleanUpRadialFns
@@ -515,8 +528,22 @@ subroutine cleanUpAtomTypes
    ! Define local variables.
    integer :: i
 
-   ! Deallocate all components of each atom type.
+   ! Deallocate all components of each atom type.  The radial-function
+   !   arrays are freed here only if they are still associated: the SCF
+   !   path sheds them early through cleanUpRadialFns (which nullifies
+   !   them), while the post-SCF paths arrive here with both arrays
+   !   still live.  Guarding on association makes this routine a
+   !   complete teardown for every caller, so no path can orphan the
+   !   pointer components by deallocating the parent array below.
    do i = 1, numAtomTypes
+      if (associated(atomTypes(i)%coreRadialFns)) then
+         deallocate (atomTypes(i)%coreRadialFns)
+         nullify (atomTypes(i)%coreRadialFns)
+      endif
+      if (associated(atomTypes(i)%valeRadialFns)) then
+         deallocate (atomTypes(i)%valeRadialFns)
+         nullify (atomTypes(i)%valeRadialFns)
+      endif
       deallocate (atomTypes(i)%alphas)
       deallocate (atomTypes(i)%coreQN_nList)
       deallocate (atomTypes(i)%coreQN_lList)

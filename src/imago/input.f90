@@ -751,9 +751,17 @@ subroutine readPACSControl(readUnit,writeUnit)
    integer :: QN_n
    integer :: QN_l
 
-   ! Initialize the first and last initial states.
-   firstInitStatePACS = 0
-   lastInitStatePACS  = 0
+   ! Initialize the trio of values that the core-state loop below
+   !   fills in only for the entry matching the excited QN pair from
+   !   the command line.  When PACS is off, or when no listed core
+   !   state matches, the loop assigns nothing, so all three must
+   !   start defined: zero means "no matching core state".  The
+   !   total energy difference in particular is unit-converted
+   !   unconditionally after the loop, and that conversion must not
+   !   read an undefined real.
+   firstInitStatePACS  = 0
+   lastInitStatePACS   = 0
+   totalEnergyDiffPACS = 0.0_double
 
 
    ! Read the input control data for PACS calculations.

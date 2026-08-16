@@ -968,7 +968,16 @@ subroutine initializeKPointMesh(applySymmetry)
    allocate (abcMeshKPoints(3,numMeshKPoints))
 
    ! Create the initial uniform mesh in fractional units of the abc reciprocal
-   !   space cell.
+   !   space cell, measured from the origin: on each axis the points are
+   !   (m + shift)/n for m = 0..n-1 (DESIGN 3.9, PSEUDOCODE 4c.4).  With
+   !   this convention a zero shift contains Gamma and a half shift excludes
+   !   it for every count, odd or even, and a single point with zero shift
+   !   IS Gamma.  There is deliberately no -1/2 offset: the fold below
+   !   compares points modulo a reciprocal lattice vector, so an offset
+   !   would change nothing for even counts, but for odd counts it would
+   !   swap which shift contains Gamma and put a lone point at the zone
+   !   corner.  (The classic Monkhorst-Pack grid, (2m-n+1)/(2n), is the
+   !   half-shift member of this family.)
    numMeshKPoints = 0
    do i = 1, numAxialKPoints(1)
       loopIndex(1) = i
@@ -978,8 +987,7 @@ subroutine initializeKPointMesh(applySymmetry)
             numMeshKPoints = numMeshKPoints + 1
             loopIndex(3) = k
             abcMeshKPoints(:,numMeshKPoints) = &
-                  & -0.5_double + (loopIndex(:) &
-                  & - 1.0_double + kPointShift(:)) &
+                  & (loopIndex(:) - 1.0_double + kPointShift(:)) &
                   & * abcDelta(:)
          enddo
       enddo

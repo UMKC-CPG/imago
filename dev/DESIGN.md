@@ -2088,13 +2088,24 @@ roughly half the memory). No change to `check_gamma_kp` is
 needed: its existing style-code-1 detection already covers the
 canonical Gamma file.
 
-By contrast, a `1 1 1` mesh is *not* Gamma: it is one k-point
-with the usual (auto or `-kpshift`) shift applied -- a single
-shifted, mean-value sample -- and runs on the general complex
-executable `imago`. The no-option default is likewise a single
-shifted point, so prior behavior is unchanged; only the
-explicit `0` sentinel is new. A density of 1.0 stays a genuine
-density request, distinct from the `0` Gamma sentinel.
+By contrast, a `1 1 1` mesh is a *general* single-point request,
+not the Gamma sentinel: it is written with whatever shift was
+requested (the AUTO sentinel by default, or `-kpshift`), and it
+runs on the general complex executable `imago`. Where that lone
+point lands is decided by imago at run time under the single-
+point rule above: the shift on a single-point axis is dropped,
+so with the mesh convention of 3.9 the point sits at the origin.
+The two requests thus sample the same k-point but differ in
+routing and in what the file promises -- the `0` sentinel is
+the only form that guarantees Gamma on disk and selects the
+real-arithmetic executable. (There is no "shifted single
+point": a shift is meaningful only where an axis carries more
+than one point, and the origin-plus-shift reading of a lone
+point is exactly what the single-point rule forbids.) The
+no-option default is a `1 1 1` request, so prior behavior is
+unchanged; only the explicit `0` sentinel is new. A density of
+1.0 stays a genuine density request, distinct from the `0`
+Gamma sentinel.
 
 A zero mixed with positive mesh counts (e.g. `0 0 1`) is
 rejected as a fatal typo for the all-zero sentinel.
@@ -2192,7 +2203,7 @@ built as in 3.2, is invariant under a point group operation `M`
 (written in the reciprocal abc basis) precisely when `M` maps
 every mesh point onto another mesh point. Writing `D` for the
 diagonal matrix `diag(n_a, n_b, n_c)`, the mesh points are the
-lattice `D^{-1} (Z^3 + s) - 1/2` inside the cell, and `M`
+lattice `D^{-1} (Z^3 + s)` inside the cell (3.9), and `M`
 carries this lattice onto itself exactly when
 
     D M D^{-1}   is an integer matrix,
@@ -2237,12 +2248,41 @@ The uniform mesh of 3.2 is a Monkhorst-Pack mesh: a regular grid
 over the reciprocal cell, folded to the irreducible zone by the
 point group with equal base weights. Its shift `s` (the
 `KP_SHIFT_A_B_C` value of 3.4) is the Monkhorst-Pack grid offset,
-expressed in units of the grid spacing, and it has exactly two
-principled values per axis:
+expressed in units of the grid spacing. In fractional reciprocal
+abc coordinates the mesh on axis `i` with count `n_i` is
 
-- `s = 0` places a sample on the origin: a Gamma-centered mesh.
+    k_i = (m + s_i) / n_i,    m = 0, 1, ..., n_i - 1
+
+so the mesh is the lattice `D^{-1} (Z^3 + s)` taken inside the
+cell (3.8). Points are compared modulo a reciprocal lattice
+vector throughout (3.10), so any point may equally be quoted in
+`[-1/2, 1/2)`; the formula above fixes only which set of points
+is meant, and it is the same set the classic Monkhorst-Pack
+prescription produces. The shift has exactly two principled
+values per axis, and their meaning does not depend on whether
+the count is even or odd:
+
+- `s = 0` places a sample on the origin: a Gamma-centered mesh,
+  for every count. A single point (`n = 1`) with `s = 0` IS the
+  Gamma point.
 - `s = 1/2` centers the samples between grid nodes, so Gamma is
-  absent: the Monkhorst-Pack off-Gamma mesh.
+  absent: the Monkhorst-Pack off-Gamma mesh, for every count.
+
+That parity independence is the reason the formula carries no
+`-1/2` offset. A grid written `(m + s)/n - 1/2` describes the
+same two families of point sets, but with the labels swapped
+for odd counts (`s = 0` would then miss Gamma whenever `n` is
+odd, and a lone point would sit at the zone corner), and every
+statement in this section and in 3.6 that reasons about "Gamma
+present" versus "Gamma absent" would be silently false for odd
+counts. The classic Monkhorst-Pack prescription itself,
+`(2m - n + 1)/(2n)`, is exactly `(m + 1/2)/n - 1/2` -- the
+offset form with the half-shift built in -- and the standalone
+`makeKPoints` program (`src/makeKPoints`) still builds that
+grid and then subtracts its own shift from it. That program is
+no longer on the makeinput path, and its grid convention is
+not this one: here the shift is measured from the origin, and
+the classic MP grid is the `s = 1/2` member of the family.
 
 An intermediate offset (a quarter of the spacing, say) is neither
 of these and has no place here; it displaces the samples so that

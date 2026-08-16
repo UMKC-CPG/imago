@@ -1604,9 +1604,18 @@ function isShiftInvariant(s, D, Dinv, recipPointOps,
 
 ### 4c.4 Full Monkhorst-Pack mesh (DESIGN 3.2, 3.9)
 
-The pure Monkhorst-Pack grid in fractional abc coordinates
-with equal base weight.  This is the primary product of the
-section; 4c.5 optionally folds it.
+The uniform grid in fractional abc coordinates with equal base
+weight, measured from the origin: `k = (m + shift)/counts`,
+`m = 0..counts-1` per axis (DESIGN 3.9).  With this convention
+`shift = 0` contains Gamma and `shift = 1/2` excludes it for
+every count, odd or even, and a single point with zero shift
+IS Gamma; the classic Monkhorst-Pack grid is the `shift = 1/2`
+member.  There is deliberately no `-1/2` offset: points are
+compared modulo a reciprocal lattice vector everywhere (4c.5),
+so the offset would change no physics for even counts, but it
+would swap which shift contains Gamma for odd counts and put a
+lone point at the zone corner.  This is the primary product of
+the section; 4c.5 optionally folds it.
 
 ```
 function generateFullMesh(counts, shift):
@@ -1620,8 +1629,7 @@ function generateFullMesh(counts, shift):
         for j = 1 to counts(2):
             for k = 1 to counts(3):
                 p = p + 1
-                mesh(:,p) = -1/2
-                          + ([i, j, k] - 1 + shift) * delta
+                mesh(:,p) = ([i, j, k] - 1 + shift) * delta
     return mesh, baseWeight, numFull
 ```
 

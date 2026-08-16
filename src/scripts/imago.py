@@ -1084,38 +1084,66 @@ def init_io(proj_home, fn):
 #                   Executable Initialization                         #
 # ------------------------------------------------------------------ #
 
+def _kp_value_tokens(lines, label, kp_path):
+    """Return the whitespace-split tokens of the value line that
+    follows ``label`` in a k-point file's lines.
+
+    ``readKPoints`` in ``src/imago/kpoints.f90`` -- the
+    authoritative grammar -- consumes the file as label/value pairs,
+    checking every label by name (``readAndCheckLabel``) before
+    reading the value line beneath it.  Locating each value by its
+    label here mirrors that behavior, so a grammar change that
+    inserts or reorders fields shifts nothing this script reads: a
+    moved field is found wherever it lands, and a missing label is a
+    loud error naming the file and the field, just as the Fortran
+    reader refuses a malformed file rather than misreading it.
+
+    Args:
+        lines: the k-point file's lines, in file order.
+        label: the field's label text, e.g. ``NUM_KP_A_B_C``.
+        kp_path: path of the file, used in the error message only.
+
+    Returns:
+        list[str]: the tokens of the line following the label line.
+    """
+    for index, line in enumerate(lines[:-1]):
+        tokens = line.split()
+        if tokens and tokens[0] == label:
+            return lines[index + 1].split()
+    sys.exit(
+        f"Label {label} not found in {kp_path}; the file does not "
+        f"follow the k-point grammar of readKPoints (kpoints.f90)."
+    )
+
+
 def check_gamma_kp(kp_file, inputs):
     """Open a kpoint file and check if it requests a gamma
     kpoint (single k-point at 0,0,0).
 
-    The detection logic depends on the kpoint style code,
-    which is always the value on line 2.  Three styles are
-    supported -- they share the first four lines
-    (``KPOINT_STYLE_CODE`` / value / ``KPOINT_INTG_CODE`` /
-    value) and diverge after that.  See ``readKPoints`` in
-    ``src/imago/kpoints.f90`` for the authoritative file
-    grammar; the layouts below are mirrored from there.
+    The detection logic depends on the kpoint style code, the value
+    under the ``KPOINT_STYLE_CODE`` label.  Three styles are
+    supported.  All of them share four leading label/value pairs --
+    ``KPOINT_STYLE_CODE``, ``KPOINT_INTG_CODE``,
+    ``NUM_TETRA_DIAGONALS``, and ``SYMMETRIZE_LAT_PARTIALS`` -- and
+    diverge after that.  See ``readKPoints`` in
+    ``src/imago/kpoints.f90`` for the authoritative file grammar.
+    Every value is located by its LABEL (``_kp_value_tokens``
+    above), never by a fixed line offset, so this mirror survives
+    grammar changes that insert or reorder fields.
 
-    Style code 0 (explicit list, legacy)::
+    Style code 0 (explicit list, legacy): ``NUM_BLOCH_VECTORS``
+    carries the total kpoint count, and the explicit kpoint lines
+    follow the ``NUM_WEIGHT_KA_KB_KC`` header, each written as
+    ``<index> <weight> <ka> <kb> <kc>`` -- so the first kpoint's
+    coordinates are tokens 2..4 of the line after that header.
 
-        Line 1: KPOINT_STYLE_CODE     Line 5: NUM_BLOCH_VECTORS
-        Line 2: 0                     Line 6: <count>
-        Line 3: KPOINT_INTG_CODE      Line 7: NUM_WEIGHT_KA_KB_KC
-        Line 4: <intg_code>           Line 8+: explicit kpoints
+    Style code 1 (axial counts; produced by mesh mode):
+    ``NUM_KP_A_B_C`` holds the per-axis kpoint counts and
+    ``KP_SHIFT_A_B_C`` the per-axis mesh shift.
 
-    Style code 1 (axial counts; produced by mesh mode)::
-
-        Line 5: NUM_KP_A_B_C
-        Line 6: <na> <nb> <nc>
-        Line 7: KP_SHIFT_A_B_C
-        Line 8: <sa> <sb> <sc>
-
-    Style code 2 (density; produced by ``-kpd``)::
-
-        Line 5: MIN_KP_LINE_DENSITY
-        Line 6: <density>             (a float, e.g. 200.0)
-        Line 7: KP_SHIFT_A_B_C
-        Line 8: <sa> <sb> <sc>
+    Style code 2 (density; produced by ``-kpd``):
+    ``MIN_KP_LINE_DENSITY`` gives the requested density as a float
+    (e.g. 200.0); mesh sizing is deferred to Imago at runtime.
 
     Returns:
         bool: True if this is a gamma-point-only calculation
@@ -1130,32 +1158,34 @@ def check_gamma_kp(kp_file, inputs):
     with open(kp_path, 'r') as f:
         lines = f.readlines()
 
-    # Style code lives on line 2 (0-indexed line 1) for
-    #   every supported file format.
-    style_code = int(lines[1].split()[0])
+    style_code = int(
+        _kp_value_tokens(lines, 'KPOINT_STYLE_CODE', kp_path)[0])
 
     if style_code == 0:
-        # Legacy explicit-list path.  Line 6 carries the
-        #   total kpoint count; the first kpoint's
-        #   coordinates appear two lines past
-        #   NUM_WEIGHT_KA_KB_KC as
-        #   "<index> <weight> <ka> <kb> <kc>", so the
-        #   coords are tokens 2..4 of line 8.
-        num_kp = int(lines[5].split()[0])
-        kp_line = lines[7].split()
+        # Legacy explicit-list path.  Gamma-only means exactly one
+        #   listed kpoint, and that kpoint sitting at the origin.
+        #   The count test short-circuits first, so the coordinate
+        #   reads only happen on a one-kpoint file where the line
+        #   after the header is guaranteed to be a kpoint line.
+        num_kp = int(
+            _kp_value_tokens(lines, 'NUM_BLOCH_VECTORS', kp_path)[0])
+        kp_line = _kp_value_tokens(lines, 'NUM_WEIGHT_KA_KB_KC',
+                                   kp_path)
         return (num_kp == 1
                 and float(kp_line[2]) == 0.0
                 and float(kp_line[3]) == 0.0
                 and float(kp_line[4]) == 0.0)
 
     if style_code == 1:
-        # Axial-count path.  A gamma-only mesh corresponds
-        #   to exactly one kpoint along each reciprocal
-        #   axis and zero shift on every axis -- any other
-        #   combination produces a multi-point mesh that
-        #   the general executable must handle.
-        axial = [int(x) for x in lines[5].split()[:3]]
-        shift = [float(x) for x in lines[7].split()[:3]]
+        # Axial-count path.  A gamma-only mesh corresponds to
+        #   exactly one kpoint along each reciprocal axis and zero
+        #   shift on every axis -- any other combination produces a
+        #   multi-point mesh that the general executable must
+        #   handle.
+        axial = [int(x) for x in _kp_value_tokens(
+            lines, 'NUM_KP_A_B_C', kp_path)[:3]]
+        shift = [float(x) for x in _kp_value_tokens(
+            lines, 'KP_SHIFT_A_B_C', kp_path)[:3]]
         return (axial == [1, 1, 1]
                 and all(s == 0.0 for s in shift))
 

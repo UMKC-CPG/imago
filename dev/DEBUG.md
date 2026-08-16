@@ -122,7 +122,7 @@ the normal way, with the DEBUG entry left as a pointer.
   divergence, but each one still needs its read against the other
   build before it can be called expected.
 
-- **RESUME HERE (2026-08-13, end of session).** Where things
+- **RESUME HERE (2026-08-16, mid-session).** Where things
   stand and what is next, in order:
 
   1. **Phase 1 is CLOSED** (commits `8c68021`, `478d1dd`,
@@ -168,29 +168,51 @@ the normal way, with the DEBUG entry left as a pointer.
      vanished warning prints loudly and exits nonzero. The
      2026-08-13 logs match the manifest, and both failure
      directions were test-fired with doctored logs.
-  5. **Phase 3 runtime instrumentation is IN PROGRESS
-     (2026-08-13; the harvest section below carries the full
-     detail). THREE CANDIDATES await programmer review** -- the
-     PSCF radial-fn leak, the PACS uninitialized conversion,
-     and the stale `check_gamma_kp` offsets that route every
-     run to the complex binary. What ran: the asan+lsan sweep
-     of both decks (complex binary only -- the third candidate
-     means `imagoG` has had no runtime coverage), and the
-     SNaN+FPE pass, which traps at parse on every deck (the
-     PACS candidate) and can go no deeper until it is fixed.
-     Harness in place: `build/gfortran-asan`,
-     `build/gfortran-debug`, and `build/gfortran-snan` all
-     built clean; overlay bins `jobs/phase3_stage_bin` (asan)
-     and `jobs/phase3_snan_bin`; evidence decks
-     `jobs/knbo3/{cubic,o3}/phase3_{asan,snan}` (the cubic
-     copies carry inputs regenerated 2026-08-13 -- the Jun 26
-     `imago.dat` predated the O3/O11 fields and no longer
-     parses). **NEXT: adjudicate the three candidates, fix,
-     then rerun SNaN past parse, cover every `imagoG` cell,
-     and run the valgrind pass** (the debug tree is built for
-     it; the valgrind overlay was NOT yet created -- wrapper
-     scripts that exec valgrind on the debug binaries were
-     awaiting approval when the session ended).
+  5. **Phase 3 runtime instrumentation is IN PROGRESS; the
+     2026-08-13 candidates are all adjudicated and FIXED
+     2026-08-14 as BUG-018 (PSCF radial-fn leak), BUG-019
+     (PACS uninitialized conversion), and BUG-020 (stale
+     `check_gamma_kp` offsets)** -- ledger entries carry the
+     fixes and verification. Fixing them widened the harvest
+     into a second wave (harvest section, 2026-08-14 wave), of
+     which the SNaN blocker is now adjudicated and FIXED
+     2026-08-16 as **BUG-021** (the integral reader loops read
+     `oneAlphaPair` columns above the current alpha's lm
+     coverage; fixed by a per-state skip at all six reader
+     sites plus block-restricted hand-backs in `nuclearPE` and
+     `electronicPE` -- strictly less work than before). **The
+     whole SCF is now SNaN-clean on both variants**, and the
+     two SNaN runs that showed it double as the batch A/B for
+     BUG-018/019/021: line-for-line identical trajectories
+     against unfixed release controls on both variants
+     (`jobs/knbo3/o3/phase3_b21_ctrl`, `phase3_asan_g`).
+     Nothing is committed or installed yet. **The imagoG
+     "divergence" candidate is RESOLVED: not a defect in either
+     variant.** Its bisection found the first differing quantity
+     was the k-point itself and led to **BUG-022 (FIXED
+     2026-08-16 through the chain)**: the mesh formula's `-1/2`
+     offset inverted the shift semantics for odd counts, so the
+     canonical Gamma deck sampled the zone corner in the complex
+     binary. Given a true Gamma point the complex binary
+     reproduces imagoG line for line -- imagoG's numerics are
+     validated for the first time -- and the Gamma-only SCF
+     oscillation is real behaviour of that sampling. **ONE
+     CANDIDATE still awaits programmer review**: the stale SYBD
+     gamma demotion in `imago.py`. The harvest section
+     also records the coverage matrix (plan of record: twelve
+     job families x two forms x two variants, of which
+     instrumentation has touched two families), the two
+     harness traps (`$IMAGO_BIN` must be exported for every
+     overlay run -- three void "verification" runs happened
+     without it -- and the overlay bins hold COPIES that must
+     be refreshed after each rebuild), and the discovery that
+     `imago.py` has a built-in valgrind mechanism that may
+     settle the still-undecided valgrind approach. **NEXT:
+     adjudicate the SYBD demotion candidate, then extend asan
+     and SNaN coverage across the runnable job families,
+     decide the valgrind approach, and close with commit +
+     install (the batch A/B for BUG-018/019/021 is done;
+     BUG-022 carries its own three-check verification).**
   6. **Then reassess the shrunken fan-out** (step 3 of the
      resequencing). The preprocessed variant texts prepared for
      it lived in session scratch and are gone; regenerate with
@@ -811,8 +833,9 @@ had NO runtime coverage yet in this phase.
   implicated code (`atomicTypes.f90`, `cleanUpPSCF`) is shared
   between the variants.
 
-**CANDIDATE (awaiting programmer review, no BUG number): every
-PSCF-family run leaks the atomic-type radial-function arrays.**
+**ACCEPTED as BUG-018 and FIXED 2026-08-14 (see the ledger entry
+for the fix): every PSCF-family run leaked the atomic-type
+radial-function arrays.**
 `readAtomicTypes` allocates the pointer components
 `coreRadialFns` and `valeRadialFns` per atomic type
 (`atomicTypes.f90:240` and `:265`; 3 types x 2 arrays = the 6
@@ -822,23 +845,26 @@ leaked allocations). On the SCF path they are freed mid-setup by
 `cleanUpPSCF` then calls `cleanUpAtomTypes`, which deallocates
 `atomTypes` itself (`atomicTypes.f90:530`) without touching the
 two radial-fn components -- the pointers are orphaned and
-LeakSanitizer reports a direct leak. Exit-time and small on this
-deck, but structural: it scales with atom-type count and would
-bite any future path that tears down and re-reads types inside
-one process. Likely fix shape: free the radial fns in
-`cleanUpAtomTypes` behind `associated()` guards (or call
-`cleanUpRadialFns` from `cleanUpPSCF`); the split exists so the
-SCF can shed them early, and that early free can stay.
+LeakSanitizer reported a direct leak. Exit-time and small on
+this deck, but structural: it scales with atom-type count and
+would bite any future path that tears down and re-reads types
+inside one process. Fixed by making `cleanUpAtomTypes` a
+complete guarded teardown (the SCF's early shed stays); the
+post-fix asan rerun on this deck is sanitizer-silent.
 
 SNaN+FPE results (`build/gfortran-snan`, configured Debug +
 `IMAGO_CHECKS` + `IMAGO_FPE_TRAP` + `IMAGO_INIT_SNAN`; decks
 copied to `phase3_snan` with converged potentials set aside):
-every run on both decks traps at PARSE TIME, at the same site,
-so the pass cannot see past input reading until that candidate
-is adjudicated and fixed. The trap is the finding:
+every run on both decks trapped at PARSE TIME, at the same
+site, so the pass could not see past input reading until that
+candidate was adjudicated and fixed (it since was, as BUG-019;
+the pass now reaches integral setup and traps at the
+`gaussOverlapNP` candidate in the 2026-08-14 wave below). The
+trap was the finding:
 
-**CANDIDATE (awaiting programmer review): `readPACSControl`
-converts an uninitialized real when PACS is off.** The unit
+**ACCEPTED as BUG-019 and FIXED 2026-08-14 (see the ledger
+entry): `readPACSControl` converted an uninitialized real when
+PACS was off.** The unit
 conversion `totalEnergyDiffPACS = totalEnergyDiffPACS / hartree`
 (`input.f90:785`) runs unconditionally, but the variable is only
 assigned inside the core-state loop above it, and only for the
@@ -852,9 +878,10 @@ initialize `totalEnergyDiffPACS` (and review its three sibling
 `*PACS` state variables) before the loop, or guard the
 conversions on a matched entry.
 
-**CANDIDATE (awaiting programmer review): `imago.py` can no
-longer select `imagoG` -- every run since the July k-point
-format change silently uses the complex binary.** The k-point
+**ACCEPTED as BUG-020 and FIXED 2026-08-14 (see the ledger
+entry): `imago.py` could no longer select `imagoG` -- every run
+since the July k-point format change silently used the complex
+binary.** The k-point
 file grammar gained `NUM_TETRA_DIAGONALS` and
 `SYMMETRIZE_LAT_PARTIALS` for ALL style codes (`readKPoints`,
 `kpoints.f90:274-276`, read before the style branch), shifting
@@ -881,11 +908,249 @@ validation ran `imagoG` only because the old grammar predated
 the drift; and this phase's cubic-deck runs are complex-binary
 runs (labels corrected above).
 
-Still to run in this phase: valgrind `--leak-check=full` passes
-on the o3 deck (debug tree built from its preset for line
-info), and -- once the two candidates above are adjudicated and
-fixed -- the SNaN+FPE runs past parse and every `imagoG`
-runtime cell (asan, valgrind, SNaN), both decks.
+### 2026-08-14 wave: adjudication, and what the fixes uncovered
+
+All three 2026-08-13 candidates were reviewed and accepted as
+BUG-018, BUG-019, and BUG-020 (mechanisms, fixes, and
+verification in their ledger entries). Restoring `imagoG`
+selection and unblocking the SNaN pass immediately produced a
+second harvest wave: the three NEW candidates below.
+
+Two harness traps burned during verification, recorded so they
+are never re-learned:
+
+- **`bin_dir` comes from `$IMAGO_BIN`, never from which copy of
+  `imago.py` was invoked.** Every overlay run must export
+  `IMAGO_BIN` to the overlay directory. Invoking the overlay's
+  `imago.py` without it silently runs the INSTALLED release
+  binaries, which trap nothing and leak-report nothing, so a
+  "verification" run passes vacuously. Three such void runs
+  happened before the trap was caught -- by a stale trap line
+  number and by a 36-second "asan" run that should have taken
+  four minutes. Judge an instrumented run only by markers an
+  instrumented binary alone can produce: sanitizer reports,
+  backtraces, characteristic run time, or a `pgrep` of the
+  running process.
+- **The overlay bins hold COPIES of the two binaries, not
+  symlinks.** A rebuild does not reach them; refresh the copies
+  after every rebuild. (The overlay `imago.py` IS a symlink,
+  and now points at the repo source copy, so script fixes take
+  effect without an install.)
+- **`rm -rf <deck>` does not remove the deck's scratch, and a
+  new deck of the same name silently inherits it.** The
+  `intermediate` symlink points under `$IMAGO_TEMP`; deleting the
+  deck leaves that directory and its `gs_scf-fb.hdf5` in place,
+  and a fresh deck created under the same name finds the old
+  integral sets marked complete and REUSES them. Caught
+  2026-08-16 when a re-created deck reproduced a different
+  k-point's run to eight digits in one second. Before re-creating
+  a deck name, `rm -f $(readlink -f <deck>/intermediate)/*`
+  first (or use a new name); judge freshness by run time and by
+  the integral timestamps in the log.
+
+One tooling note for the pending valgrind pass: `imago.py`
+already carries a built-in valgrind mechanism (`settings.
+valgrind` wraps execution in `time valgrind --leak-check=yes`),
+which may make the rejected wrapper-script overlay unnecessary;
+the approach still awaits the programmer's decision.
+
+**Coverage matrix -- the plan of record for this phase.** The
+job menu is twelve post-SCF families, each in `-X` (pscf) and
+`-scfX` forms, plus the plain SCF; instrumented coverage so far
+touches two families. Legend: ok = run clean; B18 = ran and
+found BUG-018, clean after the fix; B21 = trapped on BUG-021,
+clean after the fix (2026-08-16: the whole SCF is SNaN-clean on
+both variants); todo = not yet run; deck = needs deck work
+first. Valgrind is a whole pending column (approach undecided).
+The `-scfX` forms run their analysis from different call sites
+than the `-X` forms; whether they need their own rows is an
+open scope question.
+
+    family    imago-asan  imago-snan  imagoG-asan  imagoG-snan
+    SCF       ok          B21         todo         B21
+    -optc     B18         todo        todo         todo
+    -dos      todo        todo        todo         todo
+    -bond     todo        todo        todo         todo
+    -loen     todo        todo        todo         todo
+    -sybd     todo        todo        todo         todo
+    -force    todo        todo        todo         todo
+    -mtop     todo        todo        todo         todo
+    -pacs     deck        deck        deck         deck
+    -nlop     deck        deck        deck         deck
+    -sige     deck        deck        deck         deck
+    -dimo     deck        deck        deck         deck
+    -field    deck        deck        deck         deck
+
+Notes tying rows to the ledger: `-sybd` intersects the stale
+gamma-demotion candidate below; `-mtop` is BUG-011's
+silent-death path and an instrumented run is the cheapest probe
+for it; `-force` reaches BUG-016's gamma force dump, which was
+fixed by inspection only; `-pacs` is where BUG-019's variable
+becomes live, and needs an excited-atom deck the KNbO3
+skeletons do not provide.
+
+**CANDIDATE (awaiting programmer review, no BUG number): the
+SYBD gamma demotion tests the legacy executable name.**
+`imago.py:1533`: before a band-structure job (job_id 108/208)
+the script demotes the gamma executable to the general one via
+`if exe.startswith('g'): exe = exe[1:]` -- the old OLCAO
+convention of a `g`-PREFIXED gamma binary. The current name is
+`imagoG`, suffix-marked, so the test never fires, and a
+gamma-deck `-sybd` run would keep `imagoG` for a k-path walk
+the gamma binary cannot perform. Unreachable while BUG-020
+stood (nothing selected imagoG); live again now that it is
+fixed. Fix shape: test the current naming (the `G` suffix) and
+strip it, or better, derive both names from one place so the
+next rename cannot split them again.
+
+**RESOLVED 2026-08-16 -- NOT A DEFECT IN EITHER VARIANT; it
+exposed a k-point sentinel inversion (next candidate) and a
+harness trap.** The bisection ran both binaries fresh on
+byte-identical inputs and compared the HDF5 intermediates
+dataset by dataset. The first differing quantity was not an
+integral but the k-point itself: the canonical Gamma file
+(`1 1 1`, shift `0 0 0`) is resolved by `kpoints.f90`'s mesh
+formula `k = (i - 1 + s)/n - 1/2` to k = (-1/2, -1/2, -1/2) --
+the zone corner R -- and the complex binary sampled R with
+phases of -1 on the odd cells while `imagoG` computes at Gamma
+by construction. Given an explicit style-0 k-point at (0,0,0),
+the complex binary reproduces `imagoG` EXACTLY: raw pair
+accumulations, core-valence and core-core matrices, the
+orthogonalized overlap (diagonal 1.64434995 in both), and the
+entire 50-iteration SCF trajectory line for line (fresh decks
+`jobs/knbo3/cubic/bisect2_g` and `bisect2_c`, current-source
+release binaries; the installed binary agrees byte for byte).
+So `imagoG`'s numerics are validated against the complex
+arithmetic at Gamma -- the first such comparison ever -- and
+the oscillation to the 50-cap is what this 5-atom cubic cell
+does under Gamma-only sampling in BOTH variants (June's Phase
+0d record was that behaviour, correctly computed). A stray
+mid-bisection result that made the complex binary look
+k-blind (Gamma == R to eight digits) was a deck-name reuse
+trap, recorded in the harness list above. The original record
+follows for reference. Fresh decks, byte-identical inputs
+(`diff -r` verified): the complex binary's first iteration
+gives total energy -102.06884276 and it converges in 13
+iterations to -103.79932729 with a 0.198 au gap -- a proper
+insulator. `imagoG`'s first iteration gives -100.73536664 --
+already different where the variants should be numerically
+equivalent -- and it then oscillates to the 50-iteration cap,
+never below convergence 0.2, with the gap bouncing near zero
+and the run intermittently classifying the system as metallic.
+Both trajectories are deterministic: today's `imagoG` run
+reproduces June's Phase 0d trajectory to every printed digit
+(that June record read as a threshold artifact at the time; it
+was this), which also proves the compile-verified-only gamma
+changes since June did not alter imagoG's SCF numerics -- a
+free A/B of that work. No prior A/B ever compared imagoG
+numerics; every one ran complex-only. Evidence decks:
+`jobs/knbo3/cubic/phase3_asan_g` (fresh imagoG, release
+binary) and `jobs/knbo3/cubic/phase3_fresh_complex_ctrl`
+(fresh complex control, run via the installed pre-fix
+`imago.py` whose stale checker still selects the complex
+binary on a gamma deck). NOT connected to BUG-021 (the
+`gaussOverlapNP` read below): with that fix in, the SNaN
+`imagoG` run reproduces the same divergent trajectory digit for
+digit and completes all 50 iterations without a trap, so no
+uninitialized-real read anywhere in the SCF path is the cause.
+
+**ACCEPTED as BUG-022 and FIXED 2026-08-16 by option (a) below,
+through the chain (DESIGN 3.6/3.8/3.9 -> PSEUDOCODE 4c.4 ->
+`kpoints.f90`; ledger entry has the verification): the Gamma
+sentinel and the mesh formula are inverted with respect to each
+other.** Found by the bisection above. The record as written for
+review:
+
+*What the chain says (three statements that cannot all hold):*
+
+- DESIGN 3.8 and the code (`kpoints.f90:980-983`): mesh points
+  are `k = (i - 1 + s)/n - 1/2`, i = 1..n.
+- DESIGN 3.9: "`s = 0` places a sample on the origin (Gamma-
+  centred); `s = 1/2` centres the samples between nodes, so
+  Gamma is absent."
+- DESIGN 3.6: "on an axis with a single point the shift becomes
+  that lone point's absolute coordinate", and the canonical
+  Gamma file is therefore `1 1 1` with shift `0 0 0`.
+
+3.6 and 3.9 both assume the un-offset formula `(i - 1 + s)/n`.
+Under the coded formula the truth per case is:
+
+- `n` even, `s = 0`: Gamma present (the point `(i-1)/n = 1/2`).
+- `n` even, `s = 1/2`: Gamma absent.
+- `n` odd, `s = 0`: Gamma ABSENT (`(i-1)/n` never equals 1/2).
+- `n` odd, `s = 1/2`: Gamma PRESENT (standard Monkhorst-Pack).
+- `n = 1`, `s = 0`: the lone point is at -1/2 (zone corner).
+- `n = 1`, `s = 1/2`: the lone point is at 0 (Gamma).
+
+*The single-point rule compounds it:* `resolveShift`
+(`kpoints.f90:1699-1701`, implementing 3.6) zeroes the shift on
+any single-point axis, so under the coded formula a style-1
+request can NEVER put a lone point at the origin.
+
+*Measured on the cubic deck (complex binary):*
+
+- Canonical Gamma file (`1 1 1`, shift `0 0 0`) resolves to
+  (-1/2, -1/2, -1/2) = R; the log prints
+  `Kpoints ... -0.41313600` on all three axes (= -1/2 x 2pi/a).
+- Explicit `-kpshift 0.5 0.5 0.5` on `1 1 1`: the shift is
+  dropped by the single-point rule; also resolves to R.
+- Hand-written style-0 list with one point at (0,0,0): the only
+  way to reach Gamma; reproduces `imagoG` exactly.
+
+*Consequences:*
+
+- Since the July mesh rework, every complex-binary run of a
+  "Gamma" deck has sampled R -- and thanks to BUG-020 that was
+  EVERY Gamma deck.
+- Every odd-count `s = 0` mesh has been a Gamma-free mesh while
+  labelled Gamma-centred.
+
+*Fix options (a DESIGN decision, not a code one):*
+
+- (a) Drop the `- 1/2` from the formula (standard Gamma-centred
+  convention). 3.6, 3.9, the sentinel and `check_gamma_kp` all
+  become true as written. Cost: every odd-count mesh moves,
+  which touches stored convergence baselines and the guidance
+  database keyed on meshes.
+- (b) Keep the formula; rewrite 3.6/3.9 and the sentinel around
+  it (Gamma = `1 1 1` with shift 1/2), and change the single-
+  point rule to FORCE the half shift instead of zeroing it.
+
+The programmer chose (a) (baselines and the guidance database
+are recomputable). Why the `-1/2` was there, so nobody restores
+it: it is the classic Monkhorst-Pack prescription
+`(2m - n + 1)/(2n)` = `(m + 1/2)/n - 1/2` with the built-in half
+offset promoted to a parameter -- inherited from the initial
+commit, and still built literally by the legacy `makeKPoints`
+program (which then SUBTRACTS its shift, a third convention, and
+whose single-point case places a non-Gamma point at
+(0.125, 0.25, 1/3) -- the ancestor of DESIGN 3.6's old "shifted
+mean-value sample" wording). No live consumer needed the offset:
+tetrahedra and the MTOP map are index-based and the fold
+compares modulo 1.
+
+**ACCEPTED as BUG-021 and FIXED 2026-08-16 (see the ledger
+entry; the mechanism turned out to be the reader loops, not the
+kernels): `gaussOverlapNP` reads an uninitialized real in its
+overlap accumulation (`integrals.F90:1909`), BOTH variants;
+BLOCKED the SNaN pass.** As first recorded:
+with BUG-019 fixed, fresh SNaN runs of both binaries trapped
+at the same statement during `setupSCF` integral setup
+(`imago.F90:337`): the accumulation `pairXBasisFn2(...) =
+pairXBasisFn2(...) + oneAlphaPair(:currentlmAlphaIndex(...),
+currentlmIndex(m,2)) * currentBasisFns(...)`. The accumulator
+`pairXBasisFn2` is zeroed over its used range at line 1804
+(every sibling routine carries the same zeroing), so the
+suspect operand is `oneAlphaPair`: a fixed 16x16 local filled
+per alpha pair by the integral kernels, read here at row range
+`:currentlmAlphaIndex(alphaIndex(1),1)` and a column the
+kernel may never have written for low-angular-momentum pairs
+-- the same generated-kernel-coverage family as BUG-014's
+`preFactor` gaps. Adjudication needs the kernel read: which
+elements does the generated code actually write, per l1/l2
+switch? Until fixed this blocks SNaN for the plain SCF and for
+any fresh-deck pipeline that passes through SCF setup, on both
+variants.
 
 ## Decisions log
 
@@ -1607,6 +1872,313 @@ Ordered by severity (S1 first).
 - Fix:      APPLIED 2026-08-12: the three clamps now sit under
             the same `spin == 2` guard their assignments and
             their consumers carry, with a comment saying why.
+
+### BUG-018 -- PSCF teardown orphans the radial-function arrays
+- File:     `src/imago/atomicTypes.f90` (type declaration,
+            `cleanUpRadialFns`, `cleanUpAtomTypes`)
+- Variant:  [BOTH] -- shared module, though observed only on the
+            complex binary (the only variant with Phase 3
+            runtime coverage so far)
+- Category: LEAK
+- Severity: S4 -- exit-time leak today, structural tomorrow
+- Status:   FIXED 2026-08-14, leak-verified by an asan rerun;
+            found 2026-08-13 by the Phase 3 LeakSanitizer pass,
+            accepted by the programmer 2026-08-14; paired A/B
+            still to run with this batch's other fixes
+- Evidence: every PSCF-family run leaked 6480 bytes in 6
+            allocations (3 atom types x 2 arrays on KNbO3);
+            plain SCF runs were clean. `readAtomicTypes`
+            allocates the pointer components `coreRadialFns` and
+            `valeRadialFns` per type; the only routine freeing
+            them, `cleanUpRadialFns`, is called solely from
+            `setupSCF`, so the SCF path sheds them mid-setup.
+            The PSCF path instead reached `cleanUpAtomTypes`,
+            which deallocated the parent `atomTypes` array
+            without touching the two components -- orphaning
+            them.
+- Analysis: exit-time and small on this deck, but it scales with
+            atom-type count and becomes a live in-process leak
+            for any future path that tears down and re-reads
+            atom types inside one process (driver loops, library
+            embedding, the parallelization work). The components
+            also had UNDEFINED association status before first
+            allocation -- the BUG-001 class -- which the fix
+            settles as a prerequisite.
+- Fix:      APPLIED 2026-08-14, shape 1 by the programmer's
+            choice: `cleanUpAtomTypes` is now a complete
+            teardown. Three parts: the two components are
+            default-initialized to `null()` in the type
+            declaration (defined association status from the
+            moment `atomTypes` exists); `cleanUpRadialFns` now
+            nullifies after each deallocation so the early SCF
+            shed leaves a defined "gone" state; and
+            `cleanUpAtomTypes` frees both components behind
+            `associated()` guards before deallocating the
+            parent. The rejected alternative (calling
+            `cleanUpRadialFns` from `cleanUpPSCF`) would have
+            left the invariant "free the components before the
+            parent" enforced nowhere, for each future caller to
+            rediscover. Verified: both asan variants rebuilt
+            clean (`bug018_asan_{real,complex}.log`), the
+            overlay copies refreshed, and the o3 `-optc` rerun
+            that previously reported the leak -- run with
+            `IMAGO_BIN` pointing at the asan overlay, 4m11s, so
+            demonstrably the instrumented binary -- now runs
+            sanitizer-silent to Program Sequence Complete.  (A
+            first verification attempt silently ran the
+            installed release binary and proved nothing; the
+            harness trap is recorded in the Phase 3 harvest
+            section.)
+
+### BUG-019 -- readPACSControl converts an uninitialized real
+- File:     `src/imago/input.f90` (`readPACSControl`)
+- Variant:  [BOTH]
+- Category: UNINIT
+- Severity: S4 -- consequence-free when PACS is off, but a PACS
+            run whose core-state list has no entry matching the
+            excited QN pair would carry garbage into live state
+- Status:   FIXED 2026-08-14; found 2026-08-13 by the Phase 3
+            SNaN+FPE pass (which it BLOCKED at parse time on
+            every deck), accepted by the programmer 2026-08-14
+- Evidence: the PACS block is parsed for every run.  The trio
+            `firstInitStatePACS`/`lastInitStatePACS`/
+            `totalEnergyDiffPACS` is filled by the core-state
+            loop only for the entry matching the excited QN pair
+            from the command line; the two integers were
+            zero-initialized before the loop, the real was not
+            -- an asymmetry that reads as an oversight.  The
+            unit conversion `totalEnergyDiffPACS =
+            totalEnergyDiffPACS / hartree` then runs
+            unconditionally, so with PACS off (or no matching
+            entry) it divides an undefined real: SIGFPE under
+            SNaN init at parse, silently-stored garbage in
+            production.  The four sibling PACS reals are read
+            unconditionally from the file and are always
+            defined; this was the only conditionally-assigned
+            one.  Same silently-right-by-luck shape as BUG-015.
+- Fix:      APPLIED 2026-08-14, the programmer's choice: one
+            line, `totalEnergyDiffPACS = 0.0_double` beside the
+            existing zero-inits, with the comment extended to
+            cover the trio and say why zero must be defined
+            before the unconditional conversion.  Verified: both
+            SNaN variants rebuilt clean
+            (`bug019_snan_{real,complex}.log`), and the fresh o3
+            run under the rebuilt binaries passes the former
+            trap site -- the SNaN pass now reaches integral
+            setup, where it trapped at the NEXT candidate
+            (`gaussOverlapNP`, see the Phase 3 harvest section).
+
+### BUG-020 -- check_gamma_kp parsed stale offsets; imagoG was
+### never selected after the July k-point grammar change
+- File:     `src/scripts/imago.py` (`check_gamma_kp`; the new
+            label helper `_kp_value_tokens`)
+- Variant:  selection layer (script) -- gates which variant runs
+- Category: STALE-MIRROR
+- Severity: S3 -- no wrong numbers, but every gamma deck since
+            July silently ran the slower complex binary, the
+            gamma executable lost all live coverage, and a
+            style-0 file with `-scftetradiag 1` would crash the
+            script on a missing token
+- Status:   FIXED 2026-08-14; found 2026-08-13 (the Phase 3 SNaN
+            crash line printed the invoked command for a deck
+            regenerated `-kp 0 0 0`), accepted by the programmer
+            2026-08-14
+- Evidence: July's LAT work made `readKPoints` read
+            `NUM_TETRA_DIAGONALS` and `SYMMETRIZE_LAT_PARTIALS`
+            for ALL style codes before the style branch
+            (`kpoints.f90:274-276`), shifting every later field
+            down four lines.  `check_gamma_kp` still read
+            `lines[5]`/`lines[7]`, so a style-1 gamma file was
+            misread as `[4]` vs `[1,1,1]` and every style
+            returned False.  Its docstring claimed the layouts
+            were mirrored from `readKPoints`; they no longer
+            were.
+- Fix:      APPLIED 2026-08-14: values are located by LABEL via
+            `_kp_value_tokens`, mirroring how the Fortran side
+            reads the file (`readAndCheckLabel` then the value
+            line), so an inserted or reordered field cannot
+            silently shift what the script reads, and a missing
+            label exits loudly naming the file and field --
+            never a silent False, which is the failure mode that
+            hid this defect.  Verified three ways: the new
+            regression suite `src/tests/test_imago_gamma_kp.py`
+            (9 tests: all three styles, the tetra-settings axis
+            that broke, and the loud-failure contract; the
+            companion makeinput gamma tests stay green);
+            unit-level checks on the real deck files (cubic
+            gamma True, o3 4x4x4 False); and direct observation
+            of a live run invoking `imagoG 2 0 0 0 0 0` on the
+            cubic deck (the first imagoG selection since July)
+            while o3 runs still select `imago`.
+- Note:     the coverage this restored immediately exposed the
+            imagoG SCF divergence candidate recorded in the
+            Phase 3 harvest section, and reading around the fix
+            surfaced the stale SYBD gamma-demotion candidate
+            (`exe.startswith('g')`) -- both awaiting review.
+
+### BUG-021 -- the integral accumulation loops read oneAlphaPair
+### columns the current alpha never defined
+- File:     `src/imago/integrals.F90` (reader loops in
+            `gaussOverlapOL`, `KE`, `MV`, `NP`, `EP` and
+            `gaussOverlapHamPSCF`; hand-back copies in `nuclearPE`
+            and `electronicPE`)
+- Variant:  both
+- Category: UNINIT (hot loop; the BUG-015/019 class of a
+            garbage-times-zero read, but executed per alpha pair
+            per lattice cell rather than once)
+- Severity: S4 -- numerically inert with finite garbage (the
+            multiplier is exactly zero by construction), and the
+            paired A/B confirms no printed digit changes; but an
+            Inf/NaN in the undefined slot would poison the sum,
+            SNaN traps it, and the loops spent a row of multiplies
+            per skipped state adding nothing
+- Status:   FIXED 2026-08-16; found 2026-08-14 (first SNaN run to
+            reach integral setup once BUG-019 was fixed), accepted
+            by the programmer 2026-08-16
+- Evidence: Each reader loop runs over EVERY state m of atom 2
+            and reads column `currentlmIndex(m,2)` of the 16x16
+            `oneAlphaPair` for the current atom 2 alpha.  But an
+            alpha serves only the states up to its lm coverage
+            (`currentlmAlphaIndex`, 1/4/9/16, non-increasing
+            along the alpha list because the alphas that also
+            serve higher l come first), and the kernels write only
+            that block.  A state whose lm slot exceeds the coverage
+            therefore reads a column nothing wrote for this alpha.
+            The two-centre routines survive this by accident:
+            `oneAlphaPair` persists across pairs and the first
+            pair processed has the widest coverage, so later
+            narrower pairs read STALE values from earlier pairs --
+            wrong pair's numbers, but defined.  `nuclearPE` and
+            `electronicPE` break even that: they accumulate into a
+            FRESH 16x16 local zeroed only over the coverage block,
+            then hand it back with a full-width copy
+            (`oneAlphaPair(:,:) = nucPotAlphaOverlap(:,:)`), which
+            transplants never-written elements over the caller's
+            defined leftovers.  A temporary print of the loop
+            indices at the trap caught it exactly: the SIGFPE fired
+            at atom 2 alpha 17 (coverage 4, sp-only) meeting state
+            9 (lm slot 5, a d state), coefficient
+            `currentBasisFns` = 0.0000E+00; the 896 loop passes
+            before it all had slot <= coverage.  The zero
+            multiplier is guaranteed, not lucky: `renormalizeBasis`
+            zeroes the whole basis array and fills each state only
+            through its own orbital's alpha count.  Whether the
+            states an alpha serves form a contiguous range was
+            checked (they do NOT -- states run valence then core,
+            each in radial-function order, so core s/p states
+            follow valence d states), which is why the fix is a
+            per-state test rather than a loop bound.
+- Fix:      APPLIED 2026-08-16, the programmer's choice after
+            weighing a loop-bound form (impossible without state
+            reordering) and precomputed per-tier state lists (an
+            indirect load in place of a compare, plus new arrays
+            threaded through every routine -- no gain).  Two parts:
+            (1) every reader loop skips a state whose lm slot lies
+            above the current atom 2 alpha's coverage (`if
+            (currentlmIndex(m,2) > currentlmAlphaIndex(alphaIndex
+            (2),2)) cycle`) -- one well-predicted integer compare
+            replacing a row of multiply-adds whose result was zero
+            by construction, so the fixed loops do strictly LESS
+            work; (2) `nuclearPE` and `electronicPE` hand back only
+            the coverage block, so a half-defined accumulator can
+            no longer leak into the caller's array.  Verified: all
+            four instrumented binaries rebuilt warning-free; the
+            SNaN imagoG run on the cubic gamma deck now clears the
+            integrals and runs the entire 50-iteration SCF with no
+            trap, matching the release imagoG trajectory
+            (`phase3_asan_g`) digit-for-digit; the SNaN complex
+            run on the o3 deck converges in 15 iterations, no trap,
+            with the iteration record and the energy decomposition
+            file line-for-line identical to a fresh release control
+            (`jobs/knbo3/o3/phase3_b21_ctrl`, byte-identical
+            inputs, installed unfixed binary).  Because the SNaN
+            binaries carry BUG-018/019/021 together and the
+            controls carry none, those two runs are the batch A/B
+            for all three: numerically inert on both variants.
+- Note:     the whole SCF is now SNaN-clean on both variants, so
+            the SNaN column of the coverage matrix is unblocked.
+            The imagoG divergence candidate is NOT this defect:
+            with the fix in, imagoG reproduces its divergent
+            trajectory unchanged, and a full SNaN-clean SCF rules
+            out any uninitialized-real read in that path.  A
+            reader loop bound over states cannot replace the test
+            unless the basis states are ever regrouped by l; if
+            these loops become a profiling target, per-radial-
+            function iteration is the sharper lever, and belongs to
+            the performance campaign, not this ledger.
+
+### BUG-022 -- the mesh formula's -1/2 offset inverted the shift
+### semantics for odd counts; the Gamma sentinel sampled R
+- File:     `src/imago/kpoints.f90` (`initializeKPointMesh`, one
+            statement); `dev/DESIGN.md` 3.6, 3.8, 3.9;
+            `dev/PSEUDOCODE.md` 4c.4
+- Variant:  complex (the gamma binary computes at Gamma by
+            construction and never read the mesh); the defect is
+            in the shared k-point layer
+- Category: DESIGN-INCONSISTENCY (spec statements that could not
+            all hold, with the code on the losing side)
+- Severity: S2 -- wrong k-point sampling with no warning: every
+            complex-binary run of the canonical Gamma deck since
+            the July mesh rework sampled the zone corner
+            (-1/2,-1/2,-1/2), and every odd-count zero-shift mesh
+            was Gamma-free while documented as Gamma-centred.
+            Even-count meshes were unaffected.
+- Status:   FIXED 2026-08-16 (found the same day by the imagoG
+            "divergence" bisection; the programmer chose the fix
+            after a pros/cons review)
+- Evidence: The bisection compared imagoG and the complex binary
+            on byte-identical Gamma decks: the FIRST differing
+            quantity was the resolved k-point the log printed
+            (`-0.41313600` x3 = -1/2 x 2pi/a). DESIGN 3.8 and the
+            code placed mesh points at `(m + s)/n - 1/2`; DESIGN
+            3.6 and 3.9 reasoned as if they were at `(m + s)/n`
+            (`s = 0` on the origin; a lone point's shift is its
+            coordinate). Under the offset form the two shift
+            values swap roles for odd `n`, and `resolveShift`'s
+            zeroing of a single-point axis then pins that axis at
+            -1/2, so no style-1 request could reach Gamma at all
+            (an explicit half shift on `1 1 1` was dropped too).
+            Given a hand-written style-0 point at (0,0,0) the
+            complex binary reproduced imagoG exactly, integral by
+            integral and over the full 50-iteration SCF -- which
+            both validated imagoG's numerics and pinned the
+            defect on the mesh layer. Heritage: the offset form is
+            the classic Monkhorst-Pack `(2m-n+1)/(2n)` with its
+            built-in half shift made a parameter, from the initial
+            commit; the legacy `makeKPoints` program still builds
+            that grid.
+- Fix:      APPLIED 2026-08-16 through the chain. DESIGN 3.9 now
+            states the convention explicitly (`k = (m + s)/n`,
+            parity-independent meaning of the shift, why there is
+            no offset, and the makeKPoints heritage so it is not
+            read back in); 3.8's expression corrected; 3.6's
+            "shifted mean-value sample" wording for `1 1 1`
+            replaced by what the single-point rule actually does.
+            PSEUDOCODE 4c.4 carries the same statement and the
+            formula without the offset. `kpoints.f90` drops the
+            `-0.5_double` (one statement) with the convention in
+            its comment. Verified: (1) the canonical Gamma deck on
+            the complex binary now resolves to (0,0,0) and its
+            50-iteration trajectory is line-for-line identical to
+            imagoG's fresh run (`jobs/knbo3/cubic/meshfix_c_gamma`
+            vs `bisect2_g`); (2) the even 4x4x4 half-shift o3 deck
+            folds to the same 4 IBZ points and reproduces its
+            pre-change control to the 8th-9th digit, energy file
+            identical at print precision -- the representatives
+            moved by a reciprocal lattice vector, the physics did
+            not (`jobs/knbo3/o3/meshfix_444` vs `phase3_b21_ctrl`);
+            (3) an odd 3x3x3 auto-shift cubic mesh is now
+            Gamma-centred (Gamma is IBZ point 1 of 4) and converges
+            (`meshfix_333`). The 91 k-point/gamma tests pass
+            unchanged (their expectations were already the
+            un-offset semantics).
+- Note:     stored convergence baselines and guidance-database
+            entries keyed on ODD-count meshes describe a
+            different point set than the same key now produces;
+            the programmer has ruled they are recomputable (TODO
+            entry). The Gamma-only SCF oscillation on the cubic
+            KNbO3 cell is real behaviour of that sampling in both
+            variants, not a defect.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing

@@ -601,6 +601,24 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
                   !   times the basis functions of atom 2.
                   if (contrib .eqv. .true.) then
                      do m = 1, currentNumTotalStates(2)
+
+                        ! Only the states of atom 2 that the current atom 2
+                        !   alpha actually contributes to are accumulated.
+                        !   Every alpha serves the lowest orbital types of
+                        !   its atom, and the alphas that also serve higher
+                        !   l come first in the alpha list, so each alpha
+                        !   has an lm coverage (1, 4, 9 or 16, held in
+                        !   currentlmAlphaIndex) that never increases along
+                        !   the list.  A state whose lm slot lies above that
+                        !   coverage has a basis coefficient of exactly zero
+                        !   for this alpha by construction, and the kernel
+                        !   wrote nothing valid in that column of
+                        !   oneAlphaPair, so the term is skipped: it would
+                        !   cost a row of multiplies to add nothing (or,
+                        !   with an undefined column, to add garbage).
+                        if (currentlmIndex(m,2) > &
+                              & currentlmAlphaIndex(alphaIndex(2),2)) cycle
+
                         pairXBasisFn2(:currentlmAlphaIndex(alphaIndex(1),1),&
                               & alphaIndex(1),m) = &
                               & pairXBasisFn2(:currentlmAlphaIndex &
@@ -1045,6 +1063,15 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
                   !   times the basis functions of atom 2.
                   if (contrib .eqv. .true.) then
                      do m = 1, currentNumTotalStates(2)
+
+                        ! Skip the states of atom 2 that lie above the lm
+                        !   coverage of the current atom 2 alpha: their basis
+                        !   coefficient is zero for this alpha and the kernel
+                        !   left that column of oneAlphaPair unwritten.  See
+                        !   the same test in gaussOverlapOL for the reasoning.
+                        if (currentlmIndex(m,2) > &
+                              & currentlmAlphaIndex(alphaIndex(2),2)) cycle
+
                         pairXBasisFn2(:currentlmAlphaIndex(alphaIndex(1),1),&
                               & alphaIndex(1),m) = &
                               & pairXBasisFn2(:currentlmAlphaIndex &
@@ -1486,6 +1513,15 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
                   !   the Hamiltonian.
                   if (contrib .eqv. .true.) then
                      do m = 1, currentNumTotalStates(2)
+
+                        ! Skip the states of atom 2 that lie above the lm
+                        !   coverage of the current atom 2 alpha: their basis
+                        !   coefficient is zero for this alpha and the kernel
+                        !   left that column of oneAlphaPair unwritten.  See
+                        !   the same test in gaussOverlapOL for the reasoning.
+                        if (currentlmIndex(m,2) > &
+                              & currentlmAlphaIndex(alphaIndex(2),2)) cycle
+
                         pairXBasisFn2(:currentlmAlphaIndex(alphaIndex(1),1),&
                               & alphaIndex(1),m) = &
                               & pairXBasisFn2(:currentlmAlphaIndex &
@@ -1900,6 +1936,16 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
                   !   times the basis functions of atom 2.
                   if (contrib .eqv. .true.) then
                      do m = 1, currentNumTotalStates(2)
+
+                        ! Skip the states of atom 2 that lie above the lm
+                        !   coverage of the current atom 2 alpha: their basis
+                        !   coefficient is zero for this alpha, and nuclearPE
+                        !   defines oneAlphaPair only within that coverage,
+                        !   so the column would be read undefined.  See the
+                        !   same test in gaussOverlapOL for the reasoning.
+                        if (currentlmIndex(m,2) > &
+                              & currentlmAlphaIndex(alphaIndex(2),2)) cycle
+
                         pairXBasisFn2(:currentlmAlphaIndex(alphaIndex(1),1),&
                               & alphaIndex(1),m) = &
                               & pairXBasisFn2(:currentlmAlphaIndex &
@@ -2306,6 +2352,17 @@ subroutine gaussOverlapEP(packedVVDims,did,aid)
                   !   times the basis functions of atom 2.
                   if (contrib .eqv. .true.) then
                      do m = 1, currentNumTotalStates(2)
+
+                        ! Skip the states of atom 2 that lie above the lm
+                        !   coverage of the current atom 2 alpha: their basis
+                        !   coefficient is zero for this alpha, and
+                        !   electronicPE defines oneAlphaPair only within
+                        !   that coverage, so the column would be read
+                        !   undefined.  See the same test in gaussOverlapOL
+                        !   for the reasoning.
+                        if (currentlmIndex(m,2) > &
+                              & currentlmAlphaIndex(alphaIndex(2),2)) cycle
+
                         pairXBasisFn2(:currentlmAlphaIndex(alphaIndex(1),1),&
                               & alphaIndex(1),m) = &
                               & pairXBasisFn2(:currentlmAlphaIndex &
@@ -2739,8 +2796,13 @@ subroutine nuclearPE(contrib,alphaIndex,currentElements,currentlmAlphaIndex,&
    enddo ! (m numPots)
 
    ! Store the accumulated result in the matrix that is used in the common
-   !   subroutine for SCF integrals.
-   oneAlphaPair(:,:) = nucPotAlphaOverlap(:,:)
+   !   subroutine for SCF integrals.  Only the block within the lm coverage
+   !   of the two alphas was zeroed and accumulated above, so only that
+   !   block is handed back; the caller reads nothing outside it.
+   oneAlphaPair(:currentlmAlphaIndex(alphaIndex(1),1), &
+         & :currentlmAlphaIndex(alphaIndex(2),2)) = &
+         & nucPotAlphaOverlap(:currentlmAlphaIndex(alphaIndex(1),1), &
+         & :currentlmAlphaIndex(alphaIndex(2),2))
 
 end subroutine nuclearPE
 
@@ -2898,8 +2960,13 @@ subroutine electronicPE(contrib,alphaIndex,currentElements,currentlmAlphaIndex,&
    enddo ! (m multiplicity)
 
    ! Store the accumulated result in the matrix that is used in the common
-   !   subroutine for SCF integrals.
-   oneAlphaPair(:,:) = elecPotAlphaOverlap(:,:)
+   !   subroutine for SCF integrals.  Only the block within the lm coverage
+   !   of the two alphas was zeroed and accumulated above, so only that
+   !   block is handed back; the caller reads nothing outside it.
+   oneAlphaPair(:currentlmAlphaIndex(alphaIndex(1),1), &
+         & :currentlmAlphaIndex(alphaIndex(2),2)) = &
+         & elecPotAlphaOverlap(:currentlmAlphaIndex(alphaIndex(1),1), &
+         & :currentlmAlphaIndex(alphaIndex(2),2))
 
 end subroutine electronicPE
 
@@ -3539,6 +3606,16 @@ subroutine gaussOverlapHamPSCF(did,aid)
                   ! Hamiltonian overlaps (if any were found).
                   do q = 1, spin
                      do m = 1, currentNumTotalStates(2)
+
+                        ! Skip the states of atom 2 that lie above the lm
+                        !   coverage of the current atom 2 alpha: their basis
+                        !   coefficient is zero for this alpha and every
+                        !   accumulation into potAtomOverlap above stayed
+                        !   within that coverage.  See the same test in
+                        !   gaussOverlapOL for the reasoning.
+                        if (currentlmIndex(m,2) > &
+                              & currentlmAlphaIndex(alphaIndex(2),2)) cycle
+
                         pairXBasisFn2Ham(:currentlmAlphaIndex( &
                               & alphaIndex(1),1),alphaIndex(1),m,q) = &
                               & pairXBasisFn2Ham(:currentlmAlphaIndex &

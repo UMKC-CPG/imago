@@ -1521,6 +1521,24 @@
   initializeKPoints style-2 path
 - [x] C21. Validate IBZ reduction: compare density-mode
   kpoint count against makeKPoints for same mesh
+- [ ] C151. Recompute every stored result keyed on an ODD-count
+  k-point mesh after the mesh convention change of 2026-08-16
+  (DESIGN 3.9, `k = (m + s)/n` with no `-1/2` offset;
+  `dev/DEBUG.md` BUG-022). Under the old formula an odd-count
+  mesh with shift 0 was Gamma-FREE and with shift 1/2 was
+  Gamma-containing; the same keys now name the opposite point
+  sets, so their stored numbers no longer describe what the
+  key produces. Even-count meshes are unaffected (same point
+  set, representatives moved by a reciprocal lattice vector;
+  agreement to the 8th-9th digit). Affected stores: the
+  convergence-ladder baselines under `jobs/` and every
+  guidance-database entry whose mesh has an odd count
+  (`guidance_db.py`; check whether the entry's mesh key
+  records the shift, and treat any odd-count entry as stale
+  regardless). Also re-derive any recorded "Gamma" result that
+  was produced by the complex binary before the change: it
+  sampled (-1/2,-1/2,-1/2). Programmer's ruling 2026-08-16:
+  recompute, do not migrate.
 
 ### Phase E -- Mesh-mode conversion and style-code-0 warning
 
