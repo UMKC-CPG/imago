@@ -246,12 +246,21 @@ the normal way, with the DEBUG entry left as a pointer.
      surfaced candidate G (`-scfsybd` dies in `initHDF5_SCF`
      building the k-point group name -- job 108 has never run)
      and showed candidate F's predicted fort.31 collision live.
-     BUG-026 not yet committed or installed. NEXT: adjudicate C,
-     D, F, G one at a time, fix, re-run the failing cells; then
-     the `-optc` SNaN/gamma cells still marked todo; then decide
-     the valgrind approach.** Working state: overlay bins are
-     current with the BUG-026 source (rebuilt 2026-08-16
-     22:55); the four sweep decks hold their run logs. Scratch
+     BUG-026 committed `9187cb1`. **STATE AT SESSION END
+     2026-08-16: BUG-024/025/026 are COMMITTED (`af64524`,
+     `da30a3d`, `9187cb1`, on top of the sweep record `40f38a1`)
+     but NOT INSTALLED and NOT PUSHED -- the installed binaries
+     and `imago.py` are still the BUG-018..023 set. Install both
+     binaries and the scripts, push, and note it here. NEXT:
+     adjudicate C, D, F, G one at a time (suggested order: G is
+     a two-line mirror of the PSCF twin; F is one open-status
+     decision; then C, D which need classification), fix, re-run
+     the failing cells; then the `-optc` SNaN/gamma cells still
+     marked todo; then decide the valgrind approach.** Working
+     state: overlay bins `jobs/phase3_stage_bin` (asan) and
+     `jobs/phase3_snan_bin` (SNaN) are current with the committed
+     source (rebuilt 2026-08-16 22:55, BUG-026 in); the four
+     sweep decks hold their run logs (`bug02N_*.log`). Scratch
      hygiene: after any `-mtop` run, clear its stray `fort.NN`
      files (21-29, 31-33, 41-43, 51-53, 61-63, 71-73) from the
      deck's scratch before running SYBD or loen there.
