@@ -27,6 +27,8 @@ and calls ``check_gamma_kp`` on it, the same call ``init_exes``
 makes when choosing between imagoG and the general executable.
 """
 
+import types
+
 import pytest
 
 import imago
@@ -71,8 +73,13 @@ def test_style1_multipoint_mesh_is_not_gamma(tmp_path):
 
 
 def test_style1_shifted_single_point_is_not_gamma(tmp_path):
-    """A 1x1x1 mesh with a nonzero shift is one point NOT at the
-    origin (a mean-value sample), so it is not gamma."""
+    """A 1x1x1 mesh with a nonzero shift is a GENERAL single-point
+    request, not the canonical Gamma file: the detector answers for
+    the file's form, and only the zero-shift form promises Gamma
+    and earns the real-arithmetic executable.  (Under imago's
+    single-point rule the shift is dropped on a one-point axis, so
+    the sample lands at the origin anyway -- same k-point, general
+    routing.  See DESIGN 3.6.)"""
     body = _HEADER.format(style=1) + (
         "NUM_KP_A_B_C\n1 1 1\nKP_SHIFT_A_B_C\n0.5 0.5 0.5\n")
     assert imago.check_gamma_kp(*_write_kp(tmp_path, body)) is False
@@ -133,3 +140,76 @@ def test_missing_label_fails_loudly(tmp_path):
     body = _HEADER.format(style=1) + "KP_SHIFT_A_B_C\n0 0 0\n"
     with pytest.raises(SystemExit):
         imago.check_gamma_kp(*_write_kp(tmp_path, body))
+
+
+## ------------------------------------------------------------------
+##   init_exes: the ONE place the executable is decided (DESIGN 3.6)
+## ------------------------------------------------------------------
+
+_GAMMA_BODY = _HEADER.format(style=1) + (
+    "NUM_KP_A_B_C\n1 1 1\nKP_SHIFT_A_B_C\n0 0 0\nNUM_POINT_OPS\n48\n")
+_MESH_BODY = _HEADER.format(style=1) + (
+    "NUM_KP_A_B_C\n4 4 4\nKP_SHIFT_A_B_C\n0 0 0\nNUM_POINT_OPS\n48\n")
+
+
+def _deck(tmp_path, scf_body, pscf_body):
+    """Write both k-point files of a deck into tmp_path and return
+    the (settings, fn, inputs) triple init_exes takes.  Only the
+    attributes init_exes reads are provided: the job id and the
+    valgrind switch on settings, and the two k-point file stems plus
+    the extension on fn."""
+    (tmp_path / "kp-scf.dat").write_text(scf_body)
+    (tmp_path / "kp-pscf.dat").write_text(pscf_body)
+    fn = types.SimpleNamespace(kp_scf="kp-scf", kp_pscf="kp-pscf",
+                               dat=".dat")
+    return fn, str(tmp_path)
+
+
+def _settings(job_id):
+    return types.SimpleNamespace(job_id=job_id, valgrind=False)
+
+
+def test_gamma_deck_selects_gamma_executable(tmp_path):
+    """Gamma in both groups selects imagoG for an ordinary job."""
+    fn, inputs = _deck(tmp_path, _GAMMA_BODY, _GAMMA_BODY)
+    exe, _, _ = imago.init_exes(_settings(200), fn, inputs)
+    assert exe == "imagoG"
+
+
+def test_mesh_deck_selects_general_executable(tmp_path):
+    """A mesh in both groups selects the general executable."""
+    fn, inputs = _deck(tmp_path, _MESH_BODY, _MESH_BODY)
+    exe, _, _ = imago.init_exes(_settings(200), fn, inputs)
+    assert exe == "imago"
+
+
+@pytest.mark.parametrize("job_id", [108, 208])
+def test_band_structure_always_runs_general(tmp_path, job_id):
+    """A symmetric band structure walks a path of general k-points
+    that only the complex executable can evaluate, so it runs on
+    the general executable even on a Gamma deck (BUG-023)."""
+    fn, inputs = _deck(tmp_path, _GAMMA_BODY, _GAMMA_BODY)
+    exe, _, _ = imago.init_exes(_settings(job_id), fn, inputs)
+    assert exe == "imago"
+
+
+@pytest.mark.parametrize("job_id", [111, 211])
+def test_polarization_runs_general_on_a_mesh_deck(tmp_path, job_id):
+    """Modern-theory-of-polarization walks strings on a full mesh
+    that imago builds itself, and the routine exists only in the
+    general build, so it is routed like a band structure."""
+    fn, inputs = _deck(tmp_path, _MESH_BODY, _MESH_BODY)
+    exe, _, _ = imago.init_exes(_settings(job_id), fn, inputs)
+    assert exe == "imago"
+
+
+@pytest.mark.parametrize("job_id", [111, 211])
+def test_polarization_refuses_a_gamma_deck(tmp_path, job_id):
+    """makeinput writes the MTOP mesh counts from the post-SCF mesh
+    request, so a Gamma post-SCF group means a '0 0 0' MTOP mesh --
+    no strings to walk.  init_exes must refuse it before any
+    executable runs, naming the remedy (BUG-024)."""
+    fn, inputs = _deck(tmp_path, _MESH_BODY, _GAMMA_BODY)
+    with pytest.raises(SystemExit) as exit_info:
+        imago.init_exes(_settings(job_id), fn, inputs)
+    assert "-pscfkp" in str(exit_info.value)

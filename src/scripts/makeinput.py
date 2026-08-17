@@ -385,9 +385,10 @@ class ScriptSettings:
         # group is always written as a single 1x1x1 k-point at the
         # origin with no shift, so that imago.py's check_gamma_kp
         # selects the gamma-specialized executable (imagoG).  This
-        # is distinct from a "1 1 1" mesh, which is a single
-        # *shifted* point that runs on the general executable.  See
-        # DESIGN 3.6.
+        # is distinct from a "1 1 1" mesh, a general single-point
+        # request that runs on the general executable (and also
+        # samples the origin, since a shift is dropped on a one-
+        # point axis).  See DESIGN 3.6.
         self.kp_gamma = [False, False, False]
 
         # K-point integration method code per group.
@@ -561,11 +562,13 @@ OPTIONS EXPLANATIONS
             important note about the gamma point:  to request the single
             k-point at the origin (gamma, 0 0 0), give a mesh of 0 0 0.
             The program then runs faster because all integral matrices are
-            real with no imaginary component.  A mesh of 1 1 1 is NOT the
-            gamma point -- it is one k-point with the usual shift applied
-            (a single shifted, mean-value sample) and runs with the
-            general complex matrices.  If no kpoint definition is given
-            then 1 general (shifted) kpoint is used.
+            real with no imaginary component.  A mesh of 1 1 1 is a
+            GENERAL single-point request, not the gamma sentinel: it runs
+            with the general complex matrices, and because a shift is
+            meaningless on an axis with one point the program drops it
+            and samples the origin -- the same k-point, but without the
+            real-arithmetic routing.  If no kpoint definition is given
+            then 1 general kpoint is used.
 
 -pscfkp     Same as -scfkp except that it applies to the post-SCF
             calculations (band, bond, dos, optc).  NOTE that sybd will
@@ -885,13 +888,16 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
         # A B C are the mesh dimensions along the a, b, c lattice directions.
         # A mesh of 0 0 0 is the gamma sentinel: a single k-point at the
         # origin with no shift, which runs faster (real-only integral
-        # matrices).  A mesh of 1 1 1 is a single *shifted* point, not gamma.
-        # If not given, 1 general (shifted) kpoint is used.
+        # matrices).  A mesh of 1 1 1 is a general single-point request:
+        # it also lands at the origin (a shift is dropped on a one-point
+        # axis) but runs on the general executable.  If not given, 1
+        # general kpoint is used.
         parser.add_argument("-scfkp", dest="scfkp", nargs=3, type=int,
                             metavar=("A", "B", "C"), default=None,
                             help="SCF k-point mesh dimensions.  0 0 0 = "
                                  "gamma point (faster, real matrices); "
-                                 "1 1 1 = one shifted point, not gamma.")
+                                 "1 1 1 = one general point (also at "
+                                 "the origin, complex matrices).")
         # The -pscfkp option is the same as -scfkp but applies to post-SCF
         # calculations (band, bond, dos, optc).  SYBD uses its own path.
         parser.add_argument("-pscfkp", dest="pscfkp", nargs=3, type=int,
@@ -1375,13 +1381,19 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
                 self.kp_mesh_pscf = [None] + list(args.pscfkp)
 
             # Resolve each group's Gamma status.  A mesh of "0 0 0"
-            # is the explicit Gamma sentinel: the single k-point at
-            # the origin (0,0,0) with no shift.  Every other mesh
-            # keeps its shift, so "1 1 1" is a single *shifted*
-            # point (a mean-value sample) on the general executable,
-            # NOT Gamma.  Zeros may not be mixed with positive
-            # counts -- a single zero is almost certainly a typo for
-            # the all-zero sentinel.  See DESIGN 3.6.
+            # is the explicit Gamma sentinel: the group is written
+            # canonically (a 1x1x1 style-code-1 mesh with shift
+            # 0 0 0), the one on-disk form that promises Gamma and
+            # selects the real-arithmetic executable.  A "1 1 1"
+            # request is a *general* single-point mesh: it is
+            # written with whatever shift was requested and runs
+            # on the general executable, and imago's single-point
+            # rule then drops the shift on that lone axis, so the
+            # point also lands at the origin -- same sample, but
+            # without the routing guarantee.  Zeros may not be
+            # mixed with positive counts -- a single zero is almost
+            # certainly a typo for the all-zero sentinel.  See
+            # DESIGN 3.6.
             for group, mesh in ((1, self.kp_mesh_scf),
                                 (2, self.kp_mesh_pscf)):
                 counts = mesh[1:4]
@@ -3969,9 +3981,10 @@ def _make_kp(settings, sc):
                 settings.symmetrize_lat_partials[kp_group])
         else:
             # Style-code-1: explicit axial counts plus the shift.  A
-            # "1 1 1" mesh here is a single *shifted* point (a mean-
-            # value sample), not Gamma -- use the "0" sentinel for
-            # true Gamma.
+            # "1 1 1" mesh here is a general single-point request --
+            # imago drops the shift on a one-point axis, so it samples
+            # the origin, but on the general executable; use the "0"
+            # sentinel for the canonical Gamma file.
             _write_mesh_kp_file(
                 dest, kp_mesh[kp_group], settings.kp_shift,
                 point_ops, frac_trans, conv_lattice, cell_mode,

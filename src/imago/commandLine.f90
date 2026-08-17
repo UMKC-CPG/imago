@@ -276,7 +276,7 @@ subroutine readJobID
       write (20,*) "Doing SCF Field"
    elseif (jobID == 111) then
       doMTOP_SCF = 1
-      write (20,*) "Doing SCF Modern Polarizatino"
+      write (20,*) "Doing SCF Modern Polarization"
    elseif (jobID == 201) then
       doDOS_PSCF = 1
       write (20,*) "Doing PSCF Density of States"

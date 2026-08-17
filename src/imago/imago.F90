@@ -261,18 +261,22 @@ subroutine setupSCF
    !   for style code 0 it builds a trivial identity table
    !   (each atom maps to itself under the single identity op).
    !
-   ! Skipped on the SYBD path. Symmetric band structure is a
-   !   1-D path of k-points where each point is its own end
-   !   product (per-band eigenvalues, and -- when partial
-   !   decomposition is added later -- a direct per-atom
-   !   projection at that very k-point). There are no shell-
-   !   summed quantities to reconstruct by unfolding an IBZ
-   !   star, so atomPerm is genuinely unnecessary. The point
-   !   ops machinery (computeRealPointOps, abcRealPointOps,
-   !   abcRealFracTrans) is not initialized on this path
-   !   either, so calling buildAtomPerm here would also be a
-   !   runtime error. See DESIGN 2.6.
-   if (doSYBD_SCF /= 1) then
+   ! Skipped on the SYBD and MTOP paths. Symmetric band
+   !   structure is a 1-D path of k-points where each point is
+   !   its own end product (per-band eigenvalues, and -- when
+   !   partial decomposition is added later -- a direct per-atom
+   !   projection at that very k-point). Modern-theory-of-
+   !   polarization builds its own FULL, unreduced mesh because
+   !   the Berry phase is accumulated along strings of k-points
+   !   that must all be present -- there is no IBZ. In neither
+   !   case are there shell-summed quantities to reconstruct by
+   !   unfolding an IBZ star, so atomPerm is genuinely
+   !   unnecessary. The point ops machinery
+   !   (computeRealPointOps, abcRealPointOps, abcRealFracTrans)
+   !   is not initialized on either path, so calling
+   !   buildAtomPerm here would also be a runtime error. See
+   !   DESIGN 2.6.
+   if ((doSYBD_SCF /= 1) .and. (doMTOP_SCF /= 1)) then
       call buildAtomPerm
 
       ! Build the inverse atom permutation table for LAT
@@ -709,18 +713,12 @@ subroutine intgPSCF
    !   for style code 0 it builds a trivial identity table
    !   (each atom maps to itself under the single identity op).
    !
-   ! Skipped on the SYBD path. Symmetric band structure is a
-   !   1-D path of k-points where each point is its own end
-   !   product (per-band eigenvalues, and -- when partial
-   !   decomposition is added later -- a direct per-atom
-   !   projection at that very k-point). There are no shell-
-   !   summed quantities to reconstruct by unfolding an IBZ
-   !   star, so atomPerm is genuinely unnecessary. The point
-   !   ops machinery (computeRealPointOps, abcRealPointOps,
-   !   abcRealFracTrans) is not initialized on this path
-   !   either, so calling buildAtomPerm here would also be a
-   !   runtime error. See DESIGN 2.6.
-   if (doSYBD_PSCF /= 1) then
+   ! Skipped on the SYBD and MTOP paths, for the reasons given
+   !   at the twin call in setupSCF: a band path and a
+   !   polarization string mesh have no IBZ star to unfold, and
+   !   neither path initializes the point ops machinery that
+   !   buildAtomPerm reads. See DESIGN 2.6.
+   if ((doSYBD_PSCF /= 1) .and. (doMTOP_PSCF /= 1)) then
       call buildAtomPerm
 
       ! Build the inverse atom permutation table for LAT

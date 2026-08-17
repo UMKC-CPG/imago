@@ -1673,36 +1673,50 @@ passed in from O_KPoints as arguments.
   makeinput.py no longer produces style code 0 files;
   mesh mode (`-kp`) now writes style code 1.
 
-**SYBD path bypasses atomPerm.**  Symmetric band structure
-(`-sybd`, `-pscfsybd`) replaces the loaded k-point set with
-a 1-D path between user-specified high-symmetry vertices.
-On that path every k-point is its own end product -- band-
-structure output is per-k-point eigenvalues, and the planned
-partial decomposition (future work) is a direct per-atom
-projection at the very k-point being plotted, with no star
-to unfold.  There are simply no shell-summed quantities for
-atomPerm to reconstruct, so the table is not needed.
+**SYBD and MTOP paths bypass atomPerm.**  Symmetric band
+structure (`-sybd`, `-scfsybd`) replaces the loaded k-point
+set with a 1-D path between user-specified high-symmetry
+vertices.  On that path every k-point is its own end product
+-- band-structure output is per-k-point eigenvalues, and the
+planned partial decomposition (future work) is a direct
+per-atom projection at the very k-point being plotted, with
+no star to unfold.  Modern-theory-of-polarization (`-mtop`,
+`-scfmtop`) likewise replaces the loaded set: it builds its
+own FULL, unreduced mesh from the `MTOP_INPUT_DATA` counts,
+because the Berry phase is accumulated along strings of
+k-points that must all be present -- there is no IBZ, and no
+star to unfold.  In neither case are there shell-summed
+quantities for atomPerm to reconstruct, so the table is not
+needed.
 
-This matters in practice because the SYBD branch of
-`initializeKPoints` calls `makePathKPoints` and skips all of
-the point-ops setup that the style-code 0/1/2 branches do
-(`numPointOps` assignment, the point-op array allocations,
-`computeRealPointOps`).  `abcRealPointOps` and
+This matters in practice because the SYBD branches of
+`initializeKPoints` call `makePathKPoints`, and the MTOP
+branches call `initializeKPointMesh(0)` on the MTOP counts,
+and BOTH skip all of the point-ops setup that the style-code
+0/1/2 branches do (`numPointOps` assignment, the point-op
+array allocations, `computeRealPointOps`,
+`computeAxisClasses`).  `abcRealPointOps` and
 `abcRealFracTrans` therefore stay unallocated, as will
 `xyzRealPointOps` when section 13.4 adds it, since it is
 built on the same branches.
 Consequently, the calls to `buildAtomPerm` and
 `buildInvAtomPerm` in `setupSCF` (SCF path) and `intgPSCF`
-(PSCF path) are guarded with `if (doSYBD_SCF /= 1)` and
-`if (doSYBD_PSCF /= 1)` respectively.
+(PSCF path) are guarded with `if ((doSYBD_SCF /= 1) .and.
+(doMTOP_SCF /= 1))` and `if ((doSYBD_PSCF /= 1) .and.
+(doMTOP_PSCF /= 1))` respectively.  For the same reason the
+`RESOLVED_KP_*` records of section 3.9 / PSEUDOCODE 4d.5 are
+written only when a style-code 1 or 2 branch actually built
+and resolved the mesh; the SYBD and MTOP branches emit
+none, exactly as style code 0 emits none, because the axis
+classes those records report were never computed there.
 
 The downstream consumers of `atomPerm` and `invAtomPerm`
 are `computeBond` (effective charge / bond order star
 distribution) and the LAT PDOS channel-permutation step
 in `dos.F90`.  Both are themselves gated by their own
-`doBond_*` / `doDOS_*` flags, so a pure `-sybd` (or
-`-pscfsybd`) run with no decomposition flag never reaches
-them.  Combining `-sybd` with `-bond` or `-dos` is not
+`doBond_*` / `doDOS_*` flags, so a pure `-sybd`, `-scfsybd`,
+`-mtop` or `-scfmtop` run with no decomposition flag never
+reaches them.  Combining those with `-bond` or `-dos` is not
 physically meaningful (you cannot integrate Q* or PDOS
 over a 1-D path) and is left as an unguarded combination
 for now -- if it occurs, those consumers will trip on the
@@ -2087,6 +2101,24 @@ executable `imagoG`, whose integral matrices are real (faster,
 roughly half the memory). No change to `check_gamma_kp` is
 needed: its existing style-code-1 detection already covers the
 canonical Gamma file.
+
+Two job families override that selection, and `init_exes` is
+the ONE place the executable is decided.  A symmetric band
+structure (`-sybd`, `-scfsybd`) and a modern-theory-of-
+polarization run (`-mtop`, `-scfmtop`) always run on the
+general executable `imago`, whatever the k-point files say,
+because both replace the loaded k-point set inside imago
+(section 2.6): the band path and the polarization strings
+are sets of general k-points that only the complex arithmetic
+can evaluate, and the polarization routine itself exists only
+in the multi-k build.  The MTOP mesh, moreover, is written by
+makeinput from the post-SCF mesh request, so on a deck whose
+post-SCF group is Gamma the `MTOP_INPUT_DATA` counts are the
+`0 0 0` sentinel -- a mesh with no strings to walk.  `imago.py`
+refuses `-mtop` and `-scfmtop` on such a deck with a message
+saying to regenerate it with a post-SCF mesh, and imago itself
+stops on any non-positive MTOP count, so a hand-edited input
+fails loudly rather than dividing by zero.
 
 By contrast, a `1 1 1` mesh is a *general* single-point request,
 not the Gamma sentinel: it is written with whatever shift was

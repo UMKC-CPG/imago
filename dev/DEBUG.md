@@ -221,14 +221,23 @@ the normal way, with the DEBUG entry left as a pointer.
      rebuild; a re-created deck of the same name silently
      inherits the dead deck's scratch), and the discovery that
      `imago.py` has a built-in valgrind mechanism that may
-     settle the still-undecided valgrind approach. **NEXT:
-     adjudicate candidates A-E one at a time (suggested order
-     E, A, B, C, D), fix, re-run the failing cells; then the
+     settle the still-undecided valgrind approach. **Candidate
+     E (with E') was accepted as BUG-024 and FIXED 2026-08-16
+     through the chain (DESIGN 2.6/3.6, PSEUDOCODE 4d.5): the
+     two `buildAtomPerm` calls skip the MTOP path as they skip
+     SYBD, the `RESOLVED_KP_*` records key on the branch that
+     built the mesh instead of the file's style code, MTOP jobs
+     route to the general executable like SYBD, and a Gamma
+     post-SCF deck's empty MTOP mesh is refused by `imago.py`
+     and by imago itself. `-mtop` and `-scfmtop` completed on
+     the o3 deck for the first time on record (asan and SNaN,
+     polarization printed, no report). This CLOSES BUG-011.
+     Not yet committed or installed. NEXT: adjudicate A, B, C,
+     D one at a time, fix, re-run the failing cells; then the
      `-optc` SNaN/gamma cells still marked todo; then decide
-     the valgrind approach.** Working state at session end:
-     tree clean except this DEBUG.md update; overlay bins are
-     current with the committed source (rebuilt 2026-08-16
-     16:49); the four sweep decks hold their run logs.
+     the valgrind approach.** Working state: overlay bins are
+     current with the BUG-024 source (rebuilt 2026-08-16
+     21:27); the four sweep decks hold their run logs.
   6. **Then reassess the shrunken fan-out** (step 3 of the
      resequencing). The preprocessed variant texts prepared for
      it lived in session scratch and are gone; regenerate with
@@ -1025,8 +1034,9 @@ provide.
 
 ### 2026-08-16 wave: five candidates from the coverage sweep
 
-All five await programmer review; NO BUG numbers. Suggested
-order: E first (it closes BUG-011), then A, B, C, D.
+A, B, C and D await programmer review; NO BUG numbers for them.
+E (with E') was accepted as BUG-024 and fixed 2026-08-16 (ledger
+entry). Suggested order for the rest: A, B, C, D.
 
 **CANDIDATE A -- `-loen` bare invocation builds a job the Fortran
 cannot run (all four cells).**
@@ -1091,7 +1101,8 @@ SCF` (both gamma cells, general binary).**
   (forces are work in progress) or dead job to remove from the
   menu until finished. Not a crash; misleading success.
 
-**CANDIDATE E -- `-mtop` = BUG-011, no longer silent: SIGSEGV in
+**CANDIDATE E -- ACCEPTED as BUG-024 and FIXED 2026-08-16 (ledger
+entry) -- `-mtop` = BUG-011, no longer silent: SIGSEGV in
 `buildAtomPerm` (`atomicSites.f90:378`) from `intgPSCF`
 (`imago.F90:724`), o3 both variants and gamma asan.**
 - The MTOP branch of `initializeKPoints` (`kpoints.f90:1221-
@@ -1751,8 +1762,14 @@ Ordered by severity (S1 first).
 - Variant:  [COMPLEX] (mtop is #ifndef GAMMA)
 - Category: LOGIC (+ a fail-loudly violation)
 - Severity: S2 -- the mtop feature is unusable on this deck
-- Status:   open; found 2026-08-10 by the first live `-mtop` run
-            ever recorded (no `command` file in the tree had one)
+- Status:   CLOSED 2026-08-16 by BUG-024, which names both
+            defects recorded here: the death is `buildAtomPerm`
+            reading point-op arrays the MTOP branch never
+            allocates, and the changing RESOLVED_KP_CLASSES
+            values are the emitter printing an `axisClass` that
+            branch never computes. Found 2026-08-10 by the first
+            live `-mtop` run ever recorded (no `command` file in
+            the tree had one).
 - Evidence: `imago.py -mtop` on the KNbO3 reduced deck: the
             Fortran run dies with no error message ("Fortran
             success file missing" is all the user sees), and its
@@ -2353,6 +2370,91 @@ Ordered by severity (S1 first).
             C). So this fix makes the routing right; the
             cross-variant HDF5 collision on the SYBD job's SCF
             pass is a separate, still-open defect.
+
+### BUG-024 -- the MTOP path never sets up the point ops that
+### buildAtomPerm reads, and a Gamma deck's MTOP mesh is empty
+- File:     `src/imago/imago.F90` (`setupSCF`, `intgPSCF`),
+            `src/imago/kpoints.f90` (`initializeKPoints`),
+            `src/scripts/imago.py` (`init_exes`),
+            `src/scripts/makeinput.py` (the `MTOP_INPUT_DATA`
+            writer, unchanged; see Fix)
+- Variant:  [COMPLEX] for the crash (mtop is #ifndef GAMMA);
+            selection layer (script) for the Gamma-deck half
+- Category: LOGIC (a path added without its seam inventory)
+            + a fail-loudly violation
+- Severity: S2 -- `-mtop` and `-scfmtop` were unusable on every
+            deck: SIGSEGV on a mesh deck, SIGFPE (release build:
+            garbage) on a Gamma deck; and the `RESOLVED_KP_*`
+            record printed an unset `axisClass` on the SYBD and
+            MTOP paths (uninitialized values into a structured
+            output line the harvester parses).
+- Status:   FIXED 2026-08-16; found by the 2026-08-16 coverage
+            sweep (candidate E/E'), accepted the same day.
+            CLOSES BUG-011.
+- Evidence: asan backtrace, o3 deck: `buildAtomPerm`
+            (`atomicSites.f90:378`) <- `intgPSCF`
+            (`imago.F90:724`). Reading: the two MTOP branches of
+            `initializeKPoints` build a full unreduced mesh from
+            `numAxialMTOP_KP` and, like the SYBD branches, never
+            reach `computeRealPointOps` or `computeAxisClasses`;
+            `cleanUpKPoints` releases the SCF pass's point-op
+            arrays before the PSCF pass, so `abcRealPointOps` and
+            `abcRealFracTrans` are unallocated when the unguarded
+            `buildAtomPerm` call reads them (the SYBD guard at the
+            same call documents exactly this hazard). The
+            `RESOLVED_KP_*` emitter tested `kPointStyleCode`,
+            which is the FILE's style, so on the SYBD and MTOP
+            branches it printed an `axisClass` nobody filled --
+            BUG-011's changing values. E': the gamma deck's
+            `MTOP_INPUT_DATA` holds `0 0 0` because makeinput
+            copies the post-SCF mesh request there and a Gamma
+            group's request is the `0 0 0` sentinel; the SNaN
+            build trapped `1/numAxialKPoints` at
+            `kpoints.f90:965`, and BUG-023's `init_exes` sent the
+            job to imagoG, which does not contain the polarization
+            routine at all.
+- Fix:      APPLIED 2026-08-16 through the chain -- DESIGN 2.6
+            (the atomPerm bypass now covers SYBD and MTOP: neither
+            has an IBZ star to unfold, and neither initializes the
+            point ops), DESIGN 3.6 (MTOP jobs 111/211 always run
+            on the general executable, like SYBD; a Gamma post-SCF
+            deck is refused), PSEUDOCODE 4d.5 (the records key on
+            the branch that built the mesh). Code: both
+            `buildAtomPerm`/`buildInvAtomPerm` calls guarded on
+            `doMTOP_*` as well as `doSYBD_*`; a local
+            `builtAxialMesh` set only in the style-1/2 branches
+            gates the `RESOLVED_KP_*` records; a new
+            `checkMTOPMeshCounts` stops with cause and remedy on
+            any non-positive MTOP count; `init_exes` routes
+            111/211 to `imago` and refuses a Gamma post-SCF deck
+            with the remedy (`-pscfkp`/`-pscfkpd`). Eight
+            `init_exes` routing tests added (25 in the file, all
+            green). Verified live: `-mtop` and `-scfmtop` on the
+            o3 deck complete on the asan build (exit 0,
+            polarization printed, one `RESOLVED_KP` block -- the
+            SCF pass's -- in the PSCF job's output, none in the
+            SCF+MTOP job's, no sanitizer report) and `-mtop` on
+            the SNaN build (no trap); the gamma deck's `-mtop`
+            and `-scfmtop` are refused by the script; a
+            hand-edited `0 0 0` on a mesh deck stops in
+            `checkMTOPMeshCounts` with the message in fort.20.
+            Along the way the last three pre-BUG-022 "single
+            shifted point" comments in makeinput.py (and one
+            argparse help string, one test docstring) were
+            brought to the current single-point rule, and the
+            "Polarizatino" typo in `commandLine.f90` fixed.
+- Note:     `gs_mtop-fb.t.plot` comes out EMPTY on a successful
+            run: the `write(179+i,...)` of the polarization to
+            `fort.180` in imago.F90's `mtop` routine is commented
+            out along with its stdout echo, so the result reaches
+            fort.20 only. Same shape as candidate D (a job the
+            script harvests from a file the Fortran no longer
+            writes); classification left for the programmer with
+            D. Also: makeinput still writes the post-SCF mesh
+            into `MTOP_INPUT_DATA` verbatim, so an MTOP mesh
+            independent of the post-SCF mesh is not yet
+            requestable; that is a feature question, not a
+            defect, and was left alone.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing

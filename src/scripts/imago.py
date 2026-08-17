@@ -1214,12 +1214,15 @@ def init_exes(settings, fn, inputs):
     Determines whether to use the gamma-point version
     (imagoG) or the general k-point version (imago) of
     the executable.  This is the ONE place that decision is
-    made: the k-point files decide it in general, and a
-    band-structure job overrides them, because a symmetric
-    band structure walks a path of k-points that only the
-    general (complex) executable can evaluate -- the gamma
-    executable's integrals are real and hold for the origin
-    alone.
+    made: the k-point files decide it in general, and two
+    job families override them (DESIGN 3.6).  A symmetric
+    band structure walks a path of k-points, and a modern-
+    theory-of-polarization run walks strings of k-points on
+    a full mesh; both are sets of general k-points that only
+    the general (complex) executable can evaluate -- the
+    gamma executable's integrals are real and hold for the
+    origin alone, and the polarization routine exists only in
+    the general build.
 
     Returns:
         tuple: (executable, exe_mechanism, sub_mechanism)
@@ -1244,7 +1247,33 @@ def init_exes(settings, fn, inputs):
     #   file either executable writes, so a gamma SCF followed
     #   by a general-executable band structure is a valid
     #   sequence.)
+    #
+    # A modern-theory-of-polarization run (111 = SCF+MTOP,
+    #   211 = PSCF MTOP) is routed the same way, and for the
+    #   same reason: imago builds the polarization mesh itself
+    #   from the MTOP_INPUT_DATA counts, and only the general
+    #   build holds the polarization routine.  Those counts are
+    #   written by makeinput from the post-SCF mesh request, so
+    #   a deck whose post-SCF group is Gamma carries the
+    #   '0 0 0' sentinel there -- a mesh with no strings for the
+    #   Berry phase to walk.  Refuse that deck here, before any
+    #   executable runs, with the remedy spelled out (imago
+    #   itself also stops on a non-positive MTOP count, so a
+    #   hand-edited input fails loudly rather than dividing by
+    #   zero).
     if settings.job_id in (108, 208):
+        executable = "imago"
+    elif settings.job_id in (111, 211):
+        if do_gamma_pscf:
+            sys.exit(
+                "a modern-theory-of-polarization run "
+                "(-mtop / -scfmtop) walks strings of k-points "
+                "on a full mesh, but this deck's post-SCF "
+                "k-point group is Gamma, so its MTOP mesh is "
+                "the empty '0 0 0' sentinel. Regenerate the "
+                "input with a post-SCF mesh (makeinput.py "
+                "-pscfkp or -pscfkpd) and run again."
+            )
         executable = "imago"
 
     # Otherwise the k-point files decide: gamma in both

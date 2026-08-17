@@ -1182,6 +1182,13 @@ subroutine initializeKPoints (inSCF)
          !   emitted as RESOLVED_KP_CLASSES so the producer's Python
          !   axis-class port can be checked against imago's own
          !   answer (PSEUDOCODE 4c.7, 4d.5).
+   logical :: builtAxialMesh
+         ! True only when a mesh style-code branch (1 or 2) built
+         !   the uniform mesh and filled axisClass.  The SYBD and
+         !   MTOP branches take precedence over the file's style
+         !   code and build their own k-point sets without touching
+         !   axisClass, so the RESOLVED_KP_* records below key on
+         !   this flag, not on kPointStyleCode (PSEUDOCODE 4d.5).
 
    ! The considerations for this operation are:
 
@@ -1221,18 +1228,25 @@ subroutine initializeKPoints (inSCF)
 
    ! Proceed:
 
-   ! Check for the above sequence of situations.
+   ! Check for the above sequence of situations.  Only the two
+   !   mesh style-code branches at the end resolve a mesh under
+   !   the point group and fill axisClass; every other branch
+   !   leaves this flag false so the RESOLVED_KP_* records are
+   !   not written for it (PSEUDOCODE 4d.5).
+   builtAxialMesh = .false.
    if ((doSYBD_SCF == 1) .and. (inSCF == 1)) then
       call makePathKPoints
    elseif ((doSYBD_PSCF == 1) .and. (inSCF == 0)) then
       call makePathKPoints
    elseif ((doMTOP_SCF == 1) .and. (inSCF == 1)) then
+      call checkMTOPMeshCounts
       numAxialKPoints(:) = numAxialMTOP_KP(:)
       kPointShift(:) = kPointShiftMTOP(:)
       call initializeKPointMesh(0) ! Do not apply symmetry.
       call convertKPointsToXYZ
       call makeMTOPIndexMap
    elseif ((doMTOP_PSCF == 1) .and. (inSCF == 0)) then
+      call checkMTOPMeshCounts
       numAxialKPoints(:) = numAxialMTOP_KP(:)
       kPointShift(:) = kPointShiftMTOP(:)
       call initializeKPointMesh(0) ! Do not apply symmetry.
@@ -1326,6 +1340,7 @@ subroutine initializeKPoints (inSCF)
       call resolveShift
       call initializeKPointMesh(1) ! Apply symmetry.
       call convertKPointsToXYZ
+      builtAxialMesh = .true.
    elseif (kPointStyleCode == 2) then
       ! Reciprocal operations FIRST: the axis classes and the
       !   symmetry-compatible count selection both need them
@@ -1340,6 +1355,7 @@ subroutine initializeKPoints (inSCF)
       call resolveShift
       call initializeKPointMesh(1) ! Apply symmetry.
       call convertKPointsToXYZ
+      builtAxialMesh = .true.
    endif
 
    ! Emit the resolved mesh to the main output so that imago.py
@@ -1356,11 +1372,16 @@ subroutine initializeKPoints (inSCF)
    !   4c.7), not for the run itself.  Each record follows imago's
    !   label/value convention: the tag alone on its line, the
    !   value on the next line (as KPOINT_STYLE_CODE and the other
-   !   kp tags are written).  Only the mesh style codes (1 and 2)
-   !   build an axial mesh; an explicit-list run (style 0) has
-   !   none, so it writes no record and the harvester records all
-   !   three as absent (DESIGN 6.1.2).
-   if ((kPointStyleCode == 1) .or. (kPointStyleCode == 2)) then
+   !   kp tags are written).  Only the mesh style-code branches
+   !   (1 and 2) resolve a mesh under the point group and fill
+   !   axisClass, so only they write the records: an explicit-
+   !   list run (style 0) builds no axial mesh, and the SYBD and
+   !   MTOP branches replace the loaded set with a path or a full
+   !   string mesh without computing axis classes (DESIGN 2.6).
+   !   Keying on the file's style code would let those branches
+   !   print an axisClass nobody filled.  In every such case the
+   !   harvester records all three as absent (DESIGN 6.1.2).
+   if (builtAxialMesh) then
       write (20,*) 'RESOLVED_KP_MESH'
       write (20,*) numAxialKPoints(1), numAxialKPoints(2), &
             & numAxialKPoints(3)
@@ -1384,6 +1405,39 @@ subroutine initializeKPoints (inSCF)
    call computePhaseFactors
 
 end subroutine initializeKPoints
+
+
+subroutine checkMTOPMeshCounts
+
+   ! Refuse a modern-theory-of-polarization mesh with a non-
+   !   positive count on any axis.  The MTOP branches of
+   !   initializeKPoints build a FULL, unreduced mesh from
+   !   numAxialMTOP_KP, and initializeKPointMesh divides by each
+   !   count to get the mesh spacing, so a zero here is a division
+   !   by zero that a release build sails through into garbage.
+   !   makeinput writes MTOP_INPUT_DATA from the post-SCF mesh
+   !   request, and a deck whose post-SCF group is Gamma carries
+   !   the '0 0 0' sentinel there -- a mesh with no strings for
+   !   the Berry phase to walk.  imago.py refuses -mtop/-scfmtop
+   !   on such a deck before imago starts (DESIGN 3.6); this is
+   !   the in-program check for a hand-edited input, so the
+   !   failure is loud and names its cause.
+
+   ! Make sure that no funny variables are defined.
+   implicit none
+
+   if (any(numAxialMTOP_KP(:) < 1)) then
+      write (20,*) 'MTOP_INPUT_DATA mesh counts must all be positive, not',&
+            & numAxialMTOP_KP(:)
+      write (20,*) 'A modern-theory-of-polarization run walks strings of'
+      write (20,*) 'k-points on a full mesh; a Gamma-only (0 0 0) request'
+      write (20,*) 'has no strings. Regenerate the input with a post-SCF'
+      write (20,*) 'k-point mesh (makeinput.py -pscfkp or -pscfkpd).'
+      call flush (20)
+      stop 'checkMTOPMeshCounts: non-positive MTOP mesh count'
+   endif
+
+end subroutine checkMTOPMeshCounts
 
 
 subroutine computeAxisClasses(axisClass)

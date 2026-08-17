@@ -1959,8 +1959,15 @@ all-caps tag on its own line, the value on the next line (as
 echoed).
 
 ```
-# In initializeKPoints, after the mesh is built (styles 1
-# and 2), write to the main output unit:
+# In initializeKPoints.  builtAxialMesh is a local logical,
+# false on entry, set true ONLY inside the style-code 1 and 2
+# branches, which are the branches that build a uniform mesh
+# AND compute the axis classes.  The file's style code alone
+# is not the test: the SYBD and MTOP branches take precedence
+# over it and build their own k-point sets without touching
+# axisClass, so a record keyed on the style code would report
+# a class vector nobody computed.
+if builtAxialMesh:
     write unit 20: "RESOLVED_KP_MESH"
     write unit 20: numAxialKPoints(1), numAxialKPoints(2),
                    numAxialKPoints(3)
@@ -1981,9 +1988,12 @@ mesh size otherwise.  `RESOLVED_KP_CLASSES` is the axis-class
 label vector (`axisClass`, filled by `computeAxisClasses`,
 4c.1) -- three integers whose equality pattern says which axes
 the point group couples; it exists to validate the producer's
-4c.7 mirror, not for the run itself.  Only the mesh style codes
-(1 and 2) emit these; an explicit-list run (style 0) builds no
-axial mesh and emits none, so imago.py records them as absent
+4c.7 mirror, not for the run itself.  Only the mesh style-code
+branches (1 and 2) emit these.  An explicit-list run (style 0)
+builds no axial mesh and emits none; a band-structure (SYBD)
+or polarization (MTOP) run replaces the loaded set with its
+own path or full string mesh (DESIGN 2.6) and emits none
+either.  In every such case imago.py records them as absent
 (6.1.2).
 
 ---
