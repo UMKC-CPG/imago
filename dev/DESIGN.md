@@ -774,6 +774,38 @@ silently applying one and discarding the other. (Note
 `subroutine bond` already zeroes `thermalSigma` around its
 own populate call for a related reason.)
 
+**(f) A band-structure path is not a zone integral.**  A
+symmetric band structure (`-sybd`, `-scfsybd`) replaces the
+loaded k-point set with a 1-D path (`makePathKPoints`, equal
+weights `2/N`), and its Fermi estimate is the equal-weight
+fill of the path's own eigenvalues by `populateStandard` --
+a 1-D sample along high-symmetry lines, useful for placing
+the zero of the plot and nothing more.  Tetrahedron
+integration has nothing to act on there: no uniform mesh, no
+IBZ fold, no tetrahedra.  Yet the LAT request travels with
+the k-point FILE (`kPointIntgCode`, read by `readKPoints`),
+which is written per deck and does not know which job will
+read it, so a deck prepared with `-pscfkpint 1` (or
+`-scfkpint 1`) hands the SYBD job a code of 1.  Two consumers
+downstream of the SYBD branch would then act on it: the
+tetrahedra block at the end of `initializeKPoints`
+(tetrahedra of the FILE's mesh counts, a grid nobody
+computed) and `populateStates`, whose LAT branch reads the
+IBZ map that only a mesh build allocates.
+
+The rule: **on the SYBD path the LAT request is ignored**, and
+it is ignored at ONE switch.  The SYBD branches of
+`initializeKPoints` set `kPointIntgCode = 0` before any
+consumer runs and write a note to the output saying so and
+why; the tetrahedra block, `populateStates`, and every other
+consumer keyed on the code then take the standard path
+without a guard of their own.  This is a property of the
+band-structure job, not of the k-point file, so it lives in
+imago rather than in makeinput.  MTOP is different and is
+NOT switched: its full, unreduced mesh receives identity IBZ
+maps and genuine tetrahedra from `initializeKPointMesh(0)`,
+so LAT on the MTOP mesh is coherent.
+
 **Spin: one Fermi level, matching the Gaussian path.** That
 path merges every (state, spin, kpoint) triplet into a
 single sorted list and fills it in ascending energy until

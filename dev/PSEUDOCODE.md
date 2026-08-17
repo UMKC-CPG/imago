@@ -859,6 +859,11 @@ function populateStates:
     # run that set both would be asking for two answers.  LAT
     # wins and thermalSigma is ignored for the SCF occupation;
     # say so rather than applying one and discarding the other.
+    # On a band-structure path kPointIntgCode is already 0
+    # here: the SYBD branches of initializeKPoints switch it
+    # off, with a note, before any consumer runs (DESIGN
+    # 1.6f) -- a path is not a zone integral, and this routine
+    # needs no guard of its own.
     if kPointIntgCode == 1:
         call populateLAT
     else if thermalSigma /= 0:

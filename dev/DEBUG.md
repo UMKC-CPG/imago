@@ -238,13 +238,23 @@ the normal way, with the DEBUG entry left as a pointer.
      verifying it surfaced candidate F (loen's `status='new'`
      `fort.21` open vs mtop's stray debug unit files). MTOP
      functionality itself (empty plot, debug traces) is
-     DEFERRED by the programmer to a later date. BUG-025 not
-     yet committed or installed. NEXT: adjudicate B, C, D, F
-     one at a time, fix, re-run the failing cells; then the
-     `-optc` SNaN/gamma cells still marked todo; then decide
+     DEFERRED by the programmer to a later date. BUG-025
+     committed `da30a3d`. Candidate B was then accepted as
+     BUG-026 and FIXED 2026-08-16 (one switch: the SYBD branches
+     set `kPointIntgCode = 0` with a note; `-sybd` on the LAT
+     decks completes on both instrumented builds); verifying it
+     surfaced candidate G (`-scfsybd` dies in `initHDF5_SCF`
+     building the k-point group name -- job 108 has never run)
+     and showed candidate F's predicted fort.31 collision live.
+     BUG-026 not yet committed or installed. NEXT: adjudicate C,
+     D, F, G one at a time, fix, re-run the failing cells; then
+     the `-optc` SNaN/gamma cells still marked todo; then decide
      the valgrind approach.** Working state: overlay bins are
-     current with the BUG-025 source (rebuilt 2026-08-16
-     22:10); the four sweep decks hold their run logs.
+     current with the BUG-026 source (rebuilt 2026-08-16
+     22:55); the four sweep decks hold their run logs. Scratch
+     hygiene: after any `-mtop` run, clear its stray `fort.NN`
+     files (21-29, 31-33, 41-43, 51-53, 61-63, 71-73) from the
+     deck's scratch before running SYBD or loen there.
   6. **Then reassess the shrunken fan-out** (step 3 of the
      resequencing). The preprocessed variant texts prepared for
      it lived in session scratch and are gone; regenerate with
@@ -1041,10 +1051,10 @@ provide.
 
 ### 2026-08-16 wave: five candidates from the coverage sweep
 
-B, C, D and F await programmer review; NO BUG numbers for them.
-E (with E') was accepted as BUG-024 and A as BUG-025, both fixed
-2026-08-16 (ledger entries). Suggested order for the rest: B, C,
-D, F.
+C, D, F and G await programmer review; NO BUG numbers for them.
+E (with E') was accepted as BUG-024, A as BUG-025 and B as
+BUG-026, all fixed 2026-08-16 (ledger entries). Suggested order
+for the rest: C, D, F, G.
 
 **CANDIDATE A -- ACCEPTED as BUG-025 and FIXED 2026-08-16 (ledger
 entry) -- `-loen` bare invocation builds a job the Fortran cannot
@@ -1066,7 +1076,8 @@ run (all four cells).**
   script-side (mirroring `build_initial_potentials.py:1069`),
   and either refuse SCF+loen or guard the re-parse Fortran-side.
 
-**CANDIDATE B -- `-sybd` with LAT integration segfaults in
+**CANDIDATE B -- ACCEPTED as BUG-026 and FIXED 2026-08-16 (ledger
+entry) -- `-sybd` with LAT integration segfaults in
 `latElectronCount` (o3, both variants).**
 - The o3 decks were made with `-pscfkpint 1`. `printSYBD ->
   populateStates` takes the LAT branch (`populate.F90:198`) on
@@ -1160,6 +1171,38 @@ any stale `fort.21` in the deck's scratch kills a loen run; and
   Alternative: keep `new` and have imago.py clear `fort.21`
   before a loen run. Both are small; the first also covers a
   hand-run.
+- **The predicted collision happened the same evening:** the
+  SNaN deck's `-sybd` verification for BUG-026 found mtop's
+  debug `fort.31/32/33` in scratch (left by that deck's `-mtop`
+  run an hour earlier); `printSYBD`'s `status='new'` open of
+  `fort.31` failed, and `makeSYBD.py` then parsed the debug
+  numbers as the band file. So this is not only loen: every
+  path that opens a fixed `fort.NN` with `status='new'` is
+  exposed to a stray file from another path, and mtop today
+  scatters 26 of them.
+
+**CANDIDATE G -- `-scfsybd` (job 108) dies in `initHDF5_SCF`
+before its SCF starts: the k-point group name overflows its
+own variable (found 2026-08-16 verifying BUG-026 on the SCF
+side).**
+- `hdf5SCF.F90:127`: `write (kPointName, fmt="(a,1a)")
+  kPointName, highSymKPChar(j,i)` inside the SYBD naming loop.
+  `kPointName` is `character*17`; the item list is that same
+  17-character variable plus one more character, so the FIRST
+  append is 18 characters into a 17-character internal file:
+  `Fortran runtime error: End of record`. The variable is also
+  both the internal unit and an item of the same write, which
+  the standard forbids. The PSCF twin (`hdf5PSCF.F90:119-124`)
+  does the same job correctly -- `numPathKP` then `"_"` by
+  formatted write, then one character per position by substring
+  assignment `kPointName(charCount:charCount) = ...`.
+- Consequence: `-scfsybd` has never reached its SCF on this
+  code base (job 108 was not among the six sweep families, which
+  ran the PSCF forms). Both variants; the group name is built
+  the same way in each.
+- Fix shape: mirror the PSCF twin (substring assignment,
+  `numPathKP` + `"_"` prefix), and let both routines share one
+  name-builder so the two files cannot drift again.
 
 **ACCEPTED as BUG-023 and FIXED 2026-08-16 (ledger entry; the
 decision moved into `init_exes`): the SYBD gamma demotion tests
@@ -2554,6 +2597,62 @@ Ordered by severity (S1 first).
             `-scfmtop` run -- candidate F in the harvest section
             (loen's `status='new'` output open; mtop's debug unit
             files).
+
+### BUG-026 -- a band-structure run acted on the k-point file's
+### LAT request: tetrahedra of a mesh nobody computed, then a
+### populate through an IBZ map the path never built
+- File:     `src/imago/kpoints.f90` (`initializeKPoints`, new
+            `ignoreLATOnPath`)
+- Variant:  [BOTH] (the general binary is what runs SYBD)
+- Category: LOGIC (a job-level property left to a per-deck
+            file; two consumers with no seam to the SYBD branch)
+- Severity: S2 -- `-sybd` was unusable on any deck made with
+            `-pscfkpint 1` (SIGSEGV in `latElectronCount`,
+            `populate.F90:946`); on a Gaussian deck it was
+            unaffected.
+- Status:   FIXED 2026-08-16; found by the 2026-08-16 coverage
+            sweep (candidate B), accepted the same day.
+- Evidence: asan backtrace `latElectronCount` <- `populateLAT`
+            <- `populateStates` <- `printSYBD` (`imago.F90:925`).
+            Reading: `kPointIntgCode` arrives with the k-point
+            FILE (`readKPoints`), which is written per deck and
+            cannot know which job reads it. The SYBD branches of
+            `initializeKPoints` replace the loaded set with the
+            path (`makePathKPoints`, equal weights `2/N`), but
+            two consumers downstream still keyed on the file's
+            code: the tetrahedra block at the routine's end
+            (`generateTetrahedra` on the FILE's mesh counts) and
+            `populateStates`' LAT branch, whose
+            `latElectronCount` indexes eigenvalues through
+            `fullKPToIBZKPMap`, allocated only by
+            `initializeKPointMesh` -- never on the path. MTOP is
+            unaffected: `initializeKPointMesh(0)` gives its full
+            mesh identity IBZ maps and genuine tetrahedra.
+- Fix:      APPLIED 2026-08-16 through the chain -- DESIGN 1.6
+            gains (f) "a band-structure path is not a zone
+            integral": the SYBD Fermi estimate is the
+            equal-weight fill of the path's own eigenvalues,
+            LAT has nothing to act on, and the request is
+            ignored at ONE switch so no consumer needs a guard
+            of its own; PSEUDOCODE 3a's `populateStates` block
+            notes that the code is already 0 on the path. Code:
+            `ignoreLATOnPath`, called first thing in both SYBD
+            branches, sets `kPointIntgCode = 0` and writes a
+            four-line note (only when the file asked for LAT).
+            Verified live on the o3 LAT decks (`KPOINT_INTG_CODE
+            1` in `kp-pscf.dat`): `-sybd` completes on the asan
+            build (297 path points in `gs_sybd-fb.plot`, the note
+            once in the PSCF pass, no `Tetrahedra:` line in that
+            pass, no sanitizer report) and on the SNaN build (no
+            trap); the two decks' bands agree to ~1e-4 eV, the
+            offset of their separately converged potentials.
+- Note:     two harness traps bit during verification, both
+            recorded: the sweep's crashed SYBD run had left a
+            corrupt `gs_pscf-fb.hdf5` in scratch ("bad heap free
+            list" -- a run killed with the PSCF file open), and
+            mtop's stray debug `fort.31` collided with SYBD's band
+            file (candidate F). `-scfsybd` (job 108) still fails,
+            for an unrelated reason recorded as candidate G.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing

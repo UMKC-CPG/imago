@@ -1235,8 +1235,10 @@ subroutine initializeKPoints (inSCF)
    !   not written for it (PSEUDOCODE 4d.5).
    builtAxialMesh = .false.
    if ((doSYBD_SCF == 1) .and. (inSCF == 1)) then
+      call ignoreLATOnPath
       call makePathKPoints
    elseif ((doSYBD_PSCF == 1) .and. (inSCF == 0)) then
+      call ignoreLATOnPath
       call makePathKPoints
    elseif ((doMTOP_SCF == 1) .and. (inSCF == 1)) then
       call checkMTOPMeshCounts
@@ -1405,6 +1407,37 @@ subroutine initializeKPoints (inSCF)
    call computePhaseFactors
 
 end subroutine initializeKPoints
+
+
+subroutine ignoreLATOnPath
+
+   ! A band-structure path is not a zone integral (DESIGN 1.6f).  The
+   !   SYBD branches replace the loaded k-point set with a 1-D path of
+   !   equal weights, and the Fermi estimate for the plot is the
+   !   equal-weight fill of the path's own eigenvalues; there is no
+   !   uniform mesh, no IBZ fold and no tetrahedra for tetrahedron
+   !   integration to act on.  The LAT request nevertheless arrives
+   !   with the k-point FILE, which is written per deck and cannot know
+   !   which job will read it, so it is switched off HERE, at one
+   !   place, before any consumer runs: the tetrahedra block at the
+   !   end of initializeKPoints and the LAT branch of populateStates
+   !   (which reads the IBZ map only a mesh build allocates) then take
+   !   the standard path without guards of their own.  MTOP is not
+   !   switched -- its full mesh gets identity IBZ maps and genuine
+   !   tetrahedra from initializeKPointMesh(0).
+
+   ! Make sure that no funny variables are defined.
+   implicit none
+
+   if (kPointIntgCode == 1) then
+      write (20,*) 'Band-structure path: the LAT integration request'
+      write (20,*) 'in the k-point file is ignored (a path is not a'
+      write (20,*) 'zone integral). Occupations for the Fermi estimate'
+      write (20,*) 'come from the equal-weight fill along the path.'
+      kPointIntgCode = 0
+   endif
+
+end subroutine ignoreLATOnPath
 
 
 subroutine checkMTOPMeshCounts
