@@ -110,6 +110,54 @@ def test_outputs_loen_key():
 
 
 # --------------------------------------------------------------
+#  reconcile: the loen job is standalone (DESIGN 5.10.2, BUG-025)
+# --------------------------------------------------------------
+def _reconcile(job=None, scf_basis=None, pscf_basis=None):
+    """Run ScriptSettings.reconcile on a hand-built argparse-shaped
+    namespace, bypassing the rc-file constructor ($IMAGO_RC is not
+    needed by reconcile itself).  Returns the settings object."""
+    args = SimpleNamespace(scf_basis=scf_basis,
+                           pscf_basis=pscf_basis,
+                           serialxyz=False, valgrind=False)
+    for name in imago.JOB_DEFS:
+        setattr(args, name, None)
+    if job is not None:
+        setattr(args, job, "gs")
+    settings = imago.ScriptSettings.__new__(imago.ScriptSettings)
+    imago.ScriptSettings.reconcile(settings, args)
+    return settings
+
+
+def test_bare_loen_runs_no_scf_and_no_pscf_pass():
+    """loen reads geometry only, so bare -loen must hand imago
+    basis codes of 0 and 0: no SCF pass, no post-SCF pass.  (An
+    SCF basis alone made loen's input reader index by a zero
+    post-SCF code -- BUG-025.)"""
+    s = _reconcile(job="loen")
+    assert s.job_id == 311
+    assert (s.basis_scf, s.basis_pscf) == ("no", "no")
+    assert (s.basis_code_scf, s.basis_code_pscf) == (0, 0)
+
+
+@pytest.mark.parametrize("scf_basis,pscf_basis",
+                         [("fb", None), (None, "fb"), ("mb", "fb")])
+def test_loen_refuses_any_basis(scf_basis, pscf_basis):
+    """Combining -loen with an SCF or post-SCF basis is refused
+    before anything runs, naming the remedy."""
+    with pytest.raises(SystemExit) as exit_info:
+        _reconcile(job="loen", scf_basis=scf_basis,
+                   pscf_basis=pscf_basis)
+    assert "standalone" in str(exit_info.value)
+
+
+def test_loen_explicit_no_no_is_accepted():
+    """The producer's historical form, -loen -scf no, stays valid:
+    both bases are 'no' either way."""
+    s = _reconcile(job="loen", scf_basis="no")
+    assert (s.basis_scf, s.basis_pscf) == ("no", "no")
+
+
+# --------------------------------------------------------------
 #  _read_scf_threshold / _last_data_row (12.5)
 # --------------------------------------------------------------
 

@@ -232,12 +232,19 @@ the normal way, with the DEBUG entry left as a pointer.
      and by imago itself. `-mtop` and `-scfmtop` completed on
      the o3 deck for the first time on record (asan and SNaN,
      polarization printed, no report). This CLOSES BUG-011.
-     Not yet committed or installed. NEXT: adjudicate A, B, C,
-     D one at a time, fix, re-run the failing cells; then the
+     Committed `af64524`. Candidate A was then accepted as
+     BUG-025 and FIXED 2026-08-16 (loen is standalone: job-table
+     default `no`/`no`, script refusal, `readJobID` guard);
+     verifying it surfaced candidate F (loen's `status='new'`
+     `fort.21` open vs mtop's stray debug unit files). MTOP
+     functionality itself (empty plot, debug traces) is
+     DEFERRED by the programmer to a later date. BUG-025 not
+     yet committed or installed. NEXT: adjudicate B, C, D, F
+     one at a time, fix, re-run the failing cells; then the
      `-optc` SNaN/gamma cells still marked todo; then decide
      the valgrind approach.** Working state: overlay bins are
-     current with the BUG-024 source (rebuilt 2026-08-16
-     21:27); the four sweep decks hold their run logs.
+     current with the BUG-025 source (rebuilt 2026-08-16
+     22:10); the four sweep decks hold their run logs.
   6. **Then reassess the shrunken fan-out** (step 3 of the
      resequencing). The preprocessed variant texts prepared for
      it lived in session scratch and are gone; regenerate with
@@ -1034,12 +1041,14 @@ provide.
 
 ### 2026-08-16 wave: five candidates from the coverage sweep
 
-A, B, C and D await programmer review; NO BUG numbers for them.
-E (with E') was accepted as BUG-024 and fixed 2026-08-16 (ledger
-entry). Suggested order for the rest: A, B, C, D.
+B, C, D and F await programmer review; NO BUG numbers for them.
+E (with E') was accepted as BUG-024 and A as BUG-025, both fixed
+2026-08-16 (ledger entries). Suggested order for the rest: B, C,
+D, F.
 
-**CANDIDATE A -- `-loen` bare invocation builds a job the Fortran
-cannot run (all four cells).**
+**CANDIDATE A -- ACCEPTED as BUG-025 and FIXED 2026-08-16 (ledger
+entry) -- `-loen` bare invocation builds a job the Fortran cannot
+run (all four cells).**
 - `imago.py` `JOB_DEFS["loen"]` gives no default bases, so bare
   `-loen` means `scf=fb, pscf=no`. The Fortran then runs an SCF
   pass and calls `loen(0)`, whose `parseInput(0)` indexes
@@ -1120,6 +1129,37 @@ entry) -- `-mtop` = BUG-011, no longer silent: SIGSEGV in
   the release build sails through into E. Whether the counts
   should ever be 0 (makeinput's default for a gamma deck) is a
   second question.
+
+**CANDIDATE F -- `loen` opens `fort.21` with `status='new'`, so
+any stale `fort.21` in the deck's scratch kills a loen run; and
+`mtop` litters that scratch with debug unit files (found
+2026-08-16 while verifying BUG-025).**
+- `loen.f90:882`: `open (unit=21, file='fort.21', status='new')`.
+  A bare `-loen` on the o3 asan deck computed every bispectrum
+  and then died with `Cannot open file 'fort.21': File exists`
+  -- the file was left by the `-scfmtop` run made an hour
+  earlier in the same scratch. `imago.py` moves loen's own
+  `fort.21` out after a run, so only a FOREIGN writer can leave
+  one, but when it does the loen run fails after doing all its
+  work, and the message names a file, not a cause.
+- The foreign writer: `mtop.F90:617/742` debug writes
+  `write(code+axis,*)` and `write(code+10+axis,*)` with `code`
+  = 20/40/60, i.e. units 21-23, 31-33, 41-43, 51-53, 61-63,
+  71-73, plus `write(23+axis)`/`write(26+axis)` at `:388/:392`
+  (24-29) -- 26 `fort.NN` files in scratch after one MTOP run,
+  several on unit numbers other paths own (31 is SYBD's band
+  file; 30-32 are field's profile files). The MTOP module is
+  acknowledged work in progress (its result print and the
+  `fort.180` write are commented out; "Got here" traces
+  remain), and the programmer has deferred MTOP functionality,
+  so this half is RECORDED, not proposed for fixing now.
+- Fix shape for the loen half, for ruling: open the OUTPUT with
+  `status='replace'` (the O14 precedent for `imagoKKc`: outputs
+  replace, inputs stay `old`), so a stale file from another
+  path cannot fail a run that has already done its work.
+  Alternative: keep `new` and have imago.py clear `fort.21`
+  before a loen run. Both are small; the first also covers a
+  hand-run.
 
 **ACCEPTED as BUG-023 and FIXED 2026-08-16 (ledger entry; the
 decision moved into `init_exes`): the SYBD gamma demotion tests
@@ -2455,6 +2495,65 @@ Ordered by severity (S1 first).
             independent of the post-SCF mesh is not yet
             requestable; that is a feature question, not a
             defect, and was left alone.
+
+### BUG-025 -- bare `-loen` ran a full SCF and then read the
+### type arrays with a zero basis code
+- File:     `src/scripts/imago.py` (`JOB_DEFS`, `reconcile`),
+            `src/imago/commandLine.f90` (`readJobID`)
+- Variant:  selection layer (script) + [BOTH] for the guard
+- Category: LOGIC (a job-table default that contradicted the
+            job's nature) + a fail-loudly violation
+- Severity: S2 -- bare `-loen` was unusable on every deck: a
+            whole SCF ran for nothing, then `loen(0)`'s
+            `parseInput(0)` indexed the 3-slot per-type arrays
+            with `basisCode_PSCF = 0` (`atomicTypes.f90:238`;
+            bounds error under checks, a garbage read in
+            release). `-loen -pscf <b>` died on a double
+            `parseInput` ("already allocated angsamplevectors").
+            Only the producer's `-loen -scf no` form worked.
+- Status:   FIXED 2026-08-16; found by the 2026-08-16 coverage
+            sweep (candidate A), accepted the same day.
+- Evidence: `JOB_DEFS["loen"] = (311, "loen", None, None)`, and
+            `None` means "keep the generic default", which is
+            `scf=fb, pscf=no`; so bare `-loen` sent `imago 2 0
+            0 0 311 0`. `readBasisCodes` decides `doSCF`/
+            `doPSCF` from the raw codes (`:151`, `:168`) BEFORE
+            the both-zero substitution at `:178` (which gives
+            the input readers a valid slot and nothing more), so
+            `-scf no` alone yields no pass at all -- the working
+            form. `loen` needs geometry and `LOEN_INPUT_DATA`
+            only.
+- Fix:      APPLIED 2026-08-16 through the chain -- DESIGN 5.10.2
+            step 2 now states the rule (loen is a standalone,
+            geometry-only job; both bases default to `no`; the
+            script and imago's command-line parser refuse a
+            combination with any basis, and why). Code:
+            `JOB_DEFS["loen"]` defaults `("no", "no")`;
+            `reconcile` refuses job 311 with either basis not
+            `"no"`, naming the remedy; `readJobID`'s 311 branch
+            stops on `doSCF == 1 .or. doPSCF == 1` -- on the
+            decisions, not the basis codes, so the substitution
+            is not mistaken for a pass -- and it sits there
+            rather than in `loen`, which is reached only after
+            the SCF/PSCF blocks would already have run. Five
+            `reconcile` tests added (`test_imago_api.py`; 231
+            pass across the three touched files). Verified live
+            (asan overlay, o3 deck): bare `-loen` runs only loen
+            (`basisCode_SCF = 0`, `basisCode_PSCF = 0` then the
+            substitution note, `Doing Local Environment`,
+            `gs_loen-fb.plot` harvested with the same
+            fingerprints as the `-scf no` probe, no sanitizer
+            output); `-loen -scf fb` and `-loen -pscf fb` are
+            refused by the script; the hand-issued `imago 2 0 0
+            0 311 0` stops in `readJobID` in 0.13 s with the
+            message in fort.20. `build_initial_potentials.py`'s
+            explicit `-scf no` is left as is: redundant, harmless,
+            and its tests still pass.
+- Note:     the first bare-`-loen` verification died on a stale
+            `fort.21` in the deck's scratch, left by an earlier
+            `-scfmtop` run -- candidate F in the harvest section
+            (loen's `status='new'` output open; mtop's debug unit
+            files).
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing

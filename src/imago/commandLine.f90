@@ -316,6 +316,30 @@ subroutine readJobID
    elseif (jobID == 311) then
       doLoEn = 1
       write (20,*) "Doing Local Environment"
+
+      ! loen is a standalone, geometry-only job and never shares a
+      !   run with an SCF or post-SCF pass (DESIGN 5.10.2).  The test
+      !   is on the doSCF/doPSCF decisions, NOT on the basis codes:
+      !   when both codes arrive as zero, readBasisCodes substitutes
+      !   a valid post-SCF code so the input readers have a slot to
+      !   index, and that substitution must not be mistaken for a
+      !   requested pass.  With a pass present, loen's parseInput
+      !   would either index the per-type arrays with a zero basis
+      !   code (SCF basis alone) or re-parse onto arrays the SCF
+      !   pass left allocated (post-SCF basis after SCF).  imago.py
+      !   refuses the combination first; this guard is for a
+      !   hand-issued command line, and it sits here -- before any
+      !   pass has run -- rather than in loen itself, which is
+      !   reached only after the SCF and post-SCF blocks.
+      if ((doSCF == 1) .or. (doPSCF == 1)) then
+         write (20,*) 'loen is a standalone, geometry-only job and'
+         write (20,*) 'cannot share a run with an SCF or post-SCF pass.'
+         write (20,*) 'Give both basis codes as 0 (imago.py: -loen with'
+         write (20,*) 'no -scf/-pscf, or -scf no -pscf no) and run the'
+         write (20,*) 'other job separately.'
+         call flush (20)
+         stop 'readJobID: SCF or PSCF pass requested in a loen run'
+      endif
    endif
 
 end subroutine readJobID

@@ -1529,6 +1529,11 @@ subroutine loen(inSCF)
    integer, intent(in) :: inSCF
 
 
+   ! A loen run never carries an SCF or post-SCF pass (DESIGN 5.10.2);
+   !   parseCommandLine has already refused any command line that
+   !   asks for one, so by the time control reaches here no pass has
+   !   run and no input has been parsed.
+
    ! Read in the input to initialize all the key data structure variables.
    call parseInput(inSCF)
 

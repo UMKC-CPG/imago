@@ -7266,8 +7266,26 @@ skeleton untouched.
    this `imago.dat` carries the matcher's
    `(twoj1, twoj2, ...)` parameters via
    `BispecMatcher.to_loen_input` (5.10.5).
-2. **Run loen.**  Invoke `imago.py -loen -scf no` against
-   that `imago.dat`, producing `fort.21` (5.10.3).
+2. **Run loen.**  Invoke `imago.py -loen` against that
+   `imago.dat`, producing `fort.21` (5.10.3).  **loen is a
+   standalone, geometry-only job**: it reads the structure
+   and the `LOEN_INPUT_DATA` parameters, needs no basis and
+   no potential, and never shares a run with an SCF or
+   post-SCF pass.  `imago.py`'s job table therefore defaults
+   BOTH bases to `no` for `-loen` (so the explicit `-scf no`
+   the producer passes is redundant but harmless), and both
+   `imago.py` and imago's command-line parser (before any pass
+   runs) refuse a run that combines loen with any basis,
+   naming the reason.  The
+   refusal is not mere tidiness: imago's input readers index
+   per-type arrays by the basis code of the pass being
+   parsed, and `loen` parses as a post-SCF pass, so an SCF
+   basis with no post-SCF basis hands the reader an index of
+   zero; and a post-SCF basis after an SCF pass parses the
+   input a second time onto arrays the SCF pass left
+   allocated.  A standalone run has neither problem: with
+   both codes zero the command-line reader substitutes a
+   valid slot index for parsing only, and neither pass runs.
 3. **Orchestrate on `fort.21`.**
    - *Case 1 (grouping).*  Requires a P1 skeleton --
      space group 1 (the mandatory `space` line reads

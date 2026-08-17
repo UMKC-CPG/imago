@@ -221,8 +221,12 @@ JOB_DEFS = {
     "force": (209, "pscf+force", "fb", "fb"),
     "field": (210, "pscf+field", "fb", "fb"),
     "mtop":  (211, "pscf+mtop",  "fb", "fb"),
-    # Special jobs (300-series).
-    "loen":  (311, "loen",        None, None),
+    # Special jobs (300-series).  loen is a standalone,
+    #   geometry-only job (DESIGN 5.10.2): it reads the structure
+    #   and the LOEN_INPUT_DATA parameters and runs neither an
+    #   SCF nor a post-SCF pass, so BOTH bases default to "no".
+    #   Combining it with a basis is refused in Settings below.
+    "loen":  (311, "loen",        "no", "no"),
 }
 
 
@@ -802,6 +806,28 @@ Defaults are given in ./imagorc.py or $IMAGO_RC/imagorc.py.
                 self.basis_scf = def_scf
             if not pscf_explicit and def_pscf is not None:
                 self.basis_pscf = def_pscf
+
+            # loen is a standalone, geometry-only job and never
+            #   shares a run with an SCF or post-SCF pass (DESIGN
+            #   5.10.2).  imago's input readers index per-type
+            #   arrays by the basis code of the pass being parsed,
+            #   and loen parses as a post-SCF pass, so an SCF
+            #   basis alone hands the reader a zero index, and a
+            #   post-SCF basis after an SCF pass re-parses onto
+            #   arrays that pass left allocated.  Refuse both
+            #   here, before anything runs; imago's own loen entry
+            #   refuses the same combination for a hand-issued
+            #   command line.
+            if (self.job_id == 311
+                    and (self.basis_scf != "no"
+                         or self.basis_pscf != "no")):
+                sys.exit(
+                    "-loen is a standalone, geometry-only job: "
+                    "it does not combine with an SCF or post-SCF "
+                    "basis in one run. Drop -scf/-pscf (or give "
+                    "-scf no -pscf no) and run the SCF or "
+                    "post-SCF job separately."
+                )
 
         # Determine numeric basis codes.
         self.basis_code_scf = BASIS_CODE_MAP.get(
