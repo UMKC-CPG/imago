@@ -204,22 +204,31 @@ the normal way, with the DEBUG entry left as a pointer.
      (`0ba89ff`); both binaries and `imago.py` were INSTALLED
      and the commits PUSHED by the programmer 2026-08-16 (the
      installed complex binary verified Gamma-centred on a
-     3x3x3 mesh). The harvest section also records the coverage
-     matrix (plan of record: twelve job families x two forms x
-     two variants, of which instrumentation has touched two
-     families), three harness traps (`$IMAGO_BIN` must be
-     exported for every overlay run -- three void
-     "verification" runs happened without it; the overlay bins
-     hold COPIES that must be refreshed after each rebuild; a
-     re-created deck of the same name silently inherits the
-     dead deck's scratch), and the discovery that `imago.py`
-     has a built-in valgrind mechanism that may settle the
-     still-undecided valgrind approach. **NEXT: extend asan
-     and SNaN coverage across the runnable job families (no
-     candidate is pending, so the matrix is the work; the
-     overlay bins must be re-copied from the instrumented trees
-     after rebuilding them from the committed source); decide
-     the valgrind approach.**
+     3x3x3 mesh). **The coverage sweep then ran 2026-08-16:
+     all six runnable families x both decks x both instrumented
+     variants (24 cells; matrix and per-cell notes in the
+     harvest section). `-dos` and `-bond` are clean everywhere;
+     `-loen`, `-sybd`, `-force`, `-mtop` each fail with a
+     located, deterministic signature -- FIVE CANDIDATES (A-E)
+     await programmer review in the "2026-08-16 wave"
+     subsection, no BUG numbers. E is BUG-011's mechanism (the
+     MTOP path never sets up the point ops that `buildAtomPerm`
+     reads).** No sanitizer report appeared in the sweep. The
+     harvest section also records three harness traps
+     (`$IMAGO_BIN` must be exported for every overlay run --
+     three void "verification" runs happened without it; the
+     overlay bins hold COPIES that must be refreshed after each
+     rebuild; a re-created deck of the same name silently
+     inherits the dead deck's scratch), and the discovery that
+     `imago.py` has a built-in valgrind mechanism that may
+     settle the still-undecided valgrind approach. **NEXT:
+     adjudicate candidates A-E one at a time (suggested order
+     E, A, B, C, D), fix, re-run the failing cells; then the
+     `-optc` SNaN/gamma cells still marked todo; then decide
+     the valgrind approach.** Working state at session end:
+     tree clean except this DEBUG.md update; overlay bins are
+     current with the committed source (rebuilt 2026-08-16
+     16:49); the four sweep decks hold their run logs.
   6. **Then reassess the shrunken fan-out** (step 3 of the
      resequencing). The preprocessed variant texts prepared for
      it lived in session scratch and are gone; regenerate with
@@ -967,34 +976,139 @@ job menu is twelve post-SCF families, each in `-X` (pscf) and
 touches two families. Legend: ok = run clean; B18 = ran and
 found BUG-018, clean after the fix; B21 = trapped on BUG-021,
 clean after the fix (2026-08-16: the whole SCF is SNaN-clean on
-both variants); todo = not yet run; deck = needs deck work
-first. Valgrind is a whole pending column (approach undecided).
-The `-scfX` forms run their analysis from different call sites
-than the `-X` forms; whether they need their own rows is an
-open scope question.
+both variants); A..E = failed on the 2026-08-16 sweep with the
+signature of that letter in the wave below (candidates awaiting
+review); gen = a gamma deck routes this family to the general
+binary (BUG-023), so the cell IS the general binary; deck =
+needs deck work first. Valgrind is a whole pending column
+(approach undecided). The `-scfX` forms run their analysis from
+different call sites than the `-X` forms; whether they need
+their own rows is an open scope question.
 
     family    imago-asan  imago-snan  imagoG-asan  imagoG-snan
-    SCF       ok          B21         todo         B21
+    SCF       ok          B21         ok           B21
     -optc     B18         todo        todo         todo
-    -dos      todo        todo        todo         todo
-    -bond     todo        todo        todo         todo
-    -loen     todo        todo        todo         todo
-    -sybd     todo        todo        todo         todo
-    -force    todo        todo        todo         todo
-    -mtop     todo        todo        todo         todo
+    -dos      ok          ok          ok           ok
+    -bond     ok          ok          ok           ok
+    -loen     A           A           A            A
+    -sybd     B           B           C (gen)      C (gen)
+    -force    D           D           D            D
+    -mtop     E           E           E            E'
     -pacs     deck        deck        deck         deck
     -nlop     deck        deck        deck         deck
     -sige     deck        deck        deck         deck
     -dimo     deck        deck        deck         deck
     -field    deck        deck        deck         deck
 
-Notes tying rows to the ledger: `-sybd` on a gamma deck was
-BUG-023 (fixed; the row is now runnable); `-mtop` is BUG-011's
-silent-death path and an instrumented run is the cheapest probe
-for it; `-force` reaches BUG-016's gamma force dump, which was
-fixed by inspection only; `-pacs` is where BUG-019's variable
-becomes live, and needs an excited-atom deck the KNbO3
-skeletons do not provide.
+Sweep mechanics (2026-08-16, all 24 cells): decks
+`jobs/knbo3/o3/phase3_{asan,snan}` and
+`jobs/knbo3/cubic/phase3_{asan,snan}_g`, overlays refreshed from
+the committed source, one log per run (`matrix_<family>.log`
+in each deck) plus `matrix_summary.txt`; driver script kept in
+session scratch only (trivial: loop the six families with
+`$IMAGO_BIN` exported). Each `-X` job first re-runs the SCF from
+the stored potential, so every gamma cell also re-ran the full
+50-iteration Gamma SCF under asan and SNaN -- clean. The gamma
+`-dos`/`-bond` cells report `not_converged` from the script;
+that is the inherited Gamma-SCF verdict, not a failure (outputs
+written, no marker). No AddressSanitizer or LeakSanitizer
+report appeared anywhere in the sweep; every failure is a
+deterministic logic defect with a located site.
+
+Notes tying rows to the ledger: `-mtop` is BUG-011's
+silent-death path -- candidate E below is its mechanism;
+`-force` reaches BUG-016's gamma force dump, which was fixed by
+inspection only (and candidate D shows the PSCF force job never
+gets there); `-pacs` is where BUG-019's variable becomes live,
+and needs an excited-atom deck the KNbO3 skeletons do not
+provide.
+
+### 2026-08-16 wave: five candidates from the coverage sweep
+
+All five await programmer review; NO BUG numbers. Suggested
+order: E first (it closes BUG-011), then A, B, C, D.
+
+**CANDIDATE A -- `-loen` bare invocation builds a job the Fortran
+cannot run (all four cells).**
+- `imago.py` `JOB_DEFS["loen"]` gives no default bases, so bare
+  `-loen` means `scf=fb, pscf=no`. The Fortran then runs an SCF
+  pass and calls `loen(0)`, whose `parseInput(0)` indexes
+  `tempIntArray(basisCode_PSCF)` with basisCode 0
+  (`atomicTypes.f90:238`; bounds error under -fcheck, garbage
+  otherwise).
+- The pipeline's form `-loen -scf no` WORKS (both codes zero, so
+  `commandLine.f90:178` forces PSCF to 1); confirmed live on the
+  o3 asan deck: bispectrum computed, exit 0.
+- `-loen -pscf fb` (any SCF basis) dies differently: "Attempting
+  to allocate already allocated variable angsamplevectors" --
+  `parseInput` runs twice (SCF, then loen) and the loen reader
+  does not guard its allocation.
+- Fix shape: default `JOB_DEFS["loen"]` to `("no", ...)`
+  script-side (mirroring `build_initial_potentials.py:1069`),
+  and either refuse SCF+loen or guard the re-parse Fortran-side.
+
+**CANDIDATE B -- `-sybd` with LAT integration segfaults in
+`latElectronCount` (o3, both variants).**
+- The o3 decks were made with `-pscfkpint 1`. `printSYBD ->
+  populateStates` takes the LAT branch (`populate.F90:198`) on
+  the PATH k-points, where no mesh, tetrahedra or IBZ maps
+  exist; `latElectronCount` (`populate.F90:946`) walks
+  unallocated tetrahedra -> SIGSEGV.
+- A band structure has no zone integral to perform; SYBD must
+  not enter LAT populate (Fortran guard on the SYBD path), or
+  makeinput must not write intg code 1 into the pscf file for a
+  sybd job -- probably both.
+
+**CANDIDATE C -- `-sybd` on a gamma deck whose scratch holds an
+imagoG SCF file: `STOP Failed to create atom overlapCV did
+SCF` (both gamma cells, general binary).**
+- BUG-023 routes the job to the general binary; its SCF pass
+  opens the existing `gs_scf-fb.hdf5` that imagoG wrote (real
+  layout, `atomOverlapCV/real` only) and tries to create the
+  complex layout's datasets -> the create fails -> STOP.
+- The BUG-023 verification probe deck had NO SCF HDF5 (only the
+  potential was copied in), so it created a fresh file and
+  passed; the ledger's "gamma-SCF-then-general-SYBD works"
+  holds only in that case. Real usage (imagoG SCF, then -sybd)
+  fails until the scratch is cleared. Cross-variant HDF5
+  incompatibility is the underlying issue; options: the SYBD
+  job's SCF pass should not need the SCF HDF5 at all (`-scf no`
+  semantics), or the file must be detected and re-created.
+
+**CANDIDATE D -- `-force` (PSCF, job 209) is a stub: the run
+"succeeds" and computes no forces (all four cells).**
+- The Fortran completes (`Program Sequence Complete`, fort.2
+  written) but never computes forces: `makeValenceRho`, the only
+  caller of `computeForce`, is called only from `mainSCF`
+  (`imago.F90:572`); the PSCF call at `imago.F90:1187` is
+  commented out. `-scfforce` (109) would reach `computeForce` on
+  the converged SCF iteration; 209 cannot.
+- What the script harvests as force output (`fort.98`) is unit
+  `97+spin` -- the debug dump in `forces.F90:821-838`, BUG-016's
+  neighbourhood -- so the script's contract is with a debug
+  file.
+- Needs the programmer's classification: feature-incomplete
+  (forces are work in progress) or dead job to remove from the
+  menu until finished. Not a crash; misleading success.
+
+**CANDIDATE E -- `-mtop` = BUG-011, no longer silent: SIGSEGV in
+`buildAtomPerm` (`atomicSites.f90:378`) from `intgPSCF`
+(`imago.F90:724`), o3 both variants and gamma asan.**
+- The MTOP branch of `initializeKPoints` (`kpoints.f90:1221-
+  1232`) builds its mesh from `numAxialMTOP_KP` and never calls
+  `computeRealPointOps`, so `abcRealPointOps`/`abcRealFracTrans`
+  are unallocated when `buildAtomPerm` reads them. The comment at
+  `imago.F90:712-723` documents exactly this hazard for SYBD and
+  guards it (`if (doSYBD_PSCF /= 1)`); MTOP needs the same
+  treatment or the point-op setup on its path. This also explains
+  BUG-011's "RESOLVED_KP_CLASSES varies between runs":
+  `axisClass` is never computed on that path either.
+- **E' (gamma, SNaN):** the trap fires earlier, `1/
+  numAxialKPoints` at `kpoints.f90:965` -- the gamma deck's
+  `MTOP_INPUT_DATA` carries mesh counts of 0, a division by zero
+  the release build sails through into E. Whether the counts
+  should ever be 0 (makeinput's default for a gamma deck) is a
+  second question.
 
 **ACCEPTED as BUG-023 and FIXED 2026-08-16 (ledger entry; the
 decision moved into `init_exes`): the SYBD gamma demotion tests
@@ -2227,13 +2341,18 @@ Ordered by severity (S1 first).
             fixed script completes on the general binary -- exit
             0, `gs_sybd-fb.plot` with all 297 path points, no
             solver error -- with the SCF potential from a Gamma
-            SCF, confirming the gamma-SCF-then-general-band-
-            structure sequence works (the potential file is the
-            same text file either executable writes). The nine
-            gamma-detector tests stay green.
-- Note:     with this the -sybd row of the coverage matrix has
-            no ledger dependency left; the SYBD path itself has
-            not yet been run under asan/SNaN.
+            SCF (the potential file is the same text file either
+            executable writes). The nine gamma-detector tests
+            stay green.
+- Note:     the probe deck held NO SCF HDF5, so the general
+            binary's SCF pass created a fresh one. The coverage
+            sweep the same day showed the real sequence -- imagoG
+            SCF leaving its real-layout `gs_scf-fb.hdf5` in
+            scratch, then `-sybd` -- STOPs on
+            `Failed to create atom overlapCV` (harvest candidate
+            C). So this fix makes the routing right; the
+            cross-variant HDF5 collision on the SYBD job's SCF
+            pass is a separate, still-open defect.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing
