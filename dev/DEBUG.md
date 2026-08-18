@@ -249,18 +249,24 @@ the normal way, with the DEBUG entry left as a pointer.
      BUG-026 committed `9187cb1`. **STATE AT SESSION END
      2026-08-16: BUG-024/025/026 are COMMITTED (`af64524`,
      `da30a3d`, `9187cb1`, on top of the sweep record `40f38a1`)
-     but NOT INSTALLED and NOT PUSHED -- the installed binaries
-     and `imago.py` are still the BUG-018..023 set. Install both
-     binaries and the scripts, push, and note it here. NEXT:
-     adjudicate C, D, F, G one at a time (suggested order: G is
-     a two-line mirror of the PSCF twin; F is one open-status
-     decision; then C, D which need classification), fix, re-run
-     the failing cells; then the `-optc` SNaN/gamma cells still
-     marked todo; then decide the valgrind approach.** Working
-     state: overlay bins `jobs/phase3_stage_bin` (asan) and
-     `jobs/phase3_snan_bin` (SNaN) are current with the committed
-     source (rebuilt 2026-08-16 22:55, BUG-026 in); the four
-     sweep decks hold their run logs (`bug02N_*.log`). Scratch
+     but not yet installed or pushed. **2026-08-17: INSTALLED
+     (both binaries and the scripts) and PUSHED by the
+     programmer; `main` = `origin/main` at `a0f6cea`.**
+     **2026-08-17: G accepted as BUG-027 and FIXED (shared
+     `kPointGroupName` builder in O_KPoints; DESIGN 2.6 states
+     it), verified on both instrumented builds, UNCOMMITTED at
+     the time of writing (dirty: DEBUG.md, DESIGN.md, kpoints.f90,
+     hdf5SCF.F90, hdf5PSCF.F90). Verifying it surfaced candidate
+     H: job 108 (`-scfsybd`), once it runs, does an SCF over the
+     297 path points and never prints bands.** NEXT: adjudicate
+     H, F, C, D one at a time (H decides whether job 108 exists;
+     F is one open-status decision; C, D need classification),
+     fix, re-run the failing cells; then the `-optc` SNaN/gamma
+     cells still marked todo; then decide the valgrind approach.
+     Working state: overlay bins `jobs/phase3_stage_bin` (asan)
+     and `jobs/phase3_snan_bin` (SNaN) carry the BUG-027 source
+     (rebuilt 2026-08-17 ~07:58); the sweep decks hold their run
+     logs (`bug02N_*.log`, `bug027_scfsybd_*.log`). Scratch
      hygiene: after any `-mtop` run, clear its stray `fort.NN`
      files (21-29, 31-33, 41-43, 51-53, 61-63, 71-73) from the
      deck's scratch before running SYBD or loen there.
@@ -1060,10 +1066,12 @@ provide.
 
 ### 2026-08-16 wave: five candidates from the coverage sweep
 
-C, D, F and G await programmer review; NO BUG numbers for them.
+C, D, F and H await programmer review; NO BUG numbers for them.
 E (with E') was accepted as BUG-024, A as BUG-025 and B as
-BUG-026, all fixed 2026-08-16 (ledger entries). Suggested order
-for the rest: C, D, F, G.
+BUG-026, all fixed 2026-08-16, and G as BUG-027, fixed
+2026-08-17 (ledger entries). H (what job 108 does once it runs)
+surfaced while verifying BUG-027. Suggested order for the rest:
+H (it decides whether job 108 exists), F, C, D.
 
 **CANDIDATE A -- ACCEPTED as BUG-025 and FIXED 2026-08-16 (ledger
 entry) -- `-loen` bare invocation builds a job the Fortran cannot
@@ -1190,7 +1198,40 @@ any stale `fort.21` in the deck's scratch kills a loen run; and
   exposed to a stray file from another path, and mtop today
   scatters 26 of them.
 
-**CANDIDATE G -- `-scfsybd` (job 108) dies in `initHDF5_SCF`
+**CANDIDATE H -- `-scfsybd` (job 108), once it runs, is an SCF
+over the band path with no band output (found 2026-08-17
+verifying BUG-027; both o3 decks, both instrumented builds).**
+- With BUG-027 fixed the job completes: `initializeKPoints(1)`
+  takes its SYBD branch and REPLACES the SCF mesh with the 297
+  equal-weight path points, the SCF converges on them (7
+  iterations, E = -103.44517 Ha; the mesh SCF on the same deck
+  gives -103.50073 Ha -- a different, physically meaningless
+  ground state, since a 1-D path is not a zone integral, DESIGN
+  1.6f), and the SCF file gains a `0297_GXMGRXMR` group holding
+  matrices for those 297 points. Nothing prints bands:
+  `printSYBD` is called only from `bandPSCF` (`imago.F90:896`);
+  `mainSCF` has never referenced `doSYBD_SCF` except in the
+  BUG-024 atomPerm guard. `imago.py` then runs `makeSYBD.py`,
+  which dies on the missing `fort.31`, and the script still
+  exits 0 because its only success gate is fort.2, which the
+  Fortran did write.
+- So job 108 has never produced a band structure on this code
+  base, and now that it runs it silently converges an SCF on the
+  wrong k-point set. Same family as candidate D (a job on the
+  menu that does not do what its name says). What `-scfsybd`
+  should MEAN needs the programmer: the natural reading is "run
+  the SCF on the deck's mesh, then walk the path in the same
+  invocation" (a converged potential feeding a `bandPSCF`-style
+  pass without a second executable start), which the code does
+  not have; the alternative is to retire job 108 and let
+  `-sybd` after `-scf` be the way. Either way the SYBD branch of
+  `initializeKPoints(1)` (SCF pass) should not silently
+  replace the SCF mesh. Also worth ruling with it: whether a
+  failed secondary job (`makeSYBD.py`, `imagoKKc`, ...) should
+  fail the script -- today it cannot.
+
+**CANDIDATE G -- ACCEPTED as BUG-027 and FIXED 2026-08-17 (ledger
+entry) -- `-scfsybd` (job 108) dies in `initHDF5_SCF`
 before its SCF starts: the k-point group name overflows its
 own variable (found 2026-08-16 verifying BUG-026 on the SCF
 side).**
@@ -2662,6 +2703,72 @@ Ordered by severity (S1 first).
             mtop's stray debug `fort.31` collided with SYBD's band
             file (candidate F). `-scfsybd` (job 108) still fails,
             for an unrelated reason recorded as candidate G.
+
+### BUG-027 -- `-scfsybd` overflowed the HDF5 k-point group name
+### on the first appended letter, so job 108 never reached its SCF
+- File:     `src/imago/hdf5SCF.F90` (`initHDF5_SCF`);
+            `src/imago/hdf5PSCF.F90` (`initHDF5_PSCF`);
+            `src/imago/kpoints.f90` (new `kPointGroupName`)
+- Variant:  [BOTH] (the general binary is what runs SYBD; the
+            name is built identically in each)
+- Category: LOGIC / STANDARD (an internal write whose unit is
+            also one of its own items; the twin routine had the
+            correct form)
+- Severity: S2 -- `-scfsybd` (job 108) had never run on this
+            code base: it died in `initHDF5_SCF`, before the SCF
+            started, on every deck. `-sybd` (208) was unaffected.
+- Status:   FIXED 2026-08-17; found 2026-08-16 verifying BUG-026
+            (candidate G), accepted 2026-08-17.
+- Evidence: `Fortran runtime error: End of record` at
+            `hdf5SCF.F90:127`. Reading: the SYBD naming loop
+            appended each high-symmetry letter with `write
+            (kPointName,"(a,1a)") kPointName, highSymKPChar(j,i)`
+            -- `kPointName` is `character*17`, so the item list
+            (the whole 17-character variable plus one letter) is
+            18 characters into a 17-character record, and the
+            first append fails; the variable is also both the
+            internal unit and an item of the same write, which
+            the standard forbids. The PSCF twin
+            (`hdf5PSCF.F90:119-124`) placed the letters by
+            substring assignment after an `nnnn_` prefix, which
+            is why `-sybd` worked. Seam: every input to the name
+            (`numPathKP`, `numPaths`, `numHighSymKP`,
+            `highSymKPChar`, `numAxialKPoints`) is loaded by
+            `parseInput` (SYBD/MTOP control read unconditionally,
+            `input.f90:203/206`) and `initializeKPoints`, both
+            of which precede either HDF5 initializer on their
+            pass; no script or other Fortran reads a group name
+            back by format.
+- Fix:      APPLIED 2026-08-17 through the chain -- DESIGN 2.6
+            gains "the HDF5 k-point group name is built in ONE
+            place": the three forms (mesh `nnnnn_nnnnn_nnnnn`,
+            MTOP `nnnn_nnnn_nnnn_MP`, path `nnnn_` + letters cut
+            at 17), the substring-assignment rule and its
+            reason, and the shared-builder requirement. Code:
+            new `kPointGroupName(onPath, onMTOP, groupName)` in
+            O_KPoints; both `initHDF5_SCF` and `initHDF5_PSCF`
+            call it with their own `doSYBD_*`/`doMTOP_*` flags
+            and drop their private copies (and the now-unused
+            `i`, `j`, `charCount` locals and O_KPoints imports).
+            The SCF path name thereby takes the PSCF form
+            (`nnnn_LETTERS`); no existing file carries the old
+            SCF form, since it was never written. Verified live
+            2026-08-17 on the o3 decks: `-scfsybd` gets past
+            `initHDF5_SCF` on both instrumented builds (asan: no
+            sanitizer report; SNaN: no trap), the SCF file gains
+            the group `0297_GXMGRXMR` (297 path points, the
+            vertices G X M G R X M R in path order) beside the
+            mesh group `00004_00004_00004`, the SCF converges
+            (7 iterations) and the Fortran completes (fort.2
+            written, script exit 0).
+- Note:     Getting job 108 past its first line exposed what it
+            then does -- recorded as candidate H: the SCF pass
+            runs the SCF ON THE PATH POINTS (297 equal-weight
+            k-points, total energy -103.44517 Ha against the mesh
+            SCF's -103.50073) and never prints a band structure
+            (`printSYBD` is called only from `bandPSCF`), so
+            `makeSYBD.py` then fails on a missing `fort.31` while
+            `imago.py` still exits 0.
 
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing

@@ -54,8 +54,7 @@ subroutine initHDF5_PSCF (numStates)
    use O_PSCFFieldHDF5
    use O_CommandLine, only: excitedQN_n, excitedQN_l, basisCode_PSCF, &
          & doSYBD_PSCF, doMTOP_PSCF
-   use O_KPoints, only: numAxialKPoints, numPathKP, numPaths, &
-         & numHighSymKP, highSymKPChar
+   use O_KPoints, only: kPointGroupName
 
    ! Make sure that no funny variables are defined.
    implicit none
@@ -64,9 +63,7 @@ subroutine initHDF5_PSCF (numStates)
    integer, intent(in) :: numStates
 
    ! Declare local variables.
-   integer :: i,j
    integer :: hdferr
-   integer :: charCount
    logical :: fileExists
    logical :: groupExists
    character*15 :: fileName
@@ -114,26 +111,11 @@ subroutine initHDF5_PSCF (numStates)
    call h5pset_cache_f (pscf_plid,mdc_nelmts,0_size_t,0_size_t,rdcc_w0,hdferr)
    if (hdferr /= 0) stop 'Failed to set pscf plid cache settings.'
 
-   ! Create the name for the kPoint dependent data group.
-   if (doSYBD_PSCF == 1) then
-      write(kPointName,fmt="(i4.4,a1)") numPathKP, "_"
-      charCount = 5
-      pathLoop: do i = 1, numPaths
-         do j = 1, numHighSymKP(i)
-            charCount = charCount + 1
-            kPointName(charCount:charCount) = highSymKPChar(j,i)
-            if (charCount == 17) then
-               exit pathLoop
-            endif
-         enddo
-      enddo pathLoop
-   elseif (doMTOP_PSCF == 1) then
-      write(kPointName,fmt="(i4.4,a1,i4.4,a1,i4.4,a3)") numAxialKPoints(1), &
-            & "_", numAxialKPoints(2), "_", numAxialKPoints(3), "_MP"
-   else
-      write(kPointName,fmt="(i5.5,a1,i5.5,a1,i5.5)") numAxialKPoints(1), &
-            & "_", numAxialKPoints(2), "_", numAxialKPoints(3)
-   endif
+   ! Create the name for the kPoint dependent data group.  The name
+   !   records which k-point set (mesh, MTOP mesh, or band-structure
+   !   path) produced the data; the one builder in O_KPoints serves
+   !   this file and the SCF file so the two forms cannot drift.
+   call kPointGroupName (doSYBD_PSCF, doMTOP_PSCF, kPointName)
 
    ! Determine if an HDF5 file already exists for this calculation.
    inquire (file=fileName, exist=fileExists)

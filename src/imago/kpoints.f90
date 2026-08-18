@@ -1440,6 +1440,65 @@ subroutine ignoreLATOnPath
 end subroutine ignoreLATOnPath
 
 
+subroutine kPointGroupName (onPath, onMTOP, groupName)
+
+   ! Build the 17-character name of the k-point-dependent data group in
+   !   an SCF or PSCF HDF5 file (DESIGN 2.6).  The name records which
+   !   k-point set produced the data so that a later run on a different
+   !   set does not silently read another set's matrices.  Both HDF5
+   !   initializers obtain the name here, passing their own pass's
+   !   SYBD and MTOP flags, so the SCF and PSCF files always agree on
+   !   its form.  The three forms are:
+   !!   mesh   : nnnnn_nnnnn_nnnnn   the three axial counts
+   !!   MTOP   : nnnn_nnnn_nnnn_MP   the MTOP counts, tagged
+   !!   path   : nnnn_XYZ...         numPathKP, then the high-symmetry
+   !!                                point letters in path order, cut
+   !!                                off at the 17th character
+   !   The path letters are appended one at a time by substring
+   !   assignment: a formatted internal write that lists the
+   !   destination among its own output items is not legal Fortran and
+   !   overflows the 17-character record on the very first append.
+   !   Everything read here is loaded before either HDF5 initializer
+   !   runs: the path data by readSYBDKPoints inside parseInput, the
+   !   axial counts by initializeKPoints.
+
+   ! Make sure that no funny variables are defined.
+   implicit none
+
+   ! Define passed dummy variables.
+   integer, intent(in) :: onPath   ! 1 when this pass walks a SYBD path.
+   integer, intent(in) :: onMTOP   ! 1 when this pass runs MTOP strings.
+   character(len=17), intent(out) :: groupName
+
+   ! Define local variables.
+   integer :: pathIndex, vertexIndex ! Loop indices over the SYBD paths and
+                                     !   the high-symmetry vertices of each.
+   integer :: charCount ! Number of characters of groupName filled so far.
+
+   if (onPath == 1) then
+      write (groupName,fmt="(i4.4,a1)") numPathKP, "_"
+      charCount = 5
+      pathLoop: do pathIndex = 1, numPaths
+         do vertexIndex = 1, numHighSymKP(pathIndex)
+            charCount = charCount + 1
+            groupName(charCount:charCount) = &
+                  & highSymKPChar(vertexIndex,pathIndex)
+            if (charCount == 17) exit pathLoop
+         enddo
+      enddo pathLoop
+   elseif (onMTOP == 1) then
+      write (groupName,fmt="(i4.4,a1,i4.4,a1,i4.4,a3)") &
+            & numAxialKPoints(1), "_", numAxialKPoints(2), "_", &
+            & numAxialKPoints(3), "_MP"
+   else
+      write (groupName,fmt="(i5.5,a1,i5.5,a1,i5.5)") &
+            & numAxialKPoints(1), "_", numAxialKPoints(2), "_", &
+            & numAxialKPoints(3)
+   endif
+
+end subroutine kPointGroupName
+
+
 subroutine checkMTOPMeshCounts
 
    ! Refuse a modern-theory-of-polarization mesh with a non-

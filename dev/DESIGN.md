@@ -1742,6 +1742,31 @@ and resolved the mesh; the SYBD and MTOP branches emit
 none, exactly as style code 0 emits none, because the axis
 classes those records report were never computed there.
 
+**The HDF5 k-point group name is built in ONE place.**  The
+SCF and PSCF HDF5 files each keep their k-point-dependent data
+under a group whose 17-character name says which k-point set
+produced it, so a re-run on a different set does not silently
+read another set's matrices.  The name has three forms, one per
+branch of `initializeKPoints`: a mesh gives
+`nnnnn_nnnnn_nnnnn` (the three axial counts); an MTOP run gives
+`nnnn_nnnn_nnnn_MP` (the MTOP counts, tagged); a band-structure
+path gives `nnnn_` (the number of path k-points) followed by
+the high-symmetry-point letters in path order, cut off at the
+17th character.  Because the letters are appended one at a
+time, they are placed by substring assignment; a formatted
+internal write that names the destination among its own items
+is not legal Fortran and overflows the record on the first
+append.  Both `initHDF5_SCF` and `initHDF5_PSCF` obtain the
+name from one O_KPoints routine, `kPointGroupName`, passing
+their own SYBD/MTOP flags; the inputs it reads (`numPathKP`,
+`numPaths`, `numHighSymKP`, `highSymKPChar`, `numAxialKPoints`)
+are all loaded by `parseInput` (SYBD and MTOP control data are
+read unconditionally) and, for the axial counts, set by
+`initializeKPoints`, both of which run before either HDF5
+initializer on their respective passes.  Nothing else -- no
+script, no other Fortran -- reads a group name back by format,
+so the two files share the form and cannot drift apart.
+
 The downstream consumers of `atomPerm` and `invAtomPerm`
 are `computeBond` (effective charge / bond order star
 distribution) and the LAT PDOS channel-permutation step
