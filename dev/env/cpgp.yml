@@ -1,0 +1,55 @@
+# cpgp -- the group's PARALLEL Fortran toolchain (trailing "p" = parallel).
+#
+# This is the conda-forge environment imago's MPI + ELPA builds compile
+#   against.  It is a deliberate sibling of the general "cpg" env, not a
+#   replacement for it: cpg carries the serial HDF5 ("nompi" build) that
+#   the serial binaries and today's performance baselines were built
+#   with, and conda cannot hold the serial and the MPI builds of HDF5 in
+#   one environment -- so the MPI-enabled HDF5 needs its own env, and
+#   with it come the three libraries the distributed eigensolver needs.
+#   Everything that both envs share (gfortran, OpenBLAS) is pinned to
+#   the same major version so a binary built here differs from a cpg
+#   build ONLY in the parallel libraries.
+#
+# The Python side does not move: imago's Python venv is self-contained
+#   (no system site packages) and links neither HDF5 nor MPI, so the one
+#   venv serves builds from either env.
+#
+# Create / refresh:
+#     mamba env create -f dev/env/cpgp.yml        (first time)
+#     mamba env update -f dev/env/cpgp.yml --prune (later)
+#   The env lands in $CPG_SHARE/mamba/envs/cpgp (the first envs_dirs
+#   entry).  After creation verify:
+#     h5pfc -showconfig | grep -i "parallel hdf5"   -> yes
+#     ls $CONDA_PREFIX/include/elpa*                 -> elpa modules
+#     mpifort --version                              -> the conda gfortran
+#
+# See BUILD.md ("Parallel toolchain") and dev/PERFORMANCE.md.
+name: cpgp
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  # Compilers -- the same GCC major as cpg so the two envs' binaries
+  #   share an ABI and differ only in the parallel libraries.
+  - gcc=15
+  - gxx=15
+  - gfortran=15
+  # MPI.  openmpi is the conda-forge default MPI and what the group's
+  #   other MPI-built packages (deepmd in sabsim, upolcao) already use.
+  - openmpi>=5
+  # HDF5 built against that MPI: provides h5pfc, and serves serial
+  #   HDF5 use as well.
+  - hdf5=1.14.*=mpi_openmpi_*
+  # Dense linear algebra: OpenBLAS (as in cpg), ScaLAPACK/BLACS on the
+  #   same MPI, and ELPA -- the eigensolver ARCHITECTURE 6.6 names for
+  #   the distributed generalized eigenproblem.
+  - libblas=*=*openblas
+  - liblapack=*=*openblas
+  - openblas
+  - scalapack
+  - elpa=*=mpi_openmpi_*
+  # Build tooling.
+  - cmake>=3.21
+  - make
+  - pkg-config

@@ -39,6 +39,21 @@ would force one severity scale onto two unrelated questions.
   `callgrind` are already present and cover Phases P0 through P2.
   The investigation into `perf` and `gperftools` is recorded below
   so it does not have to be repeated.
+- **Parallel toolchain STANDING as of 2026-08-18** (programmer's
+  ruling: go straight for MPI + ELPA, the dominant use case). The
+  `cpgp` conda environment (`dev/env/cpgp.yml`; `BUILD.md`
+  "Parallel toolchain") carries openmpi 5.0.10, MPI-enabled HDF5
+  1.14.6 (`h5pfc`), ScaLAPACK 2.2 and ELPA 2025.06 on the same
+  gfortran 15.2 / OpenBLAS family as `cpg`. Verified: an `mpi_f08`
+  hello runs; ELPA links and `elpa_init(20241105)` handshakes on 2
+  ranks; the `gfortran-mpi` preset (`IMAGO_MPI`, `IMAGO_ELPA`)
+  builds the UNCHANGED serial source against it, and those
+  MPI-linked binaries reproduce the `bn_small_{c,g}` baseline
+  energies to every printed digit. The two-node SLURM launch test
+  (`mpirun -np $SLURM_NTASKS` vs `srun --mpi=pmix|pmi2`) is
+  queued behind the large baselines. Environment naming
+  convention: a trailing `p` means parallel (`cpg` -> `cpgp`);
+  the Python venv is unchanged.
 
 ## Benchmark deck set (designated 2026-08-18)
 

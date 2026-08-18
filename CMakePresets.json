@@ -68,6 +68,19 @@
       "cacheVariables": {
         "IMAGO_GPROF": "ON"
       }
+    },
+    {
+      "name": "gfortran-mpi",
+      "inherits": "gfortran-base",
+      "displayName": "gfortran: mpi (release + MPI + ELPA, cpgp toolchain)",
+      "description": "Release build against the parallel toolchain: FC=h5pfc (parallel HDF5 wrapper around mpifort), IMAGO_MPI and IMAGO_ELPA on. Requires the cpgp conda environment (dev/env/cpgp.yml) to be active so h5pfc and pkg-config find ELPA/ScaLAPACK. Symbols kept (IMAGO_PROFILE) so parallel runs profile the same way serial ones do.",
+      "environment": { "FC": "h5pfc" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IMAGO_PROFILE": "ON",
+        "IMAGO_MPI": "ON",
+        "IMAGO_ELPA": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -76,6 +89,7 @@
     { "name": "gfortran-audit", "configurePreset": "gfortran-audit" },
     { "name": "gfortran-asan", "configurePreset": "gfortran-asan" },
     { "name": "gfortran-profile", "configurePreset": "gfortran-profile" },
-    { "name": "gfortran-gprof", "configurePreset": "gfortran-gprof" }
+    { "name": "gfortran-gprof", "configurePreset": "gfortran-gprof" },
+    { "name": "gfortran-mpi", "configurePreset": "gfortran-mpi" }
   ]
 }

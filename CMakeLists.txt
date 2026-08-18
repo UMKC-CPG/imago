@@ -1,7 +1,10 @@
 # Top level CMake file for Imago
 
 # Set the minimum required version, the project name, and enable Fortran.
-cmake_minimum_required(VERSION 3.1.0)
+#   3.21 is what CMakePresets.json already requires, and CMake 4 refuses
+#   a minimum below 3.5, so this is the floor the presets and the cpgp
+#   toolchain's CMake both accept.
+cmake_minimum_required(VERSION 3.21)
 project(Imago)
 enable_language (Fortran)
 
@@ -125,6 +128,23 @@ message("CMAKE_EXE_LINKER_FLAGS= ${CMAKE_EXE_LINKER_FLAGS}")
 #                      DOES perturb the code (call-count hooks, and it
 #                      inhibits some inlining), so use it for call
 #                      counts and the call graph, not for timings.
+#
+# Two options select the PARALLEL build (ARCHITECTURE 6.5-6.6, built
+#   against the "cpgp" toolchain of dev/env/cpgp.yml).  Neither adds
+#   compiler flags of its own: the MPI include and link lines come from
+#   the compiler wrapper, which for a parallel build must be h5pfc (the
+#   parallel HDF5 wrapper around mpifort), exactly as the serial build
+#   relies on h5fc -- the rule that the Fortran compiler must be the one
+#   HDF5 was built with applies unchanged.
+#   IMAGO_MPI        define the IMAGO_MPI preprocessor symbol so that
+#                      the MPI code paths compile in.  Requires FC to be
+#                      an MPI-aware wrapper (h5pfc); configuration stops
+#                      with a message if it is not.
+#   IMAGO_ELPA       define IMAGO_ELPA and add the ELPA eigensolver
+#                      (with ScaLAPACK/BLACS beneath it) to the include
+#                      and link lines, located through pkg-config
+#                      ("elpa" and "scalapack" .pc files, as the cpgp
+#                      environment installs them).  Requires IMAGO_MPI.
 # ----------------------------------------------------------------------
 option (IMAGO_CHECKS     "Runtime checks (array bounds, etc.)"     OFF)
 option (IMAGO_FPE_TRAP   "Trap FP exceptions (inv/zero/overflow)"  OFF)
@@ -133,6 +153,8 @@ option (IMAGO_WARN_EXTRA "Extra audit-grade warning set"           OFF)
 option (IMAGO_WARN_PERF  "Performance warnings (array copies)"     OFF)
 option (IMAGO_PROFILE    "Symbols + frame pointers for profilers"  OFF)
 option (IMAGO_GPROF      "gprof instrumentation (-pg)"             OFF)
+option (IMAGO_MPI        "MPI code paths (FC must be h5pfc)"       OFF)
+option (IMAGO_ELPA       "ELPA distributed eigensolver (needs MPI)" OFF)
 set (IMAGO_SANITIZE "none" CACHE STRING
    "Sanitizer: none, address, undefined, or leak")
 
@@ -194,6 +216,48 @@ if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
    endif ()
 endif (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
 # Intel-compiler equivalents are added in Phase 0c.
+
+# Parallel build.  The wrapper check asks the compiler wrapper what it
+#   expands to (`h5pfc -show` prints the mpifort command line, `h5fc
+#   -show` the plain gfortran one) rather than trusting its name, so a
+#   mis-set FC is caught at configure time instead of at the first
+#   `use mpi_f08`.
+if (IMAGO_MPI)
+   execute_process (COMMAND ${CMAKE_Fortran_COMPILER} -show
+      OUTPUT_VARIABLE IMAGO_FC_SHOW ERROR_QUIET
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+   if (NOT IMAGO_FC_SHOW MATCHES "mpi")
+      message (FATAL_ERROR
+         "IMAGO_MPI=ON but FC (${CMAKE_Fortran_COMPILER}) is not an "
+         "MPI wrapper. Activate the cpgp environment and set FC=h5pfc "
+         "(see BUILD.md, Parallel toolchain).")
+   endif ()
+   set (IMAGO_INSTRUMENT_FLAGS "${IMAGO_INSTRUMENT_FLAGS} -DIMAGO_MPI")
+endif ()
+if (IMAGO_ELPA)
+   if (NOT IMAGO_MPI)
+      message (FATAL_ERROR "IMAGO_ELPA=ON requires IMAGO_MPI=ON.")
+   endif ()
+   find_package (PkgConfig REQUIRED)
+   # One query is enough: elpa.pc's Libs line already names ScaLAPACK
+   #   (and LAPACK/BLAS) beneath it, and conda's scalapack.pc cannot be
+   #   queried on its own because it Requires an mpi.pc that conda does
+   #   not ship.  ELPA's Fortran module files live in the include dir
+   #   pkg-config reports (…/include/elpa/modules); pass it as -I so
+   #   `use elpa` resolves, and put the libraries on the link line.
+   pkg_check_modules (ELPA REQUIRED elpa)
+   foreach (dir ${ELPA_INCLUDE_DIRS})
+      set (IMAGO_INSTRUMENT_FLAGS "${IMAGO_INSTRUMENT_FLAGS} -I${dir}")
+   endforeach ()
+   set (IMAGO_INSTRUMENT_FLAGS "${IMAGO_INSTRUMENT_FLAGS} -DIMAGO_ELPA")
+   foreach (dir ${ELPA_LIBRARY_DIRS})
+      set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -L${dir}")
+   endforeach ()
+   foreach (lib ${ELPA_LIBRARIES})
+      set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -l${lib}")
+   endforeach ()
+   message ("ELPA ${ELPA_VERSION} from ${ELPA_LIBRARY_DIRS}")
+endif ()
 
 if (NOT IMAGO_INSTRUMENT_FLAGS STREQUAL "")
    set (CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS}${IMAGO_INSTRUMENT_FLAGS}")

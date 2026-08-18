@@ -70,6 +70,10 @@ known-good default is never disturbed.
 |                    | stack frames for profilers, code unchanged |
 | `IMAGO_GPROF`      | `-pg` on compile and link: gprof hooks     |
 |                    | (call counts / call graph; perturbs time)  |
+| `IMAGO_MPI`        | `-DIMAGO_MPI`; FC must be an MPI wrapper   |
+|                    | (`h5pfc`); see "Parallel toolchain"        |
+| `IMAGO_ELPA`       | `-DIMAGO_ELPA` + ELPA/ScaLAPACK include and|
+|                    | link lines via pkg-config; needs IMAGO_MPI |
 
 **Why the two warning options are separate.** `IMAGO_WARN_PERF`
 turns on `-Warray-temporaries`, which reports hidden array copies.
@@ -120,6 +124,49 @@ taken with them is a baseline for the production build.
 Intel (`ifort`) presets are deferred: they need an `h5fc` that
 wraps `ifort` (a matching HDF5 build), tracked as step 0c in
 `dev/DEBUG.md`.
+
+## Parallel toolchain (the `cpgp` environment)
+
+The MPI + ELPA build (ARCHITECTURE 6.5-6.6, `dev/PERFORMANCE.md`)
+compiles against a second conda environment, **`cpgp`** -- the
+group's general `cpg` env plus a trailing `p` for *parallel*.
+It exists because conda cannot hold the serial (`nompi`) and the
+MPI builds of HDF5 in one environment: `cpg` keeps the serial
+HDF5 that the serial binaries and the performance baselines were
+built with, and `cpgp` carries the MPI-enabled HDF5 (`h5pfc`, a
+wrapper around `mpifort`), openmpi, ScaLAPACK and ELPA, on the
+same gfortran major and the same OpenBLAS family, so a binary
+from `cpgp` differs from a `cpg` build only in the parallel
+libraries. The recipe is `dev/env/cpgp.yml`:
+
+```
+mamba env create -f dev/env/cpgp.yml     # first time
+conda activate cpgp
+h5pfc -showconfig | grep -i "parallel hdf5"   # -> yes
+```
+
+The Python side does not move: imago's venv is self-contained
+and links neither HDF5 nor MPI, so one venv serves both envs.
+
+Build with the preset, which sets `FC=h5pfc` and turns on
+`IMAGO_MPI` and `IMAGO_ELPA` (plus `IMAGO_PROFILE`, so parallel
+runs profile like serial ones):
+
+```
+conda activate cpgp
+cmake --preset gfortran-mpi
+cmake --build --preset gfortran-mpi
+```
+
+`IMAGO_MPI` refuses to configure unless `FC -show` expands to an
+MPI command line -- the "compiler must match HDF5" rule of the
+prerequisites section, applied to the parallel HDF5. `IMAGO_ELPA`
+finds ELPA through pkg-config (`elpa.pc` also names ScaLAPACK,
+LAPACK and BLAS on its link line). Neither option adds compiler
+flags of its own beyond `-DIMAGO_MPI` / `-DIMAGO_ELPA` and the
+ELPA include path; the MPI flags come from the wrapper. Launch is
+`mpirun -np "$SLURM_NTASKS" …` inside a batch script (the group's
+LAMMPS precedent); `srun --mpi=pmix` is the alternative to test.
 
 ## Build flavors: running an instrumented binary on a real job
 
