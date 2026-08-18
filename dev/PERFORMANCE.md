@@ -24,13 +24,104 @@ would force one severity scale onto two unrelated questions.
 ## Status
 
 - Date opened: 2026-08-09
-- **Nothing built yet.** This document is an orientation written
-  before the work starts, so that the situation does not have to
-  be re-derived.
-- **This campaign is WAITING.** Sequencing settled 2026-08-09:
-  the bug campaign in `dev/DEBUG.md` goes first (see open question
-  1 below, and TODO PF5). Its Phases 1, 2 and 3 are the active
-  work.
+- **ACTIVE since 2026-08-18.** The bug campaign reached its Phase
+  3 exit for the parallelization targets (`dev/DEBUG.md`,
+  decisions log 2026-08-18): the SCF core and the `-optc` re-entry
+  are clean under asan, SNaN and valgrind memcheck on both
+  variants; the remaining candidates were punted behind this
+  work by the programmer.
+- **PF1 in progress.** The profiling presets exist
+  (`gfortran-profile`, `gfortran-gprof`; `BUILD.md`), the
+  benchmark deck set is DESIGNATED and staged (section below,
+  answering open question 2), and the measurement layers are
+  agreed. Baselines not yet captured.
+- **Install no profiling tools yet** (TODO PF6). `gprof` and
+  `callgrind` are already present and cover Phases P0 through P2.
+  The investigation into `perf` and `gperftools` is recorded below
+  so it does not have to be repeated.
+
+## Benchmark deck set (designated 2026-08-18)
+
+Six decks under the gitignored `jobs/bench/`, one per (size,
+variant) cell, all generated 2026-08-18 by the installed
+`makeinput.py` (source `9f21e96`) from the historical OLCAO
+skeletons with `-nofingerprint` (each species takes its database
+default potential entry -- deterministic, and for the glasses it
+is type-per-element, 2 types, potential dimension 32, which is
+what the historical runs used; the programmer ruled out
+bispectral typing for the baseline). Every baseline is a plain
+SCF from the initial potential (`imago.py` with no job option).
+
+    cell           deck               atoms  k-points          history
+    small/imago    bn_small_c         8      4 4 4 (auto shift) BN cubic,
+    small/imagoG   bn_small_g         8      Gamma              29.5 s SCF at
+                                                                7x7x7 (2025)
+    medium/imago   knbo3_med_c        5      4 4 4 shift 0.5    the o3 KNbO3
+                                             (= 4 reduced)      Phase 3 deck
+    medium/imagoG  sio2_243_med_g     243    Gamma              19m42s SCF
+                                                                (2025)
+    large/imago    sio2_1296_large_c  1296   1 1 1 shift 0.5    see below
+    large/imagoG   sio2_1296_large_g  1296   Gamma              2h32m for one
+                                                                restart iter
+                                                                + PSCF (2024)
+
+Sources: `~/olcao/jobs/bn/cubic/olcao.skl` (sphalerite BN, space
+group 216, conventional cell), `~/olcao/jobs/glass/sio2/{243,
+1296}/olcao.skl` (amorphous SiO2 models), and the o3 KNbO3
+skeleton already used throughout `dev/DEBUG.md`.
+
+Why these. Small must finish in seconds so callgrind (20-50x
+slowdown) can run on it. Medium is the honest profile target:
+minutes, representative of a real run. Large is the one that
+hurts, which is what parallelization is for. The large-complex
+cell is the SAME 1296-atom glass at ONE shifted k-point
+(1 1 1, shift 0.5): a 1296-atom cell does not want a real mesh,
+Gamma is its physically right sampling, but a complex-binary
+large baseline is still needed, and a single non-Gamma point
+gives the same problem size and the same integrals in the
+complex code path -- so the pair isolates the cost of complex
+arithmetic against real on the largest case. (Programmer's
+ruling 2026-08-18.) `imago.py` routes the shifted point to
+`imago` because it is not Gamma.
+
+Two facts about the environment that the baseline record must
+carry: (1) the head node is cgroup-limited to ONE visible CPU
+and runs at load ~34, so timings taken there are noise -- every
+baseline runs as a SLURM job on an exclusive node, one core;
+(2) the link line is `-llapack -lblas`, i.e. REFERENCE BLAS and
+LAPACK. If the secular solve dominates, the first optimization
+is a library swap, not a code change, and the baseline must
+record which library it was taken against.
+
+## Measurement layers (agreed 2026-08-18)
+
+Cheapest first; every layer runs on the designated decks and is
+recorded here with commit hash, compiler, BLAS and node type.
+
+1. **Wall clock + peak memory.** `gfortran-profile` binaries
+   (release code, symbols only -- open question 4 answered: the
+   generated arithmetic is the release binary's, so no
+   perturbation), each deck x variant, plain SCF from the initial
+   potential, under `/usr/bin/time -v` on an exclusive SLURM node
+   (wall, user, max RSS). Small and medium get three repeats to
+   establish the noise floor before any change is called an
+   improvement. This is PF1's "single command -> comparable
+   number".
+2. **Coarse time map (PF2).** Free: imago already stamps `Date
+   is: ... Time is: ...` at the start and end of each of the 34
+   `O_TimeStamps` operations in the `.out` file. A small
+   `dev/tools/timemap.py` diffs consecutive stamps into a
+   per-operation table (integrals / elecStat / exchCorr / secular
+   solve / potential update ...). It costs nothing, so it runs on
+   the large deck too, and it directly tests ARCHITECTURE 6.5's
+   inherited claims.
+3. **Fine map.** `valgrind --tool=callgrind` on the small decks
+   with the profile binaries: exact instruction and call counts
+   per routine and per line, `callgrind_annotate` for the report;
+   `gfortran-gprof` only as a cross-check for call counts and the
+   call graph.
+4. **Memory shape (P3, later).** Max RSS from layer 1 first;
+   massif only if allocation churn becomes the question.
 - **Install no profiling tools yet** (TODO PF6). `gprof` and
   `callgrind` are already present and cover Phases P0 through P2.
   The investigation into `perf` and `gperftools` is recorded below
@@ -225,7 +316,8 @@ session can put them to the programmer rather than guess.
      They are largely the same decks, so whichever campaign
      designates them first should do it for both.
 
-2. **What is the benchmark deck set?** Optimization without a
+2. ~~**What is the benchmark deck set?**~~ **SETTLED 2026-08-18;
+   see "Benchmark deck set" above.** Optimization without a
    fixed, versioned set of representative inputs measures noise.
    Needs at least: a small fast deck (callgrind-able, seconds), a
    medium one (the honest profile target), and a large one that

@@ -66,6 +66,10 @@ known-good default is never disturbed.
 |                    | see the note below                         |
 | `IMAGO_SANITIZE`   | a sanitizer: `address`, `undefined`, or    |
 |                    | `leak` (default `none`)                     |
+| `IMAGO_PROFILE`    | `-g -fno-omit-frame-pointer`: symbols and  |
+|                    | stack frames for profilers, code unchanged |
+| `IMAGO_GPROF`      | `-pg` on compile and link: gprof hooks     |
+|                    | (call counts / call graph; perturbs time)  |
 
 **Why the two warning options are separate.** `IMAGO_WARN_PERF`
 turns on `-Warray-temporaries`, which reports hidden array copies.
@@ -100,9 +104,18 @@ cmake --build --preset gfortran-asan   # build (or: make -C build/gfortran-asan)
 | `gfortran-audit`   | debug + checks + FP traps + signaling NaN  |
 |                    | + extra warnings (static/runtime hunting)  |
 | `gfortran-asan`    | debug + AddressSanitizer (+ leak) + checks |
+| `gfortran-profile` | RELEASE code + symbols + frame pointers    |
+|                    | (timings and callgrind; dev/PERFORMANCE.md)|
+| `gfortran-gprof`   | profile preset + `-pg` (gprof call counts  |
+|                    | and call graph; its timings are perturbed) |
 
 So: "I want a leak-checking build" -> `gfortran-asan`; "I want
-every warning the compiler can give" -> `gfortran-audit`.
+every warning the compiler can give" -> `gfortran-audit`; "I want
+to know where the time goes" -> `gfortran-profile` under
+`valgrind --tool=callgrind`, and `gfortran-gprof` only when a
+call count or the call graph is the question.  The profile
+preset's binaries run at release speed, so a wall-clock baseline
+taken with them is a baseline for the production build.
 
 Intel (`ifort`) presets are deferred: they need an `h5fc` that
 wraps `ifort` (a matching HDF5 build), tracked as step 0c in

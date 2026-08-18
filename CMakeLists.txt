@@ -107,12 +107,32 @@ message("CMAKE_EXE_LINKER_FLAGS= ${CMAKE_EXE_LINKER_FLAGS}")
 #                      warnings unfindable.  See dev/DEBUG.md's
 #                      drive-to-zero doctrine and dev/PERFORMANCE.md.
 #   IMAGO_SANITIZE   select a sanitizer: none, address, undefined, leak
+#
+# Two further options serve the PERFORMANCE campaign
+#   (dev/PERFORMANCE.md) rather than the bug hunt.  They are meant to
+#   be combined with the Release build type, so that what is measured
+#   is the production code path at production optimization:
+#   IMAGO_PROFILE    keep debug symbols and frame pointers in an
+#                      optimized build (-g -fno-omit-frame-pointer).
+#                      Symbols let a sampling or simulating profiler
+#                      (valgrind's callgrind, perf) attribute cost to
+#                      routines and lines; frame pointers let it
+#                      unwind call stacks.  Neither changes the
+#                      generated arithmetic, so timings stay
+#                      representative of the release binary.
+#   IMAGO_GPROF      instrument every routine entry for gprof (-pg on
+#                      compile AND link).  Unlike IMAGO_PROFILE this
+#                      DOES perturb the code (call-count hooks, and it
+#                      inhibits some inlining), so use it for call
+#                      counts and the call graph, not for timings.
 # ----------------------------------------------------------------------
 option (IMAGO_CHECKS     "Runtime checks (array bounds, etc.)"     OFF)
 option (IMAGO_FPE_TRAP   "Trap FP exceptions (inv/zero/overflow)"  OFF)
 option (IMAGO_INIT_SNAN  "Init reals to signaling NaN"             OFF)
 option (IMAGO_WARN_EXTRA "Extra audit-grade warning set"           OFF)
 option (IMAGO_WARN_PERF  "Performance warnings (array copies)"     OFF)
+option (IMAGO_PROFILE    "Symbols + frame pointers for profilers"  OFF)
+option (IMAGO_GPROF      "gprof instrumentation (-pg)"             OFF)
 set (IMAGO_SANITIZE "none" CACHE STRING
    "Sanitizer: none, address, undefined, or leak")
 
@@ -159,6 +179,18 @@ if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
          "${IMAGO_INSTRUMENT_FLAGS} -fsanitize=${IMAGO_SANITIZE}")
       set (CMAKE_EXE_LINKER_FLAGS
          "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=${IMAGO_SANITIZE}")
+   endif ()
+   # Performance-campaign options.  IMAGO_PROFILE only ADDS symbol
+   #   information, so the optimizer's output is the release output;
+   #   IMAGO_GPROF must reach the link step too, or the runtime that
+   #   writes gmon.out is never pulled in.
+   if (IMAGO_PROFILE)
+      set (IMAGO_INSTRUMENT_FLAGS
+         "${IMAGO_INSTRUMENT_FLAGS} -g -fno-omit-frame-pointer")
+   endif ()
+   if (IMAGO_GPROF)
+      set (IMAGO_INSTRUMENT_FLAGS "${IMAGO_INSTRUMENT_FLAGS} -pg")
+      set (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -pg")
    endif ()
 endif (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
 # Intel-compiler equivalents are added in Phase 0c.

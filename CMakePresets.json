@@ -49,12 +49,33 @@
         "IMAGO_CHECKS": "ON",
         "IMAGO_SANITIZE": "address"
       }
+    },
+    {
+      "name": "gfortran-profile",
+      "inherits": "gfortran-base",
+      "displayName": "gfortran: profile (release code + symbols for callgrind/perf)",
+      "description": "Release (-O3) plus debug symbols and frame pointers only. The generated code is the production code, so wall-clock baselines taken with it are representative; the symbols let callgrind (and perf, if it ever appears) attribute cost to routines and lines. For the performance campaign (dev/PERFORMANCE.md).",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "IMAGO_PROFILE": "ON"
+      }
+    },
+    {
+      "name": "gfortran-gprof",
+      "inherits": "gfortran-profile",
+      "displayName": "gfortran: gprof (profile preset + -pg instrumentation)",
+      "description": "The profile preset plus gprof's -pg entry hooks. Gives call counts and the call graph via gprof; timings from it are perturbed by the instrumentation, so take timings from gfortran-profile instead.",
+      "cacheVariables": {
+        "IMAGO_GPROF": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "gfortran-release", "configurePreset": "gfortran-release" },
     { "name": "gfortran-debug", "configurePreset": "gfortran-debug" },
     { "name": "gfortran-audit", "configurePreset": "gfortran-audit" },
-    { "name": "gfortran-asan", "configurePreset": "gfortran-asan" }
+    { "name": "gfortran-asan", "configurePreset": "gfortran-asan" },
+    { "name": "gfortran-profile", "configurePreset": "gfortran-profile" },
+    { "name": "gfortran-gprof", "configurePreset": "gfortran-gprof" }
   ]
 }
