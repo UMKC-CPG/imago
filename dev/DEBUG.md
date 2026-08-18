@@ -254,19 +254,27 @@ the normal way, with the DEBUG entry left as a pointer.
      programmer; `main` = `origin/main` at `a0f6cea`.**
      **2026-08-17: G accepted as BUG-027 and FIXED (shared
      `kPointGroupName` builder in O_KPoints; DESIGN 2.6 states
-     it), verified on both instrumented builds, UNCOMMITTED at
-     the time of writing (dirty: DEBUG.md, DESIGN.md, kpoints.f90,
-     hdf5SCF.F90, hdf5PSCF.F90). Verifying it surfaced candidate
-     H: job 108 (`-scfsybd`), once it runs, does an SCF over the
-     297 path points and never prints bands.** NEXT: adjudicate
-     H, F, C, D one at a time (H decides whether job 108 exists;
-     F is one open-status decision; C, D need classification),
-     fix, re-run the failing cells; then the `-optc` SNaN/gamma
-     cells still marked todo; then decide the valgrind approach.
-     Working state: overlay bins `jobs/phase3_stage_bin` (asan)
-     and `jobs/phase3_snan_bin` (SNaN) carry the BUG-027 source
-     (rebuilt 2026-08-17 ~07:58); the sweep decks hold their run
-     logs (`bug02N_*.log`, `bug027_scfsybd_*.log`). Scratch
+     it), verified on both instrumented builds. Verifying it
+     surfaced candidate H: job 108 (`-scfsybd`), once it runs,
+     does an SCF over the 297 path points and never prints
+     bands.** **2026-08-18: BUG-027 COMMITTED `9f21e96` (not
+     yet installed or pushed). The programmer PUNTED H, C, D, F
+     (with BUG-010, 013, 014) until after parallelization
+     (decisions log) and asked only for what could block that
+     work: the three `-optc` cells ran clean and the bounded
+     valgrind pass is done and clean, both variants -- see the
+     matrix and the paragraph above it. PHASE 3 IS AT ITS EXIT
+     for the parallelization targets. NEXT = install `9f21e96`
+     (both binaries and the scripts), push, then move to
+     `dev/PERFORMANCE.md` PF1 (benchmark decks + baseline). When
+     the campaign resumes here, the queue is H, F, C, D in that
+     order.** Working state: overlay bins `jobs/phase3_stage_bin`
+     (asan) and `jobs/phase3_snan_bin` (SNaN) carry the BUG-027
+     source (rebuilt 2026-08-17 ~07:58); `jobs/phase3_valgrind_bin`
+     carries the debug-tree binaries from `9f21e96`; the sweep
+     decks hold their run logs (`bug02N_*.log`,
+     `bug027_scfsybd_*.log`, `matrix_optc.log`), the valgrind
+     decks `jobs/knbo3/cubic/phase3_vg{,_g}` hold theirs. Scratch
      hygiene: after any `-mtop` run, clear its stray `fort.NN`
      files (21-29, 31-33, 41-43, 51-53, 61-63, 71-73) from the
      deck's scratch before running SYBD or loen there.
@@ -1005,11 +1013,39 @@ are never re-learned:
   first (or use a new name); judge freshness by run time and by
   the integral timestamps in the log.
 
-One tooling note for the pending valgrind pass: `imago.py`
-already carries a built-in valgrind mechanism (`settings.
-valgrind` wraps execution in `time valgrind --leak-check=yes`),
-which may make the rejected wrapper-script overlay unnecessary;
-the approach still awaits the programmer's decision.
+**Valgrind pass DONE 2026-08-18 (bounded, per the decisions
+log): plain SCF, both variants, memcheck clean.** Approach
+settled: no wrapper script -- `imago.py -valgrind` (its
+`settings.valgrind` wraps the executable in `time valgrind
+--leak-check=yes`; the report lands in the deck's `runtime`)
+over an overlay `jobs/phase3_valgrind_bin` holding COPIES of the
+`build/gfortran-debug` binaries (plain Debug: no sanitizer, no
+`IMAGO_CHECKS`, no SNaN -- the right build for memcheck, since
+asan cannot coexist with valgrind and bounds checks would mask
+what it looks for), rebuilt from `9f21e96`. Decks are FRESH
+copies of the cubic KNbO3 inputs under never-used names (so no
+inherited scratch): `jobs/knbo3/cubic/phase3_vg` (complex,
+`kp-scf.dat`/`kp-pscf.dat` set to a 4 4 4 mesh with 0.5 shift
+= 4 reduced k-points, the O2 "reduced" set) and `phase3_vg_g`
+(gamma, 1 1 1). Both start from the initial potential (no
+`gs_scfV` copied). Results, `valgrind_scf.log` + `runtime` in
+each deck:
+
+    deck        variant  iters  wall    ERROR SUMMARY   lost
+    phase3_vg   imago    15     7m12s   0 errors        0/0/0
+    phase3_vg_g imagoG   50*    7m08s   0 errors        0/0/0
+
+(* the known Gamma-only oscillation; `not_converged` from the
+script, not a defect.) "still reachable" is 22 blocks / ~22 KB
+in both, library-internal (HDF5/libc), not a leak. So the SCF
+core is memcheck-clean on both variants -- no invalid
+read/write, no conditional jump on uninitialized data (the one
+class neither asan nor SNaN covers: uninitialized INTEGER and
+LOGICAL reads), no leak. Wall cost was small (7 min per
+variant on the small deck), so a valgrind column is affordable
+as a standing check whenever it is wanted; the matrix keeps it
+as a one-off pass, not a column, since only the SCF row was
+run. The `-optc` and other rows were NOT run under valgrind.
 
 **Coverage matrix -- the plan of record for this phase.** The
 job menu is twelve post-SCF families, each in `-X` (pscf) and
@@ -1021,14 +1057,16 @@ both variants); A..E = failed on the 2026-08-16 sweep with the
 signature of that letter in the wave below (candidates awaiting
 review); gen = a gamma deck routes this family to the general
 binary (BUG-023), so the cell IS the general binary; deck =
-needs deck work first. Valgrind is a whole pending column
-(approach undecided). The `-scfX` forms run their analysis from
+needs deck work first. Valgrind was run as ONE bounded pass on
+the SCF row only (2026-08-18, clean both variants; see the
+paragraph above the matrix), not as a column. The `-scfX`
+forms run their analysis from
 different call sites than the `-X` forms; whether they need
 their own rows is an open scope question.
 
     family    imago-asan  imago-snan  imagoG-asan  imagoG-snan
     SCF       ok          B21         ok           B21
-    -optc     B18         todo        todo         todo
+    -optc     B18         ok          ok           ok
     -dos      ok          ok          ok           ok
     -bond     ok          ok          ok           ok
     -loen     A           A           A            A
@@ -1055,6 +1093,20 @@ that is the inherited Gamma-SCF verdict, not a failure (outputs
 written, no marker). No AddressSanitizer or LeakSanitizer
 report appeared anywhere in the sweep; every failure is a
 deterministic logic defect with a located site.
+
+The three `-optc` cells that the sweep left as todo ran
+2026-08-18 on the same decks and overlays (BUG-027 source in;
+`matrix_optc.log` in each deck): imago-snan on o3 (2m41s,
+`Program Sequence Complete`, no SIGFPE, all ten `gs_optc-eb.t.*`
+plots written), imagoG-asan (42 s) and imagoG-snan (30 s) on
+cubic, both complete with no sanitizer report and no trap. That
+the gamma cells ran `imagoG` is proven by their runtime
+warnings, which name `applyPhaseFactorsGamma`, a routine that
+exists only under `#ifdef GAMMA` (integrals3Terms.F90:917).
+The gamma cells' `not_converged` rc=1 is the inherited Gamma-SCF
+verdict noted above. With these the whole `-optc` row is clean
+and the paths A3-A6 will restructure (SCF core plus the PSCF
+integral re-entry) have instrumented coverage on both variants.
 
 Notes tying rows to the ledger: `-mtop` is BUG-011's
 silent-death path -- candidate E below is its mechanism;
@@ -1485,6 +1537,24 @@ variants.
   deleted -- they are an Anderson-mixing convergence effort the
   programmer intends to return to. Guard chosen over per-line
   commenting so the bodies stay byte-for-byte intact.
+- **Phase 3 exit criterion narrowed to the parallelization
+  targets (2026-08-18).** The programmer ruled candidates H, C,
+  D and F very low priority and PUNTED them, together with the
+  open BUG-010 and the deferred BUG-013/014, until after the
+  parallelization work; only what could block that work is
+  cleared now. The reasoning: TODO A3-A6 restructure the SCF
+  core (`integrals.F90` alpha-pair loops, the precision kind,
+  the `elecStat`/`exchCorr` grid loops, the secular solve) and
+  the `-optc` re-entry into the same integral routines, and
+  those paths are clean under asan and SNaN on both variants;
+  the punted candidates all live on PSCF-only job menus (SYBD,
+  force, MTOP, loen) that A3-A6 do not touch. What was cleared
+  as the exit set: BUG-027 committed (`9f21e96`), the three
+  outstanding `-optc` cells run clean, and one bounded valgrind
+  memcheck pass of the plain SCF on both variants (below). The
+  Phase 2 "shrunken fan-out" is likewise not a gate: PF4's
+  parallelization-hazard sweep in `dev/PERFORMANCE.md` is the
+  reading pass that matters next and supersedes it.
 - **Verification protocol (2026-08-10):** byte-identity is judged
   between two fresh copies of the KNbO3 job run with the old and
   new binaries -- never between a fresh run and the accumulated
