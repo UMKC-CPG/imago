@@ -56,8 +56,8 @@ SCF from the initial potential (`imago.py` with no job option).
     small/imago    bn_small_c         8      4 4 4 (auto shift) BN cubic,
     small/imagoG   bn_small_g         8      Gamma              29.5 s SCF at
                                                                 7x7x7 (2025)
-    medium/imago   knbo3_med_c        5      4 4 4 shift 0.5    the o3 KNbO3
-                                             (= 4 reduced)      Phase 3 deck
+    medium/imago   knbo3_333_med_c    135    2 2 2, no shift    cubic KNbO3
+                                             (= 4 TRIM orbits)  3x3x3 supercell
     medium/imagoG  sio2_243_med_g     243    Gamma              19m42s SCF
                                                                 (2025)
     large/imago    sio2_1296_large_c  1296   1 1 1 shift 0.5    see below
@@ -67,8 +67,20 @@ SCF from the initial potential (`imago.py` with no job option).
 
 Sources: `~/olcao/jobs/bn/cubic/olcao.skl` (sphalerite BN, space
 group 216, conventional cell), `~/olcao/jobs/glass/sio2/{243,
-1296}/olcao.skl` (amorphous SiO2 models), and the o3 KNbO3
-skeleton already used throughout `dev/DEBUG.md`.
+1296}/olcao.skl` (amorphous SiO2 models), and the KNbO3
+skeleton behind the `o3` decks used throughout `dev/DEBUG.md`
+(which is CUBIC KNbO3, space group 221, `supercell 1 1 1`).
+
+How medium/imago was sized (2026-08-18). The first choice, that
+5-atom KNbO3 cell with 4 reduced k-points, ran its whole SCF in
+4 s -- smaller than the "small" BN deck -- so the supercell line
+in the skeleton was used as the size dial, keeping the cubic
+symmetry and the same 2 2 2 unshifted mesh (whose four TRIM
+orbits under O_h, Gamma/X/M/R, give exactly 4 k-points):
+2x2x2 (40 atoms) took 1m24s, 3x3x3 (135 atoms) 25 min. The
+135-atom cell is the designated medium; the 5- and 40-atom
+decks (`knbo3_med_c`, `knbo3_222_med_c`) stay in `jobs/bench/`
+as auxiliary size points for the scaling picture, not as cells.
 
 Why these. Small must finish in seconds so callgrind (20-50x
 slowdown) can run on it. Medium is the honest profile target:
@@ -88,10 +100,33 @@ Two facts about the environment that the baseline record must
 carry: (1) the head node is cgroup-limited to ONE visible CPU
 and runs at load ~34, so timings taken there are noise -- every
 baseline runs as a SLURM job on an exclusive node, one core;
-(2) the link line is `-llapack -lblas`, i.e. REFERENCE BLAS and
-LAPACK. If the secular solve dominates, the first optimization
-is a library swap, not a code change, and the baseline must
-record which library it was taken against.
+(2) the link line says `-llapack -lblas`, but `ldd` on the built
+binary -- checked on the head node AND printed by every baseline
+job on its compute node -- resolves both to `libopenblas.so.0`
+from the `cpg` mamba environment (`$CPG_SHARE/.../envs/cpg/lib`).
+So the baselines are OpenBLAS, pinned to one thread
+(`OPENBLAS_NUM_THREADS=1`, `OMP_NUM_THREADS=1`), NOT reference
+BLAS; a different environment could silently link a different
+library, which is why the job header records what resolved. If
+the secular solve dominates, the first question is still the
+library (threads, or a vendor library), before any code change.
+
+Harness: `jobs/bench/baseline.sbatch CELL...` (`REPEATS=n`,
+`BENCH_BIN=` overlay, default `jobs/bench_profile_bin` holding
+COPIES of the `build/gfortran-profile` binaries). It runs the
+named cells sequentially on an exclusive node, resets each deck
+and its scratch before every repeat so every run starts from
+the initial potential, wraps `imago.py` in `/usr/bin/time -v`,
+and prints host, CPU model, commit and the resolved BLAS. Two
+traps it had to learn: `imagorc` takes an OPTIONAL positional
+argument as the install root (the nanoHUB hook) and a sourced
+file sees the caller's `$1`, so the cell list must be set aside
+around the `source` or the first cell name becomes `$IMAGO_DIR`
+(and `IMAGO_TEMP` becomes node-local `/tmp`); and a DANGLING
+`intermediate` link (left by that very failure) makes
+`imago.py`'s `os.path.exists()` test say "no link", after which
+its `os.symlink` fails with EEXIST -- recorded as a candidate in
+`dev/DEBUG.md`; the harness removes dead links itself.
 
 ## Measurement layers (agreed 2026-08-18)
 
@@ -122,10 +157,70 @@ recorded here with commit hash, compiler, BLAS and node type.
    call graph.
 4. **Memory shape (P3, later).** Max RSS from layer 1 first;
    massif only if allocation churn becomes the question.
-- **Install no profiling tools yet** (TODO PF6). `gprof` and
-  `callgrind` are already present and cover Phases P0 through P2.
-  The investigation into `perf` and `gperftools` is recorded below
-  so it does not have to be repeated.
+
+## Baseline (layer 1), captured 2026-08-18
+
+Commit `9d7cdad`, preset `gfortran-profile` (`-O3 -g
+-fno-omit-frame-pointer`, gfortran via `h5fc`), OpenBLAS
+single-threaded (see above), node c085 of `rulisp-lab` (AMD EPYC
+7713, exclusive), one core, plain SCF from the initial potential,
+`imago.py` wall clock and max RSS from `/usr/bin/time -v`. Three
+repeats where shown; the spread IS the noise floor.
+
+    cell            deck                 wall (repeats)          RSS   iters
+    small/imago     bn_small_c           7.7 / 7.1 / 7.3 s       47 MB  10
+    small/imagoG    bn_small_g           5.8 / 5.8 / 5.8 s       32 MB   9
+    medium/imago    knbo3_333_med_c      24m55 / 25m07 / 25m07  413 MB  13
+    medium/imagoG   sio2_243_med_g       11m42 / 11m41 / 11m39  292 MB  11
+    large/imago     sio2_1296_large_c    (queued)
+    large/imagoG    sio2_1296_large_g    (queued)
+    aux             knbo3_med_c (5 at.)  4.1 / 4.0 / 4.0 s       47 MB  15
+    aux             knbo3_222_med_c (40) 1m24 / 1m25 / 1m24      73 MB  14
+
+Every repeat reproduced its final total energy to all printed
+digits, and `sio2_243_med_g` reproduced the 2025 OLCAO value
+(-2925.62720444 Ha) exactly. So the noise floor is under 1 % on
+the medium cells and a few percent on the seconds-long small
+ones; a claimed improvement smaller than that is not one.
+
+## Coarse time map (layer 2), first reading 2026-08-18
+
+`dev/tools/timemap.py` over the repeat-1 outputs. Share of the
+stamped span; the stamps cover >99.8 % of every run (unstamped
+time between operations is ~0.1 %), so the map is complete.
+
+    deck              3-centre   secular   elecStat  valence  SCF
+                      potential  equation  matrices  density  potential
+    bn_small_c   (c)    66 %       9 %      0.1 %      5 %      8 %
+    bn_small_g   (g)    77 %     0.6 %      0.2 %    0.3 %      8 %
+    knbo3 5-atom (c)    45 %      14 %      0.2 %     10 %     21 %
+    knbo3 40-at. (c)    37 %      37 %      0.3 %     14 %      7 %
+    knbo3 135-at.(c)    40 %      46 %      0.5 %      9 %      1 %
+    sio2_243     (g)    45 %      27 %     14.5 %      5 %      3 %
+
+("3-centre potential" = the Electronic Potential Integrals stamp,
+computed once per run; "secular equation" is per iteration and
+per k-point; "elecStat matrices" is the once-per-run
+Electrostatic Matrices setup.)
+
+What it says so far -- to be re-read once the large cells land:
+- The two costs that matter are the ONE-TIME three-centre
+  electronic-potential integrals and the PER-ITERATION secular
+  solve; together they are 72-86 % of every run above the toy
+  size. Everything ARCHITECTURE 6.5 called "the cheap, proven
+  first target" -- the real-space grid work in `Make SCF
+  Potential` (exchCorr) and the electrostatic setup -- is 1-3 %
+  on the medium cells (14.5 % for the once-per-run electrostatic
+  matrices on the 243-atom glass, and that is a setup cost, not
+  a loop that repeats). On this evidence 6.5's ranking is
+  inverted for imago: the grid loops are NOT where the time is.
+- The solve overtakes the integrals as the cell grows (9 % -> 14
+  % -> 37 % -> 46 % along the complex column), as N^3 must
+  overtake N^2; the large cells will show how far that goes.
+- The complex binary at 4 k-points spends 46 % in the solve at
+  135 atoms; the real binary at Gamma spends 27 % at 243 atoms.
+  The large pair (same 1296-atom glass, real vs. one shifted
+  k-point) is the clean measurement of that ratio.
 
 ## The situation, as of 2026-08-09
 

@@ -268,7 +268,9 @@ the normal way, with the DEBUG entry left as a pointer.
      (both binaries and the scripts), push, then move to
      `dev/PERFORMANCE.md` PF1 (benchmark decks + baseline). When
      the campaign resumes here, the queue is H, F, C, D in that
-     order.** Working state: overlay bins `jobs/phase3_stage_bin`
+     order, plus I (imago.py dangling-link EEXIST, found during
+     the PF1 baselines 2026-08-18; one-line `lexists` fix).**
+     Working state: overlay bins `jobs/phase3_stage_bin`
      (asan) and `jobs/phase3_snan_bin` (SNaN) carry the BUG-027
      source (rebuilt 2026-08-17 ~07:58); `jobs/phase3_valgrind_bin`
      carries the debug-tree binaries from `9f21e96`; the sweep
@@ -1281,6 +1283,28 @@ verifying BUG-027; both o3 decks, both instrumented builds).**
   replace the SCF mesh. Also worth ruling with it: whether a
   failed secondary job (`makeSYBD.py`, `imagoKKc`, ...) should
   fail the script -- today it cannot.
+
+**CANDIDATE I -- `imago.py` dies with EEXIST when the deck's
+`intermediate` link is DANGLING (found 2026-08-18 running the
+PF1 baselines; PUNTED with H, C, D, F -- recorded only).**
+- `imago.py` (project-setup block, ~line 1066) tests
+  `os.path.exists(intermediate)`; for a symlink whose target
+  directory does not exist that returns False, so the code takes
+  the "no link yet" branch and calls `os.symlink`, which fails
+  with `[Errno 17] File exists`. The intended "link exists but
+  points elsewhere -> set aside as intermediateFIXME" branch is
+  never reached, because it sits behind the wrong test.
+- How it arose live: a first baseline job sourced `imagorc` with
+  a positional argument in scope (the nanoHUB install-root
+  hook), which set `IMAGO_TEMP` to node-local `/tmp`; the run
+  created the link, then failed for another reason; on a
+  different node the link was dangling and every later run of
+  that deck died at once. Any deck whose scratch has been
+  removed (e.g. by `tidy_scratch`, or a lost `/tmp`) hits the
+  same path.
+- Fix shape for ruling: `os.path.lexists()` for the "is there a
+  link at all" test, then the existing points-elsewhere branch
+  handles a dead link exactly like a wrong one. One line.
 
 **CANDIDATE G -- ACCEPTED as BUG-027 and FIXED 2026-08-17 (ledger
 entry) -- `-scfsybd` (job 108) dies in `initHDF5_SCF`
