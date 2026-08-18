@@ -8315,18 +8315,21 @@ is not carried only in conversation.
 
 ## PERFORMANCE AND PARALLELIZATION
 
-> Campaign ledger: `dev/PERFORMANCE.md`.  Design already
-> settled in ARCHITECTURE section 6; the optimization TARGETS
-> are A3-A6 above.  What is missing is the measurement that
-> says which of them to do first, which is what PF1-PF3 build.
+> Campaign ledger: `dev/PERFORMANCE.md`.  ARCHITECTURE section 6
+> was REWRITTEN from the 2026-08-18 measurement (6.5, 6.6, new
+> 6.8): the three-centre potential integrals and the secular
+> solve carry 72-86 % of a run, the grid work 1-3 %, and the
+> programmer ruled to go straight for MPI + ELPA.  A3-A6 (the
+> intra-node targets) stand but follow that work.  The parallel
+> implementation tasks are PA1-PA5 below; PF1-PF4 are the
+> measurement harness that produced the ruling.
 >
 > **Read `dev/PERFORMANCE.md` first.**  It records the state of
 > both campaigns, the tool inventory measured on this machine
-> (notably: valgrind and gprof yes, `perf` NO), and four open
-> questions that should go to the programmer before any code is
-> written.
+> (notably: valgrind and gprof yes, `perf` NO), the benchmark
+> deck set, the baselines and the time map.
 
-- [ ] PF1. Establish a profiling build and a benchmark deck set,
+- [x] PF1. Establish a profiling build and a benchmark deck set,
   and capture a baseline for BOTH variants.  Optimization
   without a fixed, versioned set of representative inputs
   measures noise, and improvement claims against no recorded
@@ -8335,8 +8338,14 @@ is not carried only in conversation.
   as the honest profile target, and a large one that hurts.
   `imagoG` and `imago` are different programs and need separate
   baselines.  See PERFORMANCE.md Phase P0 and open question 2.
+  **DONE 2026-08-18** (`9d7cdad`, `57eee98`): presets
+  `gfortran-profile`/`gfortran-gprof`; six decks under
+  `jobs/bench/` (BN small, KNbO3 135-atom and SiO2-243 medium,
+  SiO2-1296 large, both variants); baselines for small and
+  medium recorded with a sub-1 % noise floor; the large pair's
+  numbers are added when they land.
 
-- [ ] PF2. Produce the coarse time map, at the level of the 34
+- [~] PF2. Produce the coarse time map, at the level of the 34
   operations `O_TimeStamps` already names.  This is the cheapest
   possible answer to "where does the time go" and it is enough to
   TEST the two claims ARCHITECTURE 6.5 inherited from a sibling
@@ -8346,6 +8355,12 @@ is not carried only in conversation.
   actual scaling wall".  If the grid loops turn out to be five
   percent of runtime then the right first target is the wrong
   first target, and that is worth knowing before any restructure.
+  **First reading 2026-08-18** (`dev/tools/timemap.py`, `57eee98`):
+  the grid loops ARE the five-percent case (1-3 % on the medium
+  cells) and the solve is the scaling wall, but the three-centre
+  integrals are the largest single stage; ARCHITECTURE 6.5 was
+  reordered accordingly and 6.8 holds the table.  Remaining: the
+  large-pair reading, then close.
 
 - [ ] PF3. Decide whether `O_TimeStamps` becomes real accumulating
   timers.  Today it writes wall-clock start and end STRINGS for
@@ -8404,6 +8419,72 @@ is not carried only in conversation.
     nothing here can read.  Worth remembering anyway: it samples
     via SIGPROF in user space and would survive a stricter
     `perf_event_paranoid` than this machine sets.
+
+> **Parallel implementation (PA).**  Ruled 2026-08-18: MPI + ELPA
+> first, threads inside a rank as a companion.  ARCHITECTURE 6.5,
+> 6.6 and 6.8 are the level above these; DESIGN 9 is the level
+> that must be brought up to date BEFORE any of them is coded
+> (chain discipline: no code without pseudocode, and no pseudocode
+> without a design that names the seams).  The toolchain is done
+> (`d0ed228`: `cpgp` env, `IMAGO_MPI`/`IMAGO_ELPA`, `gfortran-mpi`
+> preset builds the unchanged serial source and reproduces the
+> baselines).
+
+- [ ] PA1. Revise DESIGN section 9 from ARCHITECTURE 6.5/6.6/6.8:
+  9.1's "backend choices remain open" is now decided (ELPA); 9.6's
+  eigensolver question closes; the ORDER of targets becomes the
+  three-centre integrals first, then the ELPA solve behind the 6.6
+  boundary (with the redistribution into and out of the
+  block-cyclic layout inside the boundary), then valence density,
+  then the 9.2 grid balance LAST.  The integral stage needs a NEW
+  subsection that DECIDES its decomposition -- by potential term
+  (private per-term datasets, `potDim` wide, terms unequal in
+  cost), by atom pair within a term (polcao's packed pair index,
+  matrix born distributed, pairs unequal in cost), or their
+  two-dimensional product -- and its load balance (cost-weighted
+  static deal, dynamic work queue, or the 2-D product), on the
+  strength of ONE measurement taken first: the per-term and
+  per-pair cost distributions on the medium decks from a
+  throwaway build stamping each `gaussOverlapEP` call.  Global
+  Arrays is not carried forward (its useful parts were
+  re-implemented in the upolcao design).  Every quantity the
+  parallel code consumes or produces gets its seam inventory (who
+  allocates, who loads, when) -- this is grafting onto a running
+  program, so the existing code is the second input.
+
+- [ ] PA2. Introduce the `O_MPI` module (`mpi.f90`: lifecycle,
+  rank/size, one-dimensional load balancer, most-square process
+  grid; `use mpi_f08`) and the `-DIMAGO_MPI` guards so the SAME
+  source builds serial (`h5fc`) and parallel (`h5pfc`); at one
+  rank the parallel binary must reproduce the serial baselines to
+  every printed digit (the acceptance test that already passed
+  for the unchanged source).  imago.py launches through
+  `IMAGO_EXE`.  PSEUDOCODE section first.
+
+- [ ] PA3. Distribute the three-centre electronic-potential
+  integrals under the decomposition and load balance PA1
+  decides (ARCHITECTURE 6.5 first bullet), serial HDF5 first.
+  Acceptance: HDF5 content identical to the serial run (h5diff)
+  and the `Electronic Potential Integrals` stamp on the medium
+  decks falling with rank count -- and, because the imbalance is
+  the known risk, the per-rank busy time recorded alongside so
+  the balance is measured, not assumed.  Then in-rank threading
+  (OpenMP over pairs) after PF4's hazard sweep of
+  `integrals3Terms`/`gaussIntegrals`.
+
+- [ ] PA4. The eigensolver boundary and the ELPA backend
+  (ARCHITECTURE 6.6): one call site behind which serial LAPACK
+  (one rank, OpenBLAS threads) and ELPA (block-cyclic, DESIGN
+  9.3) both sit; k-point and spin distributed across ranks as the
+  outer, communication-free level when there are several.
+  Acceptance: eigenvalues against the serial run to the print
+  precision on every benchmark deck, and the `Secular Equation`
+  stamp falling with rank count on the 135-atom and 1296-atom
+  cells.  Redistribution cost measured inside the boundary.
+
+- [ ] PA5. Parallel HDF5 (DESIGN 9.5) and the grid-work
+  distribution (DESIGN 9.2) -- last, and only if the map after
+  PA3/PA4 shows them worth it.
 
 ## TOOLING (lint helpers)
 

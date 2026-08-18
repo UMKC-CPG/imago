@@ -538,13 +538,21 @@ the current design:
 
 ## 6. Compute Architecture Direction
 
-> **Nothing in this section has been measured on imago.** The
-> seam map in 6.5 and its claims about which loops are the
-> cheap win and which are the scaling wall were inherited
-> from a sibling OLCAO branch. They are plausible and they
-> are untested here. The campaign that tests them is tracked
-> in `dev/PERFORMANCE.md`, with tasks PF1-PF5 in `TODO.md`;
-> read that before acting on the ordering implied below.
+> **Measured on imago 2026-08-18** (`dev/PERFORMANCE.md`, "Baseline"
+> and "Coarse time map"; the record of the numbers lives there, this
+> section carries only what they decide). Two operations account for
+> 72-86 % of every run above toy size: the ONE-TIME three-centre
+> electronic-potential integrals and the PER-ITERATION secular solve,
+> the solve's share growing with system size (9 % -> 46 % along the
+> complex column at 8 -> 135 atoms; 27 % at 243 atoms real). The
+> real-space grid work that an earlier draft of 6.5 called "the
+> cheap, proven win and the right first target" is 1-3 % of the medium
+> cells. Section 6.8 holds the table; 6.5 and 6.6 are written from it.
+> The programmer's ruling on that evidence (2026-08-18): go straight
+> for distributed-memory MPI with the ELPA eigensolver -- the dominant
+> use case is large cells at one k-point -- with in-node threading as
+> a companion inside a rank, not a separate stage. The intra-node
+> directions 6.1-6.4 (precision, SIMD, GPU) stand but follow it.
 
 ### 6.1 Configurable Precision
 
@@ -657,36 +665,110 @@ two parallel axes named in VISION Goal 7; the second,
 inter-problem throughput, is the flight layer of section
 9.
 
-A sibling branch of the common-ancestor OLCAO code (see
-6.7) already located where MPI must reach into the
-algorithm. That seam map carries directly to imago:
+A sibling branch of the common-ancestor OLCAO code (see 6.7)
+located where MPI must reach into the algorithm; the 2026-08-18
+measurement (6.8) says which of those seams carry the time. In
+that order:
 
-- **Real-space grid work** -- the site and grid loops in
-  `elecStat` (electrostatic potential) and `exchCorr`
-  (exchange-correlation). These are embarrassingly
-  parallel: a one-dimensional load balance hands each
-  rank a disjoint range of sites, and an `MPI_REDUCE`
-  accumulates the partials. This is the cheap, proven
-  win and the right first target.
-- **Integral assembly** -- the atom-pair loops in
-  `integrals.F90`. The interim, correct-but-non-scaling
-  pattern is replicate-and-broadcast: rank 0 computes,
-  then `MPI_BCAST` makes every rank consistent. This
-  provides *no* speedup and must not be mistaken for the
-  finished state. Genuine distribution assigns atom pairs
-  to ranks under the block-cyclic layout (DESIGN section
-  9).
-- **The secular solve** -- the eigenvalue problem
-  `H c = e S c`. This is the actual scaling wall and the
-  subject of 6.6.
+- **The three-centre electronic-potential integrals** (the
+  `Electronic Potential Integrals` stage, `elecPotGaussOverlap` in
+  `integrals.F90`) -- 37-45 % of every medium run and the largest
+  single stage on every deck. Computed ONCE per run. Its structure
+  is a loop over the potential terms (`potDim` of them: every alpha
+  of every potential type; 32 for a two-type glass, more for
+  crystals with more types), and for each term one full
+  valence-by-valence matrix is assembled over all atom pairs and
+  lattice cells (`gaussOverlapEP`), orthogonalized to the core
+  (`ortho`) and written to its OWN HDF5 dataset carrying a
+  completion attribute. Terms are independent of one another, and
+  within a term the atom pairs are independent of one another, so
+  the stage offers TWO orthogonal decompositions, and both have
+  been tried in the ancestor codes (6.7):
+  - **By potential term.** Each rank takes a subset of the terms,
+    computes complete matrices for them, orthogonalizes and writes
+    its own datasets: no reduction, no exchange of partial
+    matrices, and the per-term completion attribute already makes
+    the stage restartable term by term. Width `potDim`. Its
+    weakness: terms are NOT equal in cost -- a diffuse alpha (small
+    exponent) reaches many more (atom pair, lattice cell) entries
+    than a tight one (the `anyElecPotInteraction` mask that prunes
+    pairs per term is exactly the record of that inequality) -- so
+    an equal COUNT of terms per rank is not an equal share of work.
+  - **By atom pair within a term.** Each rank takes a range of the
+    packed pair index (`numAtomSites*(numAtomSites+1)/2` pairs) and
+    accumulates its pairs' contributions into a DISTRIBUTED matrix
+    (the polcao effort of 6.7 did this with Global Arrays; the
+    upolcao design of DESIGN 9.3-9.4 does it with a block-cyclic
+    layout and a few redundantly computed pairs). Width is the pair
+    count, so it scales with the cell, and it produces the matrix
+    already distributed for the solve. Its weakness is the mirror
+    image: pairs are not equal in cost either (basis size,
+    neighbours within the cutoff), and the accumulation is a
+    communication pattern rather than a private write.
+  Which of the two, or the two-dimensional product of them (terms
+  across one axis of the process grid, pair blocks across the
+  other, which also smooths both imbalances), is a DESIGN 9
+  decision (TODO PA1) that needs one measurement first: the
+  per-term and per-pair cost distributions on the medium decks,
+  which a throwaway build with a stamp around each `gaussOverlapEP`
+  call gives cheaply. The load-balance question is the same
+  question in either decomposition and has three answers to weigh
+  -- a cost-weighted static assignment (a cost estimate per term
+  or pair from the alpha exponents, cutoffs and basis sizes, dealt
+  out largest-first), a dynamic work queue (a rank hands out the
+  next term or pair block on request), or the two-dimensional
+  product above. Output through serial HDF5 works for the first
+  version (ranks write disjoint datasets in turn); collective
+  parallel HDF5 (DESIGN 9.5) is a later optimization, not a
+  prerequisite.
+- **The secular solve** -- the generalized eigenproblem
+  `H c = e S c`, per iteration, per k-point, per spin. 27-46 % of the
+  medium runs and the share that GROWS with size, as N^3 must
+  overtake the integrals' pair count. This is the scaling wall and
+  the subject of 6.6: ELPA over a block-cyclic layout (DESIGN 9.3),
+  with k-point and spin as an outer, communication-free
+  distribution when there are several of either. Note that at the
+  sizes measured (valence dimension 5184 for the 1296-atom glass:
+  430 MB complex) the matrix fits one node many times over -- the
+  driver for distributing the solve is TIME, not memory, until the
+  dimension reaches tens of thousands.
+- **Valence charge density** (`Valence Charge Density`, per
+  iteration) -- the third cost, 5-14 %; it consumes the eigenvectors
+  the solve produces and parallelizes over the same distribution.
+- **Real-space grid work** -- the site and grid loops in `elecStat`
+  and `exchCorr` (`Make SCF Potential`, `Electrostatic Matrices`).
+  Embarrassingly parallel by the one-dimensional load balance plus
+  `MPI_REDUCE` of DESIGN 9.2 -- and, on imago, 1-3 % of a medium run
+  (the electrostatic setup is 14 % of the 243-atom glass, once). It
+  is the LAST target, not the first; the earlier draft of this list
+  had it first on inherited authority, and the measurement reversed
+  that.
 
-The MPI lifecycle, a one-dimensional load balancer, and
-parallel-HDF5 helpers belong in a dedicated module
-(`mpi.f90` in the sibling branch). imago does not yet
-carry this module; introducing it is the first build-
-level step, paired with switching the gamma and k-point
-targets from the serial data reader (`readDataSerial`) to
-the parallel one.
+Two patterns to name so they are not mistaken for progress: the
+replicate-and-broadcast form (rank 0 computes, `MPI_BCAST` makes
+every rank consistent) is correct and gives NO speedup; and a
+serial LAPACK solve on a broadcast copy of the full matrix on every
+rank is the same thing for the eigenproblem. Both are what the
+sibling branch stopped at (6.7).
+
+Build and runtime shape. The MPI lifecycle, the one-dimensional
+load balancer and the process-grid helper belong in one module
+(`O_MPI`, `mpi.f90` in the sibling branch, `use mpi_f08`); imago
+does not yet carry it, and introducing it is the first code-level
+step. The toolchain exists and is verified (`BUILD.md`, "Parallel
+toolchain"): the `cpgp` conda environment (`dev/env/cpgp.yml`)
+supplies openmpi, MPI-enabled HDF5 (`h5pfc`), ScaLAPACK and ELPA on
+the same gfortran/OpenBLAS family as the serial build; the
+`gfortran-mpi` preset (`IMAGO_MPI`, `IMAGO_ELPA`) builds the
+unchanged serial source against it and reproduces the serial
+baselines, so the parallel work starts from a binary that is
+already known to be right at one rank. A parallel run is launched
+by `imago.py` through the existing `IMAGO_EXE` hook (`mpirun -np`
+inside a batch script is the group's precedent). Threads live
+INSIDE a rank: OpenBLAS threads for the serial-LAPACK backend and
+OpenMP over atom pairs within a potential term, both bounded by the
+cores a rank owns; they are a companion to the distribution above,
+not a stage before it (programmer's ruling, 2026-08-18).
 
 ### 6.6 Eigensolver Backend Abstraction
 
@@ -694,37 +776,80 @@ The secular solve must sit behind one interface with
 swappable backends, chosen by problem size and available
 hardware:
 
-- **Serial LAPACK** (`ZHEGV` / `DSYGV`) -- today's path,
-  correct for systems that fit one node.
-- **Distributed (ScaLAPACK / ELPA)** -- for problems too
-  large for one node. Both consume the same block-cyclic
-  BLACS data layout, so the distribution machinery is
-  shared. ELPA is the leading candidate: its two-stage
-  solver outperforms ScaLAPACK on the dense generalized
-  problem typical of an LCAO method, and a single ELPA
-  API spans CPU and GPU.
-- **GPU** -- via ELPA's GPU backend, or a vendor solver
-  (cuSOLVER / MAGMA) for the single-node case.
+- **Serial LAPACK** (`ZHEGV` / `DSYGV`) -- today's path, correct
+  for systems that fit one node, and the one-rank backend of the
+  parallel binary (with OpenBLAS threads inside the rank).
+- **Distributed: ELPA** -- DECIDED 2026-08-18 (programmer's ruling;
+  the toolchain carries it, `elpa_init`/`elpa_allocate` verified on
+  the cluster). ELPA consumes the block-cyclic BLACS layout of
+  DESIGN 9.3, solves the GENERALIZED problem by a Cholesky
+  transformation followed by its two-stage tridiagonalization, and
+  outperforms ScaLAPACK's `PZHEGVX` on the dense generalized
+  problem typical of an LCAO method; one API spans CPU and GPU.
+  ScaLAPACK stays linked beneath it (ELPA requires it) and remains
+  available for the layout utilities (`numroc`, descriptors) and
+  as a fallback, not as the solver.
+- **GPU** -- via ELPA's GPU backend, or a vendor solver (cuSOLVER /
+  MAGMA) for the single-node case; later.
 
-This is the single most important architectural boundary
-for parallelization. The sibling branch *declared* a
-ScaLAPACK generalized-eigensolver interface (`PZHEGVX`)
-but never called it; imago should define the boundary
-cleanly and can then complete the distributed arm
-(likely with ELPA) rather than inherit an unfinished
-stub. Because the abstraction names CPU and GPU backends
-behind one call site, it is also where VISION's "device
-placement is per-kernel" principle (Principle 14) is
-realized for the most expensive kernel in the program.
+This is the single most important architectural boundary for
+parallelization. The sibling branch *declared* a ScaLAPACK
+generalized-eigensolver interface (`PZHEGVX`) but never called it;
+imago defines the boundary cleanly -- one call site that takes H
+and S in whatever layout the backend needs and returns eigenpairs
+-- and completes the distributed arm with ELPA rather than
+inheriting an unfinished stub. What the measurement adds (6.8): at
+today's sizes the solve is distributed for TIME (its share is 46 %
+at 135 atoms and rising), so the interface must be cheap to enter
+and leave per iteration; the redistribution of H and S from
+whatever layout the integral stage produced into the block-cyclic
+one, and of the eigenvectors back out, is part of the solve's cost
+and belongs inside the boundary where it can be measured. Because
+the abstraction names CPU and GPU backends behind one call site, it
+is also where VISION's "device placement is per-kernel" principle
+(Principle 14) is realized for the most expensive kernel in the
+program.
 
-### 6.7 Reference: upolcao MPI Exploration
+### 6.7 Reference: the upolcao and polcao MPI Explorations
 
-A sibling branch of the common-ancestor OLCAO code lives
-outside this repository at:
+Two earlier parallel efforts on the common-ancestor OLCAO code
+live outside this repository, and they took the two decompositions
+of 6.5's first bullet:
 
 ```
-~/olcao/src/upolcao/
+~/olcao/src/polcao/     the earlier effort (J. Currie): atom-pair
+                        distribution of the integral routines
+~/olcao/src/upolcao/    the later effort: MPI lifecycle, grid
+                        parallelism, block-cyclic design
 ```
+
+**polcao** split every SCF integral routine (overlap, kinetic,
+nuclear, and the electronic-potential contributions) over ranks BY
+ATOM PAIR: `loadBalMPI` deals a contiguous range of the packed pair
+index `numAtomSites*(numAtomSites+1)/2` to each rank, each rank
+computes only its pairs, and the contributions accumulate into
+distributed matrices held in Global Arrays, with block-cyclic
+descriptors for the core-valence orthogonalization; the
+electronic-potential term loop stays serial with all ranks working
+each term's pairs (`ga_sync` per term). Its `parallelSubs.F90`
+carries the load balancer, the packed/unpacked pair-index maps and
+the distributed-write helpers, and its own header says what it is:
+a summer's blitz, results-first, with several implementations of
+the same balancing idea. What it proves: the pair decomposition
+works end to end and yields the matrix already distributed. What
+it leaves open: the pair-cost imbalance. Its Global Arrays
+dependency is NOT carried forward (programmer's ruling,
+2026-08-18): the later upolcao work re-implemented, in plain MPI
+and the block-cyclic layout, the parts of Global Arrays polcao
+actually used -- the distributed matrix, the local/global index
+mapping, the accumulation into it -- so the dependency had already
+been retired before imago; imago's distributed matrices live in
+the block-cyclic BLACS layout of DESIGN 9.3, which ScaLAPACK and
+ELPA consume directly and the `cpgp` toolchain already provides.
+polcao is mined for its decomposition and its index maps, not for
+its communication layer.
+
+**upolcao** is the later branch:
 
 It is *not* a parent of imago and *not* a merge source.
 upolcao branched from an older serial OLCAO to add MPI,
@@ -762,7 +887,57 @@ The honest summary: upolcao finished the grid-parallel
 half and left the distributed-linear-algebra half as an
 elaborate design with stubs. imago can take the finished
 half directly and treat the unfinished half as a vetted
-design study rather than a starting implementation.
+design study rather than a starting implementation. On the
+measurement in 6.8 the finished half is also the half that
+matters least: what upolcao parallelized is 1-3 % of an imago
+run, and what it left as stubs is where the time is.
+
+### 6.8 Measured Cost Structure (2026-08-18)
+
+The record -- decks, environment, repeats, the per-operation
+tables -- is `dev/PERFORMANCE.md` ("Benchmark deck set", "Baseline",
+"Coarse time map"); it is produced by `dev/tools/timemap.py` from
+the operation stamps every run already writes. This section keeps
+only the shape of the result, because the shape is what the
+architecture rests on. Share of the run's wall time, serial, one
+core, plain SCF from the initial potential:
+
+    deck (atoms, variant)      3-centre  secular  valence  grid
+                               integrals solve    density  work
+    BN 8, complex, 4 k           66 %      9 %      5 %     8 %
+    BN 8, real, Gamma            77 %    0.6 %    0.3 %     8 %
+    KNbO3 40, complex, 4 k       37 %     37 %     14 %     8 %
+    KNbO3 135, complex, 4 k      40 %     46 %      9 %     2 %
+    SiO2 243, real, Gamma        45 %     27 %      5 %    17 %*
+    SiO2 1296, real and complex  (large pair; pending)
+
+(* of which 14.5 % is the once-per-run electrostatic-matrix setup,
+not a repeated loop.) The stamps cover more than 99.8 % of every
+run, so the table is complete, and every repeat reproduced its
+wall time to under 1 % on the medium cells.
+
+What the shape decides:
+
+1. Two costs, of two kinds. The three-centre integrals are paid
+   ONCE per run; the solve is paid every iteration and every
+   k-point. Parallelizing the first removes a fixed cost;
+   parallelizing the second removes a cost that scales with the
+   iteration count and, through N^3, with size. Both must be done;
+   6.5 orders them by their share and 6.6 owns the second.
+2. The solve overtakes the integrals as the cell grows (9 -> 14 ->
+   37 -> 46 % along the complex column). The large pair says how
+   far that goes at 1296 atoms and, being the same cell real and
+   at one shifted k-point, gives the real-vs-complex cost ratio
+   directly.
+3. The grid work is not where the time is. The inherited claim in
+   an earlier draft of 6.5 was reasonable for the sibling code and
+   is wrong for imago; DESIGN 9.2's load balancer stays valid as a
+   design and moves to the end of the queue.
+4. What A3-A6 target -- the alpha-pair inner loops of the integral
+   engine, precision, SIMD, GPU -- is inside the largest stage, so
+   those directions are not displaced by this measurement; they
+   are intra-node work on the same stage that MPI distributes
+   between nodes, and they follow it in time (banner above).
 
 ---
 
