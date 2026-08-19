@@ -30,11 +30,25 @@ would force one severity scale onto two unrelated questions.
   are clean under asan, SNaN and valgrind memcheck on both
   variants; the remaining candidates were punted behind this
   work by the programmer.
-- **PF1 in progress.** The profiling presets exist
-  (`gfortran-profile`, `gfortran-gprof`; `BUILD.md`), the
-  benchmark deck set is DESIGNATED and staged (section below,
-  answering open question 2), and the measurement layers are
-  agreed. Baselines not yet captured.
+- **PF1 essentially done; PA1 CLOSED; PA2 at the chain gate
+  (state at the 2026-08-18 session end).** Presets, decks,
+  small/medium baselines, the time map, the PA1 cost
+  measurement, the ARCHITECTURE 6 and DESIGN 9 revisions and
+  PSEUDOCODE 24 (the O_MPI module) are all committed. NEXT
+  SESSION: (1) harvest the LARGE-pair baselines -- SLURM jobs
+  16632708 (`sio2_1296_large_g`) and 16632709
+  (`sio2_1296_large_c`), submitted with 3-day limits, results
+  land in `jobs/bench/bench_large{g,c}.o*` and the decks'
+  `baseline_r1.*`; enter them in the Baseline table below and
+  ARCHITECTURE 6.8, and re-read the time map at that size;
+  (2) harvest the two-node MPI launch test -- job 16634074,
+  `/home/rulisp/data/scratch/imago/mpitest/mpitest.o*`, queued
+  until both large jobs free their nodes; it compares `mpirun
+  -np $SLURM_NTASKS` against `srun --mpi=pmix|pmi2` and runs
+  the cross-node ELPA handshake, and its winner is the
+  launcher recipe PA2's checks use; (3) code PA2 from
+  PSEUDOCODE 24 (reviewed, committed `cb816b6`) -- `mpi.F90`
+  plus the four seam edits, acceptance checks 24.7.
 - **Install no profiling tools yet** (TODO PF6). `gprof` and
   `callgrind` are already present and cover Phases P0 through P2.
   The investigation into `perf` and `gperftools` is recorded below
