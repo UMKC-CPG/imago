@@ -237,6 +237,55 @@ What it says so far -- to be re-read once the large cells land:
   The large pair (same 1296-atom glass, real vs. one shifted
   k-point) is the clean measurement of that ratio.
 
+## PA1 cost distributions (measured 2026-08-18)
+
+The decomposition and load-balance decision for the three-centre
+electronic-potential integral stage (ARCHITECTURE 6.5 first
+bullet; TODO PA1) needed the per-term and per-pair cost
+distributions rather than a guess. A throwaway build
+(`build/pa1cost`, release+symbols) stamped every term
+(`PA1TERM`: wall time of each `gaussOverlapEP` call) and every
+outer-atom row of the pair loop (`PA1ROW`: pairs (i, i..N) within
+a term); the stamps were removed from the source after the runs.
+Decks: fresh copies `pa1_sio2_243_g` and `pa1_knbo3_333_c` under
+`jobs/bench/` (outputs kept there), one exclusive-node run each;
+both reproduced their baseline energies to every printed digit,
+and the summed term stamps match the baseline stage stamps
+(315.6 vs 316.2 s; 606.4 vs 599.4 s), so the instrumentation
+cost is ~1 %.
+
+    deck            terms  mean s  max s  max/mean   rows  row max/mean
+    sio2_243 (g)      32     9.9   15.4     1.57      243      1.91
+    knbo3_135 (c)     62     9.8   14.3     1.46      135      2.08
+
+- **Both margins are mild.** Term cost varies smoothly and
+  MONOTONELY with the alpha exponent (diffuse = costlier; the
+  most diffuse alpha of each type tops its family), max/mean
+  under 1.6. Row cost, summed over terms or within one term,
+  has max/mean about 2: the negligibility cutoff makes an
+  atom's cost proportional to its neighbours in range, so the
+  triangular row length never shows. Nothing here needs a
+  dynamic work queue: a static deal of terms, largest
+  (most-diffuse) first, is "good enough" (the programmer's
+  stated bar), and a cost model is available for free if wanted
+  since cost tracks the exponent.
+- **The surprise, and it matters more than the balance: the
+  pair loop is NOT the whole stage.** Row sums account for
+  73 % of the stage on the real/Gamma glass (230.6 of 315.6 s)
+  but only 16 % on the complex 4-k-point cell (97.5 of
+  606.4 s). The rest is per-term work OUTSIDE the pair loop --
+  dominated by the core-orthogonalization and dataset write
+  (`ortho(4,...)`), whose matrix products scale with k-points --
+  which is why the complex share is so much larger. A
+  decomposition BY TERM distributes that cost automatically; a
+  decomposition by pair within a term would leave 84 % of the
+  complex stage serial unless the ortho were also distributed.
+  This settles the decomposition question in favour of BY TERM
+  for the first implementation, with pair-level splitting (or
+  in-rank threading) as the later refinement for when ranks
+  exceed `potDim` -- exactly the widths involved: 32-62 terms
+  here, more for richer chemistries.
+
 ## The situation, as of 2026-08-09
 
 Three things are true at once, and the campaign has to be planned
