@@ -8471,6 +8471,14 @@ is not carried only in conversation.
   every printed digit (the acceptance test that already passed
   for the unchanged source).  imago.py launches through
   `IMAGO_EXE`.  PSEUDOCODE section first.
+  **2026-08-18: PSEUDOCODE 24 DRAFTED** (module data with serial
+  defaults so no caller needs its own guard; lifecycle +
+  `stopMPI` via `MPI_Abort` and the stop-conversion doctrine;
+  rank-aware unit-20 log; root-only fort.2 behind a barrier;
+  `loadBalMPI`; four acceptance checks incl. the 4-rank
+  replicate proof).  One scope change against this entry: the
+  most-square process-grid helper MOVED to PA4 -- in PA2 it
+  would be code with no caller.  Awaits programmer review.
 
 - [ ] PA3. Distribute the three-centre electronic-potential
   integrals under the decomposition and load balance PA1

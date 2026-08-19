@@ -16149,3 +16149,206 @@ whoever writes the code.
 5. The partials-sum-to-total identity CANNOT see this
    defect and is not a check. It holds under any permutation
    of the channel indices, which is the whole point.
+
+## 24. The O_MPI Module (DESIGN 9.1/9.2, ARCH 6.5; TODO PA2)
+
+One module owns the MPI lifecycle, the rank/size identity, the
+one-dimensional load balancer, and the abort discipline.  It
+compiles in BOTH builds from the same source: under the parallel
+build (`-DIMAGO_MPI`, compiler wrapper `h5pfc`) it is a real MPI
+client; under the serial build it is a set of constants and
+no-ops, so that no call site anywhere else in the program ever
+needs its own `#ifdef IMAGO_MPI` merely to coexist with the
+serial binary.  That single-source property is the point of the
+module: PA3 and PA4 write plain calls, and the serial build
+keeps meaning what it means today.
+
+### 24.1 Seam inventory
+
+What the module touches in the existing program, and nothing
+else:
+
+- `imagoWrap.f90` -- the ONLY program unit (`program
+  imagoWrapper`, shared by both variants).  It gains the first
+  and last calls of the run: `initMPI` before `call Imago`,
+  `closeMPI` after it.  Nothing inside `O_Imago` starts or ends
+  MPI.
+- `commandLine.f90:93` -- `parseCommandLine` opens the log,
+  unit 20, `fort.20`.  Under MPI every rank executes
+  parseCommandLine; the open is made rank-aware (24.4) so ranks
+  do not interleave into one file.  In the serial build the
+  statement's effect is unchanged.
+- `imago.F90` (end of `subroutine Imago`) -- `close (20)` and
+  the `fort.2` success certificate.  The certificate becomes
+  root-only, behind a barrier (24.5), because it certifies the
+  WHOLE run: every rank finished, not merely rank 0.
+- The build lists `src/imago/complex/CMakeLists.txt` and
+  `src/imago/real/CMakeLists.txt` -- both gain `../mpi.F90`
+  (capital F: the file carries the cpp guard) compiled before
+  its users, exactly as the other shared modules are listed.
+
+Nothing in this increment touches the integral routines, the
+solver, or HDF5; those are PA3 and PA4.  The kaleidoscope /
+imago.py side needs NO change for one-rank acceptance: the
+existing `IMAGO_EXE` hook prepends the launcher (`mpirun -np N`)
+when the user asks for one, and an empty `IMAGO_EXE` runs the
+binary directly, which a compiled-in MPI library treats as a
+one-rank world.
+
+### 24.2 Module data
+
+```
+module O_MPI                                    (file mpi.F90)
+
+   public
+
+   mpiRank : integer = 0    rank of this process, 0-based.
+   mpiSize : integer = 1    number of ranks in the world.
+
+   The defaults are the serial truths, and the serial build
+   never changes them.  Every consumer may therefore read
+   mpiRank/mpiSize unconditionally: "am I root" is
+   (mpiRank == 0) in both builds, and a loop balanced over
+   mpiSize ranks degenerates to the whole range at size 1.
+```
+
+### 24.3 Lifecycle
+
+```
+subroutine initMPI
+#ifdef IMAGO_MPI
+   use mpi_f08
+   call MPI_Init ()
+   call MPI_Comm_rank (MPI_COMM_WORLD, mpiRank)
+   call MPI_Comm_size (MPI_COMM_WORLD, mpiSize)
+#endif
+   (serial build: no-op; the defaults stand)
+end
+
+subroutine closeMPI
+#ifdef IMAGO_MPI
+   call MPI_Finalize ()
+#endif
+end
+
+subroutine stopMPI (message)
+   ! The ABORT path.  A plain Fortran `stop` on one rank of a
+   !   parallel run leaves the other ranks alive inside their
+   !   next collective, and the job then hangs until the
+   !   scheduler kills it.  So parallel code aborts through
+   !   here, which writes the message to the log and then
+   !   takes down the WHOLE job:
+   write the message to unit 20 (whatever rank we are: the
+         rank-aware log of 24.4 makes that safe)
+#ifdef IMAGO_MPI
+   call MPI_Abort (MPI_COMM_WORLD, errorcode=1)
+#else
+   stop 1
+#endif
+end
+```
+
+Doctrine, recorded here because it governs later increments,
+not this one: every `stop` on a path that a multi-rank build
+can reach must become `stopMPI` WHEN that path is parallelized
+(PA3, PA4).  The hundreds of existing serial `stop` statements
+are left alone by PA2 -- until a path is distributed, every
+rank executes it identically and stops together, so converting
+them wholesale would be churn without a defect.
+
+### 24.4 The log under many ranks
+
+`parseCommandLine` opens unit 20 as `fort.20`.  Under MPI with
+every rank running the same code, N ranks appending to one file
+interleave and corrupt the log.  The rule:
+
+```
+if (mpiRank == 0):  open unit 20 on 'fort.20'        (as today)
+else:               open unit 20 on 'fort.20.rNNNN'  (NNNN =
+                    zero-padded rank)
+```
+
+Root's log is byte-for-byte the serial log.  Non-root ranks get
+their own files, so any write a later increment makes from a
+worker rank -- deliberate or stray -- lands somewhere visible
+instead of tearing the main log ([[keep-problems-visible]]).
+imago.py continues to read `fort.20`; the rank files are
+diagnostic droppings, harvested only by eyes.  The change lives
+INSIDE parseCommandLine at the existing open; in the serial
+build mpiRank is 0 and the branch collapses to today's open.
+
+### 24.5 The success certificate
+
+`fort.2` is imago.py's only success gate and must remain the
+last statement of the run ([[imago-fort2-success-signal]]).
+Under MPI it must certify every rank, so the end of
+`subroutine Imago` becomes:
+
+```
+close (20)
+barrierMPI            ! all ranks reached the end (a thin
+                      !   wrapper over MPI_Barrier; no-op
+                      !   serial, like the rest of 24.3)
+if (mpiRank == 0):
+   open (unit=2, file='fort.2', status='unknown')
+```
+
+A rank that dies earlier never reaches the barrier; root then
+never writes fort.2 (the scheduler or MPI_Abort ends the job),
+and imago.py correctly reports failure.  The barrier is the
+certificate's collective meaning and is NOT optional.
+
+### 24.6 The load balancer (DESIGN 9.2)
+
+```
+subroutine loadBalMPI (toBalance, initialIdx, finalIdx)
+   ! Deal `toBalance` items over mpiSize ranks in contiguous
+   !   ranges; the highest `remainder` ranks take one extra so
+   !   no item is dropped (DESIGN 9.2 verbatim).
+   jobsPer   = toBalance / mpiSize
+   remainder = mod (toBalance, mpiSize)
+   initialIdx = jobsPer * mpiRank + 1
+   finalIdx   = jobsPer * (mpiRank + 1)
+   if (mpiRank >= mpiSize - remainder):
+      shift = remainder - (mpiSize - mpiRank)
+      initialIdx = initialIdx + shift
+      finalIdx   = finalIdx + shift + 1
+end
+```
+
+At mpiSize 1 this returns (1, toBalance): the serial build and
+the one-rank parallel build both walk the full range, which is
+what the acceptance test (24.7) leans on.  The most-square
+process-grid helper and the block-cyclic descriptor belong to
+the eigensolver increment (PA4, DESIGN 9.3) and are NOT part of
+this module yet -- introducing them here would be code with no
+caller, which the chain forbids.
+
+### 24.7 Checks
+
+1. **Serial build unchanged.**  `gfortran-release` (h5fc, no
+   `-DIMAGO_MPI`) compiles the new module as stubs; the
+   `bn_small_c` and `bn_small_g` baselines reproduce to every
+   printed digit.
+2. **One-rank parallel equals serial.**  `gfortran-mpi` build;
+   run each benchmark small deck twice -- bare (`IMAGO_EXE`
+   empty) and under `mpirun -np 1` -- and both must reproduce
+   the serial baseline energies to every printed digit, write
+   `fort.20` and `fort.2` as today, and leave no `fort.20.r*`
+   files (one rank IS root).
+3. **Many ranks, no distributed work yet.**  `mpirun -np 4` on
+   `bn_small_c`: every rank redundantly computes the identical
+   run (nothing is balanced yet), root's outputs reproduce the
+   baseline, ranks 1-3 leave only `fort.20.r000N` logs, and
+   exactly one `fort.2` appears after all four ranks end.  This
+   is the replicate stage ARCHITECTURE 6.5 warns must never be
+   CALLED progress; here it is only the lifecycle proof.
+   (HDF5: the three worker ranks must NOT open the shared
+   scratch HDF5 files for writing -- but at this increment they
+   would, since the code is unchanged.  So check 3 runs in a
+   THROWAWAY copy of the deck, and the collision it risks is
+   accepted for the proof; PA3 is where file access becomes
+   rank-aware.  Record the observed behaviour.)
+4. `stopMPI` fires visibly: force a bad input on a 2-rank run
+   and confirm the job ends promptly with the message in a log
+   rather than hanging.
