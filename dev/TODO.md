@@ -8430,7 +8430,7 @@ is not carried only in conversation.
 > preset builds the unchanged serial source and reproduces the
 > baselines).
 
-- [ ] PA1. Revise DESIGN section 9 from ARCHITECTURE 6.5/6.6/6.8:
+- [x] PA1. Revise DESIGN section 9 from ARCHITECTURE 6.5/6.6/6.8:
   9.1's "backend choices remain open" is now decided (ELPA); 9.8's
   eigensolver question closes; the ORDER of targets becomes the
   three-centre integrals first, then the ELPA solve behind the 6.6
@@ -8460,8 +8460,8 @@ is not carried only in conversation.
   9.5 term distribution with seam inventory and the
   `anyElecPotInteraction` mask decoupling, new 9.6 eigensolver
   boundary with seam inventory and the k-point/spin outer deal,
-  9.7/9.8 renumbered, eigensolver question closed).  Remains:
-  programmer review of the draft; then PA1 closes.
+  9.7/9.8 renumbered, eigensolver question closed).  Reviewed by
+  the programmer and committed `80dacf1` 2026-08-18; PA1 CLOSED.
 
 - [ ] PA2. Introduce the `O_MPI` module (`mpi.f90`: lifecycle,
   rank/size, one-dimensional load balancer, most-square process
