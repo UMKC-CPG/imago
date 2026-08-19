@@ -14152,15 +14152,32 @@ accumulates.
 This section pins down the data-distribution algorithms for
 parallelizing a single imago calculation across MPI ranks --
 the intra-problem axis of VISION Goal 7, architected in
-ARCHITECTURE 6.5-6.7. It transcribes the block-cyclic scheme
-designed in the sibling upolcao branch onto imago's terms,
-records the work-assignment decision that scheme rests on,
-and specifies the grid load balancer and parallel-I/O
-alignment that are already proven. Backend choices that
-remain open -- which distributed eigensolver, how device
-placement is expressed -- are collected in 9.6 rather than
-committed here, consistent with VISION's intent to keep
-every parallel axis open.
+ARCHITECTURE 6.5-6.8. Two decisions that earlier drafts left
+open are now made and recorded here: the distributed
+eigensolver is ELPA (ARCHITECTURE 6.6, ruled 2026-08-18 with
+the toolchain verified), and the order of implementation
+follows the measured cost structure of ARCHITECTURE 6.8
+rather than the sibling branch's inherited ordering -- the
+three-centre electronic-potential term distribution first
+(9.5), the eigensolver boundary second (9.6), the grid
+balancer (9.2) LAST, since the loops it serves are 1-3 % of
+a medium run. The block-cyclic scheme (9.3) and the
+redundant-pair work assignment (9.4) are kept: the solve
+requires the first, and the second becomes the pair-level
+refinement of the integral stage when rank counts exceed the
+term count. Remaining open choices are collected in 9.8.
+
+Two measured inputs anchor this section (dev/PERFORMANCE.md
+"Baseline", "Coarse time map", "PA1 cost distributions",
+2026-08-18): (a) the three-centre stage and the secular
+solve are 72-86 % of every run above toy size; (b) within
+the three-centre stage, per-term costs vary only mildly
+(max/mean 1.5-1.6, monotone in the alpha exponent), per-row
+pair costs likewise (max/mean about 2), and the atom-pair
+loop is only 16 % of the stage on a complex multi-k-point
+cell -- the balance is the per-term core-orthogonalization
+and write, which a term distribution carries with it for
+free and a pair distribution would leave serial.
 
 ### 9.2 One-Dimensional Grid Load Balance
 
@@ -14181,8 +14198,12 @@ work is dropped when the division is uneven. The rank then
 loops over its `[initialIdx, finalIdx]` range and the
 partials are combined with `MPI_REDUCE` under `MPI_SUM`.
 This is the `loadBalMPI` algorithm from the sibling branch
-and the lowest-risk parallelism imago can adopt; it is the
-recommended first increment.
+and the lowest-risk parallelism imago can adopt. An earlier
+draft called it the recommended first increment; the
+2026-08-18 measurement demoted it to LAST (ARCHITECTURE 6.8:
+the loops it serves are 1-3 % of a medium run). The
+algorithm stands unchanged for when its turn comes, and it
+doubles as the deal used for the term distribution of 9.5.
 
 ### 9.3 Block-Cyclic Matrix Distribution
 
@@ -14238,8 +14259,164 @@ trade when integral evaluation is cheap relative to
 interconnect cost. This decision is inherited from upolcao's
 design and is the recommended starting point; it is revisited
 only if profiling shows the redundant computation dominates.
+Its place in the sequence: it serves the PAIR-level
+refinement of the integral stage (9.5) and the assembly of
+distributed H and S for the solve (9.6), not the first
+implementation, which distributes whole terms.
 
-### 9.5 Parallel HDF5 Alignment
+### 9.5 Three-Centre Term Distribution
+
+The three-centre electronic-potential integral stage is
+distributed BY POTENTIAL TERM. This is the decided first
+parallel increment (ARCHITECTURE 6.5/6.8), and the decision
+rests on the PA1 measurement rather than symmetry with the
+other decompositions: per-term costs are mild and
+predictable (max/mean 1.5-1.6, monotone in the alpha
+exponent), and 27-84 % of the stage -- the larger figure on
+multi-k-point cells -- is per-term work OUTSIDE the atom-pair
+loop (the core-orthogonalization and dataset write), which a
+term distribution carries to the ranks for free and a pair
+distribution would leave serial.
+
+**The serial stage as it exists (seam inventory).** The
+stage is `elecPotGaussOverlap(packedVVDims, did, aid)` in
+`integrals.F90`, called ONCE from the SCF setup path of
+`imago.F90` (after `makeAlphaPotDist`). Its inputs, who
+makes them, and when:
+
+- `potDim` (module `O_Potential`), `potTypes` (`O_PotTypes`),
+  `potSites` (`O_PotSites`): loaded unconditionally by the
+  input-parsing pass before any integral work. A "term" is
+  one (potential type, alpha) pair; the term index
+  `currentIterCount` runs 1..`potDim` in the doubly nested
+  loop over potential sites carrying `firstPotType == 1` and
+  their types' alphas. The term's identity is posted in the
+  module variables `currPotAlpha`, `currPotNumber`,
+  `currPotElement`, `currAlphaNumber`, `currMultiplicity`
+  before the per-term worker runs.
+- `did(numKPoints, potDim)` = `atomPotOverlap_did` and
+  `aid(potDim)` = `atomPotTermOL_aid`: HDF5 dataset and
+  completion-attribute handles, allocated and created by
+  `initSCFIntegralHDF5` (`hdf5SCFIntg.F90`) inside the
+  k-point group during HDF5 setup -- one dataset per (k-point,
+  term), one attribute per term.
+- The per-term worker `gaussOverlapEP` assembles the full
+  valence-valence (plus core-valence, core-core) matrices for
+  its term over all atom pairs and lattice cells, then calls
+  `ortho(4, packedVVDims, did(:,term), aid(term))`, which
+  core-orthogonalizes and writes the term's datasets and
+  finally sets the term's completion attribute.
+- Restart already exists at term granularity: the term loop
+  reads `aid(term)` first and skips completed terms. The
+  parallel design inherits this unchanged -- the completion
+  attribute is the unit of both restart and distribution.
+
+**The distribution.** Rank r takes the terms
+`loadBalMPI(potDim)` assigns it (9.2's deal, applied to
+terms), after the term list is sorted most-diffuse-first
+(ascending alpha exponent) so the deal is largest-first --
+the cost model the measurement licensed. Each rank runs the
+EXISTING term loop body for its terms: same worker, same
+`ortho`, same datasets. No partial matrices ever cross
+ranks. Completion attributes make the result identical to a
+serial run's file, term by term.
+
+**HDF5 discipline (first version).** The datasets are
+disjoint per term, so ranks never write the same object, but
+the serial HDF5 library requires that a FILE not be open for
+writing by several processes at once. First version: ranks
+write in turn (an ordered token pass around the ranks at the
+end of the stage, or per-term file open/close under a lock),
+which serializes only the write time -- measured at well
+under a third of the stage serially, and overlappable with
+the next rank's compute. The collective parallel-HDF5 form
+is 9.7's calibration, not a prerequisite.
+
+**One cross-term coupling to break.** The serial loop shares
+`anyElecPotInteraction` -- the (pair, cell) negligibility
+bitmask -- across the alphas of one type: each alpha inherits
+the bits its predecessors cleared and prunes its work with
+them. The mask is a pure optimization (bits are only cleared
+when a pair/cell contributed nothing), so each rank simply
+rebuilds its own mask for the types it touches; a rank that
+holds a type's tighter alphas without its diffuse ones loses
+some pruning and no correctness. This is the only coupling
+between terms; everything else a term reads is constant
+input data.
+
+**Pair-level refinement (later).** When ranks exceed
+`potDim`, or a single term must go faster, the atom-pair
+loop within a term splits by the packed pair index under 9.4
+(each rank computes the pairs its blocks need, redundantly
+at block edges) -- or, cheaper and first, OpenMP threads
+inside the rank cover the pair loop while ranks stay at term
+granularity. The PA1 row measurement (max/mean about 2, flat
+in the row index) says a contiguous pair-range split is
+adequate when that day comes.
+
+### 9.6 The Eigensolver Boundary
+
+The secular solve sits behind ONE call site with swappable
+backends (ARCHITECTURE 6.6): serial LAPACK (today's
+`solveZHEGV` / `solveDSYGV`) for one rank, ELPA (decided
+2026-08-18) for the distributed case. This subsection names
+the seams the boundary must respect.
+
+**The serial solve as it exists (seam inventory).**
+`secularEqnSCF(spinDirection, numStates)` in
+`secularEqn.F90`, called per spin from the SCF iteration
+loop of `imago.F90`:
+
+- It loops k-points INTERNALLY (`do i = 1, numKPoints`),
+  and per k-point: reads the packed nuclear-potential matrix
+  (`readPackedMatrix` from `atomNPOverlap_did(i)`), then
+  accumulates kinetic energy, optionally mass-velocity, and
+  the `potDim` potential terms weighted by
+  `potCoeffs(j, spinDirection)` (`readPackedMatrixAccum`
+  from `atomPotOverlap_did(i,j)`) -- so H is assembled FROM
+  THE HDF5 FILE each iteration, with the iteration's
+  potential coefficients; the integral datasets of 9.5 are
+  its direct input.
+- The packed H is unpacked into the module array
+  `valeVale(valeDim, valeDim, spin)` (complex) or
+  `valeValeGamma` (real), S likewise into `valeValeOL`;
+  `solveZHEGV(valeDim, numStates, H, S, eigvals)` (or
+  `solveDSYGV`) destroys its inputs and returns the lowest
+  `numStates` eigenpairs; eigenvectors and eigenvalues are
+  written to the HDF5 eigen datasets
+  (`eigenVectors_did(i, spin)`, per-k-point completion
+  attributes -- the existing per-k-point restart unit).
+
+**The boundary.** One routine -- working name
+`solveSecular(H_desc, S_desc, numStates, eigvals, eigvecs)`
+-- owns everything between "packed H and S exist" and
+"eigenpairs exist where the writer expects them", including
+any redistribution. Backends:
+
+- **Serial (one rank per problem):** exactly today's path;
+  OpenBLAS threads inside the rank are the intra-node lever.
+- **ELPA (one problem across ranks):** the block-cyclic
+  layout of 9.3; the generalized problem is reduced via
+  ELPA's Cholesky path and solved by its two-stage
+  tridiagonalization; ScaLAPACK supplies the layout
+  utilities beneath it. The redistribution of H and S INTO
+  the block-cyclic layout (from rank-0 assembly at first;
+  from distributed assembly once 9.5's pair refinement
+  exists) and of the eigenvectors back OUT lives inside the
+  boundary, so its cost is measured with the solve's.
+
+**The outer, communication-free level.** k-points and spins
+are independent solves consuming the same integral file.
+When `numKPoints * spin >= ranks`, whole solves are dealt to
+ranks (each running the serial backend) before any single
+solve is distributed -- for the multi-k complex runs this is
+the entire win at small rank counts. The per-k-point
+completion attributes already make that deal restartable.
+The choice between "many serial solves" and "one distributed
+solve" is by problem: it is the per-kernel device-placement
+principle (VISION 14) applied one level up.
+
+### 9.7 Parallel HDF5 Alignment
 
 The distributed matrices are written to and read from HDF5
 collectively. For compression and write efficiency the on-
@@ -14249,32 +14426,34 @@ splitting them. The exact collective-write pattern against
 compressed chunks needs measurement -- one chunk per block
 per rank, versus larger chunks filled by several ranks'
 collective contributions -- and is flagged as an open
-calibration in 9.6.
+calibration in 9.8. It is NOT a prerequisite for 9.5, whose
+first version writes disjoint per-term datasets in turn
+through serial HDF5.
 
-### 9.6 Open Design Questions
+### 9.8 Open Design Questions
 
-- **Distributed eigensolver backend.** ScaLAPACK `PZHEGVX`
-  (the interface upolcao declared) versus ELPA (a faster
-  two-stage solver with a single API across CPU and GPU)
-  versus a GPU vendor solver. ELPA is the leading candidate
-  because it reuses the block-cyclic layout of 9.3 and
-  unifies the CPU/GPU axis behind one call, but the choice
-  is deferred to a benchmark on representative secular
-  dimensions. See ARCHITECTURE 6.6.
+- ~~**Distributed eigensolver backend.**~~ **DECIDED
+  2026-08-18: ELPA** (ARCHITECTURE 6.6; toolchain built and
+  the API handshake verified on the cluster). ScaLAPACK
+  remains beneath it for layout utilities, not as the
+  solver.
 - **Device-placement expression in Fortran.** How the per-
   kernel CPU/GPU boundary (VISION Principle 14) is expressed
   -- OpenACC, OpenMP target, CUDA Fortran, or a library
   boundary such as ELPA -- is open and will likely differ
   per kernel.
 - **Parallel-HDF5 chunk/block strategy.** The collective-
-  write pattern against compressed chunks (9.5) is settled
+  write pattern against compressed chunks (9.7) is settled
   by measurement, not assumed.
-- **Replicate-and-broadcast retirement.** The order in which
-  the interim replicate-and-broadcast paths (ARCHITECTURE
-  6.5) are replaced by genuine distribution -- grid work
-  first, then integral assembly, then the solve -- and the
-  validation gate between each stage, is sequenced here as
-  implementation begins.
+- **Implementation order** -- SETTLED 2026-08-18 by the
+  measurement (ARCHITECTURE 6.8): term distribution (9.5),
+  then the eigensolver boundary (9.6), then valence charge
+  density on the solve's distribution, then grid work (9.2)
+  last. The validation gate between stages is unchanged:
+  each stage must reproduce the serial benchmark results
+  (energies to print precision, HDF5 content by h5diff)
+  before the next begins, and replicate-and-broadcast forms
+  are never counted as progress.
 
 ---
 

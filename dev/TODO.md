@@ -8431,7 +8431,7 @@ is not carried only in conversation.
 > baselines).
 
 - [ ] PA1. Revise DESIGN section 9 from ARCHITECTURE 6.5/6.6/6.8:
-  9.1's "backend choices remain open" is now decided (ELPA); 9.6's
+  9.1's "backend choices remain open" is now decided (ELPA); 9.8's
   eigensolver question closes; the ORDER of targets becomes the
   three-centre integrals first, then the ELPA solve behind the 6.6
   boundary (with the redistribution into and out of the
@@ -8451,6 +8451,17 @@ is not carried only in conversation.
   parallel code consumes or produces gets its seam inventory (who
   allocates, who loads, when) -- this is grafting onto a running
   program, so the existing code is the second input.
+  **2026-08-18: the measurement is DONE** (PERFORMANCE.md "PA1
+  cost distributions": both margins mild, cost monotone in the
+  alpha exponent, and the pair loop only 16 % of the stage on the
+  complex cell -- the per-term ortho+write is the rest), **and it
+  decided BY TERM with a static most-diffuse-first deal.  The
+  DESIGN 9 revision is DRAFTED** (9.1 updated, 9.2 demoted, new
+  9.5 term distribution with seam inventory and the
+  `anyElecPotInteraction` mask decoupling, new 9.6 eigensolver
+  boundary with seam inventory and the k-point/spin outer deal,
+  9.7/9.8 renumbered, eigensolver question closed).  Remains:
+  programmer review of the draft; then PA1 closes.
 
 - [ ] PA2. Introduce the `O_MPI` module (`mpi.f90`: lifecycle,
   rank/size, one-dimensional load balancer, most-square process
@@ -8482,7 +8493,7 @@ is not carried only in conversation.
   stamp falling with rank count on the 135-atom and 1296-atom
   cells.  Redistribution cost measured inside the boundary.
 
-- [ ] PA5. Parallel HDF5 (DESIGN 9.5) and the grid-work
+- [ ] PA5. Parallel HDF5 (DESIGN 9.7) and the grid-work
   distribution (DESIGN 9.2) -- last, and only if the map after
   PA3/PA4 shows them worth it.
 

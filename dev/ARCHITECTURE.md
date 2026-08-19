@@ -719,7 +719,7 @@ that order:
   next term or pair block on request), or the two-dimensional
   product above. Output through serial HDF5 works for the first
   version (ranks write disjoint datasets in turn); collective
-  parallel HDF5 (DESIGN 9.5) is a later optimization, not a
+  parallel HDF5 (DESIGN 9.7) is a later optimization, not a
   prerequisite.
 - **The secular solve** -- the generalized eigenproblem
   `H c = e S c`, per iteration, per k-point, per spin. 27-46 % of the
