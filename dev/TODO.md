@@ -8469,7 +8469,7 @@ is not carried only in conversation.
   9.7/9.8 renumbered, eigensolver question closed).  Reviewed by
   the programmer and committed `80dacf1` 2026-08-18; PA1 CLOSED.
 
-- [ ] PA2. Introduce the `O_MPI` module (`mpi.F90`: lifecycle,
+- [x] PA2. Introduce the `O_MPI` module (`mpi.F90`: lifecycle,
   rank/size, one-dimensional load balancer, most-square process
   grid; `use mpi_f08`) and the `-DIMAGO_MPI` guards so the SAME
   source builds serial (`h5fc`) and parallel (`h5pfc`); at one
@@ -8485,7 +8485,27 @@ is not carried only in conversation.
   replicate proof).  One scope change against this entry: the
   most-square process-grid helper MOVED to PA4 -- in PA2 it
   would be code with no caller.  Reviewed by the programmer and
-  committed `cb816b6` 2026-08-18; next step is the code.
+  committed `cb816b6` 2026-08-18.
+  **CODED and ACCEPTED 2026-08-20.**  24.4 was revised first
+  (programmer's ruling on file proliferation): workers' unit 20
+  connects to `/dev/null` by default -- a 10000-rank run sheds
+  ONE log file -- with `IMAGO_RANK_LOGS=1` switching them to
+  per-rank `fort.20.rNNNN` files for debugging, and errors
+  going rank-stamped to stderr, which the launcher aggregates.
+  All four 24.7 checks ran (jobs 16670777/16670874, node c084;
+  harness `jobs/bench/pa2check.sbatch`, throwaway decks
+  `pa2_small_{c,g}`/`pa2_np4_c`): (1) serial release binaries
+  digit-identical to both bn_small baselines; (2) MPI binaries
+  bare AND under `mpirun -np 1` digit-identical, no rank
+  files; (3) 4-rank replicate: all ranks launch and run
+  identically to the HDF5 seam, default sheds NO rank logs,
+  the rank-log switch sheds exactly r0001-r0003, and the
+  accepted scratch-HDF5 collision kills the workers at the
+  file lock (errno 11) so no fort.2 appears and imago.py
+  reports failure -- the recorded motivation for PA3's
+  rank-aware file access; (4) stopMPI ends a 2-rank job
+  promptly with the rank-stamped message on stderr (and the
+  serial stub path exits 1 with the same message).
 
 - [ ] PA3. Distribute the three-centre electronic-potential
   integrals under the decomposition and load balance PA1

@@ -14,6 +14,7 @@ subroutine Imago
    use O_TimeStamps, only: initOperationLabels
    use O_ElementData,     only: initElementData
    use O_MethodCitations, only: printMethodsBlock
+   use O_MPI, only: mpiRank, barrierMPI
 
    ! Initialize the logging labels.
    call initOperationLabels
@@ -113,6 +114,16 @@ subroutine Imago
    !   reconnects and truncates the file.
    close (20)
 
+   ! Under MPI the certificate below must certify the WHOLE run --
+   !   every rank finished, not merely this one -- so all ranks meet at
+   !   a barrier before root writes it (PSEUDOCODE 24.5). A rank that
+   !   died earlier never reaches the barrier, the job is ended by the
+   !   scheduler or MPI_Abort, root never writes fort.2, and imago.py
+   !   correctly reports failure. The barrier is the certificate's
+   !   collective meaning and is not optional. In the serial build it
+   !   is a no-op and mpiRank is 0, so this block is today's behavior.
+   call barrierMPI
+
    ! Signal to the calling imago.py script that the program completed
    !   without an abortive error. This is the last statement of the run and
    !   must stay that way: it certifies everything above it, so anything
@@ -120,7 +131,9 @@ subroutine Imago
    !   was finished. Certifying from a cleanup routine instead, as was done
    !   before, means certifying one stage while later stages have yet to
    !   run.
-   open (unit=2,file='fort.2',status='unknown')
+   if (mpiRank == 0) then
+      open (unit=2,file='fort.2',status='unknown')
+   endif
 
 end subroutine Imago
 

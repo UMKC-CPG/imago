@@ -82,15 +82,51 @@ subroutine parseCommandLine
    use O_TimeStamps
    use O_Verboseness, only: initVerboseness
    use O_Banner, only: printIdentityBlock
+   use O_MPI, only: mpiRank
 
    ! Make sure that there are no accidental variable declarations.
    implicit none
 
    ! Define the local variables that will be used to parse the command line.
    character*25 :: commandBuffer
+   character*16 :: rankLogName
+   integer :: rankLogEnvLen  ! Length of $IMAGO_RANK_LOGS; 0 if unset.
 
    ! Open the file that will be written to as output for this program.
-   open(20,file='fort.20',status='unknown',form='formatted')
+   !   Under MPI every rank executes this subroutine, and two hazards
+   !   shape the branch below (PSEUDOCODE 24.4). First, N ranks
+   !   appending to one file would interleave and corrupt the log.
+   !   Second, a rank may NOT simply skip the open: a Fortran write to
+   !   a unit that was never opened does not fail -- it silently
+   !   auto-connects unit 20 to a file named fort.20 -- so a worker
+   !   with no connection of its own would tear root's log with its
+   !   first stray write. Every rank therefore connects unit 20 here.
+   !
+   !   Root keeps fort.20: byte-for-byte the serial log, and the file
+   !   imago.py reads. A worker's routine output is a replica of
+   !   root's, and a run on thousands of ranks must not shed
+   !   thousands of log files, so by default the workers connect to
+   !   /dev/null and their chatter is discarded. Setting
+   !   IMAGO_RANK_LOGS (to any non-empty value) switches the workers
+   !   to per-rank fort.20.rNNNN files for debugging sessions where
+   !   one rank's view of events is the question. Errors never depend
+   !   on the worker log: stopMPI writes rank-stamped messages to
+   !   standard error, which the MPI launcher aggregates into the one
+   !   job error file. In the serial build mpiRank is 0 and this
+   !   collapses to the original open.
+   if (mpiRank == 0) then
+      open(20,file='fort.20',status='unknown',form='formatted')
+   else
+      call get_environment_variable('IMAGO_RANK_LOGS',&
+            & length=rankLogEnvLen)
+      if (rankLogEnvLen > 0) then
+         write(rankLogName,fmt='(a9,i4.4)') 'fort.20.r', mpiRank
+         open(20,file=trim(rankLogName),status='unknown',&
+               & form='formatted')
+      else
+         open(20,file='/dev/null',status='old',form='formatted')
+      endif
+   endif
 
    ! Establish what this run is willing to print, and then print the
    !   identity block. This slot is forced from both sides: nothing may

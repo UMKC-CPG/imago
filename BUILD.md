@@ -177,7 +177,20 @@ worlds AND returns exit code 0 -- only a rank/size printout
 betrays the fragmentation. (A benign PMIx stderr warning about
 a missing `munge` component accompanies every launch; PMIx
 falls back to its native security plugin and the runs are
-unaffected.)
+unaffected.) Note also that `mpirun` inside a SLURM job takes
+its slot count from the allocation: request `-n` at least as
+large as the widest `-np` you will launch, or mpirun refuses
+with "not enough slots" before any rank starts.
+
+Logs under many ranks: rank 0 writes `fort.20` exactly as the
+serial program does, and it is the only log a normal parallel
+run leaves -- the other ranks' copies of the same output are
+discarded. Set `IMAGO_RANK_LOGS=1` in the environment to give
+every worker rank its own `fort.20.rNNNN` file instead, for
+debugging sessions where one rank's view of events is the
+question. Error messages never depend on this switch: aborts
+are rank-stamped and written to standard error, which the
+launcher aggregates into the job's error file.
 
 ## Build flavors: running an instrumented binary on a real job
 

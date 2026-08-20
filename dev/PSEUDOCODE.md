@@ -16238,8 +16238,13 @@ subroutine stopMPI (message)
    !   scheduler kills it.  So parallel code aborts through
    !   here, which writes the message to the log and then
    !   takes down the WHOLE job:
-   write the message to unit 20 (whatever rank we are: the
-         rank-aware log of 24.4 makes that safe)
+   write "ABORT (rank N): message" to standard error (the
+         launcher aggregates every rank's stderr into the one
+         job error file, so this is the shared, rank-stamped
+         error record of 24.4; it works before any log opens)
+   write the same line to unit 20 if unit 20 is open (on root
+         that is the real log; guard with inquire -- a write
+         to a CLOSED unit silently reconnects and truncates)
 #ifdef IMAGO_MPI
    call MPI_Abort (MPI_COMM_WORLD, errorcode=1)
 #else
@@ -16258,24 +16263,44 @@ them wholesale would be churn without a defect.
 
 ### 24.4 The log under many ranks
 
-`parseCommandLine` opens unit 20 as `fort.20`.  Under MPI with
-every rank running the same code, N ranks appending to one file
-interleave and corrupt the log.  The rule:
+`parseCommandLine` opens unit 20 as `fort.20`.  Two facts shape
+the rule.  Under MPI every rank runs the same code, so N ranks
+appending to one file would interleave and corrupt the log.
+And a unit that is never opened is WORSE than one opened
+elsewhere: a Fortran `write (20,...)` on a closed unit does not
+fail, it silently auto-connects unit 20 to a file named
+`fort.20` -- so a worker rank with no open of its own tears
+root's log with its first stray write.  Every rank therefore
+CONNECTS unit 20 at the existing open; WHERE it connects is
+rank-dependent (revised 2026-08-20, programmer's ruling: a
+10000-rank run must not shed 10000 log files):
 
 ```
-if (mpiRank == 0):  open unit 20 on 'fort.20'        (as today)
-else:               open unit 20 on 'fort.20.rNNNN'  (NNNN =
-                    zero-padded rank)
+if (mpiRank == 0): open unit 20 on 'fort.20'        (as today)
+elif IMAGO_RANK_LOGS is set non-empty in the environment:
+                   open unit 20 on 'fort.20.rNNNN'  (NNNN =
+                   zero-padded rank; the debugging view)
+else:              open unit 20 on '/dev/null'      (default:
+                   workers' replicated chatter is discarded)
 ```
 
-Root's log is byte-for-byte the serial log.  Non-root ranks get
-their own files, so any write a later increment makes from a
-worker rank -- deliberate or stray -- lands somewhere visible
-instead of tearing the main log ([[keep-problems-visible]]).
-imago.py continues to read `fort.20`; the rank files are
-diagnostic droppings, harvested only by eyes.  The change lives
-INSIDE parseCommandLine at the existing open; in the serial
-build mpiRank is 0 and the branch collapses to today's open.
+Root's log is byte-for-byte the serial log, and imago.py
+continues to read `fort.20` and nothing else.  A worker's
+routine output is an identical copy of root's at this
+increment and adds nothing at later ones that root does not
+also log, so by default it is discarded; when a debugging
+session needs to see what one rank was saying,
+`IMAGO_RANK_LOGS=1` switches the workers to per-rank files.
+Errors do NOT depend on the worker log: `stopMPI` (24.3)
+writes its rank-stamped message to standard error, which the
+launcher already aggregates -- every rank's stderr lands in
+the one job error file -- so the error path has a single
+shared destination with no file-locking machinery (none is
+portable in Fortran, and byte-range locks on the parallel
+filesystems here are exactly where such schemes fail), and it
+works even before any log is open.  The change lives INSIDE
+parseCommandLine at the existing open; in the serial build
+mpiRank is 0 and the branch collapses to today's open.
 
 ### 24.5 The success certificate
 
@@ -16339,7 +16364,9 @@ caller, which the chain forbids.
 3. **Many ranks, no distributed work yet.**  `mpirun -np 4` on
    `bn_small_c`: every rank redundantly computes the identical
    run (nothing is balanced yet), root's outputs reproduce the
-   baseline, ranks 1-3 leave only `fort.20.r000N` logs, and
+   baseline, ranks 1-3 leave NO log files by default (their
+   unit 20 is `/dev/null`; re-run once with `IMAGO_RANK_LOGS=1`
+   and confirm `fort.20.r000N` appear instead), and
    exactly one `fort.2` appears after all four ranks end.  This
    is the replicate stage ARCHITECTURE 6.5 warns must never be
    CALLED progress; here it is only the lifecycle proof.
@@ -16349,6 +16376,10 @@ caller, which the chain forbids.
    THROWAWAY copy of the deck, and the collision it risks is
    accepted for the proof; PA3 is where file access becomes
    rank-aware.  Record the observed behaviour.)
-4. `stopMPI` fires visibly: force a bad input on a 2-rank run
-   and confirm the job ends promptly with the message in a log
-   rather than hanging.
+4. `stopMPI` fires visibly: drive it on a 2-rank run and
+   confirm the job ends promptly with the rank-stamped message
+   on the job's standard error rather than hanging.  (PA2 adds
+   no stopMPI call sites inside imago -- the doctrine of 24.3
+   leaves the serial stops alone -- so this check drives the
+   module directly: a throwaway test program in which one rank
+   calls stopMPI while the other waits in a barrier.)

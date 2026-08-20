@@ -13,7 +13,7 @@ add_library(imagoGaussIntegrals STATIC ../../kinds.f90
 add_executable(imago ../../kinds.f90 ../../constants.f90
    ../../elementData.f90 ../../readDataSerial.f90 ../../writeData.f90
    ../stringSubs.f90 ../mathSubs.f90 ../sortSubs.f90 ../interfaces.F90
-   ../verboseness.f90 ../banner.f90
+   ../verboseness.f90 ../banner.f90 ../mpi.F90
    ../timeStamps.f90 ../commandLine.f90 ../potSites.f90 ../potTypes.f90
    ../atomicTypes.f90 ../atomicSites.f90 ../potential.f90 ../lattice.f90
    ../kpoints.f90 ../methodCitations.f90 ../gaussRelations.f90

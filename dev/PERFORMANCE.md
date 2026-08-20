@@ -44,11 +44,27 @@ would force one severity scale onto two unrelated questions.
   (VISION Goal 7, ARCH 6.5) and flagged the write-only share of
   the three-centre stage as UNMEASURED -- PA3 stamps it. The
   two-node launch test is harvested (see the toolchain bullet
-  below): the launcher for PA2's checks is `mpirun -np
-  $SLURM_NTASKS`, `srun --mpi=pmix` the working alternative,
-  `--mpi=pmi2` forbidden. NEXT: code PA2 from PSEUDOCODE 24
-  (reviewed, committed `cb816b6`) -- `mpi.F90` plus the four
-  seam edits, acceptance checks 24.7.
+  below): the launcher is `mpirun -np $SLURM_NTASKS`, `srun
+  --mpi=pmix` the working alternative, `--mpi=pmi2` forbidden.
+- **PA2 (the O_MPI module) CODED and ACCEPTED 2026-08-20.**
+  PSEUDOCODE 24.4 was revised first (programmer's ruling):
+  workers' unit 20 goes to `/dev/null` by default so a large
+  run sheds ONE log file, `IMAGO_RANK_LOGS=1` switches to
+  per-rank files, errors go rank-stamped to stderr. The code:
+  `src/imago/mpi.F90` plus the four seam edits (imagoWrap,
+  parseCommandLine's open, the fort.2 certificate behind
+  `barrierMPI`, both variant CMakeLists). All four 24.7 checks
+  passed (jobs 16670777/16670874; harness and throwaway decks
+  under `jobs/bench/pa2*`): serial and one-rank-parallel are
+  digit-identical to the bn_small baselines, the 4-rank
+  replicate proof ran to the accepted scratch-HDF5 collision
+  (workers die at the file lock, no fort.2, imago.py reports
+  failure -- PA3's motivation, recorded), and stopMPI takes a
+  2-rank job down promptly. One harness lesson worth keeping:
+  `mpirun` inside a SLURM job takes its slot count from the
+  ALLOCATION, so an acceptance job must request `-n` >= the
+  widest `-np` it launches or mpirun refuses before any rank
+  starts.
 - **Install no profiling tools yet** (TODO PF6). `gprof` and
   `callgrind` are already present and cover Phases P0 through P2.
   The investigation into `perf` and `gperftools` is recorded below
