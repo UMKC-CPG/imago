@@ -8522,6 +8522,22 @@ is not carried only in conversation.
   gives way to the collective form of 9.7.  Then in-rank
   threading (OpenMP over pairs) after PF4's hazard sweep of
   `integrals3Terms`/`gaussIntegrals`.
+  **2026-08-20: DESIGN 9.5 AMENDED + PSEUDOCODE 25 DRAFTED.**
+  Drafting exposed a defect in 9.5's deal sentence
+  (`loadBalMPI` over a sorted list is contiguous, the opposite
+  of largest-first): corrected to a SNAKE deal over the
+  cost-sorted undone terms with iteration in original term
+  order so the `anyElecPotInteraction` inheritance survives
+  ownership gaps.  The write discipline is decided: HDF5's own
+  file lock as the mutex (per-term open-write-close with
+  retry; demonstrated working by PA2's check 3), root's file
+  closed during the stage and reopened via the existing
+  restart access path, done-mask broadcast for restart, and
+  the root-serial run shape (workers park at the PA2 barrier
+  after the stage).  PSEUDOCODE 25 carries the seam inventory,
+  the term table, the lifecycle, the lock-held write, the
+  per-rank timing table, and five checks.  Awaits programmer
+  review before any code.
 
 - [ ] PA4. The eigensolver boundary and the ELPA backend
   (ARCHITECTURE 6.6): one call site behind which serial LAPACK

@@ -65,6 +65,22 @@ would force one severity scale onto two unrelated questions.
   ALLOCATION, so an acceptance job must request `-n` >= the
   widest `-np` it launches or mpirun refuses before any rank
   starts.
+- **PA3 at the chain gate 2026-08-20: DESIGN 9.5 amended,
+  PSEUDOCODE 25 drafted, awaiting review.** Drafting caught a
+  9.5 defect (a contiguous `loadBalMPI` deal over a
+  cost-sorted list is the opposite of largest-first): now a
+  SNAKE deal over the cost-sorted undone terms, iterated in
+  original term order so the pruning-mask inheritance
+  survives ownership gaps. Write discipline decided: HDF5's
+  own file lock as the mutex (per-term open-write-close with
+  retry -- the lock's behavior on this filesystem was
+  demonstrated by PA2's check 3), root's file closed for the
+  stage window and reopened via the existing restart access
+  path, and the root-serial run shape (workers park at the
+  PA2 barrier after the stage; acceptance is the STAGE stamp
+  falling with rank count, not whole-run wall). NEXT: the
+  programmer reviews DESIGN 9.5 + PSEUDOCODE 25, then PA3 is
+  coded.
 - **Install no profiling tools yet** (TODO PF6). `gprof` and
   `callgrind` are already present and cover Phases P0 through P2.
   The investigation into `perf` and `gperftools` is recorded below

@@ -14311,34 +14311,85 @@ makes them, and when:
   parallel design inherits this unchanged -- the completion
   attribute is the unit of both restart and distribution.
 
-**The distribution.** Rank r takes the terms
-`loadBalMPI(potDim)` assigns it (9.2's deal, applied to
-terms), after the term list is sorted most-diffuse-first
-(ascending alpha exponent) so the deal is largest-first --
-the cost model the measurement licensed. Each rank runs the
-EXISTING term loop body for its terms: same worker, same
-`ortho`, same datasets. No partial matrices ever cross
-ranks. Completion attributes make the result identical to a
-serial run's file, term by term.
+**The distribution** (deal corrected 2026-08-20: drafting the
+pseudocode showed the earlier sentence contradicted itself --
+`loadBalMPI` deals CONTIGUOUS blocks, so applying it to a
+cost-sorted list would give the first rank every costly term
+and the last rank every cheap one, the opposite of the
+largest-first balance it claimed). The deal is a SNAKE over
+the cost order: sort the `potDim` terms most-diffuse-first
+(ascending alpha exponent, the cost proxy the measurement
+licensed) and deal them to ranks in boustrophedon rounds
+(0,1,..,N-1 then N-1,..,1,0 and repeat), which equalizes rank
+loads under any cost monotone in the exponent. ASSIGNMENT
+order and ITERATION order are then deliberately different:
+each rank walks the terms it was dealt in ORIGINAL term-index
+order (type-major, most-diffuse-first within a type), because
+that order is what the `anyElecPotInteraction` inheritance
+below assumes. Each rank runs the EXISTING term loop body for
+its terms: same worker, same `ortho` compute, same datasets.
+No partial matrices ever cross ranks. Completion attributes
+make the result identical to a serial run's file, term by
+term.
 
-**HDF5 discipline (first version).** The datasets are
-disjoint per term, so ranks never write the same object, but
-the serial HDF5 library requires that a FILE not be open for
-writing by several processes at once. First version: ranks
-write in turn (an ordered token pass around the ranks at the
-end of the stage, or per-term file open/close under a lock),
-which serializes only the write time. How large that is has
-NOT been measured: PA1 stamped whole `gaussOverlapEP` calls
-and the pair-loop rows, so what it bounds is the combined
-ortho-plus-write remainder of the stage (27 % on the
-real/Gamma glass, 84 % on the complex multi-k cell), and the
-write-only fraction inside that remainder is unknown. PA3
-therefore stamps the dataset writes inside `ortho` per rank
-and validates the token pass against that number rather than
-assuming it; if the write dominates the remainder on
-multi-k-point cells, the collective form of 9.7 moves up the
-queue. The collective parallel-HDF5 form is otherwise 9.7's
-calibration, not a prerequisite.
+**HDF5 discipline (first version; mechanism decided
+2026-08-20).** The datasets are disjoint per term, so ranks
+never write the same object, but the serial HDF5 library
+requires that a FILE not be open for writing by several
+processes at once -- and enforces it with its own file lock
+(the PA2 acceptance run demonstrated the lock working on this
+filesystem: worker opens fail with errno 11 while a writer
+holds the file). That lock IS the mutex. Per term, a rank
+computes and packs the full k-point set of matrices into a
+buffer with the file CLOSED, then opens the file (retrying,
+with HDF5's error stack silenced, until the lock is granted),
+opens the term's datasets and attribute BY NAME (the same
+deterministic names `initSCFIntegralHDF5` created and
+`accessSCFIntegralHDF5` already reconstructs for restart),
+writes, sets the completion attribute, and closes. Only the
+write time is ever serialized, no MPI token protocol exists,
+and a one-rank run degenerates to open-write-close with no
+contention. For the discipline to work the file must be open
+by NOBODY between writes, which sets the stage's file
+lifecycle: root (which alone ran the setup writes, see the
+run shape below) CLOSES the file before the term loop, every
+rank writes its terms under the lock, and root REOPENS it
+through the existing restart access path after the stage-end
+barrier -- the barrier is required, since an early root
+reopen would hold the lock against every rank still writing.
+Restart keeps its meaning: root reads the `potDim` completion
+attributes before closing and broadcasts the done-mask, and
+the snake deal runs over the undone terms only. How large the
+serialized write time is has NOT been measured: PA1 stamped
+whole `gaussOverlapEP` calls and the pair-loop rows, so what
+it bounds is the combined ortho-plus-write remainder of the
+stage (27 % on the real/Gamma glass, 84 % on the complex
+multi-k cell), and the write-only fraction inside that
+remainder is unknown. PA3 therefore stamps the writes and the
+lock waits per rank and validates this discipline against
+those numbers rather than assuming it; if the write dominates
+the remainder on multi-k-point cells, the collective form of
+9.7 moves up the queue. The collective parallel-HDF5 form is
+otherwise 9.7's calibration, not a prerequisite.
+
+**Run shape at this increment.** Everything that touches the
+HDF5 file outside the term stage stays on root. The
+replicated, file-free setup (input parsing, lattice,
+k-points, basis, alpha distance tables) runs on every rank;
+`initHDF5_SCF` and the cheap integral stages that write
+through its held handles (overlap, kinetic energy, mass
+velocity, nuclear potential -- together a few percent of a
+run) are root-only; the term stage is the one distributed
+region; and after its barrier the workers have nothing left
+-- they skip to the end of `subroutine Imago` and park at the
+PA2 certificate barrier while root alone runs the remaining
+setup and the whole SCF iteration. Their cores idle there:
+that is the honest, accepted cost of distributing one stage
+at a time, it is bounded by the stage's share of the run
+(ARCHITECTURE 6.8), and PA4 -- the solve, the largest share
+at scale -- is what retires it. The acceptance metric for
+PA3 is therefore the STAGE stamp falling with rank count,
+not the whole-run wall time.
 
 **One cross-term coupling to break.** The serial loop shares
 `anyElecPotInteraction` -- the (pair, cell) negligibility
@@ -14348,9 +14399,15 @@ them. The mask is a pure optimization (bits are only cleared
 when a pair/cell contributed nothing), so each rank simply
 rebuilds its own mask for the types it touches; a rank that
 holds a type's tighter alphas without its diffuse ones loses
-some pruning and no correctness. This is the only coupling
-between terms; everything else a term reads is constant
-input data.
+some pruning and no correctness. The inheritance also
+survives ownership GAPS, which is why the iteration order
+above matters: a bit cleared by a more diffuse alpha is
+validly cleared for every tighter alpha of that type, whether
+or not the rank owns the alphas in between -- so a rank
+walking its owned terms in original order keeps nearly all of
+the serial pruning, resetting the mask only when it crosses
+into a new type. This is the only coupling between terms;
+everything else a term reads is constant input data.
 
 **Pair-level refinement (later).** When ranks exceed
 `potDim`, or a single term must go faster, the atom-pair

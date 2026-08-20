@@ -16383,3 +16383,217 @@ caller, which the chain forbids.
    leaves the serial stops alone -- so this check drives the
    module directly: a throwaway test program in which one rank
    calls stopMPI while the other waits in a barrier.)
+
+## 25. Distributing the Three-Centre Potential Terms
+## (DESIGN 9.5; TODO PA3)
+
+The three-centre electronic-potential stage is distributed BY
+TERM under the snake deal, with HDF5's own file lock as the
+write mutex and root-serial everything else -- the mechanism
+DESIGN 9.5 decides (as amended 2026-08-20) and the run shape
+it names.  The serial build and the one-rank parallel build
+take the SAME path through all of it: the deal degenerates to
+"rank 0 owns every term", the lock is never contested, and the
+file lifecycle (close before the stage, per-term open-write-
+close, reopen after) is identical, so acceptance can demand
+digit-identical outputs and an h5diff-identical file from every
+build at every rank count.
+
+### 25.1 Seam inventory
+
+What this increment touches, and nothing else:
+
+- `imago.F90`, `subroutine Imago` -- after `setupSCF` returns,
+  workers are FINISHED: `mainSCF` and every post-SCF block
+  (`dos`, `bond`, `optc`, ...) become root-only behind one
+  `if (mpiRank == 0)` guard, and the workers fall through to
+  the existing tail (close the log, the PA2 certificate
+  barrier), which is their parking place while root runs the
+  remainder of the calculation alone.
+- `imago.F90`, `subroutine setupSCF` -- three regions emerge.
+  REPLICATED on all ranks (touches no file): `parseInput`
+  through `renormalizeBasis`, `getECMeshParameters`,
+  `makeAlphaDist`/`makeAlphaNucDist`/`makeAlphaPotDist`,
+  `allocateIntegralsSCF[Gamma]`.  ROOT-ONLY (holds or writes
+  the file through handles from `initHDF5_SCF`):
+  `initHDF5_SCF`, `makeECMeshAndOverlap`, `gaussOverlapOL`,
+  `gaussOverlapKE`, `gaussOverlapMV`, `gaussOverlapNP` before
+  the stage; `makeElectrostatics`, `makeCoreRho` and every
+  later file consumer after it.  DISTRIBUTED: the
+  `elecPotGaussOverlap` call.  Workers return from setupSCF
+  right after the stage barrier; their memory cleanups run,
+  their file handles never existed.
+- `integrals.F90`, `elecPotGaussOverlap` -- the doubly nested
+  site/alpha loop is restructured around a TERM TABLE (25.2):
+  the loop over 1..potDim owned-term entries replaces the
+  inline identity bookkeeping, and the per-term body
+  (`gaussOverlapEP`'s pair loop, the module identity
+  variables `currPotAlpha`/`currPotNumber`/`currPotElement`/
+  `currAlphaNumber`/`currMultiplicity`, the
+  `anyElecPotInteraction` mask) is otherwise unchanged.
+- `integrals.F90`, `ortho` -- opCode 4 only: the per-k-point
+  `h5dwrite_f` calls and the completion-attribute write move
+  OUT of the compute loop into the lock-held write step
+  (25.5).  The compute half (core-orthogonalization products
+  and the packing into `packedValeVale`) is untouched; it now
+  deposits every k-point's packed matrix into a term buffer
+  sized `numKPoints x packedVVDims` (about `numKPoints x 16 B
+  x valeDim*(valeDim+1)/2`; 215 MB for the 1296-atom glass at
+  one k-point -- one term in flight per rank, never more).
+  opCodes 2/3/5 keep today's path: their stages are root-only
+  and root holds the file then.
+- `hdf5SCFIntg.F90` -- gains the per-term write helpers of
+  25.5, built from the SAME name construction
+  `initSCFIntegralHDF5` uses to create (and
+  `accessSCFIntegralHDF5` to reopen) the per-term groups
+  (`atomPotOverlap/<i7.7>`) and their per-k-point datasets.
+- `hdf5SCF.F90` -- gains `suspendHDF5_SCF` (root closes every
+  open handle and the file before the stage) and
+  `resumeHDF5_SCF` (root reopens file and handles after the
+  stage barrier, through the SAME access path the restart
+  branch of `initHDF5_SCF` already exercises).
+- `mpi.F90` -- two small additions, each with a caller in this
+  increment: `bcastIntVecMPI` (root broadcasts the done-mask)
+  and `gatherTimesMPI` (each rank's three stage timers to
+  root, 25.6).  Serial build: no-ops that leave the caller's
+  root-side data in place.
+
+### 25.2 The term table and the snake deal
+
+```
+build termTable(1..potDim) by running the EXISTING site/alpha
+   double loop once with no compute: each entry records
+   (termIndex, potNumber, potTypeNumber, alphaNumber, alpha,
+   elementID, multiplicity) -- exactly the values the loop
+   posts into the module identity variables today.
+
+root: read the potDim completion attributes (the same reads
+   the serial loop makes today), doneMask(term) = 0 or 1
+bcastIntVecMPI (doneMask)
+
+undone = terms with doneMask == 0, sorted by ascending alpha
+   (most diffuse = costliest first; ties keep term order)
+deal undone to ranks in SNAKE rounds:
+   round 0: ranks 0, 1, ..., mpiSize-1
+   round 1: ranks mpiSize-1, ..., 1, 0
+   (alternate; a term's owner is a pure function of its
+   position in the sorted list and mpiSize)
+myTerms = the terms dealt to mpiRank, RE-SORTED by original
+   termIndex   ! iteration order preserves mask inheritance
+```
+
+At mpiSize 1 every term lands on rank 0 and `myTerms` is the
+serial undone list in serial order: the deal vanishes.
+
+### 25.3 The stage lifecycle
+
+```
+(root-only setup writes above have completed; all ranks hold
+ the replicated input structures)
+
+root: suspendHDF5_SCF          ! file open by NOBODY now
+barrierMPI                     ! workers must not open before
+                               !   root has closed
+root: timeStampStart (Electronic Potential Integrals)
+for term in myTerms:           ! original-order walk
+   if term's potTypeNumber differs from the previous owned
+         term's: anyElecPotInteraction = -1   ! mask reset
+   post the term identity into the module variables
+   gaussOverlapEP compute: pair loop, then ortho's compute
+      half packing every k-point into the term buffer
+   writePotTerm (term, buffer)               ! 25.5
+barrierMPI                     ! every term written; nobody
+                               !   may reopen earlier
+root: timeStampEnd             ! the stamp includes the wait
+                               !   for the slowest rank: it is
+                               !   the stage's honest wall
+root: resumeHDF5_SCF
+gatherTimesMPI; root prints the per-rank table (25.6)
+workers: return                ! nothing below setupSCF's
+                               !   stage runs on a worker
+```
+
+### 25.4 Restart
+
+Unchanged in meaning, relocated in mechanism: the done-mask
+read (25.2) replaces the serial loop's per-term attribute
+check, and a term is marked done ONLY by the attribute write
+at the end of its lock-held write step -- so a rank killed
+mid-compute or mid-write leaves the attribute 0 and the term
+is simply dealt again on the next run.  A rerun after a crash
+deals ONLY the undone terms, which also re-balances them over
+whatever rank count the rerun uses.
+
+### 25.5 The lock-held write
+
+```
+writePotTerm (term, buffer):
+   t0 = system_clock
+   silence the HDF5 error stack (h5eset_auto off)
+   repeat:
+      try h5fopen (fileName, RDWR)
+      if granted: break
+      spin ~0.1 s (system_clock wait; the core is ours)
+      if total wait exceeds the cap (1 hour):
+         stopMPI ('term write could not acquire the file')
+   restore the error stack
+   t1 = system_clock                 ! t1-t0 = lock wait
+   open the k-point group, the term group
+      atomPotOverlap/<i7.7>, its per-k-point datasets and its
+      completion attribute BY NAME
+   for kp in 1..numKPoints: h5dwrite (dataset(kp),
+      buffer(:,:,kp))
+   h5awrite (completion attribute, 1)
+   close attribute, datasets, groups, FILE
+   t2 = system_clock                 ! t2-t1 = write time
+```
+
+The first h5fopen failure mode this must tolerate is exactly
+the one PA2's check 3 recorded: errno 11 while another rank
+holds the lock.  The library init (`h5open_f`) is made
+idempotent-safe on workers, which never ran `initHDF5_SCF`.
+
+### 25.6 Instrumentation (the PA3 acceptance numbers)
+
+Each rank accumulates three wall-time counters over its owned
+terms: compute (pair loop + ortho compute), lock wait, and
+write.  `gatherTimesMPI` delivers them to root, which prints
+one line per rank into fort.20 after the stage:
+
+```
+PA3 rank    compute s     wait s    write s   terms
+     0        123.4         0.2       15.1      8
+     ...
+```
+
+This is the table TODO PA3 requires: the balance is measured
+(compute max/mean across ranks), and the serialized-write
+question DESIGN 9.5 flags as unmeasured is answered by the
+wait and write columns on the multi-k medium deck.
+
+### 25.7 Checks
+
+1. **Serial build unchanged in results, changed in
+   lifecycle.**  bn_small and both medium decks reproduce
+   their baseline energies to every printed digit, and h5diff
+   against a pre-PA3 run's HDF5 file reports zero differences
+   (the file now passes through a close/reopen window and
+   per-term open-write-close, so the content identity is the
+   check that matters).
+2. **One-rank parallel equals serial** on the same decks, same
+   two comparisons.
+3. **Multi-rank correctness and the falling stamp.**
+   `mpirun -np 2` and `-np 4` (medium decks also `-np 8`):
+   root's outputs digit-identical, h5diff zero differences,
+   the `Electronic Potential Integrals` stamp falling with
+   rank count, and the 25.6 table showing compute max/mean
+   about 1.6 or better with wait+write well under compute.
+   Record the np-series stage times: they are DESIGN 9.5's
+   validation numbers and the input to the 9.7 decision.
+4. **Restart.**  Kill a 4-rank medium run mid-stage; rerun;
+   only undone terms recompute (the 25.6 terms column shows
+   the smaller deal) and the final file h5diffs clean against
+   a serial run.
+5. **Worker visibility.**  One `IMAGO_RANK_LOGS=1` run: each
+   worker's log names the terms it owned; the default run
+   sheds no worker files.
