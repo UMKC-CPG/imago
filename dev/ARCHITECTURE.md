@@ -705,22 +705,25 @@ that order:
     image: pairs are not equal in cost either (basis size,
     neighbours within the cutoff), and the accumulation is a
     communication pattern rather than a private write.
-  Which of the two, or the two-dimensional product of them (terms
-  across one axis of the process grid, pair blocks across the
-  other, which also smooths both imbalances), is a DESIGN 9
-  decision (TODO PA1) that needs one measurement first: the
-  per-term and per-pair cost distributions on the medium decks,
-  which a throwaway build with a stamp around each `gaussOverlapEP`
-  call gives cheaply. The load-balance question is the same
-  question in either decomposition and has three answers to weigh
-  -- a cost-weighted static assignment (a cost estimate per term
-  or pair from the alpha exponents, cutoffs and basis sizes, dealt
-  out largest-first), a dynamic work queue (a rank hands out the
-  next term or pair block on request), or the two-dimensional
-  product above. Output through serial HDF5 works for the first
-  version (ranks write disjoint datasets in turn); collective
-  parallel HDF5 (DESIGN 9.7) is a later optimization, not a
-  prerequisite.
+  The choice between the two (or their two-dimensional product:
+  terms across one axis of the process grid, pair blocks across
+  the other) was a DESIGN 9 decision resting on one measurement,
+  the per-term and per-pair cost distributions on the medium
+  decks (PERFORMANCE.md "PA1 cost distributions"). DECIDED
+  2026-08-18, BY TERM (DESIGN 9.5): per-term costs are mild and
+  monotone in the alpha exponent (max/mean 1.5-1.6), and on
+  multi-k-point cells most of the stage is the per-term
+  core-orthogonalization and dataset write OUTSIDE the pair loop
+  -- work a term distribution carries to the ranks for free and
+  a pair distribution would leave serial. The load balance is
+  decided with it: a STATIC deal of terms, most-diffuse
+  (costliest) first; a dynamic work queue is unnecessary at the
+  measured imbalance, and the pair-level split under 9.4 (with
+  the two-dimensional product it enables) is the later
+  refinement for rank counts above `potDim`. Output through
+  serial HDF5 works for the first version (ranks write disjoint
+  datasets in turn); collective parallel HDF5 (DESIGN 9.7) is a
+  later optimization, not a prerequisite.
 - **The secular solve** -- the generalized eigenproblem
   `H c = e S c`, per iteration, per k-point, per spin. 27-46 % of the
   medium runs and the share that GROWS with size, as N^3 must
@@ -753,7 +756,8 @@ sibling branch stopped at (6.7).
 
 Build and runtime shape. The MPI lifecycle, the one-dimensional
 load balancer and the process-grid helper belong in one module
-(`O_MPI`, `mpi.f90` in the sibling branch, `use mpi_f08`); imago
+(`O_MPI` -- `mpi.f90` in the sibling branch, `mpi.F90` here, the
+capital F carrying the preprocessor guard; `use mpi_f08`); imago
 does not yet carry it, and introducing it is the first code-level
 step. The toolchain exists and is verified (`BUILD.md`, "Parallel
 toolchain"): the `cpgp` conda environment (`dev/env/cpgp.yml`)

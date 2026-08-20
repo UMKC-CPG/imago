@@ -8463,7 +8463,7 @@ is not carried only in conversation.
   9.7/9.8 renumbered, eigensolver question closed).  Reviewed by
   the programmer and committed `80dacf1` 2026-08-18; PA1 CLOSED.
 
-- [ ] PA2. Introduce the `O_MPI` module (`mpi.f90`: lifecycle,
+- [ ] PA2. Introduce the `O_MPI` module (`mpi.F90`: lifecycle,
   rank/size, one-dimensional load balancer, most-square process
   grid; `use mpi_f08`) and the `-DIMAGO_MPI` guards so the SAME
   source builds serial (`h5fc`) and parallel (`h5pfc`); at one
@@ -8471,24 +8471,30 @@ is not carried only in conversation.
   every printed digit (the acceptance test that already passed
   for the unchanged source).  imago.py launches through
   `IMAGO_EXE`.  PSEUDOCODE section first.
-  **2026-08-18: PSEUDOCODE 24 DRAFTED** (module data with serial
+  **2026-08-18: PSEUDOCODE 24 WRITTEN** (module data with serial
   defaults so no caller needs its own guard; lifecycle +
   `stopMPI` via `MPI_Abort` and the stop-conversion doctrine;
   rank-aware unit-20 log; root-only fort.2 behind a barrier;
   `loadBalMPI`; four acceptance checks incl. the 4-rank
   replicate proof).  One scope change against this entry: the
   most-square process-grid helper MOVED to PA4 -- in PA2 it
-  would be code with no caller.  Awaits programmer review.
+  would be code with no caller.  Reviewed by the programmer and
+  committed `cb816b6` 2026-08-18; next step is the code.
 
 - [ ] PA3. Distribute the three-centre electronic-potential
   integrals under the decomposition and load balance PA1
-  decides (ARCHITECTURE 6.5 first bullet), serial HDF5 first.
-  Acceptance: HDF5 content identical to the serial run (h5diff)
-  and the `Electronic Potential Integrals` stamp on the medium
-  decks falling with rank count -- and, because the imbalance is
-  the known risk, the per-rank busy time recorded alongside so
-  the balance is measured, not assumed.  Then in-rank threading
-  (OpenMP over pairs) after PF4's hazard sweep of
+  decided (DESIGN 9.5: BY TERM, static most-diffuse-first
+  deal), serial HDF5 first.  Acceptance: HDF5 content identical
+  to the serial run (h5diff) and the `Electronic Potential
+  Integrals` stamp on the medium decks falling with rank count
+  -- and, because the imbalance is the known risk, the per-rank
+  busy time recorded alongside so the balance is measured, not
+  assumed.  Also stamp the dataset writes inside `ortho` per
+  rank: the write-only share of the stage is unmeasured (PA1
+  bounded only ortho+write combined), and DESIGN 9.5's
+  write-in-turn token pass is validated against that number or
+  gives way to the collective form of 9.7.  Then in-rank
+  threading (OpenMP over pairs) after PF4's hazard sweep of
   `integrals3Terms`/`gaussIntegrals`.
 
 - [ ] PA4. The eigensolver boundary and the ELPA backend
@@ -8500,6 +8506,12 @@ is not carried only in conversation.
   precision on every benchmark deck, and the `Secular Equation`
   stamp falling with rank count on the 135-atom and 1296-atom
   cells.  Redistribution cost measured inside the boundary.
+  Includes the valence charge density (the third measured cost,
+  5-14 % per iteration; ARCHITECTURE 6.5 third bullet, DESIGN
+  9.8 order): it consumes the eigenvectors the solve produces
+  and parallelizes over the same distribution, with the
+  `Valence Charge Density` stamp falling with rank count as its
+  acceptance.
 
 - [ ] PA5. Parallel HDF5 (DESIGN 9.7) and the grid-work
   distribution (DESIGN 9.2) -- last, and only if the map after

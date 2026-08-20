@@ -14327,10 +14327,18 @@ the serial HDF5 library requires that a FILE not be open for
 writing by several processes at once. First version: ranks
 write in turn (an ordered token pass around the ranks at the
 end of the stage, or per-term file open/close under a lock),
-which serializes only the write time -- measured at well
-under a third of the stage serially, and overlappable with
-the next rank's compute. The collective parallel-HDF5 form
-is 9.7's calibration, not a prerequisite.
+which serializes only the write time. How large that is has
+NOT been measured: PA1 stamped whole `gaussOverlapEP` calls
+and the pair-loop rows, so what it bounds is the combined
+ortho-plus-write remainder of the stage (27 % on the
+real/Gamma glass, 84 % on the complex multi-k cell), and the
+write-only fraction inside that remainder is unknown. PA3
+therefore stamps the dataset writes inside `ortho` per rank
+and validates the token pass against that number rather than
+assuming it; if the write dominates the remainder on
+multi-k-point cells, the collective form of 9.7 moves up the
+queue. The collective parallel-HDF5 form is otherwise 9.7's
+calibration, not a prerequisite.
 
 **One cross-term coupling to break.** The serial loop shares
 `anyElecPotInteraction` -- the (pair, cell) negligibility

@@ -226,16 +226,18 @@ flight instead of an exhaustive grid search.
    others (branchy setup, I/O orchestration, latency-bound
    logic) stay on CPU. The architecture must let each phase
    run where it performs best rather than forcing one global
-   device mode. The near-term deliverable is the cheap,
-   proven win -- the distributed real-space-grid work and
-   the inter-problem axis already underway -- while the
-   distributed eigensolve and GPU offload are staged
-   research targets, validated one phase at a time, not
-   day-one commitments. A sibling branch (upolcao) already
-   explored MPI parallelization of the common-ancestor OLCAO
-   code; its design is mined as reference (ARCHITECTURE 6.7),
-   not merged, because the two codebases diverged from that
-   shared ancestor and have drifted file by file.
+   device mode. The near-term deliverable follows the measured
+   cost structure (ARCHITECTURE 6.8, 2026-08-18): distribute
+   the three-centre integral stage and the secular solve -- MPI
+   with the ELPA eigensolver -- while the inter-problem axis of
+   Goal 4 continues alongside. The real-space-grid work
+   measures at a few percent of a run and comes last, and GPU
+   offload is a staged research target, validated one phase at
+   a time, not a day-one commitment. A sibling branch (upolcao)
+   already explored MPI parallelization of the common-ancestor
+   OLCAO code; its design is mined as reference (ARCHITECTURE
+   6.7), not merged, because the two codebases diverged from
+   that shared ancestor and have drifted file by file.
 
 ## Design Principles
 
