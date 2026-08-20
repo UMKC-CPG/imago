@@ -164,9 +164,20 @@ prerequisites section, applied to the parallel HDF5. `IMAGO_ELPA`
 finds ELPA through pkg-config (`elpa.pc` also names ScaLAPACK,
 LAPACK and BLAS on its link line). Neither option adds compiler
 flags of its own beyond `-DIMAGO_MPI` / `-DIMAGO_ELPA` and the
-ELPA include path; the MPI flags come from the wrapper. Launch is
-`mpirun -np "$SLURM_NTASKS" …` inside a batch script (the group's
-LAMMPS precedent); `srun --mpi=pmix` is the alternative to test.
+ELPA include path; the MPI flags come from the wrapper.
+
+Launch (verified on two nodes, 2026-08-19): `mpirun -np
+"$SLURM_NTASKS" …` inside the batch script -- the group's LAMMPS
+precedent -- spans nodes correctly, and the cross-node ELPA
+handshake (`elpa_init` / `elpa_allocate`) succeeds under it.
+`srun --mpi=pmix` behaves identically and is the working
+alternative. Do NOT use `srun --mpi=pmi2`: OpenMPI 5 dropped
+PMI-2 support, so it silently launches N independent one-rank
+worlds AND returns exit code 0 -- only a rank/size printout
+betrays the fragmentation. (A benign PMIx stderr warning about
+a missing `munge` component accompanies every launch; PMIx
+falls back to its native security plugin and the runs are
+unaffected.)
 
 ## Build flavors: running an instrumented binary on a real job
 

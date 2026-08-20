@@ -30,25 +30,25 @@ would force one severity scale onto two unrelated questions.
   are clean under asan, SNaN and valgrind memcheck on both
   variants; the remaining candidates were punted behind this
   work by the programmer.
-- **PF1 essentially done; PA1 CLOSED; PA2 at the chain gate
-  (state at the 2026-08-18 session end).** Presets, decks,
-  small/medium baselines, the time map, the PA1 cost
-  measurement, the ARCHITECTURE 6 and DESIGN 9 revisions and
-  PSEUDOCODE 24 (the O_MPI module) are all committed. NEXT
-  SESSION: (1) harvest the LARGE-pair baselines -- SLURM jobs
-  16632708 (`sio2_1296_large_g`) and 16632709
-  (`sio2_1296_large_c`), submitted with 3-day limits, results
-  land in `jobs/bench/bench_large{g,c}.o*` and the decks'
-  `baseline_r1.*`; enter them in the Baseline table below and
-  ARCHITECTURE 6.8, and re-read the time map at that size;
-  (2) harvest the two-node MPI launch test -- job 16634074,
-  `/home/rulisp/data/scratch/imago/mpitest/mpitest.o*`, queued
-  until both large jobs free their nodes; it compares `mpirun
-  -np $SLURM_NTASKS` against `srun --mpi=pmix|pmi2` and runs
-  the cross-node ELPA handshake, and its winner is the
-  launcher recipe PA2's checks use; (3) code PA2 from
-  PSEUDOCODE 24 (reviewed, committed `cb816b6`) -- `mpi.F90`
-  plus the four seam edits, acceptance checks 24.7.
+- **PF1 and PF2 COMPLETE; PA1 CLOSED; PA2 at the chain gate
+  (2026-08-20).** Presets, decks, all six baselines, the full
+  time map, the PA1 cost measurement, the ARCHITECTURE 6 and
+  DESIGN 9 revisions and PSEUDOCODE 24 (the O_MPI module) are
+  committed. The LARGE pair was harvested 2026-08-19/20 (jobs
+  16632708/16632709; Baseline table, time map and ARCHITECTURE
+  6.8 updated): at 1296 atoms the solve is 62 % of the complex
+  run at ONE k-point and 37 % of the real run, and the
+  once-per-run electrostatic setup (21 %/11 %) is the emerging
+  Amdahl bound. A /refine pass over the parallelization chain
+  (2026-08-20, `762bb9d`) propagated the PA1 decisions upward
+  (VISION Goal 7, ARCH 6.5) and flagged the write-only share of
+  the three-centre stage as UNMEASURED -- PA3 stamps it. The
+  two-node launch test is harvested (see the toolchain bullet
+  below): the launcher for PA2's checks is `mpirun -np
+  $SLURM_NTASKS`, `srun --mpi=pmix` the working alternative,
+  `--mpi=pmi2` forbidden. NEXT: code PA2 from PSEUDOCODE 24
+  (reviewed, committed `cb816b6`) -- `mpi.F90` plus the four
+  seam edits, acceptance checks 24.7.
 - **Install no profiling tools yet** (TODO PF6). `gprof` and
   `callgrind` are already present and cover Phases P0 through P2.
   The investigation into `perf` and `gperftools` is recorded below
@@ -63,11 +63,17 @@ would force one severity scale onto two unrelated questions.
   ranks; the `gfortran-mpi` preset (`IMAGO_MPI`, `IMAGO_ELPA`)
   builds the UNCHANGED serial source against it, and those
   MPI-linked binaries reproduce the `bn_small_{c,g}` baseline
-  energies to every printed digit. The two-node SLURM launch test
-  (`mpirun -np $SLURM_NTASKS` vs `srun --mpi=pmix|pmi2`) is
-  queued behind the large baselines. Environment naming
-  convention: a trailing `p` means parallel (`cpg` -> `cpgp`);
-  the Python venv is unchanged.
+  energies to every printed digit. The two-node SLURM launch
+  test (job 16634074, c[083,085], harvested 2026-08-20; outputs
+  `~/data/scratch/imago/mpitest/`) settled the launcher: `mpirun
+  -np $SLURM_NTASKS` spans nodes correctly and the cross-node
+  ELPA handshake succeeds under it; `srun --mpi=pmix` behaves
+  identically; `srun --mpi=pmi2` is a TRAP -- OpenMPI 5 dropped
+  PMI-2, so it silently launches N one-rank worlds with exit
+  code 0, and only a rank/size printout betrays it. The recipe
+  is recorded in BUILD.md ("Parallel toolchain"). Environment
+  naming convention: a trailing `p` means parallel (`cpg` ->
+  `cpgp`); the Python venv is unchanged.
 
 ## Benchmark deck set (designated 2026-08-18)
 
@@ -201,8 +207,8 @@ repeats where shown; the spread IS the noise floor.
     small/imagoG    bn_small_g           5.8 / 5.8 / 5.8 s       32 MB   9
     medium/imago    knbo3_333_med_c      24m55 / 25m07 / 25m07  413 MB  13
     medium/imagoG   sio2_243_med_g       11m42 / 11m41 / 11m39  292 MB  11
-    large/imago     sio2_1296_large_c    (queued)
-    large/imagoG    sio2_1296_large_g    (queued)
+    large/imago     sio2_1296_large_c    30h44m (1 repeat)   11.2 GB  11
+    large/imagoG    sio2_1296_large_g    15h56m (1 repeat)    6.3 GB  11
     aux             knbo3_med_c (5 at.)  4.1 / 4.0 / 4.0 s       47 MB  15
     aux             knbo3_222_med_c (40) 1m24 / 1m25 / 1m24      73 MB  14
 
@@ -211,6 +217,15 @@ digits, and `sio2_243_med_g` reproduced the 2025 OLCAO value
 (-2925.62720444 Ha) exactly. So the noise floor is under 1 % on
 the medium cells and a few percent on the seconds-long small
 ones; a claimed improvement smaller than that is not one.
+
+The large pair (harvested 2026-08-19: jobs 16632708/16632709,
+nodes c083/c084, one repeat each -- at 16 and 31 hours a repeat
+is bought only when a claim needs it) is its own cross-check
+instead: the real/Gamma and complex/one-shifted-k runs of the
+SAME glass agree on the final total energy to the eighth decimal
+(-15614.45846254 vs -15614.45846252) with identical iteration
+counts and convergence traces -- two different binaries and
+arithmetic paths landing on the same physics.
 
 ## Coarse time map (layer 2), first reading 2026-08-18
 
@@ -226,30 +241,44 @@ time between operations is ~0.1 %), so the map is complete.
     knbo3 40-at. (c)    37 %      37 %      0.3 %     14 %      7 %
     knbo3 135-at.(c)    40 %      46 %      0.5 %      9 %      1 %
     sio2_243     (g)    45 %      27 %     14.5 %      5 %      3 %
+    sio2_1296    (g)    35 %      37 %       21 %      3 %    0.2 %
+    sio2_1296    (c)    22 %      62 %       11 %      3 %    0.1 %
 
 ("3-centre potential" = the Electronic Potential Integrals stamp,
 computed once per run; "secular equation" is per iteration and
 per k-point; "elecStat matrices" is the once-per-run
 Electrostatic Matrices setup.)
 
-What it says so far -- to be re-read once the large cells land:
+What it says, re-read with the large pair (2026-08-19):
 - The two costs that matter are the ONE-TIME three-centre
   electronic-potential integrals and the PER-ITERATION secular
   solve; together they are 72-86 % of every run above the toy
-  size. Everything ARCHITECTURE 6.5 called "the cheap, proven
-  first target" -- the real-space grid work in `Make SCF
-  Potential` (exchCorr) and the electrostatic setup -- is 1-3 %
-  on the medium cells (14.5 % for the once-per-run electrostatic
-  matrices on the 243-atom glass, and that is a setup cost, not
-  a loop that repeats). On this evidence 6.5's ranking is
-  inverted for imago: the grid loops are NOT where the time is.
-- The solve overtakes the integrals as the cell grows (9 % -> 14
-  % -> 37 % -> 46 % along the complex column), as N^3 must
-  overtake N^2; the large cells will show how far that goes.
-- The complex binary at 4 k-points spends 46 % in the solve at
-  135 atoms; the real binary at Gamma spends 27 % at 243 atoms.
-  The large pair (same 1296-atom glass, real vs. one shifted
-  k-point) is the clean measurement of that ratio.
+  size, and the large pair sits inside that band (72 % real,
+  84 % complex). Everything ARCHITECTURE 6.5 once ranked first
+  -- the real-space grid work in `Make SCF Potential` (exchCorr)
+  -- is 1-3 % on the medium cells and 0.2 % on the large ones:
+  the ranking inversion the medium cells suggested, the large
+  cells confirm.
+- The solve overtakes the integrals as the cell grows, and at
+  1296 atoms it HAS: 9 % -> 14 % -> 37 % -> 46 % -> 62 % along
+  the complex column (the 62 % at ONE k-point), and 27 % -> 37 %
+  real at Gamma. The scaling wall is no longer a projection;
+  the largest deck spends more time in the solve than in
+  everything else combined (complex), and the solve edges out
+  the integrals even in the real binary.
+- The complex-vs-real cost ratio, measured clean (same 1296-atom
+  glass, one shifted k-point vs Gamma): whole run 1.93x, secular
+  solve 3.27x (68708 vs 21022 s -- consistent with complex
+  arithmetic's ~4x flops in ZHEGV vs DSYGV), three-centre
+  integrals only 1.17x.
+- A third cost emerges with size: the once-per-run
+  `Electrostatic Matrices` setup is ~12050 s on BOTH variants
+  (real-space work, independent of k) -- 21 % of the real run,
+  11 % of the complex. Once the integrals and the solve are
+  distributed, this serial 3.3 h becomes the Amdahl bound
+  (about 5x max speedup on the real run if untouched). It is
+  exactly the `elecStat` work upolcao already parallelized
+  (ARCHITECTURE 6.7), so PA5 is last but not optional at scale.
 
 ## PA1 cost distributions (measured 2026-08-18)
 

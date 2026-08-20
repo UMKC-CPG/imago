@@ -538,13 +538,14 @@ the current design:
 
 ## 6. Compute Architecture Direction
 
-> **Measured on imago 2026-08-18** (`dev/PERFORMANCE.md`, "Baseline"
-> and "Coarse time map"; the record of the numbers lives there, this
-> section carries only what they decide). Two operations account for
-> 72-86 % of every run above toy size: the ONE-TIME three-centre
-> electronic-potential integrals and the PER-ITERATION secular solve,
-> the solve's share growing with system size (9 % -> 46 % along the
-> complex column at 8 -> 135 atoms; 27 % at 243 atoms real). The
+> **Measured on imago 2026-08-18/19** (`dev/PERFORMANCE.md`,
+> "Baseline" and "Coarse time map"; the record of the numbers lives
+> there, this section carries only what they decide). Two operations
+> account for 72-86 % of every run above toy size: the ONE-TIME
+> three-centre electronic-potential integrals and the PER-ITERATION
+> secular solve, the solve's share growing with system size (9 % ->
+> 62 % along the complex column at 8 -> 1296 atoms, the endpoint at
+> ONE k-point; 27-37 % at 243-1296 atoms real). The
 > real-space grid work that an earlier draft of 6.5 called "the
 > cheap, proven win and the right first target" is 1-3 % of the medium
 > cells. Section 6.8 holds the table; 6.5 and 6.6 are written from it.
@@ -913,12 +914,16 @@ core, plain SCF from the initial potential:
     KNbO3 40, complex, 4 k       37 %     37 %     14 %     8 %
     KNbO3 135, complex, 4 k      40 %     46 %      9 %     2 %
     SiO2 243, real, Gamma        45 %     27 %      5 %    17 %*
-    SiO2 1296, real and complex  (large pair; pending)
+    SiO2 1296, real, Gamma       35 %     37 %      3 %    22 %*
+    SiO2 1296, complex, 1 k      22 %     62 %      3 %    11 %*
 
-(* of which 14.5 % is the once-per-run electrostatic-matrix setup,
-not a repeated loop.) The stamps cover more than 99.8 % of every
-run, so the table is complete, and every repeat reproduced its
-wall time to under 1 % on the medium cells.
+(* dominated by the once-per-run electrostatic-matrix setup, not
+a repeated loop: 14.5 % at 243 atoms, and ~12050 s at 1296 atoms
+on BOTH variants -- real-space work, independent of k -- which is
+21 % of the real run and 11 % of the complex one.) The stamps
+cover more than 99.8 % of every run, so the table is complete,
+and every repeat reproduced its wall time to under 1 % on the
+medium cells.
 
 What the shape decides:
 
@@ -928,15 +933,21 @@ What the shape decides:
    parallelizing the second removes a cost that scales with the
    iteration count and, through N^3, with size. Both must be done;
    6.5 orders them by their share and 6.6 owns the second.
-2. The solve overtakes the integrals as the cell grows (9 -> 14 ->
-   37 -> 46 % along the complex column). The large pair says how
-   far that goes at 1296 atoms and, being the same cell real and
-   at one shifted k-point, gives the real-vs-complex cost ratio
-   directly.
+2. The solve overtakes the integrals as the cell grows, and at
+   1296 atoms it has: 9 -> 14 -> 37 -> 46 -> 62 % along the
+   complex column (the 62 % at ONE k-point), 37 % real at Gamma.
+   The large pair, being the same cell real and at one shifted
+   k-point, also gives the real-vs-complex cost ratio directly:
+   whole run 1.93x, solve 3.27x, three-centre integrals 1.17x.
 3. The grid work is not where the time is. The inherited claim in
    an earlier draft of 6.5 was reasonable for the sibling code and
    is wrong for imago; DESIGN 9.2's load balancer stays valid as a
-   design and moves to the end of the queue.
+   design and moves to the end of the queue. One caveat the large
+   pair adds: the once-per-run electrostatic-matrix SETUP grows
+   with size (21 % of the 1296-atom real run) and becomes the
+   serial Amdahl bound once the integrals and the solve are
+   distributed -- it is the `elecStat` work upolcao already
+   parallelized (6.7), so the last target is last, not never.
 4. What A3-A6 target -- the alpha-pair inner loops of the integral
    engine, precision, SIMD, GPU -- is inside the largest stage, so
    those directions are not displaced by this measurement; they

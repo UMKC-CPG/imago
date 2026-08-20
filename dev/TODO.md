@@ -8345,7 +8345,7 @@ is not carried only in conversation.
   medium recorded with a sub-1 % noise floor; the large pair's
   numbers are added when they land.
 
-- [~] PF2. Produce the coarse time map, at the level of the 34
+- [x] PF2. Produce the coarse time map, at the level of the 34
   operations `O_TimeStamps` already names.  This is the cheapest
   possible answer to "where does the time go" and it is enough to
   TEST the two claims ARCHITECTURE 6.5 inherited from a sibling
@@ -8359,8 +8359,14 @@ is not carried only in conversation.
   the grid loops ARE the five-percent case (1-3 % on the medium
   cells) and the solve is the scaling wall, but the three-centre
   integrals are the largest single stage; ARCHITECTURE 6.5 was
-  reordered accordingly and 6.8 holds the table.  Remaining: the
-  large-pair reading, then close.
+  reordered accordingly and 6.8 holds the table.
+  **CLOSED 2026-08-20 with the large-pair reading**: at 1296
+  atoms the solve is 62 % of the complex run at ONE k-point and
+  37 % of the real run (solve complex/real ratio 3.27x, whole
+  run 1.93x), and the once-per-run electrostatic setup (21 %/
+  11 %) is the emerging serial Amdahl bound -- PA5's eventual
+  case.  Table in ARCHITECTURE 6.8; record in PERFORMANCE.md
+  "Coarse time map".
 
 - [ ] PF3. Decide whether `O_TimeStamps` becomes real accumulating
   timers.  Today it writes wall-clock start and end STRINGS for
