@@ -8507,7 +8507,7 @@ is not carried only in conversation.
   promptly with the rank-stamped message on stderr (and the
   serial stub path exits 1 with the same message).
 
-- [ ] PA3. Distribute the three-centre electronic-potential
+- [x] PA3. Distribute the three-centre electronic-potential
   integrals under the decomposition and load balance PA1
   decided (DESIGN 9.5: BY TERM, static most-diffuse-first
   deal), serial HDF5 first.  Acceptance: HDF5 content identical
@@ -8536,8 +8536,29 @@ is not carried only in conversation.
   the root-serial run shape (workers park at the PA2 barrier
   after the stage).  PSEUDOCODE 25 carries the seam inventory,
   the term table, the lifecycle, the lock-held write, the
-  per-rank timing table, and five checks.  Awaits programmer
-  review before any code.
+  per-rank timing table, and five checks.  Reviewed by the
+  programmer 2026-08-20.
+  **CODED and ACCEPTED 2026-08-21.**  All five 25.7 checks pass
+  (record: PERFORMANCE.md "PA3 term-stage scaling"; evidence
+  under `jobs/bench/pa3*`).  Serial and one-rank parallel are
+  BIT-exact (all four decks h5diff-identical to pre-PA3 serial;
+  bare singleton == mpirun -np 1 bit-identical); multi-rank
+  clean under the DESIGN 9.5 criterion (same build, same node,
+  1e-10, eigenvectors excluded) with energies digit-identical
+  everywhere; the stage scales 313->158->82->43 s at np 1/2/4/8
+  on the medium glass (7.2x at 8 ranks; one-rank cost over
+  serial: nil) and 604->163 s at np 1->4 on the multi-k-point
+  KNbO3 cell (3.7x); snake-deal balance max/mean <= 1.05; lock
+  waits <= 3.6 s and writes ~4 % of compute, answering 9.5's
+  serialized-write question; a mid-stage 4-rank kill restarted
+  with exactly the 12 undone terms redealt and finished
+  identical to baseline.  Two latent pre-existing defects fixed
+  on the way (closeSCFIntegralHDF5 never deallocated
+  atomKOverlapPlusG_did; packedVVDims was set only by routines
+  root runs -- both found by the acceptance runs, both recorded
+  as seams in PSEUDOCODE 25.1).  In-rank OpenMP threading over
+  pairs remains deferred behind PF4's hazard sweep, as written
+  above.
 
 - [ ] PA4. The eigensolver boundary and the ELPA backend
   (ARCHITECTURE 6.6): one call site behind which serial LAPACK

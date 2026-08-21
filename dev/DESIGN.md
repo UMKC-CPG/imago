@@ -14395,19 +14395,50 @@ not the whole-run wall time.
 `anyElecPotInteraction` -- the (pair, cell) negligibility
 bitmask -- across the alphas of one type: each alpha inherits
 the bits its predecessors cleared and prunes its work with
-them. The mask is a pure optimization (bits are only cleared
-when a pair/cell contributed nothing), so each rank simply
-rebuilds its own mask for the types it touches; a rank that
-holds a type's tighter alphas without its diffuse ones loses
-some pruning and no correctness. The inheritance also
-survives ownership GAPS, which is why the iteration order
-above matters: a bit cleared by a more diffuse alpha is
-validly cleared for every tighter alpha of that type, whether
-or not the rank owns the alphas in between -- so a rank
-walking its owned terms in original order keeps nearly all of
-the serial pruning, resetting the mask only when it crosses
-into a new type. This is the only coupling between terms;
-everything else a term reads is constant input data.
+them. The mask is an optimization at the NEGLIGIBILITY FLOOR
+(a bit is cleared when a pair/cell contributed nothing above
+the threshold -- which is below-threshold, not exactly zero),
+so each rank simply rebuilds its own mask for the types it
+touches; a rank that holds a type's tighter alphas without
+its diffuse ones loses some pruning and no correctness. The
+inheritance also survives ownership GAPS, which is why the
+iteration order above matters: a bit cleared by a more
+diffuse alpha is validly cleared for every tighter alpha of
+that type, whether or not the rank owns the alphas in between
+-- so a rank walking its owned terms in original order keeps
+nearly all of the serial pruning, resetting the mask only
+when it crosses into a new type. This is the only coupling
+between terms; everything else a term reads is constant input
+data.
+
+One measured consequence (2026-08-20, the first multi-rank
+acceptance run): because a rank's mask lacks the clearings
+that unowned alphas of its types would have made, it COMPUTES
+sub-threshold contributions the serial walk skipped -- so a
+multi-rank run's term matrices agree with serial to the
+negligibility floor (relative 1e-13 observed; slightly MORE
+arithmetic than serial, never less), not to the bit. Serial
+and the one-rank parallel run keep the full inheritance and
+remain bit-identical. The acceptance criterion follows the
+physics, and bit-exactness is meaningful only WITHIN one
+build: the serial and MPI builds link different OpenBLAS
+builds whose results differ in the last bit, an effect
+independent of this design (measured 2026-08-20: about 1e-15
+absolute, plus the eigenvector gauge it triggers). So: at one
+rank, h5diff must be exactly clean against the SAME build's
+serial-shaped run (the bare singleton and `mpirun -np 1` must
+be bit-identical to each other, and the serial binary must be
+bit-identical to the pre-change serial binary); above one
+rank, the comparison basis is the same build's one-rank file,
+and the term data must agree within a tolerance safely above
+the floor and below anything physical (1e-10 relative), with
+the derived outputs (iteration trace, energies)
+digit-identical against the recorded baselines and the
+eigenVECTOR datasets excluded from the file comparison --
+floor-level jitter in H rotates degenerate eigenvectors
+arbitrarily (the standard gauge freedom) while every
+invariant built from them is checked through the
+digit-identical outputs.
 
 **Pair-level refinement (later).** When ranks exceed
 `potDim`, or a single term must go faster, the atom-pair

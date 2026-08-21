@@ -303,6 +303,35 @@ Modules directly affected by the current development:
   Future symmetry concerns (supercell construction, atom
   permutation tables) migrate into this module as Section 7's
   split proceeds.
+- **The SCF HDF5 module family** (`hdf5SCF.F90` and the six
+  section files `hdf5SCFIntg.F90`, `hdf5SCFElec.f90`,
+  `hdf5SCFExco.f90`, `hdf5SCFEigVal.f90`, `hdf5SCFEigVec.F90`,
+  `hdf5SCFPotRho.f90`; the PSCF family mirrors it): the layout
+  follows the HDF5 file itself. `O_SCFHDF5` is the sole owner
+  of the FILE -- its id, property list, k-point group and the
+  shared attribute dataspace -- and every open or close of the
+  file in the program happens in this one module; the section
+  modules own the groups, datasets and attributes of their
+  subtree and receive shared context DOWNWARD as arguments,
+  never reaching back up (the `use` arrows run from
+  `O_SCFHDF5` into the sections only). The parallelization
+  work (Section 6.5, DESIGN 9.5) extends the pattern rather
+  than bending it: the term-stage file lifecycle
+  (suspend/resume, the shared file-name builder, and the
+  lock-disciplined per-term write) lives in `hdf5SCF.F90` with
+  the other file-level operations, while each section exports
+  its object NAMES as public parameters beside the code that
+  creates them, so a by-name reopen cannot drift from the
+  creation spelling.
+- **O_HDF5Utils** (`hdf5Utils.f90`, new): the small shared
+  layer beneath both file owners, holding only operations
+  about HDF5 files in general -- the lock-retry open (the
+  file lock is the write mutex of DESIGN 9.5) and the
+  close-every-remaining-object sweep that makes "the file is
+  truly closed" a guarantee. `O_SCFHDF5` uses it now; the
+  PSCF owner uses it when post-SCF parallelization arrives,
+  which is also the natural moment to unify the two owners'
+  duplicated file-name construction here.
 
 ---
 

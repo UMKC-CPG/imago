@@ -65,22 +65,22 @@ would force one severity scale onto two unrelated questions.
   ALLOCATION, so an acceptance job must request `-n` >= the
   widest `-np` it launches or mpirun refuses before any rank
   starts.
-- **PA3 at the chain gate 2026-08-20: DESIGN 9.5 amended,
-  PSEUDOCODE 25 drafted, awaiting review.** Drafting caught a
-  9.5 defect (a contiguous `loadBalMPI` deal over a
-  cost-sorted list is the opposite of largest-first): now a
-  SNAKE deal over the cost-sorted undone terms, iterated in
-  original term order so the pruning-mask inheritance
-  survives ownership gaps. Write discipline decided: HDF5's
-  own file lock as the mutex (per-term open-write-close with
-  retry -- the lock's behavior on this filesystem was
-  demonstrated by PA2's check 3), root's file closed for the
-  stage window and reopened via the existing restart access
-  path, and the root-serial run shape (workers park at the
-  PA2 barrier after the stage; acceptance is the STAGE stamp
-  falling with rank count, not whole-run wall). NEXT: the
-  programmer reviews DESIGN 9.5 + PSEUDOCODE 25, then PA3 is
-  coded.
+- **PA3 CODED and ACCEPTED 2026-08-21** (chain: DESIGN 9.5 as
+  amended + PSEUDOCODE 25, both reviewed 2026-08-20). The
+  three-centre term stage is distributed by the snake deal
+  with HDF5's file lock as the write mutex and the
+  root-serial remainder. All five acceptance checks pass; the
+  scaling and balance numbers are in "PA3 term-stage scaling"
+  below, the closure record in TODO PA3. Two latent serial
+  defects were exposed and fixed on the way (a missing
+  deallocate in closeSCFIntegralHDF5; packedVVDims set only
+  by root-run routines), and the acceptance work itself
+  produced four recorded traps (concurrent mpirun core
+  binding, /usr/bin/time swallowing signals, cross-build and
+  cross-node BLAS last-bit noise, relative tolerances on
+  near-zero elements -- see the scaling section). NEXT: PA4
+  (the eigensolver boundary and ELPA, DESIGN 9.6) --
+  PSEUDOCODE section first, per the chain.
 - **Install no profiling tools yet** (TODO PF6). `gprof` and
   `callgrind` are already present and cover Phases P0 through P2.
   The investigation into `perf` and `gperftools` is recorded below
@@ -360,6 +360,74 @@ cost is ~1 %.
   in-rank threading) as the later refinement for when ranks
   exceed `potDim` -- exactly the widths involved: 32-62 terms
   here, more for richer chemistries.
+
+## PA3 term-stage scaling (measured 2026-08-21)
+
+The acceptance record for the distributed three-centre stage
+(PSEUDOCODE 25.7; TODO PA3). Correctness ran as one concurrent
+suite plus follow-ups (jobs 16677143, 16688102/450/488,
+16688165); the numbers below come from the SEQUENTIAL series on
+an exclusive rulisp-lab node (job 16688480, c084, one mpirun at
+a time), which is the only honest way to time this: concurrent
+mpirun launches each bind their ranks starting at core 0, so
+simultaneous runs stack onto the same cores and corrupt both
+the absolute times and the apparent balance.
+
+    deck (terms)              np1      np2      np4      np8
+    sio2_243_med_g (32)     313.5 s  158.4 s  81.6 s  43.4 s
+    knbo3_333_med_c (62)    604.4 s     --   163.4 s     --
+
+Stage-stamp wall times; ratios 1.98 / 1.94 / 1.88 per doubling
+on the glass (7.2x at 8 ranks) and 3.70x at 4 ranks on the
+ortho-heavy multi-k cell. The one-rank parallel stage matches
+the serial baseline (313.5 vs 316-317 s; 604.4 vs 599-602 s):
+the distribution machinery costs nothing when there is nothing
+to distribute. Snake-deal balance: compute max/mean <= 1.05 at
+every width (e.g. np4 glass: 78.0/78.5/74.5/74.6 s). The
+lock-discipline overhead DESIGN 9.5 flagged as unmeasured:
+lock waits 0.0-3.6 s and dataset writes ~4 % of compute at
+every width -- the write-in-turn mutex is benign at these rank
+counts, and the 9.7 collective form stays a later calibration.
+
+Correctness, per the amended 25.7 criteria: serial and the
+one-rank forms are BIT-exact (all four decks h5diff-identical
+to the pre-PA3 serial reference; bare singleton == mpirun -np 1
+bit-identical); np 2/4/8 are CLEAN at 1e-10 relative against
+the same-build same-node one-rank file with eigenvectors
+excluded; every run's iteration and energy traces are
+digit-identical to the recorded baselines; a 4-rank run killed
+mid-stage (20 of 32 terms done) restarted with exactly the 12
+undone terms redealt 3/3/3/3 and finished identical to
+baseline; the default run sheds no worker logs and
+IMAGO_RANK_LOGS=1 sheds exactly fort.20.r0001-3.
+
+Traps this campaign paid for, so they are paid for once:
+
+- **Concurrent mpirun runs collide on cores.** Each mpirun
+  binds its ranks starting at core 0. Nineteen concurrent runs
+  put every rank 0 on the same core: a one-rank run under
+  mpirun ran 5x slower than the same binary bare, and rank 0
+  looked slowest in every balance table. Ratios survived;
+  absolutes did not. Timing runs must be sequential (or bind
+  explicitly).
+- **/usr/bin/time does not forward signals.** imago.py wraps
+  the engine in `time`, so TERM-ing (or KILL-ing) mpirun
+  orphans the engine ranks, which keep the HDF5 file lock and
+  poison any restart. Killing a parallel run from a script
+  needs a process-SESSION kill (setsid + pkill -s) or must
+  target the engine pids; scancel's cgroup teardown is what
+  real crashes look like and needs none of this.
+- **Bit-exactness has a scope.** Different OpenBLAS builds
+  (cpg vs cpgp) differ in the last bit; so do different CPU
+  models dispatching different kernels (~1e-19 absolute on
+  near-zero elements, cross-node). Bit-level comparisons are
+  meaningful only same-build AND same-node; across those
+  boundaries the digit-identical printed outputs are the
+  check.
+- **Relative tolerances lie near zero.** h5diff -p flags
+  1e-19 absolute differences on 1e-9-magnitude elements as
+  1e-10 "relative disagreement". Any relative criterion needs
+  the element magnitudes in view before it is believed.
 
 ## The situation, as of 2026-08-09
 

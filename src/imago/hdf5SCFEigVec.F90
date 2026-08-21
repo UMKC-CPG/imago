@@ -22,7 +22,8 @@ module O_SCFEigVecHDF5
    ! Declare array that holds the dimensions of the chunk.
    integer(hsize_t), dimension (2) :: valeStatesChunk
 
-   ! Declare the eigenvector subgroup of the scf_fid.
+   ! Declare the eigenvector subgroup of the SCF file's k-point group
+   !   (the parent group each init/access call receives).
    integer(hid_t) :: eigenVectors_gid
 
    ! Declare the eigenvector dataspace.
@@ -48,7 +49,7 @@ module O_SCFEigVecHDF5
    contains
 
 
-subroutine initSCFEigVecHDF5 (scf_fid,attribInt_dsid,attribIntDims,numStates)
+subroutine initSCFEigVecHDF5 (parent_gid,attribInt_dsid,attribIntDims,numStates)
 
    ! Import any necessary definition modules.
    use HDF5
@@ -63,7 +64,7 @@ subroutine initSCFEigVecHDF5 (scf_fid,attribInt_dsid,attribIntDims,numStates)
    implicit none
 
    ! Define the passed parameters.
-   integer(hid_t) :: scf_fid
+   integer(hid_t) :: parent_gid
    integer(hid_t) :: attribInt_dsid
    integer(hsize_t), dimension (1) :: attribIntDims
    integer, intent(in) :: numStates
@@ -91,8 +92,8 @@ subroutine initSCFEigVecHDF5 (scf_fid,attribInt_dsid,attribIntDims,numStates)
       valeStatesChunk(2) = valeStates(2)
    endif
 
-   ! Create the eigenVectors group in the scf_fid.
-   call h5gcreate_f (scf_fid,"eigenVectors",eigenVectors_gid,hdferr)
+   ! Create the eigenVectors group under the k-point parent group.
+   call h5gcreate_f (parent_gid,"eigenVectors",eigenVectors_gid,hdferr)
    if (hdferr /= 0) stop 'Failed to create eigenvectors group SCF'
 
    ! Create the dataspace that will be used for the energy eigen vectors.
@@ -173,7 +174,7 @@ end subroutine initSCFEigVecHDF5
 !   opens datasets and attributes that were already created, so this
 !   routine has no need for the integer attribute dataspace handles
 !   that the init routine uses to create them.
-subroutine accessSCFEigVecHDF5 (scf_fid,numStates)
+subroutine accessSCFEigVecHDF5 (parent_gid,numStates)
 
    ! Import any necessary definition modules.
    use HDF5
@@ -188,7 +189,7 @@ subroutine accessSCFEigVecHDF5 (scf_fid,numStates)
    implicit none
 
    ! Define the passed parameters.
-   integer(hid_t) :: scf_fid
+   integer(hid_t) :: parent_gid
    integer, intent(in) :: numStates
 
    ! Define local variables.
@@ -214,8 +215,8 @@ subroutine accessSCFEigVecHDF5 (scf_fid,numStates)
       valeStatesChunk(2) = valeStates(2)
    endif
 
-   ! Open the eigenVectors group in the scf_fid.
-   call h5gopen_f (scf_fid,"eigenVectors",eigenVectors_gid,hdferr)
+   ! Open the eigenVectors group under the k-point parent group.
+   call h5gopen_f (parent_gid,"eigenVectors",eigenVectors_gid,hdferr)
    if (hdferr /= 0) stop 'Failed to open eigenvectors group SCF.'
 
    ! Allocate space to hold IDs for the datasets in the eigenvectors group.

@@ -44,11 +44,23 @@ module O_MPI
    use mpi_f08
 #endif
 
+   ! Import the precision kinds for the broadcast and gather buffers.
+   use O_Kinds
+
    ! Make sure that no funny variables are defined.
    implicit none
 
    ! Define access
    public
+
+   ! One generic name covers the two shapes in which the overlap
+   !   stage's core-valence byproduct exists (PSEUDOCODE 25.1): the
+   !   complex three-index form of the multi-k build and the real
+   !   two-index form of the gamma build. Callers write plain
+   !   `call bcastMPI (array)` in either build.
+   interface bcastMPI
+      module procedure bcastComplexCube, bcastRealMatrix
+   end interface bcastMPI
 
    ! The identity of this process within the parallel run. The values
    !   below are the SERIAL truths and double as the defaults: the
@@ -204,6 +216,101 @@ subroutine loadBalMPI (toBalance, initialIdx, finalIdx)
    endif
 
 end subroutine loadBalMPI
+
+
+subroutine bcastIntVecMPI (vector)
+
+   ! Root broadcasts an integer vector to every rank; the workers'
+   !   copies are overwritten. The PA3 caller sends the potential-term
+   !   done-mask that root read from the completion attributes before
+   !   the file was suspended (PSEUDOCODE 25.2/25.3). Serial build (or
+   !   one rank): a no-op -- root's data is already everyone's data.
+
+   implicit none
+
+   ! Define passed parameters.
+   integer, dimension (:), intent (inout) :: vector
+
+#ifdef IMAGO_MPI
+   call MPI_Bcast (vector, size (vector), MPI_INTEGER, 0,&
+         & MPI_COMM_WORLD)
+#else
+   ! Serial no-op. The associate block marks the argument as
+   !   deliberately untouched, keeping the build warning-free.
+   associate (unused => vector)
+   end associate
+#endif
+
+end subroutine bcastIntVecMPI
+
+
+subroutine bcastComplexCube (buffer)
+
+   ! Root broadcasts a complex rank-3 array (the multi-k form of
+   !   coreValeOL; see the bcastMPI generic above). Serial: no-op.
+
+   implicit none
+
+   ! Define passed parameters.
+   complex (kind=double), dimension (:,:,:), intent (inout) :: buffer
+
+#ifdef IMAGO_MPI
+   call MPI_Bcast (buffer, size (buffer), MPI_DOUBLE_COMPLEX, 0,&
+         & MPI_COMM_WORLD)
+#else
+   ! Serial no-op; see bcastIntVecMPI.
+   associate (unused => buffer)
+   end associate
+#endif
+
+end subroutine bcastComplexCube
+
+
+subroutine bcastRealMatrix (buffer)
+
+   ! Root broadcasts a real rank-2 array (the gamma form of
+   !   coreValeOL; see the bcastMPI generic above). Serial: no-op.
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension (:,:), intent (inout) :: buffer
+
+#ifdef IMAGO_MPI
+   call MPI_Bcast (buffer, size (buffer), MPI_DOUBLE_PRECISION, 0,&
+         & MPI_COMM_WORLD)
+#else
+   ! Serial no-op; see bcastIntVecMPI.
+   associate (unused => buffer)
+   end associate
+#endif
+
+end subroutine bcastRealMatrix
+
+
+subroutine gatherTimesMPI (myTimes, allTimes)
+
+   ! Every rank contributes its small vector of stage timers; root
+   !   receives them side by side so it can print the per-rank table
+   !   of PSEUDOCODE 25.6 into the log. On non-root ranks allTimes is
+   !   untouched apart from what MPI_Gather defines (nothing). Serial
+   !   build (or one rank): rank 0's column is filled directly.
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension (:), intent (in) :: myTimes
+   real (kind=double), dimension (:,:), intent (out) :: allTimes
+
+#ifdef IMAGO_MPI
+   call MPI_Gather (myTimes, size (myTimes), MPI_DOUBLE_PRECISION,&
+         & allTimes, size (myTimes), MPI_DOUBLE_PRECISION, 0,&
+         & MPI_COMM_WORLD)
+#else
+   allTimes(:,1) = myTimes(:)
+#endif
+
+end subroutine gatherTimesMPI
 
 
 end module O_MPI

@@ -16442,21 +16442,69 @@ What this increment touches, and nothing else:
   one k-point -- one term in flight per rank, never more).
   opCodes 2/3/5 keep today's path: their stages are root-only
   and root holds the file then.
-- `hdf5SCFIntg.F90` -- gains the per-term write helpers of
-  25.5, built from the SAME name construction
-  `initSCFIntegralHDF5` uses to create (and
-  `accessSCFIntegralHDF5` to reopen) the per-term groups
-  (`atomPotOverlap/<i7.7>`) and their per-k-point datasets.
-- `hdf5SCF.F90` -- gains `suspendHDF5_SCF` (root closes every
-  open handle and the file before the stage) and
-  `resumeHDF5_SCF` (root reopens file and handles after the
-  stage barrier, through the SAME access path the restart
-  branch of `initHDF5_SCF` already exercises).
-- `mpi.F90` -- two small additions, each with a caller in this
-  increment: `bcastIntVecMPI` (root broadcasts the done-mask)
-  and `gatherTimesMPI` (each rank's three stage timers to
-  root, 25.6).  Serial build: no-ops that leave the caller's
-  root-side data in place.
+- `hdf5SCF.F90` -- the file-lifecycle home (arrangement
+  settled with the programmer 2026-08-20; ARCHITECTURE 2:
+  every open and close of the file stays in the one module
+  that owns the file). Gains `scfFileName` (the name
+  construction factored out of `initHDF5_SCF`, so the by-name
+  reopen and the original open share one spelling),
+  `suspendHDF5_SCF` (root closes the sections, sweeps any
+  handle still open on the file via O_HDF5Utils, and closes
+  the file before the stage), `resumeHDF5_SCF` (root reopens
+  file and handles after the stage barrier, through the SAME
+  access path the restart branch of `initHDF5_SCF` already
+  exercises), and `writePotTermHDF5` (the lock-held per-term
+  write of 25.5 -- it OPENS THE FILE, which is why it lives
+  here and not beside the datasets it writes).
+- `hdf5Utils.f90` (NEW file, module `O_HDF5Utils`) -- the
+  generic layer beneath both file owners: `openFileWithRetry`
+  (the lock-retry acquire with the error stack silenced and
+  the one-hour abort cap) and `closeAllFileObjects` (the
+  h5fget_obj sweep over attributes, datasets, groups and
+  datatypes still open on a file id). SCF uses it now; PSCF
+  parallelization reuses it later. Both variant CMakeLists
+  gain the file.
+- `hdf5SCFIntg.F90` -- exports its object names
+  (`atomIntgGroup`, `atomPotOverlap`, the `status` attribute)
+  as public character PARAMETERS declared beside the code
+  that creates the objects, and its own `init`/`access`
+  routines switch to using them -- one spelling, owned by the
+  section, consumed downward by `writePotTermHDF5`. Gains
+  `readPotTermDoneMask` (root reads every term's completion
+  attribute through the still-open handles; opens nothing).
+- The sections' `access*` routines rename their misleading
+  dummy argument (`scf_fid`, which actually receives the
+  k-point GROUP id from `initHDF5_SCF`'s restart branch) to
+  `parent_gid` -- a clarity fix at exactly the seam this
+  increment works, no behavior change.
+- `packedVVDims` -- the packed-matrix dimensions every rank
+  sizes its term buffer with -- is module data of
+  `O_SCFIntegralsHDF5` whose only writers were the init and
+  access routines, WHICH ONLY ROOT RUNS: a worker would
+  allocate a zero-sized buffer and silently write garbage
+  terms.  (Seam found by the 4-rank acceptance run,
+  2026-08-20: root's 8 terms were bit-identical, all 24
+  worker terms junk.)  The dimension arithmetic is factored
+  into `setIntegralDims` -- pure arithmetic, no file -- which
+  init, access, AND an all-ranks call in `setupSCF` share.
+- The overlap stage's in-memory byproduct `coreValeOL` (and
+  `coreValeOLGamma`): every later `ortho` consumes it, so the
+  EP terms on the workers need it too.  It is allocated by
+  `allocateIntegralsSCF` on ALL ranks, but its CONTENT comes
+  from root's root-only overlap stage -- computed fresh, or
+  read back from the `atomOverlapCV` datasets when the
+  overlap attribute says done (the serial restart path
+  already does this) -- so root BROADCASTS it right after the
+  root-only integral block.  (Seam found while coding,
+  2026-08-20: the inventory above had missed it.)  The term's
+  own `valeVale`/`coreVale`/`coreCore` need nothing:
+  `gaussOverlapEP` zeroes them at entry on every rank.
+- `mpi.F90` -- three small additions, each with a caller in
+  this increment: `bcastIntVecMPI` (root broadcasts the
+  done-mask), `bcastMPI` (a generic over the complex-3D and
+  real-2D forms of `coreValeOL`), and `gatherTimesMPI` (each
+  rank's stage timers to root, 25.6).  Serial build: no-ops
+  that leave the caller's root-side data in place.
 
 ### 25.2 The term table and the snake deal
 
@@ -16491,6 +16539,13 @@ serial undone list in serial order: the deal vanishes.
 (root-only setup writes above have completed; all ranks hold
  the replicated input structures)
 
+bcastMPI (coreValeOL)          ! the overlap-stage byproduct
+                               !   every ortho consumes (25.1);
+                               !   sent once, right after the
+                               !   root-only integral block
+root: readPotTermDoneMask      ! via the still-open attribute
+                               !   handles; logs the skip lines
+bcastIntVecMPI (doneMask)
 root: suspendHDF5_SCF          ! file open by NOBODY now
 barrierMPI                     ! workers must not open before
                                !   root has closed
@@ -16580,20 +16635,45 @@ wait and write columns on the multi-k medium deck.
    (the file now passes through a close/reopen window and
    per-term open-write-close, so the content identity is the
    check that matters).
-2. **One-rank parallel equals serial** on the same decks, same
-   two comparisons.
+2. **One-rank parallel equals serial** on the same decks: the
+   bare singleton and `mpirun -np 1` runs are BIT-IDENTICAL to
+   each other (same build, same serial-shaped path), and their
+   outputs are digit-identical to the recorded baselines.
+   Against the serial BUILD's file the comparison uses the
+   check-3 tolerance instead: the two builds link different
+   OpenBLAS builds, and last-bit library differences (with the
+   eigenvector gauge they trigger) make cross-build
+   bit-exactness unachievable in principle -- an effect of the
+   toolchain, not of this increment (measured 2026-08-20).
 3. **Multi-rank correctness and the falling stamp.**
    `mpirun -np 2` and `-np 4` (medium decks also `-np 8`):
-   root's outputs digit-identical, h5diff zero differences,
-   the `Electronic Potential Integrals` stamp falling with
-   rank count, and the 25.6 table showing compute max/mean
-   about 1.6 or better with wait+write well under compute.
-   Record the np-series stage times: they are DESIGN 9.5's
-   validation numbers and the input to the 9.7 decision.
+   root's outputs digit-identical; h5diff clean at 1e-10
+   relative, against the SAME BUILD's one-rank file COMPUTED
+   ON THE SAME NODE, with the eigenVector datasets excluded
+   (the mask-inheritance floor and the degenerate-eigenvector
+   gauge make bit-exactness above one rank impossible in
+   principle -- DESIGN 9.5's "one measured consequence"
+   paragraph is the specification of this criterion; the
+   same-node requirement exists because different CPU models
+   dispatch different BLAS kernels, one more last-bit source,
+   measured 2026-08-21 at ~1e-19 absolute on near-zero
+   elements -- which a purely relative tolerance mistakes for
+   real disagreement); the `Electronic Potential Integrals`
+   stamp falling with rank count; and the 25.6 table showing
+   compute max/mean about 1.6 or better with wait+write well
+   under compute.  Record the np-series stage times: they are
+   DESIGN 9.5's validation numbers and the input to the 9.7
+   decision -- and they must come from SEQUENTIAL runs on an
+   otherwise idle node, because concurrent mpirun launches
+   each bind their ranks starting at core 0, stacking every
+   run's ranks on the same cores and corrupting both the
+   absolute times and the apparent balance (observed
+   2026-08-20; the falling RATIOS survived, the numbers did
+   not).
 4. **Restart.**  Kill a 4-rank medium run mid-stage; rerun;
    only undone terms recompute (the 25.6 terms column shows
    the smaller deal) and the final file h5diffs clean against
-   a serial run.
+   a serial run under the check-3 criterion.
 5. **Worker visibility.**  One `IMAGO_RANK_LOGS=1` run: each
    worker's log names the terms it owned; the default run
    sheds no worker files.

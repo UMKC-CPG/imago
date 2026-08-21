@@ -2037,7 +2037,7 @@ end subroutine gaussOverlapNP
 
 
 ! Electronic Potential three center overlap integrals.
-subroutine gaussOverlapEP(packedVVDims,did,aid)
+subroutine gaussOverlapEP(packedVVDims,packedBuffer)
 
    ! Import necessary modules.
    use O_Kinds
@@ -2056,13 +2056,22 @@ subroutine gaussOverlapEP(packedVVDims,did,aid)
    ! Make sure that there are not accidental variable declarations.
    implicit none
 
-   ! Define passed parameters.
+   ! Define passed parameters. The term's orthogonalized, packed
+   !   result lands in packedBuffer -- one k-point per slab -- and
+   !   the CALLER writes it to the HDF5 file under the file-lock
+   !   discipline of the distributed term stage (DESIGN 9.5). This
+   !   routine touches no HDF5 handle: the file is closed while the
+   !   stage runs.
    integer(hsize_t), dimension(2), intent(in) :: packedVVDims
-   integer(hid_t), dimension(numKPoints), intent(in) :: did
-   integer(hid_t), intent(in) :: aid
+   real (kind=double), dimension (:,:,:), intent(out) :: packedBuffer
 
    ! Define local variables for logging and loop control
    integer :: i,j,k,l,m ! Loop index variables
+
+   ! Placeholder handles for ortho's argument list in buffered mode;
+   !   never referenced (see the ortho call at the end).
+   integer(hid_t), dimension (numKPoints) :: dummyDid
+   integer(hid_t) :: dummyAid
 
    ! Atom specific variables that change with each atom pair loop iteration.
    integer,              dimension (2)    :: currentAtomType
@@ -2450,16 +2459,22 @@ subroutine gaussOverlapEP(packedVVDims,did,aid)
    deallocate (currentPairGamma)
 #endif
 
-   ! Perform orthogonalization and save the results to disk.  The 4 is an
-   !   operation code signifying that a non-overlap orthogonalization should be
-   !   done, and specifically that the result is for the electronic potential
-   !   and that it should be written to the EP portion of the hdf5 file.
-   call ortho(4,packedVVDims,did,aid)
+   ! Perform the orthogonalization.  The 4 is an operation code
+   !   signifying that a non-overlap orthogonalization should be done,
+   !   and specifically that the result is for the electronic
+   !   potential.  With packedBuffer present, ortho deposits every
+   !   k-point's packed result there instead of writing the hdf5 file;
+   !   the dummy handles below are never referenced in that mode (no
+   !   valid handle exists -- the file is closed during the term
+   !   stage) and only satisfy ortho's argument list.
+   dummyDid(:) = 0
+   dummyAid = 0
+   call ortho(4,packedVVDims,dummyDid,dummyAid,packedBuffer)
 
 end subroutine gaussOverlapEP
 
 
-subroutine elecPotGaussOverlap(packedVVDims,did,aid)
+subroutine elecPotGaussOverlap(packedVVDims,doneMask)
 
    ! Import the necessary modules
    use O_Kinds
@@ -2471,26 +2486,60 @@ subroutine elecPotGaussOverlap(packedVVDims,did,aid)
    use O_Potential, only: potDim
    use O_PotTypes, only: potTypes
    use O_PotSites, only: potSites, numPotSites
+   use O_MPI, only: mpiRank, mpiSize, barrierMPI, gatherTimesMPI,&
+         & stopMPI
+   use O_SCFHDF5, only: writePotTermHDF5
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
 
-   ! Define passed parameters.
+   ! Define passed parameters. The done-mask replaces the per-term
+   !   attribute check of the serial loop: root read every term's
+   !   completion attribute before the file was suspended, the mask
+   !   was broadcast, and this stage runs with the file CLOSED --
+   !   each finished term is written under the file-lock discipline
+   !   through writePotTermHDF5 (DESIGN 9.5, PSEUDOCODE 25).
    integer(hsize_t), dimension(2), intent(in) :: packedVVDims
-   integer(hid_t), dimension(numKPoints,potDim), intent(in) :: did
-   integer(hid_t), dimension(potDim), intent(in) :: aid
-
-   ! Define local variables that are extracted from the passed data structures
-   integer :: numAlphas
+   integer, dimension(potDim), intent(in) :: doneMask
 
    ! Define local variables for logging and loop control
-   integer :: i,j ! Loop index variables
+   integer :: i,j,n,m ! Loop index variables
+   integer :: term
    integer :: currentIterCount
    integer (hsize_t) :: matrixSize ! Used to define the size of the
          ! anyElecPotInteraction matrix and the number of bits in hsize_t.
-   integer :: hdf5Status
-   integer :: hdferr
-   integer(hsize_t), dimension (1) :: attribIntDims ! Attribute dataspace dim
+
+   ! The term table (PSEUDOCODE 25.2): one entry per potential term,
+   !   recording the identity the serial loop used to carry in its
+   !   loop variables. A term is one (potential type, alpha) pair.
+   integer, dimension (potDim) :: termSite     ! Potential site index.
+   integer, dimension (potDim) :: termType     ! Potential type index.
+   integer, dimension (potDim) :: termAlphaNum ! Alpha index in type.
+   real (kind=double), dimension (potDim) :: termAlpha ! The exponent.
+
+   ! The deal (PSEUDOCODE 25.2): the undone terms sorted most-diffuse
+   !   first, snake-dealt to ranks, and this rank's share re-sorted
+   !   into original term order for the walk.
+   integer, dimension (potDim) :: undoneList
+   integer, dimension (potDim) :: myTerms
+   integer :: numUndone
+   integer :: numOwned
+   integer :: dealRound   ! Which snake round a sorted position is in.
+   integer :: posInRound  ! Position within that round.
+   integer :: owner       ! The rank that round position lands on.
+   integer :: holdTerm    ! Insertion-sort carrier.
+   integer :: previousType ! Drives the mask reset on type change.
+
+   ! One term in flight: every k-point's packed, orthogonalized
+   !   matrix, filled by ortho through gaussOverlapEP and written by
+   !   writePotTermHDF5 under the lock.
+   real (kind=double), allocatable, dimension (:,:,:) :: packedBuffer
+
+   ! The per-rank stage accounting of PSEUDOCODE 25.6: compute, lock
+   !   wait, write, and the owned-term count, gathered to root.
+   real (kind=double), dimension (4) :: myStageTimes
+   real (kind=double), allocatable, dimension (:,:) :: allStageTimes
+   integer :: clockBefore, clockAfter, clockRate
 
    ! Make a time stamp.
    call timeStampStart (11)
@@ -2510,82 +2559,176 @@ subroutine elecPotGaussOverlap(packedVVDims,did,aid)
             & bit_size(matrixSize)+1))
    endif
 
-   ! Initialize the counter for the total number of iterations of the loops.
+   ! Build the term table by running the same doubly nested loop the
+   !   serial stage iterated, with no compute: each potential site
+   !   that is the FIRST of its type (firstPotType == 1) contributes
+   !   one term per alpha of that type, and the running count is the
+   !   term index -- the same index that names the term's HDF5 group.
    currentIterCount = 0
-
    do i = 1, numPotSites
-
-      ! Check if this potential site is the first to have some particular
-      !   potential type.  If it is the first site to have a particular
-      !   potential type then its "firstPotType" flag is 1.  Other sites with
-      !   the same type have a "firstPotType" value equal to 0.
       if (potSites(i)%firstPotType == 0) cycle
-
-      currPotTypeNumber = potSites(i)%potTypeAssn
-      numAlphas         = potTypes(currPotTypeNumber)%numAlphas
-
-      ! Initialize the anyElecPotInteraction matrix for this set of potential
-      !   alphas.  The assumption is that every atom pair will have some
-      !   potential interaction in every cell.  When a cell/atom/atom set is
-      !   found to not have an interaction, then that bit is set to zero.
-      !   (Note that the value of -1 will have every bit set to TRUE (1).)
-      !   (I hope that there is no machine dependence to this.  ^_^)
-      anyElecPotInteraction(:,:,:) = -1
-
-      do j = 1, numAlphas
-
-         ! Increment the counter of the number of total iterations. I.e.,
-         !   keep track of which potential term we are working on out of all
-         !   potential terms in the system (potDim).
+      do j = 1, potTypes(potSites(i)%potTypeAssn)%numAlphas
          currentIterCount = currentIterCount + 1
-
-         ! Determine if this calculation has already been completed by a
-         !   previous Imago execution.
-         hdf5Status = 0
-         attribIntDims(1) = 1
-         call h5aread_f(aid(currentIterCount),&
-               & H5T_NATIVE_INTEGER,hdf5Status,attribIntDims,hdferr)
-         if (hdferr /= 0) stop 'Failed to read atom pot term OL status.'
-         if (hdf5Status == 1) then
-            write(20,*) &
-                  & "Three-center pot term OL already exists. Skipping: ", &
-                  & currentIterCount
-            call h5aclose_f(aid(currentIterCount),hdferr)
-            if (hdferr /= 0) stop 'Failed to close atom pot term OL status.'
-            cycle
-         endif
-
-         ! Record the current parameters for this iteration.
-         currPotAlpha   = potTypes(currPotTypeNumber)%alphas(j)
-         currPotNumber  = i
-         currPotElement = potTypes(currPotTypeNumber)%elementID
-         currAlphaNumber = j
-         currMultiplicity = potTypes(currPotTypeNumber)%multiplicity
-
-         ! Calculate the overlap for the current alpha of the current type
-         !   with all the alphas of every pair of atoms.
-         call gaussOverlapEP(packedVVDims,did(:,currentIterCount),&
-               & aid(currentIterCount))
-
-         ! Record that this loop has finished
-         if (mod(currentIterCount,10) .eq. 0) then
-            write (20,ADVANCE="NO",FMT="(a1)") "|"
-         else
-            write (20,ADVANCE="NO",FMT="(a1)") "."
-         endif
-         if (mod(currentIterCount,50) .eq. 0) then
-            write (20,*) " ",currentIterCount
-         endif
-         call flush (20)
+         termSite(currentIterCount)     = i
+         termType(currentIterCount)     = potSites(i)%potTypeAssn
+         termAlphaNum(currentIterCount) = j
+         termAlpha(currentIterCount)    = &
+               & potTypes(potSites(i)%potTypeAssn)%alphas(j)
       enddo
    enddo
+   if (currentIterCount /= potDim) then
+      call stopMPI ('Term table count disagrees with potDim.')
+   endif
+
+   ! Collect the undone terms and sort them most-diffuse-first
+   !   (ascending alpha exponent -- the cost proxy the PA1
+   !   measurement licensed: diffuse alphas reach more atom pairs and
+   !   cost more). The insertion sort is stable, so equal exponents
+   !   keep their term order.
+   numUndone = 0
+   do n = 1, potDim
+      if (doneMask(n) == 0) then
+         numUndone = numUndone + 1
+         undoneList(numUndone) = n
+      endif
+   enddo
+   do n = 2, numUndone
+      holdTerm = undoneList(n)
+      m = n - 1
+      do
+         if (m < 1) exit
+         if (termAlpha(undoneList(m)) <= termAlpha(holdTerm)) exit
+         undoneList(m+1) = undoneList(m)
+         m = m - 1
+      enddo
+      undoneList(m+1) = holdTerm
+   enddo
+
+   ! The snake deal (DESIGN 9.5): boustrophedon rounds over the
+   !   cost-sorted list -- ranks 0..N-1, then N-1..0, alternating --
+   !   which equalizes rank loads under any cost monotone in the
+   !   exponent. A term's owner is a pure function of its sorted
+   !   position and the rank count, so every rank computes the same
+   !   deal without communicating.
+   numOwned = 0
+   do n = 1, numUndone
+      dealRound  = (n - 1) / mpiSize
+      posInRound = mod (n - 1, mpiSize)
+      if (mod (dealRound, 2) == 0) then
+         owner = posInRound
+      else
+         owner = mpiSize - 1 - posInRound
+      endif
+      if (owner == mpiRank) then
+         numOwned = numOwned + 1
+         myTerms(numOwned) = undoneList(n)
+      endif
+   enddo
+
+   ! Walk the owned terms in ORIGINAL term order, not deal order: the
+   !   original order is type-major and most-diffuse-first within a
+   !   type, which is what the anyElecPotInteraction inheritance
+   !   below assumes (a bit cleared by a more diffuse alpha is validly
+   !   cleared for every tighter alpha of its type, ownership gaps
+   !   included).
+   do n = 2, numOwned
+      holdTerm = myTerms(n)
+      m = n - 1
+      do
+         if (m < 1) exit
+         if (myTerms(m) <= holdTerm) exit
+         myTerms(m+1) = myTerms(m)
+         m = m - 1
+      enddo
+      myTerms(m+1) = holdTerm
+   enddo
+
+   ! One term's write payload stays in flight at a time.
+   allocate (packedBuffer (int(packedVVDims(1)),&
+         & int(packedVVDims(2)), numKPoints))
+   myStageTimes(:) = 0.0_double
+
+   ! The stage loop: this rank's terms only. The mask is reset
+   !   whenever the walk crosses into a new potential type; within a
+   !   type it accumulates prunings exactly as the serial loop did.
+   previousType = 0
+   do n = 1, numOwned
+      term = myTerms(n)
+      if (termType(term) /= previousType) then
+         ! Initialize the anyElecPotInteraction matrix for this type's
+         !   alphas.  The assumption is that every atom pair will have
+         !   some potential interaction in every cell.  When a
+         !   cell/atom/atom set is found to not have an interaction,
+         !   then that bit is set to zero.  (Note that the value of -1
+         !   will have every bit set to TRUE (1).)
+         anyElecPotInteraction(:,:,:) = -1
+         previousType = termType(term)
+      endif
+
+      ! Record the current parameters for this term.
+      currPotTypeNumber = termType(term)
+      currPotAlpha      = termAlpha(term)
+      currPotNumber     = termSite(term)
+      currPotElement    = potTypes(currPotTypeNumber)%elementID
+      currAlphaNumber   = termAlphaNum(term)
+      currMultiplicity  = potTypes(currPotTypeNumber)%multiplicity
+
+      ! Calculate the overlap for the current alpha of the current
+      !   type with all the alphas of every pair of atoms, and then
+      !   write the finished term under the file lock.
+      call system_clock (clockBefore, clockRate)
+      call gaussOverlapEP(packedVVDims,packedBuffer)
+      call system_clock (clockAfter)
+      myStageTimes(1) = myStageTimes(1)&
+            & + real (clockAfter - clockBefore, double)&
+            & / real (clockRate, double)
+      call writePotTermHDF5 (term, packedBuffer, packedVVDims,&
+            & myStageTimes(2), myStageTimes(3))
+
+      ! Record that this loop has finished
+      if (mod(n,10) .eq. 0) then
+         write (20,ADVANCE="NO",FMT="(a1)") "|"
+      else
+         write (20,ADVANCE="NO",FMT="(a1)") "."
+      endif
+      if (mod(n,50) .eq. 0) then
+         write (20,*) " ",n
+      endif
+      call flush (20)
+   enddo
+   myStageTimes(4) = real (numOwned, double)
 
    ! Deallocate matrices that are no longer used.
+   deallocate (packedBuffer)
    deallocate (anyElecPotInteraction)
 
+   ! Every rank must be done writing before anyone reopens the file
+   !   (root resumes its handles right after this returns), and the
+   !   stage stamp must cover the wait for the slowest rank -- it is
+   !   the stage's honest wall time.
+   call barrierMPI
 
    ! Make a finishing time stamp.
    call timeStampEnd (11)
+
+   ! Gather the per-rank accounting to root and print the table of
+   !   PSEUDOCODE 25.6: the balance is measured, not assumed, and the
+   !   wait and write columns answer DESIGN 9.5's serialized-write
+   !   question on real decks.
+   allocate (allStageTimes (4, mpiSize))
+   call gatherTimesMPI (myStageTimes, allStageTimes)
+   if (mpiRank == 0) then
+      write (20,*) 'Three-center term stage, per-rank accounting:'
+      write (20,fmt='(a)') &
+            & '   rank   compute s      wait s     write s  terms'
+      do n = 1, mpiSize
+         write (20,fmt='(i7,3f12.3,i7)') n-1, allStageTimes(1,n),&
+               & allStageTimes(2,n), allStageTimes(3,n),&
+               & nint (allStageTimes(4,n))
+      enddo
+      call flush (20)
+   endif
+   deallocate (allStageTimes)
 
 end subroutine elecPotGaussOverlap
 
@@ -3867,7 +4010,7 @@ subroutine orthoOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
 end subroutine orthoOL
 
 
-subroutine ortho (opCode,packedVVDims,did,aid)
+subroutine ortho (opCode,packedVVDims,did,aid,packedBuffer)
 
    ! Use necessary modules.
    use HDF5
@@ -3880,11 +4023,21 @@ subroutine ortho (opCode,packedVVDims,did,aid)
    ! Make sure that no funny variables are defined.
    implicit none
 
-   ! Define passed dummy arguments.
+   ! Define passed dummy arguments. When packedBuffer is PRESENT the
+   !   compute half runs exactly as always, but each k-point's packed
+   !   result is deposited into the buffer instead of written to the
+   !   did handles, and the completion attribute is left untouched --
+   !   the caller writes both later, under the file-lock discipline
+   !   of the distributed term stage (DESIGN 9.5, PSEUDOCODE 25.5),
+   !   through writePotTermHDF5. In that mode did and aid are never
+   !   referenced; the term stage runs with the file closed, so no
+   !   valid handles even exist.
    integer, intent(in) :: opCode
    integer(hsize_t), dimension(2), intent(in) :: packedVVDims
    integer(hid_t), dimension(numKPoints), intent(in) :: did
    integer(hid_t), intent(in) :: aid
+   real (kind=double), optional, dimension (:,:,:), intent(out) :: &
+         & packedBuffer
 
    ! Define local variables.
    integer :: i,j,k
@@ -3979,20 +4132,45 @@ subroutine ortho (opCode,packedVVDims,did,aid)
 #endif
       endif
 
-      ! Write the valeVale term onto disk in HDF5 format.
-      call h5dwrite_f(did(i),H5T_NATIVE_DOUBLE,packedValeVale(:,:),&
-            & packedVVDims,hdferr)
-      select case (opCode)
-      case (2)
-         if (hdferr /= 0) stop 'Failed to write kinetic energy vale vale'
-      case (3)
-         if (hdferr /= 0) stop 'Failed to write nuclear potential vale vale'
-      case (4)
-         if (hdferr /= 0) stop 'Failed to write electronic potential vale vale'
-      case (5) ! Implies that we are doing a scalar rel. calculation.
-         if (hdferr /= 0) stop 'Failed to write mass velocity vale vale'
-      end select
+      ! Deposit or write the packed valeVale term. Under the
+      !   distributed term stage the caller supplied a buffer and
+      !   owns the (lock-held) write; otherwise the term goes onto
+      !   disk right here through the open handle, as always.
+      if (present(packedBuffer)) then
+         packedBuffer(:,:,i) = packedValeVale(:,:)
+      else
+         call h5dwrite_f(did(i),H5T_NATIVE_DOUBLE,packedValeVale(:,:),&
+               & packedVVDims,hdferr)
+         select case (opCode)
+         case (2)
+            if (hdferr /= 0) stop &
+                  & 'Failed to write kinetic energy vale vale'
+         case (3)
+            if (hdferr /= 0) stop &
+                  & 'Failed to write nuclear potential vale vale'
+         case (4)
+            if (hdferr /= 0) stop &
+                  & 'Failed to write electronic potential vale vale'
+         case (5) ! Implies that we are doing a scalar rel. calculation.
+            if (hdferr /= 0) stop &
+                  & 'Failed to write mass velocity vale vale'
+         end select
+      endif
    enddo ! numKPoints i
+
+   ! In buffered mode the completion attribute belongs to the caller's
+   !   lock-held write: skip the record-and-close block below and only
+   !   release the local work arrays.
+   if (present(packedBuffer)) then
+#ifndef GAMMA
+      deallocate (valeCore)
+      deallocate (packedValeVale)
+#else
+      deallocate (valeCoreGamma)
+      deallocate (packedValeVale)
+#endif
+      return
+   endif
 
    ! Record that the calculation is complete..
    attribIntDims(1) = 1

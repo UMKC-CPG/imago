@@ -19,7 +19,8 @@ module O_SCFEigValHDF5
    ! Declare arrays that hold the dimensions of the eigenvalue dataset.
    integer(hsize_t), dimension (1) :: states
 
-   ! Declare the eigenvalue subgroup of the scf_fid.
+   ! Declare the eigenvalue subgroup of the SCF file's k-point group
+   !   (the parent group each init/access call receives).
    integer(hid_t) :: eigenValues_gid
 
    ! Declare the eigenvalue dataspace.
@@ -43,7 +44,7 @@ module O_SCFEigValHDF5
    contains
 
       
-subroutine initSCFEigValHDF5 (scf_fid,numStates)
+subroutine initSCFEigValHDF5 (parent_gid,numStates)
 
    ! Import any necessary definition modules.
    use HDF5
@@ -53,7 +54,7 @@ subroutine initSCFEigValHDF5 (scf_fid,numStates)
    use O_Potential, only: spin
 
    ! Define the passed parameters.
-   integer(hid_t) :: scf_fid
+   integer(hid_t) :: parent_gid
    integer, intent(in) :: numStates
 
    ! Define local variables.
@@ -64,8 +65,8 @@ subroutine initSCFEigValHDF5 (scf_fid,numStates)
    ! Initialize data structure dimensions.
    states(1) = numStates
 
-   ! Create the eigenValues group in the scf_fid.
-   call h5gcreate_f (scf_fid,"eigenValues",eigenValues_gid,hdferr)
+   ! Create the eigenValues group under the k-point parent group.
+   call h5gcreate_f (parent_gid,"eigenValues",eigenValues_gid,hdferr)
    if (hdferr /= 0) stop 'Failed to create eigenValues gid SCF'
 
    ! Create the dataspace that will be used for the energy eigen values.
@@ -101,7 +102,7 @@ subroutine initSCFEigValHDF5 (scf_fid,numStates)
 end subroutine initSCFEigValHDF5
 
 
-subroutine accessSCFEigValHDF5 (scf_fid,numStates)
+subroutine accessSCFEigValHDF5 (parent_gid,numStates)
 
    ! Import any necessary definition modules.
    use HDF5
@@ -111,7 +112,7 @@ subroutine accessSCFEigValHDF5 (scf_fid,numStates)
    use O_Potential, only: spin
 
    ! Define the passed parameters.
-   integer(hid_t) :: scf_fid
+   integer(hid_t) :: parent_gid
    integer, intent(in) :: numStates
 
    ! Define local variables.
@@ -122,8 +123,8 @@ subroutine accessSCFEigValHDF5 (scf_fid,numStates)
    ! Initialize data structure dimensions.
    states(1) = numStates
 
-   ! Open the eigenValues group in the scf_fid.
-   call h5gopen_f (scf_fid,"eigenValues",eigenValues_gid,hdferr)
+   ! Open the eigenValues group under the k-point parent group.
+   call h5gopen_f (parent_gid,"eigenValues",eigenValues_gid,hdferr)
    if (hdferr /= 0) stop 'Failed to open eigenValues group SCF'
 
    ! Allocate space to hold the IDs for the datasets in the eigenvalues group.

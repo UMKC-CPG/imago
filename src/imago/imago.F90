@@ -26,45 +26,57 @@ subroutine Imago
    call parseCommandLine
 
    ! Now, we are ready to do *either* SCF or Post SCF work.
+   !
+   ! Under MPI, setupSCF is the one region with distributed work at
+   !   this increment (its three-centre term stage, DESIGN 9.5);
+   !   everything after it is the root-serial remainder of the run
+   !   shape, so the worker ranks skip from here to the end of this
+   !   routine and park at the certificate barrier below while root
+   !   finishes alone. A serial build has mpiRank 0 and runs all of
+   !   it, exactly as always. (If root dies in its serial remainder,
+   !   the MPI runtime sees a process exit without finalize and ends
+   !   the whole job -- the parked workers cannot hang it.)
    if (doSCF == 1) then
       call setupSCF ! Preparation for SCF cycle and wave function calculation.
 
-      call mainSCF ! The actual SCF cycle and wave function calculation.
+      if (mpiRank == 0) then
+         call mainSCF ! The actual SCF cycle and wave function calculation.
 
-      if (doDOS_SCF == 1) then
-         call dos(1)  ! Passing inSCF == 1.
+         if (doDOS_SCF == 1) then
+            call dos(1)  ! Passing inSCF == 1.
+         endif
+
+         if (doBond_SCF >= 1) then
+            call bond(1, doBond_SCF)  ! Passing inSCF == 1
+         endif
+
+         if (doDIMO_SCF == 1) then
+            call dimo(1)  ! Passing inSCF == 1
+         endif
+
+         if (doOPTC_SCF >= 1) then
+            call optc(1, doOPTC_SCF)  ! Passing inSCF == 1
+         endif
+
+         if (doField_SCF == 1) then
+            call field(1)  ! Passing inSCF == 1
+         endif
+
+         if (doMTOP_SCF == 1) then
+            call mtop(1)  ! Passing inSCF == 1
+         endif
+
+         if (doPSCF == 1) then
+            !call reset
+         endif
+
+         call cleanUpSCF
+
+         call closeHDF5_SCF
       endif
-
-      if (doBond_SCF >= 1) then
-         call bond(1, doBond_SCF)  ! Passing inSCF == 1
-      endif
-
-      if (doDIMO_SCF == 1) then
-         call dimo(1)  ! Passing inSCF == 1
-      endif
-
-      if (doOPTC_SCF >= 1) then
-         call optc(1, doOPTC_SCF)  ! Passing inSCF == 1
-      endif
-
-      if (doField_SCF == 1) then
-         call field(1)  ! Passing inSCF == 1
-      endif
-
-      if (doMTOP_SCF == 1) then
-         call mtop(1)  ! Passing inSCF == 1
-      endif
-
-      if (doPSCF == 1) then
-         !call reset
-      endif
-
-      call cleanUpSCF
-
-      call closeHDF5_SCF
    endif
 
-   if (doPSCF == 1) then
+   if ((doPSCF == 1) .and. (mpiRank == 0)) then
       call intgPSCF ! Preparations for wave function calculation.
 
       call bandPSCF ! Wave function calculation.
@@ -98,7 +110,7 @@ subroutine Imago
       call closeHDF5_PSCF
    endif
 
-   if (doLoEn == 1) then
+   if ((doLoEn == 1) .and. (mpiRank == 0)) then
       call loen(0)
    endif
 
@@ -144,13 +156,15 @@ subroutine setupSCF
    use O_Kinds
 
    ! Import the necessary modules.
-   use O_SCFHDF5, only: initHDF5_SCF
+   use O_MPI, only: mpiRank, barrierMPI, bcastMPI, bcastIntVecMPI
+   use O_SCFHDF5, only: initHDF5_SCF, suspendHDF5_SCF, resumeHDF5_SCF
+   use O_SCFIntegralsHDF5, only: readPotTermDoneMask, setIntegralDims
    use O_SCFIntegralsHDF5, only: atomOverlap_did, atomOverlapCV_did, &
          & atomKEOverlap_did, atomMVOverlap_did, atomNPOverlap_did, &
-         & atomDMOverlap_did, atomMMOverlap_did, atomPotOverlap_did, &
+         & atomDMOverlap_did, atomMMOverlap_did, &
          & atomOverlap_aid, atomKEOverlap_aid, atomMVOverlap_aid, &
          & atomNPOverlap_aid, atomDMOverlap_aid, atomMMOverlap_aid, &
-         & atomPotTermOL_aid, numComponents, fullCVDims, packedVVDims
+         & numComponents, fullCVDims, packedVVDims
 #ifndef GAMMA
    ! The k-point overlap dataset handles feed the gaussKOverlap calls
    !   below. The gamma-only build works at a single k-point and never
@@ -182,12 +196,12 @@ subroutine setupSCF
    use O_Integrals,   only: allocateIntegralsSCF, gaussOverlapOL, &
          & gaussOverlapKE, gaussOverlapMV, gaussOverlapNP, &
          & elecPotGaussOverlap, cleanUpIntegrals, &
-         & secondCleanUpIntegrals
+         & secondCleanUpIntegrals, coreValeOL
 #else
    use O_Integrals,   only: allocateIntegralsSCFGamma, gaussOverlapOL, &
          & gaussOverlapKE, gaussOverlapMV, gaussOverlapNP, &
          & elecPotGaussOverlap, cleanUpIntegrals, &
-         & secondCleanUpIntegrals
+         & secondCleanUpIntegrals, coreValeOLGamma
 #endif
    use O_Integrals3Terms ! Use all so we can exclude gaussKOverlap
    use O_AtomicSites, only: coreDim, valeDim, &
@@ -196,7 +210,7 @@ subroutine setupSCF
    use O_AtomicTypes, only: cleanUpRadialFns, cleanUpAtomTypes
    use O_PotSites, only: cleanUpPotSites
    use O_PotTypes, only: cleanUpPotTypes
-   use O_Potential, only: rel, cleanUpPotential
+   use O_Potential, only: rel, potDim, cleanUpPotential
    use O_CoreCharge, only: makeCoreRho
 
    ! Import the HDF5 module.
@@ -209,6 +223,11 @@ subroutine setupSCF
    implicit none
 
    ! Define local variables.
+   ! The three-centre term stage's done-mask: root reads it from the
+   !   completion attributes before the file is suspended, and the
+   !   broadcast copy steers every rank's snake deal (DESIGN 9.5,
+   !   PSEUDOCODE 25.2).
+   integer, allocatable, dimension (:) :: potTermDoneMask
 ! zeroVectors belongs to the commented plusG form of the
 !   gaussKOverlap calls below (BUG-010 in dev/DEBUG.md).
 !   real (kind=double), dimension(3,3) :: zeroVectors
@@ -307,13 +326,29 @@ subroutine setupSCF
    call getECMeshParameters
 
 
-   ! Now, the dimensions of the system are known.  Therefore we can
-   !   initialize the HDF5 file structure format, and datasets.
-   call initHDF5_SCF (maxNumRayPoints, numStates)
+   ! Now, the dimensions of the system are known.  Set the integral
+   !   dataset dimensions on EVERY rank: only root shapes the file
+   !   with them, but every rank sizes its term-stage compute buffers
+   !   from packedVVDims (PSEUDOCODE 25.1). Root's init call repeats
+   !   the same arithmetic harmlessly.
+   call setIntegralDims
 
+   ! Initialize the HDF5 file structure format, and datasets.
+   !
+   ! ROOT ONLY (PSEUDOCODE 25.1): root is the sole owner of the HDF5
+   !   file -- it creates the structure and holds every handle -- and
+   !   the exchange-correlation mesh write goes through those
+   !   handles. Worker ranks of a parallel run never open the file;
+   !   they join back in at the distributed term stage below, and a
+   !   term is written there by whichever rank computed it, under the
+   !   file lock, with root's view of the file suspended.
+   if (mpiRank == 0) then
+      call initHDF5_SCF (maxNumRayPoints, numStates)
 
-   ! Construct the exchange correlation overlap matrix, and sampling field.
-   call makeECMeshAndOverlap
+      ! Construct the exchange correlation overlap matrix, and
+      !   sampling field.
+      call makeECMeshAndOverlap
+   endif
 
 
    ! Create the alpha distance matrices.
@@ -328,39 +363,91 @@ subroutine setupSCF
 #endif
 
 
-   ! Calculate the matrix elements of the overlap between all LCAO basis fns.
-   call gaussOverlapOL(numComponents,fullCVDims,packedVVDims,atomOverlap_did,&
-         & atomOverlapCV_did,atomOverlap_aid)
+   ! ROOT ONLY: these cheap integral stages (a few percent of a run,
+   !   ARCHITECTURE 6.8) write through the handles root holds from
+   !   initHDF5_SCF, so root computes them alone while the workers
+   !   wait for the term stage.
+   if (mpiRank == 0) then
 
+      ! Calculate the matrix elements of the overlap between all LCAO
+      !   basis fns.
+      call gaussOverlapOL(numComponents,fullCVDims,packedVVDims,&
+            & atomOverlap_did,atomOverlapCV_did,atomOverlap_aid)
 
-   ! Calculate the matrix elements of the kinetic energy between all LCAO
-   !   basis functions.
-   call gaussOverlapKE(packedVVDims,atomKEOverlap_did,atomKEOverlap_aid)
+      ! Calculate the matrix elements of the kinetic energy between
+      !   all LCAO basis functions.
+      call gaussOverlapKE(packedVVDims,atomKEOverlap_did,&
+            & atomKEOverlap_aid)
 
-
-   ! Calculate the matrix elements of the mass velocity between all LCAO
-   !   basis functions if needed for the scalar relativistic calculation.
-   if (rel == 1) then
-      call gaussOverlapMV(packedVVDims,atomMVOverlap_did,atomMVOverlap_aid)
+      ! Calculate the matrix elements of the mass velocity between
+      !   all LCAO basis functions if needed for the scalar
+      !   relativistic calculation.
+      if (rel == 1) then
+         call gaussOverlapMV(packedVVDims,atomMVOverlap_did,&
+               & atomMVOverlap_aid)
+      endif
    endif
 
+   ! The overlap stage leaves more than its file datasets behind: the
+   !   core-valence overlap matrix stays in memory (coreValeOL) and
+   !   every later orthogonalization consumes it -- including the
+   !   term stage's ortho on the WORKER ranks, which never ran the
+   !   overlap stage. Root therefore shares its copy (computed fresh
+   !   above, or read back from the file when a restart skipped the
+   !   stage) with everyone (PSEUDOCODE 25.1). Serial build: no-op.
+#ifndef GAMMA
+   call bcastMPI (coreValeOL)
+#else
+   call bcastMPI (coreValeOLGamma)
+#endif
 
    ! Create the alpha distance matrix with nuclear alpha factor
    call makeAlphaNucDist
 
 
    ! Calculate the matrix elements of the overlap between all LCAO
-   !   wave functions and the nuclear potentials.
-   call gaussOverlapNP(packedVVDims,atomNPOverlap_did,atomNPOverlap_aid)
+   !   wave functions and the nuclear potentials. ROOT ONLY, as the
+   !   stages above.
+   if (mpiRank == 0) then
+      call gaussOverlapNP(packedVVDims,atomNPOverlap_did,&
+            & atomNPOverlap_aid)
+   endif
 
 
    ! Create the alpha distance matrix with potential alpha factor
    call makeAlphaPotDist
 
 
+   ! The distributed three-centre term stage (DESIGN 9.5, PSEUDOCODE
+   !   25.3). Root reads which terms an earlier run already finished
+   !   and broadcasts the mask; then root closes the file COMPLETELY
+   !   (suspendHDF5_SCF), because the stage uses HDF5's own file lock
+   !   as its write mutex and any held handle would keep the lock and
+   !   starve every rank. The barrier keeps a fast worker from taking
+   !   the lock before root has released it. Every rank -- root
+   !   included -- then computes its dealt share of the terms and
+   !   writes each one under the lock; the stage-end barrier inside
+   !   elecPotGaussOverlap holds everyone until the last term is on
+   !   disk, after which root alone rebuilds its handles
+   !   (resumeHDF5_SCF) and carries the rest of the run.
+   allocate (potTermDoneMask (potDim))
+   if (mpiRank == 0) then
+      call readPotTermDoneMask (potTermDoneMask)
+   endif
+   call bcastIntVecMPI (potTermDoneMask)
+   if (mpiRank == 0) then
+      call suspendHDF5_SCF
+   endif
+   call barrierMPI
+
    ! Calculate the matrix elements of the overlap between all LCAO
    !   wave functions and the potential site potential alphas.
-   call elecPotGaussOverlap(packedVVDims,atomPotOverlap_did,atomPotTermOL_aid)
+   call elecPotGaussOverlap(packedVVDims,potTermDoneMask)
+
+   deallocate (potTermDoneMask)
+   if (mpiRank == 0) then
+      call resumeHDF5_SCF (numStates)
+   endif
 
 
    ! Now that all the single matrices are done being made we can deallocate
@@ -370,8 +457,12 @@ subroutine setupSCF
 
    ! If any supplementary three-term matrices (xyz) were requested for
    !   computing other properties, then allocate the space that is necessary
-   !   for the integral calculation and do the integral.
-   if ((doDIMO_SCF == 1) .or. (doOPTC_SCF >= 1) .or. (doMTOP_SCF == 1)) then
+   !   for the integral calculation and do the integral. ROOT ONLY:
+   !   these write through root's (now resumed) handles, and the
+   !   workers' run is over -- everything below the term stage is the
+   !   root-serial remainder of DESIGN 9.5's run shape.
+   if (((doDIMO_SCF == 1) .or. (doOPTC_SCF >= 1) .or. &
+         & (doMTOP_SCF == 1)) .and. (mpiRank == 0)) then
 
       ! Consider in the future an option to do the XYZ independently to
       !   conserve memory if that becomes a problem.
@@ -421,7 +512,8 @@ subroutine setupSCF
 
    ! Construct a vector describing the core charge density since it will not
    !   change throughout the SCF iterations because of core orthogonalization.
-   if (coreDim /= 0) then
+   !   Root-only: it feeds the SCF iteration, which only root runs.
+   if ((coreDim /= 0) .and. (mpiRank == 0)) then
       call makeCoreRho
    endif
 
@@ -432,8 +524,11 @@ subroutine setupSCF
 
 
    ! Construct matrix operators and integral vectors that are used to later
-   !   determine the electrostatic potential.
-   call makeElectrostatics
+   !   determine the electrostatic potential. Root-only: it writes
+   !   through root's handles and feeds the root-serial SCF iteration.
+   if (mpiRank == 0) then
+      call makeElectrostatics
+   endif
 
 
    !! Close all the parts of the setup HDF5 file.

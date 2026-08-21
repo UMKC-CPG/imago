@@ -20,8 +20,19 @@ module O_SCFIntegralsHDF5
    !   component. Otherwise, we need two.
    integer :: numComponents
 
-   ! Define the main subgroup from scf_fid that holds the multicenter
-   !   Gaussian integral results.
+   ! The names of this section's HDF5 objects, declared beside the code
+   !   that creates them and exported as parameters so that the by-name
+   !   reopen in O_SCFHDF5 (writePotTermHDF5, the lock-held per-term
+   !   write of the distributed integral stage) cannot drift from the
+   !   creation spelling (PSEUDOCODE 25.1). The init and access
+   !   routines below use these same parameters.
+   character (len=*), parameter :: intgGroupName = "atomIntgGroup"
+   character (len=*), parameter :: potOverlapGroupName = &
+         & "atomPotOverlap"
+   character (len=*), parameter :: statusAttribName = "status"
+
+   ! Define the main subgroup, under the k-point group of the SCF
+   !   file, that holds the multicenter Gaussian integral results.
    integer(hid_t) :: atomIntgGroup_gid ! Atom and potential overlap group.
 
    ! Begin group, dataspace, dataset definitions for atomIntgGroup_gid.
@@ -105,7 +116,8 @@ module O_SCFIntegralsHDF5
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    contains
 
-subroutine initSCFIntegralHDF5 (scf_fid, attribInt_dsid, attribIntDims)
+subroutine initSCFIntegralHDF5 (parent_gid, attribInt_dsid,&
+      & attribIntDims)
 
    ! Import any necessary definition modules.
    use HDF5
@@ -115,8 +127,10 @@ subroutine initSCFIntegralHDF5 (scf_fid, attribInt_dsid, attribIntDims)
    use O_Potential,   only: potDim
    use O_AtomicSites, only: coreDim, valeDim
 
-   ! Define the passed parameters.
-   integer(hid_t) :: scf_fid
+   ! Define the passed parameters. The parent is the k-point GROUP of
+   !   the SCF file, not the file itself: initHDF5_SCF hands each
+   !   k-point-dependent section its place in the tree.
+   integer(hid_t) :: parent_gid
    integer(hid_t) :: attribInt_dsid
    integer(hsize_t), dimension (1) :: attribIntDims
 
@@ -125,22 +139,11 @@ subroutine initSCFIntegralHDF5 (scf_fid, attribInt_dsid, attribIntDims)
    integer :: hdferr
    character*30 :: currentName
 
-   ! Determine the number of components for some data structures.
-#ifndef GAMMA
-   numComponents = 2 ! Real and imaginary are needed.
-#else
-   numComponents = 1 ! Real only is needed.
-#endif
-
-   ! Initialize data structure dimensions.
-   packedVVDims(1) = numComponents
-   packedVVDims(2) = valeDim*(valeDim+1)/2 ! Linear storage of 1/2 matrix.
-   fullVVDims(1) = valeDim
-   fullVVDims(2) = valeDim
-   if (coreDim > 0) then
-      fullCVDims(1) = coreDim
-      fullCVDims(2) = valeDim
-   endif
+   ! Determine the component count and the data structure dimensions.
+   !   The arithmetic lives in setIntegralDims because ranks that
+   !   never open the file need these dimensions too (they size the
+   !   term stage's compute buffers); see that routine's header.
+   call setIntegralDims
 
    ! Check that the chunk size is not too large. The assumption here is that
    !   the number being stored are 8 byte reals and that we should not go over
@@ -188,7 +191,7 @@ subroutine initSCFIntegralHDF5 (scf_fid, attribInt_dsid, attribIntDims)
    endif
 
    ! Create the Integral group within the scf HDF5 file.
-   call h5gcreate_f (scf_fid,"atomIntgGroup",atomIntgGroup_gid,hdferr)
+   call h5gcreate_f (parent_gid,intgGroupName,atomIntgGroup_gid,hdferr)
    if (hdferr /= 0) stop 'Failed to create atom intg group SCF'
 
    ! The basic layout of the contents of the integral group are as follows:
@@ -243,7 +246,8 @@ subroutine initSCFIntegralHDF5 (scf_fid, attribInt_dsid, attribIntDims)
          & atomKOverlapPlusG_gid,hdferr)
    if (hdferr /= 0) stop 'Failed to create KoverlapPlusG group SCF'
 
-   call h5gcreate_f (atomIntgGroup_gid,"atomPotOverlap",atomPotOverlap_gid,&
+   call h5gcreate_f (atomIntgGroup_gid,potOverlapGroupName,&
+         & atomPotOverlap_gid,&
          & hdferr)
    if (hdferr /= 0) stop 'Failed to create atom potential overlap group SCF'
 
@@ -451,40 +455,41 @@ subroutine initSCFIntegralHDF5 (scf_fid, attribInt_dsid, attribIntDims)
 
    ! Create the attribute that indicates completion of the calculation of
    !   each integral type.
-   call h5acreate_f (atomOverlap_gid,"status",H5T_NATIVE_INTEGER,&
+   call h5acreate_f (atomOverlap_gid,statusAttribName,H5T_NATIVE_INTEGER,&
          & attribInt_dsid,atomOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to create atom overlap aid SCF'
 
-   call h5acreate_f (atomKEOverlap_gid,"status",H5T_NATIVE_INTEGER,&
+   call h5acreate_f (atomKEOverlap_gid,statusAttribName,H5T_NATIVE_INTEGER,&
          & attribInt_dsid,atomKEOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to create KE overlap aid SCF'
 
-   call h5acreate_f (atomMVOverlap_gid,"status",H5T_NATIVE_INTEGER,&
+   call h5acreate_f (atomMVOverlap_gid,statusAttribName,H5T_NATIVE_INTEGER,&
          & attribInt_dsid,atomMVOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to create MV overlap aid SCF'
 
-   call h5acreate_f (atomNPOverlap_gid,"status",H5T_NATIVE_INTEGER,&
+   call h5acreate_f (atomNPOverlap_gid,statusAttribName,H5T_NATIVE_INTEGER,&
          & attribInt_dsid,atomNPOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to create Nuc overlap aid SCF'
 
-   call h5acreate_f (atomDMOverlap_gid,"status",H5T_NATIVE_INTEGER,&
+   call h5acreate_f (atomDMOverlap_gid,statusAttribName,H5T_NATIVE_INTEGER,&
          & attribInt_dsid,atomDMOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to create DM overlap aid SCF'
 
-   call h5acreate_f (atomMMOverlap_gid,"status",H5T_NATIVE_INTEGER,&
+   call h5acreate_f (atomMMOverlap_gid,statusAttribName,H5T_NATIVE_INTEGER,&
          & attribInt_dsid,atomMMOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to create MM overlap aid SCF'
 
-   call h5acreate_f (atomKOverlap_gid,"status",H5T_NATIVE_INTEGER,&
+   call h5acreate_f (atomKOverlap_gid,statusAttribName,H5T_NATIVE_INTEGER,&
          & attribInt_dsid,atomKOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to create Koverlap aid SCF'
 
-   call h5acreate_f (atomKOverlapPlusG_gid,"status",H5T_NATIVE_INTEGER,&
+   call h5acreate_f (atomKOverlapPlusG_gid,statusAttribName,H5T_NATIVE_INTEGER,&
          & attribInt_dsid,atomKOverlapPlusG_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to create KoverlapPlusG aid SCF'
 
    do i = 1, potDim
-      call h5acreate_f (atomPotTermOL_gid(i),"status",H5T_NATIVE_INTEGER,&
+      call h5acreate_f (atomPotTermOL_gid(i),statusAttribName,&
+            & H5T_NATIVE_INTEGER,&
             & attribInt_dsid,atomPotTermOL_aid(i),hdferr)
       if (hdferr /= 0) stop 'Failed to create potential overlap aid (i) SCF'
    enddo
@@ -523,12 +528,14 @@ subroutine initSCFIntegralHDF5 (scf_fid, attribInt_dsid, attribIntDims)
 
    ! At this point, we flush all meta data to the SCF HDF5 file. Then, the
    !   HDF5 file is primed for use.
-   call h5fflush_f(scf_fid,H5F_SCOPE_GLOBAL_F,hdferr)
+   ! Flush through the parent group id; the flush applies to the whole
+   !   file that contains it.
+   call h5fflush_f(parent_gid,H5F_SCOPE_GLOBAL_F,hdferr)
 
 end subroutine initSCFIntegralHDF5
 
 
-subroutine accessSCFIntegralHDF5 (scf_fid)
+subroutine accessSCFIntegralHDF5 (parent_gid)
 
    ! Import any necessary definition modules.
    use HDF5
@@ -538,33 +545,21 @@ subroutine accessSCFIntegralHDF5 (scf_fid)
    use O_Potential,   only: potDim
    use O_AtomicSites, only: coreDim, valeDim
 
-   ! Define the passed parameters.
-   integer(hid_t) :: scf_fid
+   ! Define the passed parameters. The parent is the k-point GROUP of
+   !   the SCF file, exactly as in initSCFIntegralHDF5 above.
+   integer(hid_t) :: parent_gid
 
    ! Define local variables.
    integer :: i,j
    integer :: hdferr
    character*30 :: currentName
 
-   ! Determine the number of components for some data structures.
-#ifndef GAMMA
-   numComponents = 2 ! Real and imaginary are needed.
-#else
-   numComponents = 1 ! Real only is needed.
-#endif
-
-   ! Initialize data structure dimensions.
-   packedVVDims(1) = numComponents
-   packedVVDims(2) = valeDim*(valeDim+1)/2 ! Linear storage of 1/2 matrix.
-   fullVVDims(1) = valeDim
-   fullVVDims(2) = valeDim
-   if (coreDim > 0) then
-      fullCVDims(1) = coreDim
-      fullCVDims(2) = valeDim
-   endif
+   ! Determine the component count and the data structure dimensions
+   !   (shared arithmetic; see setIntegralDims).
+   call setIntegralDims
 
    ! Open the Integral group within the scf HDF5 file.
-   call h5gopen_f (scf_fid,"atomIntgGroup",atomIntgGroup_gid,hdferr)
+   call h5gopen_f (parent_gid,intgGroupName,atomIntgGroup_gid,hdferr)
    if (hdferr /= 0) stop 'Failed to open atom intg group SCF'
 
    ! Open the subgroups within the atomIntgGroup. We open all the subgroups
@@ -592,7 +587,8 @@ subroutine accessSCFIntegralHDF5 (scf_fid)
    call h5gopen_f (atomIntgGroup_gid,"atomKOverlapPlusG",&
          & atomKOverlapPlusG_gid,hdferr)
    if (hdferr /= 0) stop 'Failed to open KoverlapPlusG group SCF'
-   call h5gopen_f (atomIntgGroup_gid,"atomPotOverlap",atomPotOverlap_gid,hdferr)
+   call h5gopen_f (atomIntgGroup_gid,potOverlapGroupName,&
+         & atomPotOverlap_gid,hdferr)
    if (hdferr /= 0) stop 'Failed to open atom potential overlap group SCF'
 
    ! For the integrals that have multiple matrices per kpoint, we need to
@@ -727,33 +723,35 @@ subroutine accessSCFIntegralHDF5 (scf_fid)
    enddo
 
    ! Open the attributes of each integral group.
-   call h5aopen_f (atomOverlap_gid,'status',atomOverlap_aid,hdferr)
+   call h5aopen_f (atomOverlap_gid,statusAttribName,atomOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to open atom overlap aid SCF'
 
-   call h5aopen_f (atomKEOverlap_gid,'status',atomKEOverlap_aid,hdferr)
+   call h5aopen_f (atomKEOverlap_gid,statusAttribName,atomKEOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to open atom KE overlap aid SCF'
 
-   call h5aopen_f (atomMVOverlap_gid,'status',atomMVOverlap_aid,hdferr)
+   call h5aopen_f (atomMVOverlap_gid,statusAttribName,atomMVOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to open atom MV overlap aid SCF'
 
-   call h5aopen_f (atomNPOverlap_gid,'status',atomNPOverlap_aid,hdferr)
+   call h5aopen_f (atomNPOverlap_gid,statusAttribName,atomNPOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to open nuclear overlap aid SCF'
 
-   call h5aopen_f (atomDMOverlap_gid,'status',atomDMOverlap_aid,hdferr)
+   call h5aopen_f (atomDMOverlap_gid,statusAttribName,atomDMOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to open DM overlap aid SCF'
 
-   call h5aopen_f (atomMMOverlap_gid,'status',atomMMOverlap_aid,hdferr)
+   call h5aopen_f (atomMMOverlap_gid,statusAttribName,atomMMOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to open MM overlap aid SCF'
 
-   call h5aopen_f (atomKOverlap_gid,'status',atomKOverlap_aid,hdferr)
+   call h5aopen_f (atomKOverlap_gid,statusAttribName,atomKOverlap_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to open Koverlap aid SCF'
 
-   call h5aopen_f (atomKOverlapPlusG_gid,'status',atomKOverlapPlusG_aid,&
+   call h5aopen_f (atomKOverlapPlusG_gid,statusAttribName,&
+         & atomKOverlapPlusG_aid,&
          & hdferr)
    if (hdferr /= 0) stop 'Failed to open KoverlapPlusG aid SCF'
 
    do i = 1, potDim
-      call h5aopen_f (atomPotTermOL_gid(i),'status',atomPotTermOL_aid(i),&
+      call h5aopen_f (atomPotTermOL_gid(i),statusAttribName,&
+            & atomPotTermOL_aid(i),&
             & hdferr)
       if (hdferr /= 0) stop 'Failed to open potential overlap aid SCF'
    enddo
@@ -948,6 +946,7 @@ subroutine closeSCFIntegralHDF5
    deallocate (atomDMOverlap_did)
    deallocate (atomMMOverlap_did)
    deallocate (atomKOverlap_did)
+   deallocate (atomKOverlapPlusG_did)
    deallocate (atomPotOverlap_did)
    deallocate (atomPotTermOL_aid)
    deallocate (atomPotTermOL_gid)
@@ -959,5 +958,83 @@ subroutine closeSCFIntegralHDF5
    ! Note that the attributes are closed as soon as they are finished.
    
 end subroutine closeSCFIntegralHDF5
+
+
+subroutine readPotTermDoneMask (doneMask)
+
+   ! Read the completion attribute of every three-centre potential
+   !   term through the attribute handles that are open right now
+   !   (PSEUDOCODE 25.2/25.3). Called on ROOT ONLY, before the file
+   !   is suspended for the distributed term stage: the mask is then
+   !   broadcast, and the snake deal runs over the undone terms.
+   !   Nothing is opened and nothing is closed here -- the handles
+   !   came from init or access, and suspendHDF5_SCF's sweep closes
+   !   everything still open on the file.
+
+   ! Import necessary object modules.
+   use O_Potential, only: potDim
+
+   ! Make sure that no funny variables are defined.
+   implicit none
+
+   ! Define the passed parameters.
+   integer, dimension (potDim), intent (out) :: doneMask
+
+   ! Define local variables.
+   integer :: i
+   integer :: hdferr
+   integer(hsize_t), dimension (1) :: attribIntDims
+
+   attribIntDims(1) = 1
+   do i = 1, potDim
+      doneMask(i) = 0
+      call h5aread_f (atomPotTermOL_aid(i), H5T_NATIVE_INTEGER,&
+            & doneMask(i), attribIntDims, hdferr)
+      if (hdferr /= 0) stop 'Failed to read atom pot term OL status.'
+      if (doneMask(i) == 1) then
+         write (20,*) &
+               & "Three-center pot term OL already exists. Skipping: ",&
+               & i
+      endif
+   enddo
+
+end subroutine readPotTermDoneMask
+
+
+subroutine setIntegralDims
+
+   ! Set this section's component count and dataset dimensions from
+   !   the system size. This is pure arithmetic -- no file is touched
+   !   -- and it exists as its own routine because TWO kinds of
+   !   caller need the numbers: the init and access routines above,
+   !   which shape the file's datasets, and EVERY rank of a parallel
+   !   run, which sizes the term stage's compute buffers with
+   !   packedVVDims even though only root ever opens the file
+   !   (PSEUDOCODE 25.1). One spelling of the arithmetic serves all.
+
+   ! Import necessary object modules.
+   use O_AtomicSites, only: coreDim, valeDim
+
+   ! Make sure that no funny variables are defined.
+   implicit none
+
+   ! Determine the number of components for some data structures.
+#ifndef GAMMA
+   numComponents = 2 ! Real and imaginary are needed.
+#else
+   numComponents = 1 ! Real only is needed.
+#endif
+
+   ! Initialize data structure dimensions.
+   packedVVDims(1) = numComponents
+   packedVVDims(2) = valeDim*(valeDim+1)/2 ! Linear storage of 1/2 matrix.
+   fullVVDims(1) = valeDim
+   fullVVDims(2) = valeDim
+   if (coreDim > 0) then
+      fullCVDims(1) = coreDim
+      fullCVDims(2) = valeDim
+   endif
+
+end subroutine setIntegralDims
 
 end module O_SCFIntegralsHDF5

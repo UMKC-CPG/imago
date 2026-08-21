@@ -17,7 +17,7 @@ add_executable(imago ../../kinds.f90 ../../constants.f90
    ../timeStamps.f90 ../commandLine.f90 ../potSites.f90 ../potTypes.f90
    ../atomicTypes.f90 ../atomicSites.f90 ../potential.f90 ../lattice.f90
    ../kpoints.f90 ../methodCitations.f90 ../gaussRelations.f90
-   ../hdf5PSCFIntg.F90
+   ../hdf5Utils.f90 ../hdf5PSCFIntg.F90
    ../hdf5PSCFEigVal.f90 ../hdf5PSCFEigVec.F90 ../hdf5PSCFField.F90
    ../hdf5PSCF.F90 ../hdf5SCFIntg.F90 ../hdf5SCFElec.f90 ../hdf5SCFExco.f90
    ../hdf5SCFEigVal.f90 ../hdf5SCFEigVec.F90 ../hdf5SCFPotRho.f90
