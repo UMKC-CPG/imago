@@ -16759,31 +16759,41 @@ deferral).
 
 ### 26.3 Root's dispatch-collect flow (inside secularEqnSCF)
 
+ROUND-BASED (corrected 2026-08-22 after the first acceptance run
+deadlocked; see 26.5): each round hands every rank at most one
+k-point, so a worker never holds a second pending task while its
+reply is unsent.
+
 ```
-for each undone k-point i owned by a WORKER w:
-   assemble packed H (nuclear + kinetic [+ mass velocity]
-         + potDim potential terms with potCoeffs), as today
-   read packed S, as today
-   send to w: control TASK(i), then packed H, then packed S
-for each undone k-point i owned by ROOT:
-   assemble as today; unpack; solve (solveZHEGV/solveDSYGV);
-   hold the results        ! root computes while workers do
-for each dealt k-point i, in deal order:
-   receive from its owner: eigenvalues(numStates),
-         eigenvector block (valeDim x numStates; complex or
-         real per build), solve seconds
-   write eigenvalues dataset + energyEigenValues(:,i,spin)
-   write eigenvector datasets; set completion attribute
-(root's own k-points write identically, as today)
+for each ROUND r of the deal (round r = the r-th undone
+      k-point of each rank, while any rank has one):
+   for each WORKER w with a k-point i in this round:
+      assemble packed H (nuclear + kinetic [+ mass velocity]
+            + potDim potential terms with potCoeffs), as today
+      read packed S, as today
+      send to w: control TASK(i), then packed H, then packed S
+      ! w is idle in recvCtrl when this round's send arrives,
+      !   so the send always completes
+   if ROOT has a k-point i in this round:
+      assemble as today; unpack; solve; write the eigenvalue
+            and eigenvector datasets and the completion
+            attribute, as today   ! root computes while the
+                                  !   workers do
+   for each WORKER w with a k-point i in this round:
+      receive: eigenvalues(numStates), eigenvector block
+            (valeDim x numStates; complex or real per build),
+            solve seconds
+      write eigenvalues dataset + energyEigenValues(:,i,spin)
+      write eigenvector datasets; set completion attribute
 reset all completion attributes    ! as today
 write one summary line to the log: k-points dealt, ranks
       used, min/max solve seconds  ! the 25.6-style record
 ```
 
-The assembly for dealt k-points happens BEFORE root starts its
-own solves, so workers are busy while root computes; the
-collection order is fixed (deal order), which is fine because
-the reply wait overlaps root's own work, not the workers'.
+Within a round the overlap is intact -- workers solve while
+root does -- and the round barrier costs only the spread
+between equal-cost solves. The round structure is what makes
+blocking transport safe (26.5).
 
 ### 26.4 The worker's solve server (secularEqn.F90)
 
@@ -16825,11 +16835,18 @@ Paired, blocking, tagged wrappers with serial no-op stubs:
 `sendRealBlockMPI`/`recvRealBlockMPI` (the eigenvector block),
 `sendDblVecMPI`/`recvDblVecMPI` (eigenvalues + timing), and
 `sendCtrlMPI`/`recvCtrlMPI` (the TASK/SHUTDOWN code and the
-k-point index). Blocking point-to-point is sufficient: the
-protocol is strictly request-reply per k-point, and the only
-concurrency needed -- root computing while workers compute --
-comes from the dispatch ordering of 26.3, not from
-non-blocking calls.
+k-point index). Blocking point-to-point is sufficient ONLY
+under the round discipline of 26.3, and the first acceptance
+run is the proof (2026-08-22): an earlier form dispatched
+every task before collecting any reply, and on the medium
+deck -- where the packed matrices are tens of megabytes, past
+MPI's eager threshold and into the rendezvous path -- root's
+blocking send of a worker's SECOND task met that worker's
+blocking send of its FIRST reply head-on, with neither side's
+matching receive posted: a deadlock the small deck's
+eager-path messages could never expose. One outstanding task
+per worker restores true request-reply, and then every
+blocking send faces a receiver that is already waiting.
 
 ### 26.6 Checks
 

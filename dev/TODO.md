@@ -8589,8 +8589,30 @@ is not carried only in conversation.
   section after A is accepted -- the win for one-k-point large
   cells); the valence density rides the same deal as its own
   step after A. Deferrals recorded in 9.6: spin pairing, and
-  Hubbard-U k-points stay on root. Awaits programmer review
-  before any code.
+  Hubbard-U k-points stay on root. Reviewed by the programmer
+  2026-08-21.
+  **STAGE A CODED and ACCEPTED 2026-08-22** (record:
+  PERFORMANCE.md "PA4-A solve deal"; evidence
+  `jobs/bench/pa4*`). All six 26.6 checks pass: serial
+  bit-exact against the PA3 binaries on three deck pairs; bare
+  singleton == mpirun -np 1 bit-identical; the deal correct
+  and criterion-clean at np 2/4 on the 8-k-point small and the
+  4-k-point medium, with the solve component scaling ideally
+  (37.6 -> 18.8 -> 9.4 s per call) and the stage bounded by
+  root's serial per-k-point ASSEMBLY exactly as the
+  measurement predicts (2.25x measured, 2.3x bound); width-one
+  solve stamps unchanged; a mid-iteration session-kill
+  restarted from checkpoint and converged in one further
+  iteration to the SCF tolerance; clean worker lifecycle.
+  Two findings feed stage B: the first acceptance run
+  DEADLOCKED (dispatch-all-then-collect meets MPI's rendezvous
+  path on large matrices; the round discipline of PSEUDOCODE
+  26.3 is the fix and carries the lesson), and the OpenBLAS
+  thread lever is nearly worthless for ZHEGV (188 -> 180 s at
+  16 threads -- the driver is serial/BLAS-2 bound), so ELPA is
+  the ONLY path to a faster one-k-point solve. REMAINING in
+  PA4: stage B (ELPA -- pseudocode section next) and the
+  valence-density step.
 
 - [ ] PA5. Parallel HDF5 (DESIGN 9.7) and the grid-work
   distribution (DESIGN 9.2) -- last, and only if the map after

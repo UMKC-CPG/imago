@@ -69,6 +69,18 @@ module O_MPI
    integer :: mpiRank = 0 ! Rank of this process, 0-based; 0 is root.
    integer :: mpiSize = 1 ! Number of ranks in the world.
 
+   ! The solve-server protocol (PSEUDOCODE 26.4/26.5): control codes
+   !   and message tags for the k-point deal. The code set is
+   !   deliberately open -- stage B's collective ELPA solve arrives as
+   !   one more code, not a new worker structure.
+   integer, parameter :: solveShutdown = 0 ! End the server loop.
+   integer, parameter :: solveTask     = 1 ! One k-point, serial solve.
+   integer, parameter :: mpiTagCtrl  = 100 ! (code, k-point) pair.
+   integer, parameter :: mpiTagHam   = 101 ! Packed Hamiltonian.
+   integer, parameter :: mpiTagOvlp  = 102 ! Packed overlap.
+   integer, parameter :: mpiTagVals  = 103 ! Eigenvalues + solve time.
+   integer, parameter :: mpiTagVecs  = 104 ! Eigenvector block.
+
 contains
 
 
@@ -286,6 +298,218 @@ subroutine bcastRealMatrix (buffer)
 #endif
 
 end subroutine bcastRealMatrix
+
+
+subroutine sendCtrlMPI (code, kPointIndex, destination)
+
+   ! Send one control message of the solve-server protocol: the code
+   !   (solveTask / solveShutdown / a stage-B successor) and the
+   !   k-point index it concerns (ignored for shutdown). Blocking
+   !   point-to-point is sufficient throughout this protocol: it is
+   !   strictly request-reply per k-point, and the concurrency comes
+   !   from the dispatch ORDER (root ships every task before doing
+   !   its own solves), not from non-blocking calls (PSEUDOCODE
+   !   26.5). Serial build: a no-op stub that is never reached --
+   !   the deal is width one.
+
+   implicit none
+
+   ! Define passed parameters.
+   integer, intent (in) :: code
+   integer, intent (in) :: kPointIndex
+   integer, intent (in) :: destination
+
+#ifdef IMAGO_MPI
+   integer, dimension (2) :: message
+   message(1) = code
+   message(2) = kPointIndex
+   call MPI_Send (message, 2, MPI_INTEGER, destination, mpiTagCtrl,&
+         & MPI_COMM_WORLD)
+#else
+   ! Serial no-op; see bcastIntVecMPI.
+   associate (unusedA => code, unusedB => kPointIndex,&
+         & unusedC => destination)
+   end associate
+#endif
+
+end subroutine sendCtrlMPI
+
+
+subroutine recvCtrlMPI (code, kPointIndex, source)
+
+   ! Receive one control message; the blocking pair of sendCtrlMPI.
+
+   implicit none
+
+   ! Define passed parameters.
+   integer, intent (out) :: code
+   integer, intent (out) :: kPointIndex
+   integer, intent (in) :: source
+
+#ifdef IMAGO_MPI
+   integer, dimension (2) :: message
+   call MPI_Recv (message, 2, MPI_INTEGER, source, mpiTagCtrl,&
+         & MPI_COMM_WORLD, MPI_STATUS_IGNORE)
+   code = message(1)
+   kPointIndex = message(2)
+#else
+   ! Serial stub: never reached; satisfy the intents defensively.
+   code = solveShutdown
+   kPointIndex = 0
+   associate (unused => source)
+   end associate
+#endif
+
+end subroutine recvCtrlMPI
+
+
+subroutine sendPackedMPI (buffer, destination, tag)
+
+   ! Send one packed real matrix (a packed Hamiltonian or overlap;
+   !   also the real-build eigenvector block, which has the same
+   !   type and rank). Blocking; see sendCtrlMPI.
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension (:,:), intent (in) :: buffer
+   integer, intent (in) :: destination
+   integer, intent (in) :: tag
+
+#ifdef IMAGO_MPI
+   call MPI_Send (buffer, size (buffer), MPI_DOUBLE_PRECISION,&
+         & destination, tag, MPI_COMM_WORLD)
+#else
+   ! Serial no-op; see bcastIntVecMPI.
+   associate (unusedA => buffer, unusedB => destination,&
+         & unusedC => tag)
+   end associate
+#endif
+
+end subroutine sendPackedMPI
+
+
+subroutine recvPackedMPI (buffer, source, tag)
+
+   ! Receive one packed real matrix; the blocking pair of
+   !   sendPackedMPI.
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension (:,:), intent (out) :: buffer
+   integer, intent (in) :: source
+   integer, intent (in) :: tag
+
+#ifdef IMAGO_MPI
+   call MPI_Recv (buffer, size (buffer), MPI_DOUBLE_PRECISION,&
+         & source, tag, MPI_COMM_WORLD, MPI_STATUS_IGNORE)
+#else
+   ! Serial stub: never reached.
+   buffer(:,:) = 0.0_double
+   associate (unusedA => source, unusedB => tag)
+   end associate
+#endif
+
+end subroutine recvPackedMPI
+
+
+subroutine sendCmplxBlockMPI (buffer, destination, tag)
+
+   ! Send one complex rank-2 block (the multi-k eigenvector block).
+
+   implicit none
+
+   ! Define passed parameters.
+   complex (kind=double), dimension (:,:), intent (in) :: buffer
+   integer, intent (in) :: destination
+   integer, intent (in) :: tag
+
+#ifdef IMAGO_MPI
+   call MPI_Send (buffer, size (buffer), MPI_DOUBLE_COMPLEX,&
+         & destination, tag, MPI_COMM_WORLD)
+#else
+   ! Serial no-op; see bcastIntVecMPI.
+   associate (unusedA => buffer, unusedB => destination,&
+         & unusedC => tag)
+   end associate
+#endif
+
+end subroutine sendCmplxBlockMPI
+
+
+subroutine recvCmplxBlockMPI (buffer, source, tag)
+
+   ! Receive one complex rank-2 block; the pair of
+   !   sendCmplxBlockMPI.
+
+   implicit none
+
+   ! Define passed parameters.
+   complex (kind=double), dimension (:,:), intent (out) :: buffer
+   integer, intent (in) :: source
+   integer, intent (in) :: tag
+
+#ifdef IMAGO_MPI
+   call MPI_Recv (buffer, size (buffer), MPI_DOUBLE_COMPLEX,&
+         & source, tag, MPI_COMM_WORLD, MPI_STATUS_IGNORE)
+#else
+   ! Serial stub: never reached.
+   buffer(:,:) = cmplx (0.0_double, 0.0_double, double)
+   associate (unusedA => source, unusedB => tag)
+   end associate
+#endif
+
+end subroutine recvCmplxBlockMPI
+
+
+subroutine sendDblVecMPI (buffer, destination, tag)
+
+   ! Send one real vector (the eigenvalues with the solve seconds
+   !   appended).
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension (:), intent (in) :: buffer
+   integer, intent (in) :: destination
+   integer, intent (in) :: tag
+
+#ifdef IMAGO_MPI
+   call MPI_Send (buffer, size (buffer), MPI_DOUBLE_PRECISION,&
+         & destination, tag, MPI_COMM_WORLD)
+#else
+   ! Serial no-op; see bcastIntVecMPI.
+   associate (unusedA => buffer, unusedB => destination,&
+         & unusedC => tag)
+   end associate
+#endif
+
+end subroutine sendDblVecMPI
+
+
+subroutine recvDblVecMPI (buffer, source, tag)
+
+   ! Receive one real vector; the pair of sendDblVecMPI.
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension (:), intent (out) :: buffer
+   integer, intent (in) :: source
+   integer, intent (in) :: tag
+
+#ifdef IMAGO_MPI
+   call MPI_Recv (buffer, size (buffer), MPI_DOUBLE_PRECISION,&
+         & source, tag, MPI_COMM_WORLD, MPI_STATUS_IGNORE)
+#else
+   ! Serial stub: never reached.
+   buffer(:) = 0.0_double
+   associate (unusedA => source, unusedB => tag)
+   end associate
+#endif
+
+end subroutine recvDblVecMPI
 
 
 subroutine gatherTimesMPI (myTimes, allTimes)

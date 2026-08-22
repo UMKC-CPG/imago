@@ -52,11 +52,16 @@ subroutine secularEqnSCF(spinDirection, numStates)
    use O_SCFIntegralsHDF5, only: packedVVDims, atomOverlap_did, &
          & atomKEOverlap_did, atomMVOverlap_did, atomNPOverlap_did, &
          & atomPotOverlap_did
+   use O_MPI, only: mpiSize, sendCtrlMPI, sendPackedMPI, &
+         & recvDblVecMPI, solveTask, mpiTagHam, mpiTagOvlp, &
+         & mpiTagVals, mpiTagVecs
 #ifndef GAMMA
+   use O_MPI, only: recvCmplxBlockMPI
    use O_LAPACKZHEGV
    use O_MatrixSubs, only: readPackedMatrix, readPackedMatrixAccum,&
          & unpackMatrix
 #else
+   use O_MPI, only: recvPackedMPI
    use O_LAPACKDSYGV
    use O_MatrixSubs, only: readPackedMatrix, readPackedMatrixAccum, &
          & unpackMatrixGamma
@@ -79,6 +84,29 @@ subroutine secularEqnSCF(spinDirection, numStates)
    real    (kind=double), allocatable, dimension (:,:)   :: packedValeVale
    real    (kind=double), allocatable, dimension (:,:)   :: tempPackedValeVale
 !complex(kind=double), allocatable, dimension(:,:) :: identity
+
+   ! The k-point deal (PSEUDOCODE 26.2/26.3): which k-points an
+   !   earlier pass found complete, which rank owns each undone one,
+   !   and the buffers the dispatch and collection use. A dealt
+   !   k-point's packed overlap travels in its own buffer because
+   !   the Hamiltonian occupies packedValeVale at the same time.
+   real    (kind=double), allocatable, dimension (:,:)   :: packedOverlap
+   integer, allocatable, dimension (:) :: kPointDone
+   integer, allocatable, dimension (:) :: kPointOwner
+   integer, allocatable, dimension (:) :: kPointRound
+   integer :: numShipped ! K-points dealt to worker ranks this call.
+   integer :: dealWidth  ! Ranks in the deal: mpiSize, or 1 when the
+         ! deal is off (one rank, one k-point, or Hubbard-U).
+   integer :: numRounds  ! Deal rounds; each hands every rank at most
+         ! one k-point (the deadlock-free discipline of 26.3).
+   integer :: roundIdx
+   real (kind=double), allocatable, dimension (:) :: valsPlusTime
+#ifndef GAMMA
+   complex (kind=double), allocatable, dimension (:,:) :: eigVecBlock
+#else
+   real (kind=double), allocatable, dimension (:,:) :: eigVecBlockGamma
+#endif
+   real (kind=double) :: minSolveSeconds, maxSolveSeconds
 
    ! Record the date and time that we start.
    call timeStampStart (15)
@@ -116,24 +144,96 @@ subroutine secularEqnSCF(spinDirection, numStates)
 #endif
    allocate(packedValeVale     (dim1,valeDim*(valeDim+1)/2))
    allocate(tempPackedValeVale (dim1,valeDim*(valeDim+1)/2))
+   allocate(packedOverlap      (dim1,valeDim*(valeDim+1)/2))
+   allocate(kPointDone  (numKPoints))
+   allocate(kPointOwner (numKPoints))
+   allocate(kPointRound (numKPoints))
 
-
-   ! Begin loop over all kpoints.
-   do i = 1,numKPoints
-
-      ! If the eigen vectors for this kpoint and spin direction are already
-      !   computed, then skip.
+   ! Read every k-point's completion attribute up front: the deal
+   !   below must know the undone set before anything is shipped
+   !   (PSEUDOCODE 26.2). The attribute handle is NOT closed for a
+   !   completed k-point -- the reset loop at the end of this
+   !   routine writes through the same handle, so closing it here
+   !   would make that write fail on a mid-iteration restart.
+   attribIntDims(1) = 1
+   do i = 1, numKPoints
       hdf5Status = 0
-      attribIntDims(1) = 1
       call h5aread_f(eigenVectors_aid(i,spinDirection),H5T_NATIVE_INTEGER,&
             & hdf5Status,attribIntDims,hdferr)
       if (hdferr /= 0) stop 'Failed to read eigen vector SCF status.'
+      kPointDone(i) = hdf5Status
       if (hdf5Status == 1) then
          write(20,*) "Wave function for kpoint ",i," already computed."
-         call h5aclose_f(eigenVectors_aid(i,spinDirection),hdferr)
-         if (hdferr /= 0) stop 'Failed to close eigen vector SCF status'
-         cycle
       endif
+   enddo
+
+   ! The deal (PSEUDOCODE 26.2/26.3): round-robin over the undone
+   !   k-points, root taking a share like any rank, in ROUNDS of at
+   !   most one k-point per rank -- the discipline that keeps the
+   !   blocking transport deadlock-free (a worker never holds a
+   !   second pending task while its reply is unsent; the first
+   !   acceptance run proved the alternative deadlocks once the
+   !   matrices pass MPI's eager threshold). K-points carrying the
+   !   Hubbard-U correction are never dealt (the UJ path couples to
+   !   the previous iteration's density matrix held here on root),
+   !   and a width of one -- one rank, or one k-point -- degenerates
+   !   to today's all-on-root path.
+   kPointOwner(:) = 0
+   kPointRound(:) = 0
+   numShipped = 0
+   dealWidth = 1
+   if ((mpiSize > 1) .and. (numKPoints > 1) .and. &
+         & (numPlusUJAtoms == 0)) then
+      dealWidth = mpiSize
+   endif
+   j = 0
+   do i = 1, numKPoints
+      if (kPointDone(i) == 1) cycle
+      kPointOwner(i) = mod(j, dealWidth)
+      kPointRound(i) = j / dealWidth
+      if (kPointOwner(i) /= 0) numShipped = numShipped + 1
+      j = j + 1
+   enddo
+   numRounds = (j + dealWidth - 1) / dealWidth
+
+   if (numShipped > 0) then
+      allocate (valsPlusTime (numStates + 1))
+#ifndef GAMMA
+      allocate (eigVecBlock (valeDim, numStates))
+#else
+      allocate (eigVecBlockGamma (valeDim, numStates))
+#endif
+      minSolveSeconds = huge (minSolveSeconds)
+      maxSolveSeconds = 0.0_double
+   endif
+
+   ! The round loop (PSEUDOCODE 26.3): ship this round's worker
+   !   k-points (each worker is idle in recvCtrl, so the sends
+   !   complete), solve root's own k-point while they work, then
+   !   collect the round's replies before dealing the next.
+   do roundIdx = 0, numRounds - 1
+
+   ! Dispatch this round's worker-owned k-points.
+   do i = 1, numKPoints
+      if ((kPointDone(i) == 1) .or. (kPointOwner(i) == 0) .or. &
+            & (kPointRound(i) /= roundIdx)) cycle
+      call assembleSecularSCF (i, spinDirection, packedValeVale,&
+            & packedOverlap, tempPackedValeVale)
+      call sendCtrlMPI (solveTask, i, kPointOwner(i))
+      call sendPackedMPI (packedValeVale, kPointOwner(i), mpiTagHam)
+      call sendPackedMPI (packedOverlap, kPointOwner(i), mpiTagOvlp)
+   enddo
+
+   ! Root's own k-point this round: today's serial body, unchanged
+   !   in effect. (The loop finds at most one match per round; it
+   !   stays a loop so the width-one path reads as today's code.)
+   do i = 1,numKPoints
+
+      ! Skip k-points already computed (the mid-iteration restart),
+      !   k-points dealt to a worker (collected below), and other
+      !   rounds' k-points.
+      if ((kPointDone(i) == 1) .or. (kPointOwner(i) /= 0) .or. &
+            & (kPointRound(i) /= roundIdx)) cycle
 
       ! Prepare the matrices.
       packedValeVale(:,:) = 0.0_double
@@ -147,30 +247,13 @@ subroutine secularEqnSCF(spinDirection, numStates)
       valeValeOLGamma(:,:) = 0.0_double
 #endif
 
-      ! Read the nuclear potential term into packed hamiltonian.
-      call readPackedMatrix(atomNPOverlap_did(i),packedValeVale,&
-            & packedVVDims,dim1,valeDim)
-
-      ! Read the kinetic energy term into the still packed hamiltonian.
-      call readPackedMatrixAccum(atomKEOverlap_did(i),packedValeVale,&
-            & tempPackedValeVale,packedVVDims,0.0_double,dim1,valeDim)
-
-      ! Read the mass velocity term into the still packed hamiltonian if
-      !   we are doing a scalar relativistic calculation.
-      if (rel == 1) then
-         ! Note that the -1.0 introduce a negative sign to the term. In the
-         !   future, the sign should be incorporated into the matrix
-         !   calculation itself to avoid the extra work here.
-         call readPackedMatrixAccum(atomMVOverlap_did(i),packedValeVale,&
-               & tempPackedValeVale,packedVVDims,0.0_double,dim1,valeDim)
-      endif
-
-      ! Read the atomic potential terms into the still packed hamiltonian.
-      do j = 1, potDim
-         call readPackedMatrixAccum(atomPotOverlap_did(i,j),packedValeVale,&
-               & tempPackedValeVale,packedVVDims,potCoeffs(j,spinDirection),&
-               & dim1,valeDim)
-      enddo
+      ! Assemble this k-point's packed Hamiltonian and overlap --
+      !   the SAME assembly the dispatch loop ships to workers
+      !   (nuclear + kinetic [+ mass velocity] + the potDim potential
+      !   terms weighted by this iteration's potCoeffs; see
+      !   assembleSecularSCF).
+      call assembleSecularSCF (i, spinDirection, packedValeVale,&
+            & packedOverlap, tempPackedValeVale)
 
       ! Unpack the hamiltonian matrix.
 #ifndef GAMMA
@@ -180,15 +263,11 @@ subroutine secularEqnSCF(spinDirection, numStates)
             & packedValeVale,valeDim,0)
 #endif
 
-      ! Read the atomic overlap matrix. 
-      call readPackedMatrix(atomOverlap_did(i),packedValeVale,&
-            & packedVVDims,dim1,valeDim)
-
       ! Unpack the overlap matrix.
 #ifndef GAMMA
-      call unpackMatrix(valeValeOL(:,:),packedValeVale,valeDim,0)
+      call unpackMatrix(valeValeOL(:,:),packedOverlap,valeDim,0)
 #else
-      call unpackMatrixGamma(valeValeOLGamma(:,:),packedValeVale,valeDim,0)
+      call unpackMatrixGamma(valeValeOLGamma(:,:),packedOverlap,valeDim,0)
 #endif
 
       ! For each atom with a Hubbard U and Hund J term, we need to apply its
@@ -308,6 +387,76 @@ subroutine secularEqnSCF(spinDirection, numStates)
       if (hdferr /= 0) stop 'Failed to record eigenvector success SCF.'
    enddo ! Loop i over kpoints.
 
+   ! Collect this round's dealt k-points (PSEUDOCODE 26.3): each
+   !   owner returns the eigenvalues (with its solve seconds
+   !   appended) and the lowest numStates eigenvector columns, and
+   !   root writes them exactly where its own solves write --
+   !   populate, the density, and every later consumer see the
+   !   serial state.
+   if (numShipped > 0) then
+      do i = 1, numKPoints
+         if ((kPointDone(i) == 1) .or. (kPointOwner(i) == 0) .or. &
+               & (kPointRound(i) /= roundIdx)) cycle
+
+         call recvDblVecMPI (valsPlusTime, kPointOwner(i), mpiTagVals)
+         energyEigenValues(:,i,spinDirection) = &
+               & valsPlusTime(1:numStates)
+         minSolveSeconds = min (minSolveSeconds,&
+               & valsPlusTime(numStates+1))
+         maxSolveSeconds = max (maxSolveSeconds,&
+               & valsPlusTime(numStates+1))
+
+         ! Write the energy eigenValues onto disk in a.u.
+         call h5dwrite_f (eigenValues_did(i,spinDirection),&
+               & H5T_NATIVE_DOUBLE,energyEigenValues(:,i,spinDirection),&
+               & states,hdferr)
+         if (hdferr /= 0) stop 'Cannot write energy eigen values SCF.'
+
+#ifndef GAMMA
+         call recvCmplxBlockMPI (eigVecBlock, kPointOwner(i),&
+               & mpiTagVecs)
+         call h5dwrite_f(eigenVectors_did(1,i,spinDirection),&
+               & H5T_NATIVE_DOUBLE,real(eigVecBlock(:,:),double),&
+               & valeStates,hdferr)
+         if (hdferr /= 0) stop &
+               & 'Cannot write real energy eigen vectors SCF.'
+         call h5dwrite_f(eigenVectors_did(2,i,spinDirection),&
+               & H5T_NATIVE_DOUBLE,aimag(eigVecBlock(:,:)),&
+               & valeStates,hdferr)
+         if (hdferr /= 0) stop &
+               & 'Cannot write imag energy eigen vectors SCF.'
+#else
+         call recvPackedMPI (eigVecBlockGamma, kPointOwner(i),&
+               & mpiTagVecs)
+         call h5dwrite_f(eigenVectors_did(1,i,spinDirection),&
+               & H5T_NATIVE_DOUBLE,eigVecBlockGamma(:,:),&
+               & valeStates,hdferr)
+         if (hdferr /= 0) stop &
+               & 'Cannot write real energy eigen vectors SCF.'
+#endif
+
+         ! Record that this calculation is complete.
+         call h5awrite_f(eigenVectors_aid(i,spinDirection),&
+               & H5T_NATIVE_INTEGER,1,attribIntDims,hdferr)
+         if (hdferr /= 0) stop 'Failed to record eigenvector success.'
+      enddo
+   endif
+
+   enddo ! roundIdx over the deal rounds.
+
+   if (numShipped > 0) then
+      ! One summary line: the k-point deal's record for this call.
+      write (20,*) 'Secular k-point deal: ', numShipped,&
+            & ' shipped over ', mpiSize - 1, ' workers; solve s ',&
+            & minSolveSeconds, maxSolveSeconds
+      deallocate (valsPlusTime)
+#ifndef GAMMA
+      deallocate (eigVecBlock)
+#else
+      deallocate (eigVecBlockGamma)
+#endif
+   endif
+
    ! Once all kpoints are done, we need to reset the attributes so that the
    !   next iteration doesn't think that all the kpoints are done already.
    do i = 1, numKPoints
@@ -319,6 +468,10 @@ subroutine secularEqnSCF(spinDirection, numStates)
    ! Deallocate unnecessary arrays and matrices.
    deallocate (packedValeVale)
    deallocate (tempPackedValeVale)
+   deallocate (packedOverlap)
+   deallocate (kPointDone)
+   deallocate (kPointOwner)
+   deallocate (kPointRound)
 #ifndef GAMMA
    deallocate(valeValeOL)
 #else
@@ -329,6 +482,208 @@ subroutine secularEqnSCF(spinDirection, numStates)
    call timeStampEnd (15)
 
 end subroutine secularEqnSCF
+
+
+subroutine assembleSecularSCF (kPointIndex, spinDirection, packedHam,&
+      & packedOvlp, scratch)
+
+   ! Assemble one k-point's packed Hamiltonian and packed overlap
+   !   from root's open HDF5 handles (PSEUDOCODE 26.3): the nuclear
+   !   potential, the kinetic energy, the mass velocity when the
+   !   calculation is scalar relativistic, and the potDim
+   !   three-centre potential terms weighted by this iteration's
+   !   potential coefficients; then the overlap matrix. This is THE
+   !   assembly of the secular problem, factored out so that root's
+   !   own solves and the k-point deal's shipments cannot drift
+   !   apart. It runs on root only -- workers have no file handles.
+
+   ! Import necessary modules.
+   use HDF5
+   use O_Kinds
+   use O_Potential, only: rel, potDim, potCoeffs
+   use O_AtomicSites, only: valeDim
+   use O_SCFIntegralsHDF5, only: packedVVDims, atomOverlap_did, &
+         & atomKEOverlap_did, atomMVOverlap_did, atomNPOverlap_did, &
+         & atomPotOverlap_did
+   use O_MatrixSubs, only: readPackedMatrix, readPackedMatrixAccum
+
+   ! Make sure that no funny variables are defined.
+   implicit none
+
+   ! Define the passed parameters.
+   integer, intent (in) :: kPointIndex
+   integer, intent (in) :: spinDirection
+   real (kind=double), dimension (:,:), intent (out) :: packedHam
+   real (kind=double), dimension (:,:), intent (out) :: packedOvlp
+   real (kind=double), dimension (:,:), intent (inout) :: scratch
+
+   ! Define the local variables used in this subroutine.
+   integer :: j
+   integer :: dim1
+
+   dim1 = size (packedHam, 1)
+   packedHam(:,:) = 0.0_double
+   scratch(:,:) = 0.0_double
+
+   ! Read the nuclear potential term into the packed hamiltonian.
+   call readPackedMatrix(atomNPOverlap_did(kPointIndex),packedHam,&
+         & packedVVDims,dim1,valeDim)
+
+   ! Read the kinetic energy term into the still packed hamiltonian.
+   call readPackedMatrixAccum(atomKEOverlap_did(kPointIndex),&
+         & packedHam,scratch,packedVVDims,0.0_double,dim1,valeDim)
+
+   ! Read the mass velocity term into the still packed hamiltonian
+   !   if we are doing a scalar relativistic calculation.
+   if (rel == 1) then
+      ! Note that the -1.0 introduce a negative sign to the term. In
+      !   the future, the sign should be incorporated into the matrix
+      !   calculation itself to avoid the extra work here.
+      call readPackedMatrixAccum(atomMVOverlap_did(kPointIndex),&
+            & packedHam,scratch,packedVVDims,0.0_double,dim1,valeDim)
+   endif
+
+   ! Read the atomic potential terms into the still packed
+   !   hamiltonian, each weighted by this iteration's coefficient.
+   do j = 1, potDim
+      call readPackedMatrixAccum(atomPotOverlap_did(kPointIndex,j),&
+            & packedHam,scratch,packedVVDims,&
+            & potCoeffs(j,spinDirection),dim1,valeDim)
+   enddo
+
+   ! Read the atomic overlap matrix into its own packed buffer.
+   call readPackedMatrix(atomOverlap_did(kPointIndex),packedOvlp,&
+         & packedVVDims,dim1,valeDim)
+
+end subroutine assembleSecularSCF
+
+
+subroutine solveServerLoop
+
+   ! The worker side of the k-point deal (PSEUDOCODE 26.4). Between
+   !   the term stage and the certificate barrier, every worker rank
+   !   sits here: receive a control message from root; on a TASK,
+   !   receive the k-point's packed Hamiltonian and overlap, unpack,
+   !   solve with the SAME serial backend root uses, and return the
+   !   eigenvalues (solve seconds appended) and the lowest numStates
+   !   eigenvector columns; on SHUTDOWN, return to the caller, which
+   !   falls to the certificate barrier. Everything needed beyond
+   !   the messages -- valeDim, numStates, the LAPACK block size --
+   !   is replicated setup state this rank already holds.
+   !
+   ! The control-code dispatch is deliberately extensible: stage B
+   !   (ELPA) adds a collective-solve code here rather than a new
+   !   worker structure.
+
+   ! Import necessary modules.
+   use O_Kinds
+   use O_Input, only: numStates
+   use O_AtomicSites, only: valeDim
+   use O_LAPACKParameters, only: setBlockSize
+   use O_MPI, only: recvCtrlMPI, recvPackedMPI, sendDblVecMPI, &
+         & solveShutdown, solveTask, stopMPI, &
+         & mpiTagHam, mpiTagOvlp, mpiTagVals, mpiTagVecs
+#ifndef GAMMA
+   use O_MPI, only: sendCmplxBlockMPI
+   use O_LAPACKZHEGV
+   use O_MatrixSubs, only: unpackMatrix
+#else
+   use O_MPI, only: sendPackedMPI
+   use O_LAPACKDSYGV
+   use O_MatrixSubs, only: unpackMatrixGamma
+#endif
+
+   ! Make sure that no funny variables are defined.
+   implicit none
+
+   ! Define the local variables used in this subroutine.
+   integer :: code
+   integer :: kPointIndex
+   integer :: dim1
+   integer :: clockBefore, clockAfter, clockRate
+   real (kind=double), allocatable, dimension (:,:) :: packedHam
+   real (kind=double), allocatable, dimension (:,:) :: packedOvlp
+   real (kind=double), allocatable, dimension (:)   :: valsPlusTime
+#ifndef GAMMA
+   complex (kind=double), allocatable, dimension (:,:) :: hamiltonian
+   complex (kind=double), allocatable, dimension (:,:) :: overlap
+#else
+   real (kind=double), allocatable, dimension (:,:) :: hamiltonian
+   real (kind=double), allocatable, dimension (:,:) :: overlap
+#endif
+
+#ifndef GAMMA
+   dim1 = 2
+#else
+   dim1 = 1
+#endif
+
+   ! Set up LAPACK machine parameters, mirroring mainSCF.
+   call setBlockSize (valeDim)
+
+   allocate (packedHam  (dim1, valeDim*(valeDim+1)/2))
+   allocate (packedOvlp (dim1, valeDim*(valeDim+1)/2))
+   allocate (hamiltonian (valeDim, valeDim))
+   allocate (overlap     (valeDim, valeDim))
+   allocate (valsPlusTime (numStates + 1))
+
+   do
+      call recvCtrlMPI (code, kPointIndex, 0)
+      if (code == solveShutdown) exit
+      if (code /= solveTask) then
+         call stopMPI ('Solve server received an unknown code.')
+      endif
+
+      call recvPackedMPI (packedHam, 0, mpiTagHam)
+      call recvPackedMPI (packedOvlp, 0, mpiTagOvlp)
+
+#ifndef GAMMA
+      hamiltonian(:,:) = cmplx (0.0_double, 0.0_double, double)
+      overlap(:,:)     = cmplx (0.0_double, 0.0_double, double)
+      call unpackMatrix (hamiltonian, packedHam, valeDim, 0)
+      call unpackMatrix (overlap, packedOvlp, valeDim, 0)
+#else
+      hamiltonian(:,:) = 0.0_double
+      overlap(:,:)     = 0.0_double
+      call unpackMatrixGamma (hamiltonian, packedHam, valeDim, 0)
+      call unpackMatrixGamma (overlap, packedOvlp, valeDim, 0)
+#endif
+
+      ! Solve with the same backend root uses; the eigenvectors land
+      !   in the hamiltonian's columns, exactly as on root.
+      call system_clock (clockBefore, clockRate)
+#ifndef GAMMA
+      call solveZHEGV (valeDim, numStates, hamiltonian, overlap,&
+            & valsPlusTime(1:numStates))
+#else
+      call solveDSYGV (valeDim, numStates, hamiltonian, overlap,&
+            & valsPlusTime(1:numStates))
+#endif
+      call system_clock (clockAfter)
+      valsPlusTime(numStates+1) = real (clockAfter - clockBefore,&
+            & double) / real (clockRate, double)
+
+      ! Log the service in this rank's own log (visible under
+      !   IMAGO_RANK_LOGS; discarded by default).
+      write (20,*) 'Served k-point ', kPointIndex, ' in ',&
+            & valsPlusTime(numStates+1), ' s'
+
+      call sendDblVecMPI (valsPlusTime, 0, mpiTagVals)
+#ifndef GAMMA
+      call sendCmplxBlockMPI (hamiltonian(:,1:numStates), 0,&
+            & mpiTagVecs)
+#else
+      call sendPackedMPI (hamiltonian(:,1:numStates), 0, mpiTagVecs)
+#endif
+   enddo
+
+   deallocate (packedHam)
+   deallocate (packedOvlp)
+   deallocate (hamiltonian)
+   deallocate (overlap)
+   deallocate (valsPlusTime)
+
+end subroutine solveServerLoop
 
 
 subroutine secularEqnPSCF(spinDirection,numStates,numComponents,ol_did,&

@@ -78,9 +78,20 @@ would force one severity scale onto two unrelated questions.
   produced four recorded traps (concurrent mpirun core
   binding, /usr/bin/time swallowing signals, cross-build and
   cross-node BLAS last-bit noise, relative tolerances on
-  near-zero elements -- see the scaling section). NEXT: PA4
-  (the eigensolver boundary and ELPA, DESIGN 9.6) --
-  PSEUDOCODE section first, per the chain.
+  near-zero elements -- see the scaling section).
+- **PA4 STAGE A (the solve boundary + k-point deal) CODED and
+  ACCEPTED 2026-08-22** (chain: DESIGN 9.6 as amended +
+  PSEUDOCODE 26, reviewed 2026-08-21; numbers and findings in
+  "PA4-A solve deal" below, closure in TODO PA4). Root ships
+  each dealt k-point's packed H and S to its owner in ROUNDS
+  of one task per rank; owners solve with the serial backend;
+  root writes. The first acceptance run deadlocked and bought
+  the round discipline (blocking sends meet MPI's rendezvous
+  path on large matrices); the thread-lever measurement
+  showed ZHEGV nearly thread-proof, making ELPA the only path
+  for the one-k-point solve. NEXT: PA4 stage B (ELPA behind
+  the same boundary) -- PSEUDOCODE section first, per the
+  chain; then the valence-density step.
 - **Install no profiling tools yet** (TODO PF6). `gprof` and
   `callgrind` are already present and cover Phases P0 through P2.
   The investigation into `perf` and `gperftools` is recorded below
@@ -428,6 +439,65 @@ Traps this campaign paid for, so they are paid for once:
   1e-19 absolute differences on 1e-9-magnitude elements as
   1e-10 "relative disagreement". Any relative criterion needs
   the element magnitudes in view before it is believed.
+
+## PA4-A solve deal (measured 2026-08-22)
+
+The acceptance record for the k-point deal (PSEUDOCODE 26.6;
+TODO PA4 stage A; job 16700619, sequential on exclusive c084,
+in-job references from the accepted PA3 binaries so every
+bit-comparison is same-build-lineage and same-node).
+
+    knbo3_333_med_c, Secular Equation stage (14 calls):
+                        np1        np2        np4
+    stage wall        695.0 s    438.8 s    308.3 s
+    per call           49.6 s     31.3 s     22.0 s
+      = assembly       ~12 s      ~12 s      ~12 s   (root-serial)
+      + solve chain    ~37.6 s    ~18.8 s    ~9.4 s  (ideal 2x
+                                                      per doubling)
+
+The deal parallelizes the SOLVES perfectly -- the workers'
+reported per-solve times (9.6-10.4 s) match root's own -- and
+the stage is bounded by root's serial per-k-point ASSEMBLY
+(reading the ~60 packed matrices per k-point from the file:
+~3 s each, ~12 s per call), exactly the designed root-side
+cost: predicted bound 2.3x for this deck, measured 2.25x.
+That bound is a known input to stage B: ELPA distributes the
+solve itself, and the assembly share is what remains until it
+is distributed or absorbed into the redistribution.
+
+Correctness: serial bit-exact vs the PA3 binaries (bn pair and
+the 25-minute medium, outputs and h5diff); bare singleton ==
+mpirun -np 1 bit-identical; np 2/4 criterion-clean vs the
+same-build same-node np1 file on both the 8-k-point small and
+the 4-k-point medium with digit-identical energies; width-one
+solve stamps unchanged from PA3 (188.0 s on the glass, PA3-era
+~190 s); a mid-iteration session-kill restarted from the
+checkpointed potential and converged in ONE further iteration
+to the SCF tolerance (5e-7 Ha from the uninterrupted run --
+checkpoint-restart of an iterative solver reconverges, it does
+not replay); clean worker lifecycle, no worker files.
+
+Two findings, both feeding stage B:
+
+- **Blocking sends deadlock past the eager threshold.** The
+  first acceptance run hung 6.7 h on np2_medc:
+  dispatch-all-then-collect gave a worker a second task while
+  its first reply was unsent, and once the packed matrices
+  (~64 MB) crossed into MPI's rendezvous path, root's send and
+  the worker's reply blocked head-on with neither receive
+  posted. The small deck could never expose it (eager-path
+  messages complete immediately) -- which is why the medium
+  deck is in the acceptance set. The fix is the round
+  discipline of PSEUDOCODE 26.3: at most one outstanding task
+  per worker, so every blocking send faces a receiver already
+  waiting.
+- **The OpenBLAS thread lever is nearly worthless for
+  ZHEGV.** 16 threads on the one-k-point glass: solve 188.0 ->
+  180.1 s (~4 %). The driver is dominated by the serial QL
+  iteration and BLAS-2 tridiagonalization that threads cannot
+  touch. ELPA's two-stage algorithm exists precisely because
+  of this; it is now measured to be the ONLY path to a faster
+  single-k-point solve.
 
 ## The situation, as of 2026-08-09
 

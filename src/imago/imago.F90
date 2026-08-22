@@ -14,7 +14,15 @@ subroutine Imago
    use O_TimeStamps, only: initOperationLabels
    use O_ElementData,     only: initElementData
    use O_MethodCitations, only: printMethodsBlock
-   use O_MPI, only: mpiRank, barrierMPI
+   use O_MPI, only: mpiRank, mpiSize, barrierMPI, sendCtrlMPI, &
+         & solveShutdown
+   use O_SecularEquation, only: solveServerLoop
+
+   ! Make sure that there are no accidental variable declarations.
+   implicit none
+
+   ! Define local variables.
+   integer :: i ! Loop index over the worker ranks at shutdown.
 
    ! Initialize the logging labels.
    call initOperationLabels
@@ -27,17 +35,26 @@ subroutine Imago
 
    ! Now, we are ready to do *either* SCF or Post SCF work.
    !
-   ! Under MPI, setupSCF is the one region with distributed work at
-   !   this increment (its three-centre term stage, DESIGN 9.5);
-   !   everything after it is the root-serial remainder of the run
-   !   shape, so the worker ranks skip from here to the end of this
-   !   routine and park at the certificate barrier below while root
-   !   finishes alone. A serial build has mpiRank 0 and runs all of
-   !   it, exactly as always. (If root dies in its serial remainder,
-   !   the MPI runtime sees a process exit without finalize and ends
-   !   the whole job -- the parked workers cannot hang it.)
+   ! Under MPI, two regions carry distributed work: setupSCF's
+   !   three-centre term stage (DESIGN 9.5) and the secular solves of
+   !   the SCF iteration (DESIGN 9.6's k-point deal). Between those,
+   !   the worker ranks sit in the solve server: root's secularEqnSCF
+   !   ships each dealt k-point's matrices there and collects the
+   !   eigenpairs, and everything else -- populate, density,
+   !   potential update, the post-SCF blocks -- remains root-serial.
+   !   After root's last solve it shuts the servers down and the
+   !   workers fall to the certificate barrier below. A serial build
+   !   has mpiRank 0 and runs all of it, exactly as always. (If root
+   !   dies in its serial remainder, the MPI runtime sees a process
+   !   exit without finalize and ends the whole job -- workers
+   !   waiting in the server or at the barrier cannot hang it.)
    if (doSCF == 1) then
       call setupSCF ! Preparation for SCF cycle and wave function calculation.
+
+      ! Worker ranks serve solves until root sends the shutdown.
+      if (mpiRank /= 0) then
+         call solveServerLoop
+      endif
 
       if (mpiRank == 0) then
          call mainSCF ! The actual SCF cycle and wave function calculation.
@@ -73,6 +90,13 @@ subroutine Imago
          call cleanUpSCF
 
          call closeHDF5_SCF
+
+         ! Every solve is done (the post-loop band computation in
+         !   mainSCF was the last): end the workers' solve servers.
+         !   They then proceed to the certificate barrier.
+         do i = 1, mpiSize - 1
+            call sendCtrlMPI (solveShutdown, 0, i)
+         enddo
       endif
    endif
 
