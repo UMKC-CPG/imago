@@ -16677,3 +16677,192 @@ wait and write columns on the multi-k medium deck.
 5. **Worker visibility.**  One `IMAGO_RANK_LOGS=1` run: each
    worker's log names the terms it owned; the default run
    sheds no worker files.
+
+## 26. The Eigensolver Boundary and the K-Point Deal
+## (DESIGN 9.6; TODO PA4 stage A)
+
+The secular solve becomes the second distributed region: whole
+(k-point) solves are dealt to ranks, each running today's serial
+LAPACK backend, with root assembling and shipping the matrices
+and collecting the eigenpairs (DESIGN 9.6's dispatch mechanism).
+Nothing about the FILE changes hands -- root remains its sole
+holder -- and the serial build and the one-rank parallel build
+take today's path unchanged: at width one the deal degenerates
+to "root solves everything locally", byte for byte the current
+code. ELPA behind the same boundary is stage B (its own
+pseudocode section, written after this stage is accepted).
+
+### 26.1 Seam inventory
+
+- `imago.F90`, `subroutine Imago` -- the worker path changes
+  from "park after setupSCF" to "serve solves after setupSCF":
+  when `doSCF == 1`, workers call `solveServerLoop` (26.4)
+  where they previously fell through, and proceed to the
+  certificate barrier when it returns. Root's path is
+  unchanged except that, after its `closeHDF5_SCF`, it sends
+  every worker the shutdown message -- the server must end
+  before the workers can reach the barrier, and only root
+  knows when the last solve (the post-loop band computation in
+  `mainSCF`) has happened.
+- `imago.F90`, `mainSCF` -- UNTOUCHED, and stays root-only:
+  the iteration structure, `populateStates`, the density and
+  potential updates all read module state that root alone
+  maintains. The deal lives entirely inside secularEqnSCF.
+- `secularEqn.F90`, `secularEqnSCF` -- the k-point loop
+  restructures into deal-dispatch-collect (26.3) on root.
+  Everything each solve consumes is assembled ON ROOT exactly
+  as today (`readPackedMatrix`/`readPackedMatrixAccum` from
+  root's handles, weighted by root's `potCoeffs`); everything
+  each solve produces returns to root, which writes the
+  eigenvalue and eigenvector datasets, sets and later resets
+  the per-k-point completion attributes, and fills
+  `energyEigenValues(:,i,spin)` -- so `populateStates`,
+  `makeValenceRho` (including its one-k-point
+  keep-in-memory path, which only ever applies at width one),
+  and every later consumer see exactly the serial state.
+- The k-points root does NOT deal: any k-point whose solve
+  carries the Hubbard-U correction (`numPlusUJAtoms > 0`) --
+  the UJ path couples to the previous iteration's density
+  matrix held on root -- and, trivially, every k-point when
+  `numKPoints == 1` or `mpiSize == 1`. The mid-iteration
+  restart skip (completion attribute already 1) happens on
+  root BEFORE the deal, so only undone k-points are dealt.
+- `mpi.F90` -- gains the paired transport wrappers of 26.5
+  (send/receive for a packed real matrix, a complex and a
+  real eigenvector block, a small real vector, and an integer
+  control code). Serial build: no-op stubs, never reached
+  (the deal is width one).
+- The GAMMA build compiles all of it and never exercises the
+  server (one k-point by construction); its solves stay local
+  to root. Both variant CMakeLists are unchanged (no new
+  files; the server lives in secularEqn.F90 beside the code
+  it mirrors).
+
+### 26.2 The deal
+
+```
+undone = k-points whose completion attribute reads 0
+      (root read them, as today, before anything is dealt)
+if (mpiSize == 1 or numPlusUJAtoms > 0 or numKPoints == 1):
+   owner(every undone k-point) = root      ! today's path
+else:
+   deal undone k-points to ranks 0..mpiSize-1 round-robin
+      (k-point costs are equal -- same valeDim, same work --
+      so the plain cyclic deal suffices; root takes a share
+      like any rank, and shares smaller than the rank count
+      leave the excess ranks idle for this call)
+```
+
+Spin stays the outer sequential loop of mainSCF: each
+`secularEqnSCF(spin)` call deals its own k-points (DESIGN 9.6's
+deferral).
+
+### 26.3 Root's dispatch-collect flow (inside secularEqnSCF)
+
+```
+for each undone k-point i owned by a WORKER w:
+   assemble packed H (nuclear + kinetic [+ mass velocity]
+         + potDim potential terms with potCoeffs), as today
+   read packed S, as today
+   send to w: control TASK(i), then packed H, then packed S
+for each undone k-point i owned by ROOT:
+   assemble as today; unpack; solve (solveZHEGV/solveDSYGV);
+   hold the results        ! root computes while workers do
+for each dealt k-point i, in deal order:
+   receive from its owner: eigenvalues(numStates),
+         eigenvector block (valeDim x numStates; complex or
+         real per build), solve seconds
+   write eigenvalues dataset + energyEigenValues(:,i,spin)
+   write eigenvector datasets; set completion attribute
+(root's own k-points write identically, as today)
+reset all completion attributes    ! as today
+write one summary line to the log: k-points dealt, ranks
+      used, min/max solve seconds  ! the 25.6-style record
+```
+
+The assembly for dealt k-points happens BEFORE root starts its
+own solves, so workers are busy while root computes; the
+collection order is fixed (deal order), which is fine because
+the reply wait overlaps root's own work, not the workers'.
+
+### 26.4 The worker's solve server (secularEqn.F90)
+
+```
+solveServerLoop:
+   allocate H, S (valeDim x valeDim; complex or real), packed
+         receive buffers, eigenvalue vector -- once
+   loop:
+      receive control from root
+      if SHUTDOWN: exit
+      receive packed H, packed S for k-point i
+      unpack both, as secularEqnSCF does today
+      solve with the SAME solveZHEGV/solveDSYGV call
+      send back: eigenvalues, the lowest numStates
+            eigenvector columns, solve seconds
+   deallocate; return           ! caller falls to the barrier
+```
+
+Everything the server needs beyond the messages -- `valeDim`,
+`numStates`, the LAPACK block size (`setBlockSize`) -- is
+replicated setup state every rank already holds; the server
+calls setBlockSize itself once, mirroring mainSCF.
+
+The control protocol is DELIBERATELY extensible: stage B (ELPA)
+adds one more control code -- "enter a collective solve" --
+on which every server steps from this loop into the collective
+ELPA call (scatter of H and S into the block-cyclic layout,
+cooperative solve, gather of the eigenvector columns) and back
+to the loop. Same server, same lifecycle, same shutdown; the
+one-k-point large-cell case is served by adding a code, not a
+new worker structure, which is why the loop is keyed on a
+control message rather than hard-wired to the TASK shape.
+
+### 26.5 O_MPI transport wrappers
+
+Paired, blocking, tagged wrappers with serial no-op stubs:
+`sendPackedMPI`/`recvPackedMPI` (real rank-2),
+`sendCmplxBlockMPI`/`recvCmplxBlockMPI` and
+`sendRealBlockMPI`/`recvRealBlockMPI` (the eigenvector block),
+`sendDblVecMPI`/`recvDblVecMPI` (eigenvalues + timing), and
+`sendCtrlMPI`/`recvCtrlMPI` (the TASK/SHUTDOWN code and the
+k-point index). Blocking point-to-point is sufficient: the
+protocol is strictly request-reply per k-point, and the only
+concurrency needed -- root computing while workers compute --
+comes from the dispatch ordering of 26.3, not from
+non-blocking calls.
+
+### 26.6 Checks
+
+1. **Serial build unchanged**: bn_small pair and both medium
+   decks bit-exact (outputs and h5diff) against the PA3 serial
+   results -- width one is today's code path.
+2. **One-rank parallel**: bare and `mpirun -np 1`
+   bit-identical to each other; clean against the recorded
+   baselines per the 25.7 criteria.
+3. **The deal on the multi-k deck** (`knbo3_333_med_c`, 4
+   k-points): `-np 2` and `-np 4` outputs digit-identical,
+   file clean per the same-build same-node criterion, and the
+   `Secular Equation` stamp falling with rank count -- measured
+   SEQUENTIALLY (25.7's binding trap). The 135-atom cell's
+   solve is 46 % of the run, so the whole-run wall should
+   visibly drop at -np 4.
+4. **No regression at width one**: the one-k-point decks
+   (`sio2_243_med_g`, and the 1296 pair if run) show Secular
+   Equation stamps unchanged from PA3 -- the deal must cost
+   nothing where it cannot help. Note the lever that DOES
+   help those decks at this stage: the serial backend is
+   LAPACK over OpenBLAS, so a one-k-point run at `-np 1` with
+   `OPENBLAS_NUM_THREADS=N` threads the solve across one
+   node's cores with no new code (ARCHITECTURE 6.6's "threads
+   inside the rank"); record one threaded measurement on the
+   243-atom glass alongside check 4, since until stage B this
+   is the one-k-point case's only solve speedup.
+5. **Mid-iteration restart**: kill a `-np 4` multi-k run
+   during the solve stage; rerun; the completion-attribute
+   skip plus the undone-only deal completes the iteration and
+   the run finishes identical to baseline (the session-kill
+   method of the PA3 harness).
+6. **Worker lifecycle**: after the last solve the shutdown
+   empties every server; exactly one fort.2; no worker files
+   by default; `IMAGO_RANK_LOGS=1` shows each worker's served
+   k-points.

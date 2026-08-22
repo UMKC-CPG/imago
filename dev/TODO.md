@@ -8575,6 +8575,22 @@ is not carried only in conversation.
   and parallelizes over the same distribution, with the
   `Valence Charge Density` stamp falling with rank count as its
   acceptance.
+  **2026-08-21: DESIGN 9.6 AMENDED + PSEUDOCODE 26 DRAFTED
+  (stage A).** The seam inventory (secularEqnSCF assembles H
+  from ROOT's file handles; workers have no file access by
+  PA3's design) decided the dispatch mechanism: root assembles
+  and ships packed H and S to the k-point's owner, the owner
+  solves with the serial backend and ships eigenpairs back,
+  root writes -- workers run a solve-server loop between the
+  term stage and the certificate barrier, replacing the PA3
+  parking. PA4 lands in accepted stages: (A) the boundary and
+  the k-point deal (PSEUDOCODE 26 -- the whole win for multi-k
+  decks); (B) ELPA behind the same boundary (own pseudocode
+  section after A is accepted -- the win for one-k-point large
+  cells); the valence density rides the same deal as its own
+  step after A. Deferrals recorded in 9.6: spin pairing, and
+  Hubbard-U k-points stay on root. Awaits programmer review
+  before any code.
 
 - [ ] PA5. Parallel HDF5 (DESIGN 9.7) and the grid-work
   distribution (DESIGN 9.2) -- last, and only if the map after

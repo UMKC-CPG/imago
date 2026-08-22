@@ -14512,6 +14512,44 @@ The choice between "many serial solves" and "one distributed
 solve" is by problem: it is the per-kernel device-placement
 principle (VISION 14) applied one level up.
 
+**The dispatch mechanism (decided 2026-08-21, from the seam
+inventory).** Root is the sole holder of the HDF5 file (the
+PA3 run shape), so the outer deal moves MATRICES, not file
+access: root assembles each k-point's packed H and S from its
+handles exactly as today, ships the pair to the k-point's
+owner rank, the owner unpacks and solves with the serial
+backend, and ships the eigenvalues plus the lowest numStates
+eigenvector columns back; root writes them to the file and
+into the module arrays, so populate, the density, and every
+later consumer see exactly the serial state. The payloads are
+small against the solve (packed H+S about 2 x 16 B x
+valeDim(valeDim+1)/2 per k-point; the eigenvector block
+valeDim x numStates), and root overlaps its own solves with
+the workers' by dealing first and solving its own share
+while it waits. Between the term stage and the certificate
+barrier the workers run a SOLVE SERVER loop -- receive a
+task or a shutdown, solve, reply -- replacing the PA3
+parking; the root-serial remainder of the run shrinks to
+what root alone still does between solves. Two deliberate
+deferrals: spin-polarized runs deal each spin's k-points in
+turn (the spin pairing would double the width but requires
+restructuring mainSCF's spin loop; revisit if spin-polarized
+multi-k runs matter), and k-points of atoms carrying
+Hubbard-U terms are not dealt out -- the UJ correction
+couples the solve to the previous iteration's density matrix
+on root, so root solves those itself until the UJ path is
+distributed.
+
+**Staging.** PA4 lands in two accepted stages: (A) the
+boundary and the outer deal above -- the entire win for the
+multi-k decks -- with the serial backend on every rank; then
+(B) the ELPA backend behind the same boundary, with the
+block-cyclic layout of 9.3, the process-grid helper, and the
+redistribution inside the boundary -- the win for the
+one-k-point large cells. The valence-density distribution
+rides the same k-point deal and follows as its own accepted
+step once A is in.
+
 ### 9.7 Parallel HDF5 Alignment
 
 The distributed matrices are written to and read from HDF5
