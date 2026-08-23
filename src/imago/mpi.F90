@@ -62,6 +62,14 @@ module O_MPI
       module procedure bcastComplexCube, bcastRealMatrix
    end interface bcastMPI
 
+   ! One generic name for summing partial accumulators onto root
+   !   (the electrostatic setup's vectors and matrices, PSEUDOCODE
+   !   28). Serial build: a no-op -- root's data IS the sum at
+   !   width one.
+   interface reduceSumMPI
+      module procedure reduceSumVector, reduceSumMatrix
+   end interface reduceSumMPI
+
    ! The identity of this process within the parallel run. The values
    !   below are the SERIAL truths and double as the defaults: the
    !   serial build never touches them, and the parallel build
@@ -77,6 +85,9 @@ module O_MPI
    integer, parameter :: solveTask     = 1 ! One k-point, serial solve.
    integer, parameter :: solveCollective = 2 ! Join a collective ELPA
          ! solve of one k-point (PSEUDOCODE 27).
+   integer, parameter :: elecStatTask = 3 ! Join a dealt electrostatic
+         ! setup sub-stage (PSEUDOCODE 28); the message's second
+         ! integer names which sub-stage.
    integer, parameter :: mpiTagCtrl  = 100 ! (code, k-point) pair.
    integer, parameter :: mpiTagHam   = 101 ! Packed Hamiltonian.
    integer, parameter :: mpiTagOvlp  = 102 ! Packed overlap.
@@ -512,6 +523,65 @@ subroutine recvDblVecMPI (buffer, source, tag)
 #endif
 
 end subroutine recvDblVecMPI
+
+
+subroutine reduceSumVector (buffer)
+
+   ! Sum every rank's copy of a real vector onto root, in place on
+   !   root; the workers' copies are consumed (their contents are
+   !   unspecified afterward -- callers deallocate them). This is
+   !   the combine step of the DESIGN 9.2 pattern: each rank
+   !   accumulated its dealt share into a private copy, and the sum
+   !   of the copies is the serial result. Serial build: no-op.
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension (:), intent (inout) :: buffer
+
+#ifdef IMAGO_MPI
+   real (kind=double), dimension (1) :: unusedSink
+   if (mpiRank == 0) then
+      call MPI_Reduce (MPI_IN_PLACE, buffer, size (buffer),&
+            & MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD)
+   else
+      call MPI_Reduce (buffer, unusedSink, size (buffer),&
+            & MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD)
+   endif
+#else
+   ! Serial no-op; see bcastIntVecMPI.
+   associate (unused => buffer)
+   end associate
+#endif
+
+end subroutine reduceSumVector
+
+
+subroutine reduceSumMatrix (buffer)
+
+   ! The rank-2 form of reduceSumVector; same contract.
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension (:,:), intent (inout) :: buffer
+
+#ifdef IMAGO_MPI
+   real (kind=double), dimension (1) :: unusedSink
+   if (mpiRank == 0) then
+      call MPI_Reduce (MPI_IN_PLACE, buffer, size (buffer),&
+            & MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD)
+   else
+      call MPI_Reduce (buffer, unusedSink, size (buffer),&
+            & MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD)
+   endif
+#else
+   ! Serial no-op; see bcastIntVecMPI.
+   associate (unused => buffer)
+   end associate
+#endif
+
+end subroutine reduceSumMatrix
 
 
 subroutine gatherTimesMPI (myTimes, allTimes)

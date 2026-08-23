@@ -9,9 +9,12 @@ module O_ElectroStatics
    ! Make sure that no funny variables are defined.
    implicit none
 
-   ! Define access
+   ! Define access. The two sub-stage workers were private when
+   !   makeElectrostatics was their only caller; the distributed
+   !   setup (PSEUDOCODE 28) gives them a second legitimate entry --
+   !   the solve server calls the one a control message names -- so
+   !   they are public now.
    public
-   private :: neutralAndNuclearQPot, residualQ
 
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    ! Begin list of module data.!
@@ -78,6 +81,12 @@ subroutine neutralAndNuclearQPot
    use O_PotSites, only: numPotSites, potSites
    use O_Potential, only: potDim
 
+   ! Import the MPI layer: the site deal, the sum-onto-root combine,
+   !   the worker wake-up, and the per-rank time gather (PSEUDOCODE
+   !   28; DESIGN 9.2's first exercise).
+   use O_MPI, only: mpiRank, mpiSize, loadBalMPI, reduceSumMPI, &
+         & sendCtrlMPI, gatherTimesMPI, elecStatTask
+
    ! Import external subroutines.
    use O_MathSubs
 
@@ -89,6 +98,13 @@ subroutine neutralAndNuclearQPot
    integer :: hdferr
    integer :: hdf5Status
    integer(hsize_t), dimension (1) :: attribIntDims ! Attribute dataspace dim
+
+   ! The dealt site range of this rank (PSEUDOCODE 28.2), and the
+   !   per-rank loop accounting the acceptance record requires.
+   integer :: initSiteIdx, finSiteIdx
+   integer :: clockBefore, clockAfter, clockRate
+   real (kind=double), dimension (1) :: myLoopSeconds
+   real (kind=double), allocatable, dimension (:,:) :: allLoopSeconds
 
    ! Iteration dependent variables.  For each pair of potential sites these
    !   values will change when the potential type of either site changes.
@@ -165,16 +181,30 @@ subroutine neutralAndNuclearQPot
    real (kind=double) :: coeff ! The same as the above applies to this.
    real (kind=double) :: potMagnitude
 
-   ! Determine if this calculation has already been completed by a previous
-   !   Imago execution.
-   hdf5Status = 0
+   ! Determine if this calculation has already been completed by a
+   !   previous Imago execution. Root alone reads the attribute (it
+   !   is the sole holder of the file), and the read GATES the
+   !   dispatch: a completed sub-stage sends no wake-up at all, so
+   !   the workers stay in the solve server (PSEUDOCODE 28.1).
    attribIntDims(1) = 1
-   call h5aread_f(potOLAndLocalQ_aid,H5T_NATIVE_INTEGER,hdf5Status,&
-         & attribIntDims,hdferr)
-   if (hdferr /= 0) stop 'Failed to read pot OL and local Q status.'
-   if (hdf5Status == 1) then
-      write(20,*) "Pot OL and local Q electrostatics already exists. Skipping."
-      return
+   if (mpiRank == 0) then
+      hdf5Status = 0
+      call h5aread_f(potOLAndLocalQ_aid,H5T_NATIVE_INTEGER,hdf5Status,&
+            & attribIntDims,hdferr)
+      if (hdferr /= 0) stop 'Failed to read pot OL and local Q status.'
+      if (hdf5Status == 1) then
+         write(20,*) "Pot OL and local Q electrostatics already ",&
+               & "exists. Skipping."
+         return
+      endif
+
+      ! Wake every worker out of the solve server and into this
+      !   sub-stage (sub-stage 1 of the electrostatic setup); they
+      !   call this same subroutine and take the all-ranks path
+      !   below.
+      do i = 1, mpiSize - 1
+         call sendCtrlMPI (elecStatTask, 1, i)
+      enddo
    endif
 
    ! Allocate space for the coulomb potential matrices that are created here.
@@ -219,6 +249,13 @@ subroutine neutralAndNuclearQPot
    currentType(:)      = 0
    currentMinNumAlpha  = 0
    currentMaxNumAlpha  = 0
+
+   ! Deal the outer site loop across the ranks (DESIGN 9.2): each
+   !   rank accumulates its contiguous site range into its private
+   !   copies of the matrices zeroed above, and the copies are
+   !   summed onto root after the loop. At one rank the range is
+   !   the full 1..numPotSites and nothing else changes.
+   call loadBalMPI (numPotSites, initSiteIdx, finSiteIdx)
 
    ! Many different things are computed in this subroutine.
    !
@@ -318,8 +355,20 @@ subroutine neutralAndNuclearQPot
    !   map to atomic sites too.  Still, we will keep this current algorithm
    !   because it isn't all that bad even for our now simpler case of no
    !   auxiliary functions.
-   do i = 1, numPotSites
-      if (potSites(i)%firstPotType == 1) then
+   !
+   ! The outer sites are DEALT across ranks (PSEUDOCODE 28.2), so
+   !   the type-local data refreshes on a TYPE CHANGE rather than on
+   !   the firstPotType flag -- the flag marks only one site per
+   !   type, which a mid-range start would never see -- and the
+   !   whole-system alpha indices come from the type's cumulative
+   !   alpha count rather than a sequential carry, so any starting
+   !   site computes them correctly. Sites are ordered with each
+   !   type contiguous (the precondition the original sequential
+   !   carry already relied on), so serially this refreshes at
+   !   exactly the same sites as before.
+   call system_clock (clockBefore, clockRate)
+   do i = initSiteIdx, finSiteIdx
+      if (potSites(i)%potTypeAssn /= currentType(1)) then
 
          ! Assign local copies of the potential type assignment of the current
          !   potential site, and the number of alphas for that type.
@@ -332,8 +381,8 @@ subroutine neutralAndNuclearQPot
 
          ! Update the indices for which alphas we are dealing with out of all
          !   the alphas in the whole system.
-         initAlphaIndex(1) = finAlphaIndex(1)
-         finAlphaIndex(1)  = finAlphaIndex(1) + currentNumAlphas(1)
+         initAlphaIndex(1) = potTypes(currentType(1))%cumulAlphaSum
+         finAlphaIndex(1)  = initAlphaIndex(1) + currentNumAlphas(1)
       endif
 
 
@@ -623,6 +672,9 @@ subroutine neutralAndNuclearQPot
          endif
       enddo
    enddo
+   call system_clock (clockAfter)
+   myLoopSeconds(1) = real (clockAfter - clockBefore, double)&
+         & / real (clockRate, double)
 
    ! Deallocate the variables that will not be used later.
    deallocate (potOverlapCoeff)
@@ -631,6 +683,34 @@ subroutine neutralAndNuclearQPot
    deallocate (currentAlphas)
    deallocate (currentAlphasSqrt)
    deallocate (neutralQPotCoeff)
+
+   ! Combine every rank's partial accumulators onto root -- the sum
+   !   of the dealt ranges IS the serial result -- and gather the
+   !   per-rank loop times so the balance is measured, not assumed
+   !   (PSEUDOCODE 28.2).
+   call reduceSumMPI (potAlphaOverlap)
+   call reduceSumMPI (nonLocalNeutQPot)
+   call reduceSumMPI (nonLocalNucQPot)
+   call reduceSumMPI (localNeutQPot)
+   call reduceSumMPI (localNucQPot)
+   allocate (allLoopSeconds (1, mpiSize))
+   call gatherTimesMPI (myLoopSeconds, allLoopSeconds)
+   if (mpiRank == 0) then
+      write (20,*) 'ElecStat sub-stage 1 per-rank loop seconds:',&
+            & allLoopSeconds(1,:)
+   endif
+   deallocate (allLoopSeconds)
+
+   ! Only root holds the summed result and the file; the workers
+   !   release their copies and return to the solve server.
+   if (mpiRank /= 0) then
+      deallocate (nonLocalNeutQPot)
+      deallocate (nonLocalNucQPot)
+      deallocate (localNucQPot)
+      deallocate (localNeutQPot)
+      deallocate (potAlphaOverlap)
+      return
+   endif
 
    ! Record the potential overlap and local Q data.
    call h5dwrite_f(potAlphaOverlap_did,H5T_NATIVE_DOUBLE, &
@@ -685,6 +765,10 @@ subroutine residualQ
    use O_PotTypes, only: numPotTypes, potTypes, maxNumPotAlphas, minPotAlpha
    use O_Potential, only: potDim
 
+   ! Import the MPI layer (PSEUDOCODE 28; see neutralAndNuclearQPot).
+   use O_MPI, only: mpiRank, mpiSize, loadBalMPI, reduceSumMPI, &
+         & sendCtrlMPI, gatherTimesMPI, elecStatTask
+
    ! Import external subroutines.
    use O_MathSubs
 
@@ -696,6 +780,13 @@ subroutine residualQ
    integer :: hdferr
    integer :: hdf5Status
    integer(hsize_t), dimension (1) :: attribIntDims ! Attribute dataspace dim
+
+   ! The dealt site range of this rank and the per-rank loop
+   !   accounting (PSEUDOCODE 28.2).
+   integer :: initSiteIdx, finSiteIdx
+   integer :: clockBefore, clockAfter, clockRate
+   real (kind=double), dimension (1) :: myLoopSeconds
+   real (kind=double), allocatable, dimension (:,:) :: allLoopSeconds
 
    ! Iteration dependent variables.  For each pair of potential sites these
    !   values will change when the potential type of either site changes.
@@ -762,18 +853,27 @@ subroutine residualQ
 
    ! For writing the attribute.
 
-   ! Determine if this calculation has already been completed by a previous
-   !   Imago execution.
-   hdf5Status = 0
+   ! Determine if this calculation has already been completed by a
+   !   previous Imago execution. Root alone reads and, when there is
+   !   work, wakes the workers into this sub-stage (sub-stage 2);
+   !   see neutralAndNuclearQPot for the pattern (PSEUDOCODE 28.1).
    attribIntDims(1) = 1
-   call h5aread_f(nonLocalResidualQ_aid,H5T_NATIVE_INTEGER,hdf5Status,&
-         & attribIntDims,hdferr)
-   if (hdferr /= 0) stop 'Failed to read non-local residual Q status.'
-   if (hdf5Status == 1) then
-      write(20,*) "Non-local residual Q electrostatics exists. Skipping."
-      call h5aclose_f(nonLocalResidualQ_aid,hdferr)
-      if (hdferr /= 0) stop 'Failed to close non-local residual Q status.'
-      return
+   if (mpiRank == 0) then
+      hdf5Status = 0
+      call h5aread_f(nonLocalResidualQ_aid,H5T_NATIVE_INTEGER,hdf5Status,&
+            & attribIntDims,hdferr)
+      if (hdferr /= 0) stop 'Failed to read non-local residual Q status.'
+      if (hdf5Status == 1) then
+         write(20,*) "Non-local residual Q electrostatics exists. Skipping."
+         call h5aclose_f(nonLocalResidualQ_aid,hdferr)
+         if (hdferr /= 0) then
+            stop 'Failed to close non-local residual Q status.'
+         endif
+         return
+      endif
+      do i = 1, mpiSize - 1
+         call sendCtrlMPI (elecStatTask, 2, i)
+      enddo
    endif
 
    ! Allocate space for the coulomb potential matrices that are created here.
@@ -809,12 +909,21 @@ subroutine residualQ
    initAlphaIndex = 0
    finAlphaIndex  = 0
 
-   ! Initialize the current element to zero.
+   ! Initialize the current element and type to zero.
    currentElement = 0
+   currentType(1) = 0
+
+   ! Deal the outer site loop across the ranks (DESIGN 9.2), exactly
+   !   as in neutralAndNuclearQPot.
+   call loadBalMPI (numPotSites, initSiteIdx, finSiteIdx)
 
    ! Begin with nested loops over the potential alphas of each potential site.
-   do i = 1, numPotSites
-      if (potSites(i)%firstPotType == 1) then
+   !   The type-local data refreshes on a TYPE CHANGE with the alpha
+   !   indices from the type's cumulative count, so any dealt range
+   !   start computes them correctly (see neutralAndNuclearQPot).
+   call system_clock (clockBefore, clockRate)
+   do i = initSiteIdx, finSiteIdx
+      if (potSites(i)%potTypeAssn /= currentType(1)) then
 !write(20,*) "FPT:i",i
 
          ! Assign local copies of the potential type assignment of the current
@@ -833,8 +942,8 @@ subroutine residualQ
 
          ! Update the indices for which alphas we are dealing with out of all
          !   the alphas in the whole system.
-         initAlphaIndex = finAlphaIndex
-         finAlphaIndex  = finAlphaIndex + currentNumAlphas(1)
+         initAlphaIndex = potTypes(currentType(1))%cumulAlphaSum
+         finAlphaIndex  = initAlphaIndex + currentNumAlphas(1)
 
          ! Compute key variables for the alphas of this potential type.  This
          !   only needs to be done when the alphas actually change (which can
@@ -1014,6 +1123,9 @@ subroutine residualQ
 
    enddo
    write (20,*)
+   call system_clock (clockAfter)
+   myLoopSeconds(1) = real (clockAfter - clockBefore, double)&
+         & / real (clockRate, double)
 
    ! Deallocate the variables that will not be used later.
    deallocate (reducedPotAlphaSqrt)
@@ -1025,6 +1137,25 @@ subroutine residualQ
    deallocate (phase)
    deallocate (recipCellExp)
    deallocate (minReducedAlphaSqrt)
+
+   ! Combine the partial accumulators onto root and record the
+   !   per-rank balance (PSEUDOCODE 28.2), as in the first
+   !   sub-stage.
+   call reduceSumMPI (nonLocalResidualQ)
+   allocate (allLoopSeconds (1, mpiSize))
+   call gatherTimesMPI (myLoopSeconds, allLoopSeconds)
+   if (mpiRank == 0) then
+      write (20,*) 'ElecStat sub-stage 2 per-rank loop seconds:',&
+            & allLoopSeconds(1,:)
+   endif
+   deallocate (allLoopSeconds)
+
+   ! Only root holds the summed result and the file; the workers
+   !   release their copies and return to the solve server.
+   if (mpiRank /= 0) then
+      deallocate (nonLocalResidualQ)
+      return
+   endif
 
    ! Write to disk the matrices that will be used by main later.
    call h5dwrite_f(nonLocalResidualQ_did,H5T_NATIVE_DOUBLE, &

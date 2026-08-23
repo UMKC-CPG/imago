@@ -623,9 +623,10 @@ subroutine solveServerLoop
    use O_AtomicSites, only: valeDim
    use O_LAPACKParameters, only: setBlockSize
    use O_MPI, only: recvCtrlMPI, recvPackedMPI, sendDblVecMPI, &
-         & solveShutdown, solveTask, solveCollective, stopMPI, &
-         & mpiTagHam, mpiTagOvlp, mpiTagVals, mpiTagVecs
+         & solveShutdown, solveTask, solveCollective, elecStatTask, &
+         & stopMPI, mpiTagHam, mpiTagOvlp, mpiTagVals, mpiTagVecs
    use O_ELPASolve, only: workerCollectiveSolve
+   use O_ElectroStatics, only: neutralAndNuclearQPot, residualQ
 #ifndef GAMMA
    use O_MPI, only: sendCmplxBlockMPI
    use O_LAPACKZHEGV
@@ -680,6 +681,20 @@ subroutine solveServerLoop
          call workerCollectiveSolve (valeDim, numStates)
          write (20,*) 'Joined collective solve for k-point ',&
                & kPointIndex
+         cycle
+      endif
+      if (code == elecStatTask) then
+         ! Join a dealt electrostatic-setup sub-stage (PSEUDOCODE
+         !   28): the same subroutine root is inside, whose
+         !   root-only entry and exit blocks skip themselves on a
+         !   worker; the second control integer names the
+         !   sub-stage.
+         if (kPointIndex == 1) then
+            call neutralAndNuclearQPot
+         else
+            call residualQ
+         endif
+         write (20,*) 'Joined electrostatics sub-stage ', kPointIndex
          cycle
       endif
       if (code /= solveTask) then

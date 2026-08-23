@@ -8652,9 +8652,46 @@ is not carried only in conversation.
   valence-density step (now the third cost at 10.8 % of the
   headline run), which rides the same deal.
 
-- [ ] PA5. Parallel HDF5 (DESIGN 9.7) and the grid-work
-  distribution (DESIGN 9.2) -- last, and only if the map after
-  PA3/PA4 shows them worth it.
+- [ ] PA5a. Distribute the ELECTROSTATIC SETUP under DESIGN 9.2
+  -- PULLED FORWARD 2026-08-22 (programmer's ruling on the
+  post-PA3/PA4 map; DESIGN 9.8 records the re-ordering): the
+  map DID show it worth it -- 12050 s serial at 1296 atoms on
+  both variants, the remaining ceiling, larger than the ELPA'd
+  solve. Site loops dealt by loadBalMPI, potDim-sized partial
+  accumulators reduced onto root, root writes as today; workers
+  wake through the solve server's control protocol. Acceptance:
+  the `Electrostatic Matrices` stamp falling with rank count on
+  the 243-atom glass, energies identical, per-rank loop times
+  recorded.
+  **2026-08-22: PSEUDOCODE 28 DRAFTED** (seam inventory
+  verified against the code -- both sub-stage workers, their
+  accumulators and attributes, the alive-on-workers inputs, the
+  elecStatTask control code, the reduceSumMPI helper; six
+  checks). Reviewed by the programmer 2026-08-22. It runs
+  AHEAD of PA4's valence-density tail and of the solve
+  refinements (assembly caching, Cholesky reuse), per 9.8.
+  **CODED and ACCEPTED 2026-08-22** (record: PERFORMANCE.md
+  "PA5a electrostatic setup deal"; evidence
+  `jobs/bench/pa5a*`, job 16707849). The smallest increment of
+  the campaign and the cleanest result: the serial build is
+  BIT-IDENTICAL to the pre-PA5a binaries on both decks (the
+  range-safety restructure is exactly equivalent), the stage
+  falls 58.6 -> 29.4 -> 14.8 -> 7.8 s at np 1/2/4/8 on the
+  243-atom glass (ideal halving at every doubling, per-rank
+  loop times within 3 %), the files are clean at the measured
+  1e-6 ABSOLUTE criterion of 28.3 with energies identical, and
+  a run killed mid-SCF restarts with the finished setup
+  skipped, no dispatch, and the baseline energy reproduced.
+  Two facts for the next stage: the cost is almost entirely
+  the RECIPROCAL-space sub-stage (`residualQ`: 99.97 s of the
+  glass's 100.1 s), and the same stage runs about 1.7x faster
+  in the MPI build than in the serial build -- unattributed,
+  recorded rather than reconciled.
+
+- [ ] PA5b. Parallel HDF5 (DESIGN 9.7) and the remaining
+  per-iteration grid work in the SCF potential loop (DESIGN
+  9.2) -- last, and only if the map after PA5a shows them
+  worth it.
 
 ## TOOLING (lint helpers)
 

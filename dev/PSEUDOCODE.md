@@ -17076,3 +17076,124 @@ case solveCollective:
    mid-iteration restart of 26.6 check 5 revalidated once on
    the collective arm.
 
+## 28. Distributing the Electrostatic Setup
+## (DESIGN 9.2, 9.8 as re-ordered; TODO PA5a)
+
+The once-per-run electrostatic setup is the serial ceiling the
+post-PA4 measurements exposed: 12050 s at 1296 atoms on BOTH
+variants (it is k-independent), larger than the ELPA'd solve.
+Its two workers are exactly the shape DESIGN 9.2 was written
+for -- outer loops over `numPotSites` accumulating into
+potDim-sized arrays (about 31 KB at potDim 62, so the
+reduction is trivial against the compute) -- and the workers
+are woken through the solve server's control protocol, by now
+the standing pattern for entering any distributed region.
+
+### 28.1 Seam inventory
+
+- `elecStat.f90` -- `makeElectrostatics` calls two stage
+  workers, each with its own completion attribute and its own
+  site loop, and each is dealt independently:
+  `neutralAndNuclearQPot` (sites x sites x alphas x real
+  cells; accumulators `potAlphaOverlap(potDim,potDim)`,
+  `nonLocalNeutQPot(potDim,potDim)`,
+  `localNeutQPot(potDim,potDim)`, `localNucQPot(potDim)`,
+  `nonLocalNucQPot(potDim)`; five dataset writes plus the
+  `potOLAndLocalQ` attribute at the end) and `residualQ`
+  (sites x reciprocal cells; `nonLocalResidualQ`; one write
+  plus its attribute). Each worker's outer
+  `do i = 1, numPotSites` becomes
+  `do i = initialIdx, finalIdx` from `loadBalMPI(numPotSites)`
+  (DESIGN 9.2 verbatim -- site costs are near-uniform, the
+  contiguous deal suffices and the per-rank times are
+  recorded to confirm it). Two range-safety corrections the
+  code needed (found while coding, 2026-08-23): the outer
+  loops refreshed their type-local data on the
+  `firstPotType` FLAG, which marks one site per type and
+  which a mid-range start would never see -- the refresh
+  condition becomes "the site's type differs from the
+  current type", equivalent serially because sites are
+  type-contiguous, the precondition the existing code
+  already relied on; and the whole-system alpha indices were
+  a sequential carry across the loop -- they become
+  `potTypes(...)%cumulAlphaSum`-derived, the same
+  equivalence PA3's ortho already leaned on. After the loop
+  every rank's
+  accumulators are combined by `reduceSumMPI` onto root, and
+  ONLY root proceeds to the writes and attributes, exactly as
+  today. The existing skip-if-done attribute reads at each
+  worker's entry run on ROOT ONLY and gate the dispatch: a
+  completed sub-stage sends no control message at all.
+- Every input the loops read is replicated setup state that is
+  still alive when root reaches this stage on all ranks:
+  `potSites`/`potTypes`/`potDim` (parsed input),
+  `O_Lattice`'s real and reciprocal cell structures
+  (`cleanUpLattice` runs only in the end-of-run cleanups),
+  and `O_MathSubs`. Verified against the code, not assumed.
+- `imago.F90`, `setupSCF` -- the root-only `makeElectrostatics`
+  call stands; by the time root reaches it the workers are
+  already sitting in `solveServerLoop` (they enter it directly
+  after the term stage), so the dispatch timing needs nothing
+  new.
+- `secularEqn.F90`, `solveServerLoop` -- one new case,
+  `elecStatTask`: the worker calls the shared distributed
+  routine for the named sub-stage (the control message's
+  second integer says which) and returns to its loop.
+- `mpi.F90` -- the control code `elecStatTask = 3` and one new
+  helper with a caller: `reduceSumMPI` (a real rank-1/rank-2
+  generic; SUM onto root; the serial stub leaves root's data
+  in place, which IS the sum at width one).
+- Run shape: root sends the control message to every worker
+  before entering its own share, all ranks compute and reduce,
+  root writes. Serial build and one-rank parallel take today's
+  path byte for byte (the deal degenerates, no message is
+  sent, the reduce is the identity).
+
+### 28.2 The flow (per sub-stage, on root)
+
+```
+read the sub-stage's completion attribute (as today); if done,
+      skip -- no dispatch
+send ctrl (elecStatTask, subStageIndex) to every worker
+      ! workers are idle in the server; sends complete
+all ranks (root included):
+   loadBalMPI (numPotSites) -> my [initialIdx, finalIdx]
+   zero my accumulators; run the EXISTING loop body over my
+         range              ! same arithmetic, same order
+         !   within a site -- only the outer range changes
+   record my loop seconds
+reduceSumMPI each accumulator onto root
+gather the per-rank loop seconds; root logs one line
+root: write the datasets and the completion attribute, as
+      today; workers return to the server loop
+```
+
+### 28.3 Checks
+
+1. **Serial unchanged**: bn_small pair bit-exact against the
+   accepted binaries; `sio2_243_med_g` energies identical and
+   its `Electrostatic Matrices` stamp unchanged.
+2. **One-rank parallel equals serial** (bare and
+   `mpirun -np 1`), bit-exact files.
+3. **Multi-rank correctness and the falling stamp**: np 2/4/8
+   on `sio2_243_med_g` (its setup is 14.5 % of the run):
+   energies identical, `Electrostatic Matrices` stamp falling
+   with rank count, per-rank loop seconds within the mild
+   imbalance the near-uniform site costs predict. The file
+   criterion for THIS stage is ABSOLUTE, 1e-6, eigenvectors
+   excluded (measured 2026-08-22): the reduce reorders the
+   accumulator sums, and the potential fit's linear solve
+   carries the floor into potCoeffs as ~2e-9 absolute on
+   order-40 values -- 5e-11 RELATIVE, physically nothing, but
+   past any near-zero-safe relative form; every physical
+   magnitude in the file is below 1e3, so 1e-6 absolute is
+   at worst 1e-9 relative where it matters.
+4. **The ceiling moves**: on a 1296-atom run (or the recorded
+   headline numbers), the projected whole-run wall drops by
+   the setup's dealt share -- the point of the re-ordering.
+5. **Restart**: a run killed between the two sub-stages
+   resumes with the first skipped (attribute set) and only
+   the second dealt.
+6. **Lifecycle**: no worker files by default; the server
+   returns cleanly to solve service afterward (the SCF that
+   follows still deals or collects solves correctly).

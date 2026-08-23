@@ -101,6 +101,17 @@ would force one severity scale onto two unrelated questions.
   solve 11.3x faster. Three ELPA protocol facts and the
   full-triangle unpack were measured, not read from the
   documentation, and are recorded in 27.
+- **PA5a (the electrostatic setup deal) CODED and ACCEPTED
+  2026-08-22** (chain: DESIGN 9.2/9.8 as re-ordered +
+  PSEUDOCODE 28, reviewed 2026-08-22; numbers in "PA5a
+  electrostatic setup deal" below, closure in TODO PA5a). The
+  once-per-run setup -- 44 % of the post-PA4 headline run and
+  the standing serial ceiling -- is dealt by site range and
+  reduced onto root: ideal scaling, serial bit-identical, the
+  smallest increment of the campaign. NEXT: PA4's
+  valence-density tail (the third cost, 10.8 % of the headline
+  run), then the atom-pair distribution of the remaining
+  integral stages, per DESIGN 9.8.
 - **Install no profiling tools yet** (TODO PF6). `gprof` and
   `callgrind` are already present and cover Phases P0 through P2.
   The investigation into `perf` and `gperftools` is recorded below
@@ -591,6 +602,61 @@ so the serial unpack, which fills only that half, fed ELPA
 zeros for the rest and produced garbage eigenvectors and a
 POSITIVE total energy. The collective arm unpacks both
 triangles.
+
+## PA5a electrostatic setup deal (measured 2026-08-22)
+
+The acceptance record for the dealt electrostatic setup
+(PSEUDOCODE 28.3; TODO PA5a; job 16707849, sequential on
+exclusive c084, in-job references from the accepted PA4
+binaries).
+
+    sio2_243_med_g, Electrostatic Matrices stage (1 call):
+                        np1        np2        np4        np8
+    stage wall         58.6 s     29.4 s     14.8 s      7.8 s
+
+Ideal halving at every doubling (7.5x at eight ranks), with the
+per-rank loop times inside 3 % of one another at every width --
+the near-uniform site costs DESIGN 9.2 assumed, confirmed
+rather than asserted. Applying that ratio to the headline run's
+7237-second setup projects the 1296-atom np8 run at about 2.9 h
+-- 5.5x over serial -- which is the point of the re-ordering
+recorded in DESIGN 9.8.
+
+Correctness: the serial build is BIT-IDENTICAL to the pre-PA5a
+binaries on both the small pair and the 243-atom glass, so the
+two range-safety corrections (refresh on TYPE CHANGE rather
+than on the `firstPotType` flag; alpha indices from
+`cumulAlphaSum` rather than a sequential carry) are exactly
+equivalent to what they replaced. At np 2/4/8 the files are
+clean against the same-build same-node np1 file at 1e-6
+ABSOLUTE with eigenvectors excluded and the energies are
+identical. That criterion is measured, not chosen for comfort:
+the reduce reorders the accumulator sums, and the potential
+fit's linear solve carries the floor into `potCoeffs` as about
+2e-9 absolute on order-40 values -- 5e-11 relative, physically
+nothing, but past any near-zero-safe relative form. Every
+physical magnitude in the file is below 1e3, so 1e-6 absolute
+is at worst 1e-9 relative where it matters. A run killed
+mid-SCF restarted with the finished setup skipped (37 skip
+lines, no dispatch, no orphans) and reconverged to the baseline
+total energy.
+
+Two observations worth keeping:
+
+- **The cost is the reciprocal-space sub-stage.** On the glass,
+  `neutralAndNuclearQPot` takes 0.099 s and `residualQ` takes
+  99.97 s. Both are dealt, but only the second matters, and it
+  is the one that scales with the reciprocal-cell count.
+- **The stage is about 1.7x faster in the MPI build.** Same
+  node, same job: 100.1 s under the serial `cpg` build against
+  58.6 s under the `cpgp` MPI build at one rank; the same ratio
+  separates the 1296-atom baseline's 12045 s from the headline
+  run's 7237 s. The stage is exp/erf-bound, so a math-library
+  difference between the two conda environments is the
+  plausible cause, but this is NOT attributed. It is recorded
+  so the two baselines are never silently compared: PA5a's own
+  np-series is same-build throughout and is the honest scaling
+  measurement.
 
 ## The situation, as of 2026-08-09
 

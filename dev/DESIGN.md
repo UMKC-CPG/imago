@@ -14204,6 +14204,16 @@ draft called it the recommended first increment; the
 the loops it serves are 1-3 % of a medium run). The
 algorithm stands unchanged for when its turn comes, and it
 doubles as the deal used for the term distribution of 9.5.
+Its first exercise (re-ordered forward 2026-08-22; see 9.8)
+is the once-per-run ELECTROSTATIC SETUP, whose site loops
+accumulate into potDim-sized arrays small enough that the
+reduction is trivial: every rank takes its contiguous site
+range, partial accumulators are combined with `MPI_REDUCE`
+under SUM on root, and root writes the datasets exactly as
+today. The workers enter through the solve server's control
+protocol (9.6's dispatch mechanism, one more code), which by
+then is the standing pattern for waking them into any
+distributed region.
 
 ### 9.3 Block-Cyclic Matrix Distribution
 
@@ -14583,11 +14593,21 @@ through serial HDF5.
   measurement (ARCHITECTURE 6.8): term distribution (9.5),
   then the eigensolver boundary (9.6), then valence charge
   density on the solve's distribution, then grid work (9.2)
-  last. The validation gate between stages is unchanged:
-  each stage must reproduce the serial benchmark results
-  (energies to print precision, HDF5 content by h5diff)
-  before the next begins, and replicate-and-broadcast forms
-  are never counted as progress.
+  last. RE-ORDERED 2026-08-22, again by measurement: with the
+  term stage dealt and the solve under ELPA, the once-per-run
+  ELECTROSTATIC SETUP is the remaining serial ceiling (12050 s
+  at 1296 atoms, k-independent, both variants) and exceeds the
+  post-ELPA solve -- so its distribution (the 9.2 pattern on
+  its site loops) comes NEXT, ahead of the valence density and
+  of the cheap solve refinements (root's per-iteration
+  assembly cached in memory; the constant overlap's Cholesky
+  reused), which follow it; the grid work in the per-iteration
+  SCF potential loop stays last. The validation gate between
+  stages is unchanged: each stage must reproduce the serial
+  benchmark results (energies to print precision, HDF5 content
+  by h5diff under the measured criteria of 9.5) before the
+  next begins, and replicate-and-broadcast forms are never
+  counted as progress.
 
 ---
 
