@@ -532,7 +532,7 @@ accepted PA3 and PA4-A binaries).
     per call           15.7 s      6.2 s      5.2 s      4.8 s
                       LAPACK      ELPA       ELPA       ELPA
 
-At valence dimension 1800 the collective arm beats the serial
+At valence dimension 2349 the collective arm beats the serial
 one by 2.5x at two ranks and then flattens: the matrix is too
 small for eight ranks to help, which is the expected shape and
 the reason the headline deck exists. The 135-atom KNbO3 3x3x3
@@ -540,8 +540,8 @@ supercell at one k-point (the COMPLEX arm, job 16702210) gives
 the same picture with more room: whole run 527.3 -> 197.4 s and
 the solve 197.9 -> 65.6 s at np8 (3.0x), energies identical.
 
-The headline -- `sio2_1296_large_g`, valence dimension 5184, at
-np8 against the serial baseline:
+The headline -- `sio2_1296_large_g`, valence dimension 12528
+(numStates 5184, potDim 32), at np8 against the serial baseline:
 
     stage                     serial       np8    speedup
     whole run               15h55m      4h33m       3.5x
@@ -552,7 +552,7 @@ np8 against the serial baseline:
 
 Energies IDENTICAL to the baseline. The solve's 11.3x is the
 number to read: ELPA's two-stage algorithm scales far better at
-5184 than at 1800, so the solve fell from 37 % of the run to
+12528 than at 2349, so the solve fell from 37 % of the run to
 11 % and the once-per-run electrostatic setup became the new
 leader at 44 %. The term stage's per-rank table is the best
 balance the campaign has recorded: compute 3258-3328 s across
@@ -593,8 +593,9 @@ failed run, all folded into PSEUDOCODE 27:
   of the grid owning nothing, and the generalized solve
   returned garbage on the degenerate layout. The edge is now
   adaptive and the arm policy additionally requires
-  valeDim >= mpiSize. Production sizes (1800-5184) were never
-  affected; a 60-row acceptance deck exposed it.
+  valeDim >= mpiSize. Production sizes (valeDim 1620-12528 on
+  the benchmark decks) were never affected; a 60-row acceptance
+  deck exposed it.
 
 And one data-shape fact: ELPA consumes the FULL Hermitian
 matrix, while LAPACK's solvers read only the upper triangle --
@@ -651,12 +652,127 @@ Two observations worth keeping:
   node, same job: 100.1 s under the serial `cpg` build against
   58.6 s under the `cpgp` MPI build at one rank; the same ratio
   separates the 1296-atom baseline's 12045 s from the headline
-  run's 7237 s. The stage is exp/erf-bound, so a math-library
-  difference between the two conda environments is the
-  plausible cause, but this is NOT attributed. It is recorded
-  so the two baselines are never silently compared: PA5a's own
-  np-series is same-build throughout and is the honest scaling
-  measurement.
+  run's 7237 s. ATTRIBUTED 2026-08-23 -- see "The two
+  toolchains are not equally fast" below. PA5a's own np-series
+  is same-build throughout and is unaffected by it.
+
+## The two toolchains are not equally fast (attributed 2026-08-23)
+
+The `cpgp` (parallel) build emits calls to glibc's VECTOR math
+routines and the `cpg` (serial) build does not. `imagoG` from
+`jobs/pa5a_mpi_bin` carries undefined symbols `_ZGVbN2v_exp`,
+`_ZGVbN2v_sin`, `_ZGVbN2v_cos` and `_ZGVbN2vv_pow` and a NEEDED
+entry for `libmvec.so.1`; the same program from
+`jobs/pa5a_release_bin` carries none of them and links only
+scalar `libm`. A probe isolating one exponential loop
+(`vecmath_probe.f90`, the shape `residualQ` runs) compiled at
+`-O3` by each environment's own gfortran, on one node:
+
+    environment   vector symbols        exp loop     checksum
+    cpg           none                   0.257 s   999999.49793899385
+    cpgp          _ZGVbN2v_exp           0.083 s   999999.49793899385
+
+3.1x on the loop, with the summed result identical to every
+printed digit. The cause is not a flag imago sets: both builds
+compile at `-O3 -fimplicit-none -Wall` (the MPI preset adds
+only `-g -fno-omit-frame-pointer` from IMAGO_PROFILE, plus the
+ELPA includes), and neither HDF5 wrapper injects optimization
+flags. It is the COMPILER PACKAGE. Both environments carry
+gfortran 15.2.0, but from different conda-forge builds --
+`15.2.0-7` in `cpg` against `15.2.0-20` in `cpgp` -- configured
+against different sysroots, and only the newer one's target
+glibc lets GCC's vectorizer emit libmvec calls. Fortran gets
+this without `-ffast-math` because gfortran already implies
+`-fno-math-errno`.
+
+What follows, in order of consequence:
+
+1. **The serial build is leaving a free speedup on the floor.**
+   Every exp/erf/pow-heavy stage -- the electrostatic setup
+   above all, and plausibly the exchange-correlation mesh and
+   the Gaussian evaluation inside the integrals -- runs slower
+   in `cpg` for no reason but a package pin. Upgrading `cpg`'s
+   compiler (or pinning both environments to one build) is a
+   no-code change with a measured payoff.
+2. **Cross-build ratios in this file are contaminated, and the
+   headline is one of them.** The 3.5x whole-run figure
+   compares a `cpg` serial baseline against a `cpgp` np8 run.
+   The electrostatic setup alone accounts for 4808 s of that
+   gap from the toolchain rather than from parallelism, which
+   puts the honest comparison at about 14h35m vs 4h33m = 3.2x.
+   Other stages may add to that correction. The stage-level
+   speedups measured WITHIN one build -- the solve's 11.3x, the
+   term stage's 6.1x, PA5a's 7.5x -- are untouched, because
+   both sides of each of those ratios came from the same
+   binary.
+3. **Cross-build bit-comparison now has a second named cause.**
+   PA3 recorded OpenBLAS build differences; vector versus
+   scalar `exp`/`sin`/`cos`/`pow` is the other. The rule is
+   unchanged and now better founded: bit-level comparisons are
+   meaningful only same-build AND same-node.
+
+What is NOT yet done, and is TODO PF7: rebuild the serial
+preset against a toolchain that emits libmvec, confirm the
+243-atom glass setup lands near 58 s rather than 100 s, and
+re-take the serial baselines that every parallel ratio in this
+file is quoted against.
+
+## Integral storage layout and read cost (measured 2026-08-23)
+
+Read from the files themselves with `h5ls -v`, and from the
+dataset-creation code in `hdf5SCFIntg.F90`, while settling
+whether parallel reads could serve the valence density step
+(DESIGN 9.7). Two facts about how the integrals are stored
+decide more than any timing does.
+
+**Every packed matrix is ONE compressed chunk.** The datasets
+are created chunked with DEFLATE level 1, and the chunk is the
+whole dataset unless `packedVVDims(1) * packedVVDims(2)` passes
+250 million elements, which engages only above valence
+dimension 22,360 real / 15,811 complex. The largest benchmark
+cell is 12,528. Confirmed on disk rather than inferred from the
+code -- every potential-term dataset of the 1296-atom run
+reports `Chunks: {78481656, 1} 627853248 bytes`, one chunk
+holding the entire matrix.
+
+**Compression is strong and very uneven.** Per dataset on the
+1296-atom real run, all of them 627,853,248 logical bytes:
+
+    dataset                    on disk    ratio
+    atomPotOverlap term 1     191.6 MB     3.3x
+    atomPotOverlap term 16     11.6 MB    54.1x
+    atomPotOverlap term 32     13.6 MB    46.3x
+    atomOverlap               209.4 MB     3.0x
+    atomNPOverlap             220.1 MB     2.9x
+    atomKEOverlap             242.8 MB     2.6x
+    atomMVOverlap                   0      (unwritten; rel=0)
+
+The spread is the negligibility mask showing up in the file: a
+diffuse term reaches most pairs and barely compresses, a tight
+one is mostly exact zeros and compresses fifty-fold. Totals for
+the 35 datasets the valence density reads per k-point: 21.97 GB
+logical, 3.85 GB on disk, 5.7x overall. For the 64 datasets the
+secular assembly reads per k-point on the 4-k-point medium
+cell: 1.345 GB logical, 0.185 GB on disk, 7.3x.
+
+**Per-iteration read volume.** The assembly and the valence
+density read essentially the same set, so the SCF loop inflates
+about 44 GB per iteration on the large cell -- data that has
+not changed since the integral stage produced it.
+
+**The read rate, and what it does NOT establish.** PA4-A
+measured root's assembly at about 12 s per call on the medium
+cell; that call covers all FOUR k-points, so it is about 3 s
+per k-point -- roughly 448 MB/s of uncompressed output, or
+62 MB/s off the device. Both figures sit inside the plausible
+band for their own mechanism (DEFLATE level 1 inflates at a few
+hundred MB/s per core; 62 MB/s is slow for this filesystem but
+not impossible across 64 separate reads), so this measurement
+does NOT decide whether the cost is inflation or storage. An
+earlier note in DESIGN 9.7 claimed inflation confidently on an
+arithmetic slip -- it read the 12 s as one k-point's worth and
+derived 26 MB/s, which nothing here would explain. Corrected
+here and there. TODO PF8 settles it directly.
 
 ## The situation, as of 2026-08-09
 

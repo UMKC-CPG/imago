@@ -14630,6 +14630,131 @@ calibration in 9.8. It is NOT a prerequisite for 9.5, whose
 first version writes disjoint per-term datasets in turn
 through serial HDF5.
 
+**The layout as it actually is (read from the code
+2026-08-23).** The calibration above was written before anyone
+had looked at what `initSCFIntegralHDF5` creates. It creates
+the packed valence-valence datasets chunked and DEFLATE-
+compressed at level 1, and the chunk is the WHOLE DATASET
+unless `packedVVDims(1) * packedVVDims(2)` exceeds 250 million
+elements, in which case the second extent alone is capped. That
+threshold is not reached by anything we run: it engages above
+valence dimension 22,000 real and 15,800 complex, and the
+largest benchmark cell is 12,528. So for every deck in the
+benchmark set, EVERY packed matrix on disk is a single
+compressed chunk.
+
+Three consequences follow, and they answer the read half of
+this section's calibration outright.
+
+**FIRST: sub-matrix collective reads are foreclosed, and not
+by the filesystem.** A compression chunk is all-or-nothing --
+to obtain any element the library must fetch and inflate the
+whole chunk. Under this layout a rank that wants the block-
+cyclic tiles it owns would fetch and inflate the entire matrix
+to get them, so N ranks reading N disjoint shares would do N
+times the work of one rank reading it once. Collective reads
+at the granularity of matrix PIECES are therefore not available
+until the chunking changes, and changing it is not free: the
+same datasets are written per-term by 9.5, and the completion
+attributes that make the term stage restartable are attached to
+them. This is a property of the stored layout, not a
+performance guess, and it retires "one chunk per block per
+rank" as an option for the reads until the layout question is
+reopened deliberately.
+
+**SECOND: the existing per-term WRITE pattern is already
+aligned.** Because each term's dataset is one chunk, 9.5's
+open-write-close of a whole term writes whole chunks by
+construction. That is very likely why PA3 measured the
+write-in-turn discipline as benign (writes about 4 % of
+compute, lock waits under four seconds). The write half of this
+section's calibration is thus answered in the affirmative for
+the current increment: the alignment it asked for already
+holds, by accident of the chunk sizing rather than by design,
+and it should be recorded as a requirement so a later change to
+the chunk rule does not quietly break it.
+
+**THIRD: whether the cost is inflation or the storage is NOT
+yet decided, and the arithmetic says so.** The stored volumes
+are measured (PERFORMANCE.md "Integral storage layout and read
+cost"): on the 4-k-point medium cell the assembly's 64 datasets
+per k-point are 1.345 GB uncompressed and 0.185 GB on disk,
+compressing 7.3-fold; on the 1296-atom real cell the density
+step's 35 datasets are 21.97 GB uncompressed and 3.85 GB on
+disk, 5.7-fold. PA4-A measured root's assembly at about 12
+seconds per call on the medium cell, and that call covers all
+FOUR k-points, so it is about 3 seconds per k-point: roughly
+448 MB/s of uncompressed output, or 62 MB/s off the device.
+Both readings are inside the plausible band for their
+mechanism -- DEFLATE level 1 inflates at a few hundred MB/s per
+core, and 62 MB/s is slow for this filesystem but not
+impossible across 64 separate small reads. So the honest
+position is that the mechanism is UNDETERMINED. An earlier
+draft of this paragraph asserted inflation on an arithmetic
+slip (it read the 12 seconds as one k-point's worth and
+concluded 26 MB/s, which no storage here would explain); the
+corrected numbers do not support that confidence. The test is
+cheap and is TODO PF8. The distinction matters because
+inflation is processor work that divides across ranks
+perfectly, while storage bandwidth on a shared filesystem
+divides much less predictably.
+
+**What the aligned unit of work is.** If the cost is
+inflation, then the natural division is not a piece of a matrix
+but a WHOLE MATRIX. The datasets are independent, there are
+about 35 of them per k-point, and each is exactly one chunk, so
+dealing whole datasets to ranks aligns with the storage
+exactly, wastes nothing, and needs no layout change. It is also
+a shape this project has already built twice: it is 9.5's term
+deal applied to reads instead of writes, and the file-open
+discipline it needs is 9.5's -- root suspends the file, every
+rank opens it READ-ONLY (concurrent readers are not the case
+the file lock exists to prevent), reads its own datasets, and
+root reopens after a barrier.
+
+**The question underneath the whole calibration.** The integral
+matrices do not change after the integral stage produces them,
+yet the SCF loop reads them TWICE per iteration -- once when
+9.6's assembly builds H, once when the valence density
+contracts against them -- for about 44 GB of inflation per
+iteration on the large cell, all of it re-deriving data that
+was fixed before the first iteration began. Holding them in
+memory instead removes the cost from BOTH consumers rather than
+parallelizing it -- and it is the one direction that does not
+depend on what PF8 finds, since a read not taken costs nothing
+whichever mechanism would have paid for it. The arithmetic
+permits it: about 22 GB
+uncompressed for the largest cell, under 3 GB per rank across
+eight ranks, against a measured peak resident set of 7.5 GB for
+the headline run. 9.8 already lists "root's per-iteration
+assembly cached in memory" as a solve refinement; what the read
+above adds is that the SAME cache serves the valence density,
+which roughly doubles what it is worth, and that a
+whole-dataset deal is how a cache gets filled in parallel. The
+two directions are therefore one direction, and neither is
+adopted here -- this section records what the layout permits,
+not what will be built.
+
+**What this does NOT fix, so it is not mistaken for a cure.**
+Distributing the eigensolver's output so the solution stays
+spread across ranks (9.4's endgame) removes DATA MOVEMENT --
+the gather of eigenvectors onto root and the redistribution
+back out -- and lets the density matrix be built where its
+inputs already are. It does not remove file reading, and in the
+single-k-point gamma build there is no eigenvector re-read to
+remove in the first place: those wave functions stay resident
+in memory from the solve. The reads discussed above are of the
+stored INTEGRALS, which the eigensolver never touches. The two
+questions are independent and both must be answered.
+
+Finally, all of this is subordinate to a measurement that has
+not been taken: 9.6's valence paragraph records that the split
+between building the density matrix and contracting it against
+the stored integrals is unmeasured. If the building half
+dominates, everything in these paragraphs is second-order. The
+stamps that decide it are part of that step's first increment,
+and this section should be re-read against them.
+
 ### 9.8 Open Design Questions
 
 - ~~**Distributed eigensolver backend.**~~ **DECIDED
@@ -14642,9 +14767,18 @@ through serial HDF5.
   -- OpenACC, OpenMP target, CUDA Fortran, or a library
   boundary such as ELPA -- is open and will likely differ
   per kernel.
-- **Parallel-HDF5 chunk/block strategy.** The collective-
-  write pattern against compressed chunks (9.7) is settled
-  by measurement, not assumed.
+- **Parallel-HDF5 chunk/block strategy.** PARTLY ANSWERED
+  2026-08-23 by reading the layout (9.7): every packed matrix
+  is a single compressed chunk at every size we run, which
+  forecloses sub-matrix collective READS until the chunking
+  changes and means 9.5's per-term writes are already
+  chunk-aligned. What remains open is the direction 9.7's
+  reading points to -- whole-dataset deals and a read-once
+  in-memory cache of the constant integrals, serving the
+  assembly and the valence density together -- and the
+  mechanism question underneath it, whether the read cost is
+  DEFLATE inflation or the storage, which the measured volumes
+  leave genuinely open and TODO PF8 settles.
 - **Implementation order** -- SETTLED 2026-08-18 by the
   measurement (ARCHITECTURE 6.8): term distribution (9.5),
   then the eigensolver boundary (9.6), then valence charge

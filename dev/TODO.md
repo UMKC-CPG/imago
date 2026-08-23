@@ -8426,6 +8426,97 @@ is not carried only in conversation.
     via SIGPROF in user space and would survive a stricter
     `perf_event_paranoid` than this machine sets.
 
+- [ ] PF7. Close out the toolchain speed difference between the
+  two conda environments.  ROOT CAUSE FOUND 2026-08-23 and
+  recorded in PERFORMANCE.md ("The two toolchains are not equally
+  fast"): the `cpgp` build emits glibc VECTOR math calls
+  (`_ZGVbN2v_exp` and friends, NEEDED `libmvec.so.1`) and the
+  `cpg` build emits only scalar `libm`, because the two
+  environments carry different conda-forge builds of gfortran
+  15.2.0 (`-7` against `-20`) configured against different
+  sysroots.  A one-loop probe measured 3.1x on `exp` with
+  identical results to every printed digit; the electrostatic
+  setup, being exp-bound, showed 1.7x end to end.  It is not a
+  flag imago sets -- both builds compile at `-O3 -fimplicit-none
+  -Wall`.  What remains:
+
+  - Pin both environments to one compiler build, or upgrade
+    `cpg`'s.  Prefer pinning: the two environments differing at
+    all is what produced this, and `dev/env/*.yml` is where the
+    pin belongs.
+  - Rebuild the serial preset against it and re-run
+    `sio2_243_med_g`.  The check is whether its
+    `Electrostatic Matrices` stamp lands near 58 s rather than
+    100 s; if it does, the attribution is closed.
+  - Measure which OTHER stages move.  The exchange-correlation
+    mesh and the Gaussian evaluation inside the three-centre
+    integrals are the candidates; the coarse time map on the
+    rebuilt binary answers it in one run.
+  - RE-TAKE the serial baselines.  Every whole-run parallel
+    ratio in PERFORMANCE.md is quoted against a `cpg` baseline,
+    so the headline 3.5x is really about 3.2x once the
+    electrostatic setup's share of the gap is attributed to the
+    toolchain.  Stage ratios measured within one build (the
+    solve's 11.3x, the term stage's 6.1x, PA5a's 7.5x) are not
+    affected and do not need re-taking.
+  - Record the pin in `BUILD.md` beside the existing parallel
+    toolchain recipe, since "the two environments must carry the
+    same compiler build" is now a build rule and not a
+    preference.
+
+- [ ] PF8. Settle whether the SCF loop's integral-read cost is
+  DEFLATE INFLATION or STORAGE.  DESIGN 9.7 turns on this and
+  cannot be closed without it; the stored volumes are already
+  measured (PERFORMANCE.md "Integral storage layout and read
+  cost") and they do NOT decide it -- about 448 MB/s of
+  uncompressed output and 62 MB/s off the device are each
+  plausible for their own mechanism.  Why it matters: inflation
+  is processor work that divides across ranks perfectly, so a
+  whole-dataset deal would parallelize it; storage bandwidth on
+  a shared filesystem divides much less predictably.
+
+  Method, and the trap it must avoid:
+
+  - The trap is the PAGE CACHE.  A second read of the same file
+    is served from memory, so a naive before/after comparison
+    measures caching, not the thing in question.  Turn that into
+    the instrument instead of fighting it: we cannot drop caches
+    without root, but we CAN read WARM deliberately, which
+    removes the device from the picture entirely and leaves only
+    inflation plus the copy.
+  - Take two datasets from the 1296-atom run whose compression
+    differs by more than an order of magnitude and whose
+    uncompressed size is identical (627,853,248 bytes both):
+    `atomPotOverlap` term 1 (191.6 MB on disk, 3.3x) and term 16
+    (11.6 MB on disk, 54x).  Make uncompressed copies with
+    `h5repack -f NONE`.
+  - Time four reads, all warm: term 1 compressed, term 16
+    compressed, and each one's uncompressed copy.  The
+    uncompressed reads are the floor -- a pure copy of 628 MB.
+    If inflation dominates, both compressed reads cost far more
+    than that floor and term 1 costs clearly more than term 16
+    (inflating dense data is slower per output byte than
+    inflating mostly-zeros).  If the device dominates, the warm
+    reads all collapse toward the floor and the difference
+    reappears only on a cold read, tracking the ON-DISK sizes
+    (a 16x spread) rather than the output sizes.
+  - Instrument with a small Fortran probe that opens the file
+    and reads one named dataset, timed with `system_clock`, so
+    it exercises the same HDF5 library imago links rather than a
+    command-line tool's own overhead.  Run it on a compute node.
+  - Repeat on the medium cell, since that is where the PA4-A
+    assembly timing came from and the two cells compress
+    differently (7.3x against 5.7x).
+
+  What the answer changes: if inflation, the aligned unit of
+  parallel work is a WHOLE DATASET (each is exactly one chunk),
+  reusing PA3's suspend-and-reopen discipline with read-only
+  opens.  If storage, that route buys much less and the question
+  becomes a storage one.  EITHER WAY the read-once in-memory
+  cache of the constant integrals (DESIGN 9.7's last direction)
+  is worth doing, so PF8 gates the parallel-read design, not the
+  cache.
+
 > **Parallel implementation (PA).**  Ruled 2026-08-18: MPI + ELPA
 > first, threads inside a rank as a companion.  ARCHITECTURE 6.5,
 > 6.6 and 6.8 are the level above these; DESIGN 9 is the level
@@ -8712,6 +8803,17 @@ is not carried only in conversation.
   per-iteration grid work in the SCF potential loop (DESIGN
   9.2) -- last, and only if the map after PA5a shows them
   worth it.
+  **2026-08-23: NARROWED by reading the stored layout (DESIGN
+  9.7 as amended).** Every packed matrix is a single compressed
+  chunk at every size we run, so collective reads at the
+  granularity of matrix PIECES are foreclosed until the chunking
+  changes -- and 9.5's per-term writes are already chunk-aligned,
+  which is likely why PA3 measured them benign. What is left of
+  this item is therefore not "parallel HDF5" in general but two
+  specific things: a whole-dataset read deal (gated on PF8) and
+  a read-once in-memory cache of the constant integrals serving
+  both the assembly and the valence density (not gated on PF8).
+  Neither is adopted yet.
 
 ## TOOLING (lint helpers)
 

@@ -761,10 +761,14 @@ that order:
   the subject of 6.6: ELPA over a block-cyclic layout (DESIGN 9.3),
   with k-point and spin as an outer, communication-free
   distribution when there are several of either. Note that at the
-  sizes measured (valence dimension 5184 for the 1296-atom glass:
-  430 MB complex) the matrix fits one node many times over -- the
-  driver for distributing the solve is TIME, not memory, until the
-  dimension reaches tens of thousands.
+  sizes measured (valence dimension 12528 for the 1296-atom glass:
+  1.26 GB real, 2.5 GB complex -- corrected 2026-08-23 from the
+  run logs, which report valeDim directly; the earlier figure of
+  5184 was that deck's numSTATES, the first of the three
+  NUM_STATES_TO_USE values, not its matrix dimension) the matrix
+  still fits one node many times over -- the driver for
+  distributing the solve is TIME, not memory, until the dimension
+  reaches tens of thousands.
 - **Valence charge density** (`Valence Charge Density`, per
   iteration) -- the third cost, 5-14 %; it consumes the eigenvectors
   the solve produces and parallelizes over the same distribution.

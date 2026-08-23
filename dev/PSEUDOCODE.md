@@ -16968,7 +16968,8 @@ nblk = max (1, min (64, valeDim/nprows, valeDim/npcols))
       !   column owning NOTHING, and the generalized solve
       !   returned garbage on the degenerate layout (measured
       !   on the 60-row acceptance deck; production sizes,
-      !   1800-5184, are unaffected -- 64 stands there). The
+      !   valeDim 1620-12528 on the benchmark decks, are
+      !   unaffected -- 64 stands there). The
       !   bound guarantees every grid coordinate owns at least
       !   one block, and the arm policy additionally requires
       !   valeDim >= mpiSize so the bound is achievable.
