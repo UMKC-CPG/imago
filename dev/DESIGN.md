@@ -14578,43 +14578,172 @@ the k-point ORDER of those sums reproduces the serial result
 exactly -- this stage can be BIT-exact above one rank, unlike
 9.5's mask floor or the cross-algorithm floor of the ELPA arm.
 
-Only (a) can move. Workers hold no HDF5 handles (the 9.5 run
-shape), and shipping (b)'s `potDim + 4` packed matrices to an
-owner would cost far more traffic than the work is worth --
-about 1.4 GB per k-point on the 4-k-point medium deck (65
-packed matrices of 21 MB each at valeDim 1620, complex)
-against roughly 21 MB for the eigenvector block, a ratio of
-sixty-five to one. So the deal SPLITS the
-body: root ships the k-point's eigenvector block and its
-occupations, the owner accumulates and packs the density and
-ships the packed matrix back, and root contracts as today. That
-is stage A's shape one stage later -- distributed compute,
-root-serial file work, and the stage bounded by what root still
-does.
+Only (a) can move UNDER STAGE A'S RUN SHAPE, and both reasons
+are properties of that shape rather than limits of the code.
+Workers hold no HDF5 handles because 9.5 left them holding none
+inside the SCF loop, not because they cannot hold any: 9.5's
+term stage already has every worker opening the file and
+writing its own datasets under the file lock. And the traffic
+figure prices ROOT SHIPPING the matrices, which is one way an
+owner could come to have them and not the only way. Priced that
+way it is decisive: shipping (b)'s `potDim + 4` packed matrices
+to an owner costs about 1.4 GB per k-point on the 4-k-point
+medium deck (65 packed matrices of 21 MB each at valeDim 1620,
+complex) against roughly 21 MB for the eigenvector block, a
+ratio of sixty-five to one. So stage A SPLITS the body: root
+ships the k-point's eigenvector block and its occupations, the
+owner accumulates and packs the density and ships the packed
+matrix back, and root contracts as today. That is stage A's
+shape one stage later -- distributed compute, root-serial file
+work, and the stage bounded by what root still does. What lifts
+the restriction is 9.7's whole-dataset read deal, and the
+one-k-point paragraphs below are where that matters.
 
 Two limits, recorded rather than discovered later. FIRST, the
 deal's width is `numKPoints`, so the one-k-point case -- the
 dominant use and the largest deck -- gains nothing from it,
-exactly as it gained nothing for the solve. Its axis is the
-STATE loop inside (a): each rank accumulates a subset of states
-into a private matrix, and one reduction of the packed density
-combines them. That is a SECOND stage and is deliberately not
-specified here. SECOND, the split between (a) and (b) has never
-been measured; PA1's precedent is that the decomposition axis is
-chosen on a measurement and not on symmetry, so the first stage
-stamps (a) and (b) separately and the second stage's design
-waits on that reading. Hubbard-U k-points stay on root as they
-do for the solve, and the deal is skipped entirely on a
-force-computing iteration, because the force block consumes the
-UNPACKED density matrix that the split does not ship back.
+exactly as it gained nothing for the solve. Its axis lies
+inside one k-point rather than across k-points, and the block
+after this paragraph says what the candidates are and in what
+order they are tried. That is a SECOND stage and is
+deliberately not specified here. SECOND, the split between (a)
+and (b) has never been measured; PA1's precedent is that the
+decomposition axis is chosen on a measurement and not on
+symmetry, so the first stage stamps (a) and (b) separately and
+the second stage's design waits on that reading -- it is that
+reading which chooses among the three candidates below.
+Hubbard-U k-points stay on root as they do for the solve, and
+the deal is skipped entirely on a force-computing iteration,
+because the force block consumes the UNPACKED density matrix
+that the split does not ship back.
 
-One serial optimization the seam exposes and this section does
-NOT adopt: (b) re-reads the same `potDim + 4` datasets for every
-k-point, so reading each once and contracting it against all
-k-points' packed densities would cut that read volume by
-`numKPoints`, at the cost of holding `numKPoints` packed
-densities at once. It is orthogonal to the distribution and is
-recorded here so it is weighed on its own merits.
+**The one-k-point case (amended 2026-08-23, from a second
+reading of (a)).** Stage B was sketched above as the state loop
+inside (a): each rank accumulating a subset of states into a
+private matrix, with one reduction of the packed density to
+combine them. Reading the accumulation code closely says that
+sketch is the LAST of three candidates rather than the first,
+and that taken by itself it can lose.
+
+What (a) actually is, in the code, is `numStates` separate
+`zher`/`dsyr` calls -- one per state, each streaming the whole
+`valeDim` x `valeDim` upper triangle through memory to do work
+proportional to that same area. It is a BLAS level-2 loop. On
+the large cell each call touches about 628 MB, and several
+thousand states carry occupation above the skip threshold,
+which puts the accumulation near four terabytes of memory
+traffic against under a teraflop of arithmetic: roughly an
+eighth of a flop per byte moved. Those two figures are
+arithmetic from the array shapes rather than measurements --
+the stamps of check 5 are what confirm or refute them, and
+this ordering should be re-read against those stamps before
+anything is built. If they hold, it is a bandwidth-limited
+loop, not a
+compute-limited one, and it changes what dividing it is worth.
+Ranks on one node share one memory system, so splitting the
+states among them divides work that was not the constraint,
+while giving each rank a full square accumulator of its own
+(1.26 GB real, 2.5 GB complex on the large cell -- ten
+gigabytes across eight ranks where there had been one matrix)
+and adding a 628 MB reduction that did not exist before. The
+sketch can therefore finish SLOWER than the serial loop on a
+single node, and the reduction only grows across nodes. This is
+PA4-A's threading lesson in another costume: the axis was
+picked from the loop's shape instead of from where its time
+goes.
+
+So the one-k-point case has three candidates, tried in this
+order. None is specified here; each needs its own seam
+inventory when it is, and (ii)'s in particular has to settle
+the file lifecycle against 9.7's.
+
+(i) RECAST (a) AS A RANK-K UPDATE. The `numStates` rank-1
+updates of one matrix are mathematically a single symmetric
+rank-k update -- the eigenvector columns scaled by their
+occupations and multiplied against themselves in one call.
+The same flop count, level 3 instead of level 2, and memory
+traffic cut by roughly the state count. It goes
+first for three reasons: it is a SERIAL win, at one rank, with
+no message passing anywhere in it; it converts (a) into a
+compute-limited operation, which is the precondition for any
+distribution of (a) paying at all; and once (a) is
+compute-limited, candidate (iii) is just this operation blocked
+by columns, so the fast serial form and the parallel form
+become one change rather than two. Two things it must handle.
+Occupations are not all non-negative: the Bloechl corner
+correction shifts weight between corners and its terms sum to
+zero, so an individual corner's weight can go below zero, and
+the column scaling therefore separates the positive-weight
+columns from the negative-weight ones and issues two rank-k
+updates, one added and one subtracted. And the
+negligible-occupation skip stops being a cycle inside the loop
+and becomes a gather of the columns that survive it.
+
+(ii) DEAL (b) BY DATASET. This is 9.7's whole-dataset read deal
+applied here, and it fits (b) more exactly than it fits the
+assembly. The contraction against each stored matrix is a dot
+product returning ONE number into a running sum, and every
+accumulator the stage produces is fed by EXACTLY ONE dataset:
+the charge-density trace by the overlap, the nuclear-potential
+trace by the nuclear potential, the kinetic-energy trace by the
+kinetic energy, the mass-velocity trace by the mass velocity,
+and each `potRho` slot by its own potential dataset. A deal
+over datasets therefore leaves no accumulator shared between
+two ranks, and what would elsewhere be a reduction is a gather
+of disjoint slots -- `potDim + 4` doubles per spin. Its
+per-iteration traffic is one broadcast of the packed density
+(628 MB on the large cell, milliseconds within a node) and it
+divides the stage's reading by the rank count. Its width is the
+dataset count, about 35 per k-point, so unlike the k-point deal
+it is a real width at one k-point.
+
+(iii) THE STATE AXIS, and only if (a) still dominates after
+(i). At that point it is the blocking of a compute-limited
+operation, and the private matrices and the reduction are being
+paid for something that scales.
+
+**What this costs in exactness (the claim relaxed, not
+abandoned).** The bit-exactness claimed above is worth being
+precise about, because it comes from two independent places and
+only one of them is at risk. Stage A's deal reorders nothing,
+and candidate (ii)'s dataset deal shares no accumulator, so for
+both a parallel run is bit-identical to a serial run of the
+SAME code at every rank count. That is the claim that does work
+for us -- it is what catches a defect in a deal -- and it is
+kept whole. What candidate (i) changes is the SERIAL arithmetic
+itself: a rank-k update sums a state's contributions in a
+different order than a sequence of rank-1 updates does. So the
+recast moves the serial baseline once, deliberately, in a step
+of its own, and is compared against the old baseline at a
+tolerance MEASURED on the accepted decks and reported, the way
+9.2's reduce floor was measured rather than chosen for comfort.
+Everything downstream of the recast returns to zero tolerance,
+and the recast is blocked in a fixed column order so that its
+serial and parallel forms agree with each other bit for bit.
+Candidate (iii) is the one that would genuinely break
+parallel-equals-serial, since combining private matrices
+reorders sums the serial code adds in state order; that is a
+further reason it comes last, and its acceptance criterion has
+to be settled when it is specified rather than inherited from
+here.
+
+Two serial optimizations the seam exposes and this section does
+NOT adopt, kept apart from each other because they pay in
+opposite places. WITHIN one call, (b) re-reads the same
+`potDim + 4` datasets for every k-point, so reading each once
+and contracting it against all k-points' packed densities would
+cut that read volume by `numKPoints`, at the cost of holding
+`numKPoints` packed densities at once -- which means it saves
+exactly nothing in the one-k-point case the paragraphs above
+are about. ACROSS calls, those same datasets are constant for
+the whole run: the integral stage fixes them before the first
+iteration and (b) re-reads all of them on every iteration
+after, about 22 GB per iteration on the large cell. Holding
+them instead is 9.7's read-once cache; it is largest exactly
+where the loop inversion is worthless, and candidate (ii) is
+how such a cache gets filled and held in parallel. Both are
+orthogonal to the distribution and are recorded here so they
+are weighed on their own merits.
 
 ### 9.7 Parallel HDF5 Alignment
 

@@ -17208,11 +17208,14 @@ the last per-iteration stage still entirely on root. It is
 computed once per SCF iteration by `makeValenceRho`, whose
 k-point loop is the axis DESIGN 9.6 assigns it. This section
 specifies STAGE A, the deal, which is the whole win for the
-multi-k decks. The one-k-point case needs the state axis inside
-one k-point, and DESIGN 9.6 holds that back as stage B until
-this stage's stamps say how much of the work it can reach. Both
-limits are the design's, not omissions: read 9.6's valence
-paragraph before this one.
+multi-k decks. The one-k-point case needs an axis inside one
+k-point, and DESIGN 9.6 holds that back as stage B until this
+stage's stamps say how much of the work it can reach -- 9.6's
+amended one-k-point block names three candidates for it and
+the order they are tried in, and check 5 below is the
+measurement that chooses among them. Both limits are the
+design's, not omissions: read 9.6's valence paragraphs before
+this one.
 
 ### 29.1 Seam inventory
 
@@ -17391,6 +17394,14 @@ not decoration. DESIGN 9.6 makes stage B's axis wait on the
 taken on the real decks, at the real sizes, in the same run
 that proves the deal correct.
 
+The (a) timer carries a second duty, so it must be a timer and
+not a subtraction. Check 5 sweeps the BLAS thread count and
+reads (a) alone at each setting, which is what separates a
+compute-limited accumulation from a bandwidth-limited one; a
+figure derived by taking (b) away from the stage total would
+carry the file system's variance into exactly the comparison
+that decides stage B's shape.
+
 ### 29.7 Checks
 
 1. **Serial unchanged**: the serial build is bit-identical to
@@ -17411,11 +17422,34 @@ that proves the deal correct.
    PA4-A was bounded by root's assembly; the bound is computed
    from the stamps and reported, not hoped for.
 5. **The split, measured**: the (a)/(b) seconds at np1 on the
-   4-k-point medium AND on the one-k-point 243-atom glass. The
-   glass reading is what stage B's design consumes -- if (a)
-   dominates, the state axis is worth its machinery; if (b)
-   does, the read-once loop inversion of DESIGN 9.6's last
-   paragraph is the better target and stage B changes shape.
+   4-k-point medium AND on a one-k-point glass, plus a THREAD
+   SWEEP of (a) alone at np1 -- the same deck run at one, two,
+   four and eight BLAS threads with the (a) seconds recorded
+   at each. This is the reading DESIGN 9.6's amended
+   one-k-point block consumes to order its three candidates,
+   and the split by itself cannot order them. A large (a)
+   admits two quite different explanations: (a) is
+   compute-limited and dividing it will pay, or (a) is
+   bandwidth-limited and already saturating the node, in which
+   case dividing it across ranks that share that node divides
+   what was never the constraint while multiplying the square
+   accumulator by the rank count. The thread sweep is what
+   separates them. An (a) that falls with threads is
+   compute-limited and candidate (iii) is live; an (a) that
+   flattens early is the bandwidth case 9.6 describes, and
+   candidate (i) -- the rank-k recast -- comes first because
+   it changes the answer rather than dividing it. A dominant
+   (b) points at candidate (ii), the dataset deal, with the
+   read-once cache behind it.
+
+   Which deck carries this reading matters more than it looks.
+   Take it on `sio2_1296_large_g`, not on the 243-atom glass:
+   at valeDim 2349 the accumulator's stored triangle is about
+   22 MB and can sit in a large last-level cache, so its
+   thread behaviour is the behaviour of a cached matrix and
+   says nothing about the 628 MB one. A converged run is not
+   needed -- the stamps accumulate per call, so two SCF
+   iterations give the reading.
 6. **The guards hold**: a Hubbard-U deck and a converged
    `-force` run each take the serial path at np4 with results
    identical to np1 and no control message sent.
