@@ -987,6 +987,205 @@ What the shape decides:
    are intra-node work on the same stage that MPI distributes
    between nodes, and they follow it in time (banner above).
 
+### 6.9 The Scaling Ceiling (assessed 2026-08-23)
+
+6.5-6.8 order the parallel work by where the time is TODAY, at
+one to two thousand atoms. This subsection answers a different
+question the programmer asked: what stands between imago and a
+ten-thousand-atom calculation held in distributed memory across
+many nodes. The answer is worth recording because it is not
+"more of 6.5" -- the arithmetic permits the calculation, and the
+program's structure is what does not.
+
+**The arithmetic permits it.** Scaling from the measured
+1296-atom glass (valence dimension 12528, core dimension 3024,
+5184 states, 32 potential terms), a 10,000-atom cell of the same
+composition gives a valence dimension near 97,000, core
+dimension near 23,000, and about 40,000 states. The potential
+term count does NOT grow: it is set by the number of potential
+TYPES times their alphas, so it stays at 32 for a two-type
+glass however large the cell.
+
+    quantity at ~10,000 atoms          size (real / gamma)
+    one full square matrix              75 GB
+    one packed matrix                   37.6 GB
+    the 35 stored integral matrices     1.32 TB  (~230 GB on
+                                                  disk at the
+                                                  measured 5.7x)
+    the eigenvector block               31 GB
+    the core-valence block              18 GB
+
+Spread over a thousand ranks the integrals are 1.3 GB each and
+the solve's working set is a few hundred MB each. MEMORY IS NOT
+THE OBSTACLE, provided nothing is ever assembled whole.
+Extrapolating the MEASURED ELPA time (155 s per solve at
+dimension 12528 on eight cores) by the cubic law and allowing
+for imperfect scaling puts one diagonalization near a quarter
+hour on a thousand cores and a twelve-iteration run near three
+hours of solving. That is an extrapolation, not a measurement,
+and it will be optimistic -- but it describes a real calculation
+on an ordinary allocation, not a fantasy.
+
+**The structure does not permit it.** Four facts, counted in the
+source rather than estimated:
+
+1. **The whole-matrix assumption is pervasive.** 48 sites
+   allocate a full square valence matrix, and the full valence
+   matrices are referenced more than 350 times across 14 files
+   (integrals, secular equation, valence density, DOS, bond,
+   optical, field). At dimension 97,000 each such allocation
+   wants 75 GB in ONE process. Some would still fit on a large
+   node, which is worse than failing: the run would proceed with
+   one process holding everything and the rest waiting.
+2. **The parallel increments built so far inherit that
+   assumption.** PA3 through PA5a distribute WORK while keeping
+   root the custodian of DATA: root assembles each Hamiltonian,
+   ships pieces out, collects results, writes. Even the ELPA arm
+   has root unpack a complete matrix and scatter it, and the
+   valence-density design of DESIGN 9.6 ships wave functions the
+   same way. This is correct at today's sizes and does not
+   extend. The hard wall is near 15,000-20,000 atoms, where one
+   matrix exceeds any node; the practical wall -- where root's
+   serial custody dominates the run -- arrives well before it.
+3. **The FILE is the interface between stages, not merely
+   storage.** The integral stage writes matrices, the solve
+   reads them back to assemble H, the valence density reads them
+   again. No stage hands a matrix to the next in memory. An
+   in-memory calculation therefore replaces the layer through
+   which every stage talks to every other; it is not an
+   optimization applied to the present flow.
+4. **The integral stage's width is capped at the term count.**
+   PA3 divides by potential term, and that count is fixed by the
+   type count -- 32 for a two-type glass. On a thousand ranks,
+   968 would idle. DESIGN 9.4's pair decomposition stops being a
+   refinement at this scale and becomes mandatory.
+
+Three further consequences follow. RESTART is currently free
+(completion attributes in the file) and would have to be rebuilt
+on collective checkpoint writes, which reopens DESIGN 9.7's
+chunk-alignment question from the write side. EVERYTHING AFTER
+THE SCF LOOP -- DOS, bond, optical -- is serial and reads the
+eigenvector block through one process. And MULTI-NODE OPERATION
+IS UNTESTED: we have verified that a job launches across two
+nodes and that ELPA's handshake completes, and nothing else. No
+calculation has ever run across nodes.
+
+**What is already right.** The distributed eigensolver is in and
+working, and it is the piece that matters most. The
+electrostatic setup already divides on an axis that grows with
+the atom count. The messaging layer, the control protocol for
+waking ranks into a distributed region, and the file
+suspend/resume discipline all exist and are exercised. DESIGN
+9.4 already commits to the born-distributed strategy; nothing
+implements it.
+
+**The judgment.** Ten thousand atoms is not a continuation of
+the present campaign but a second one that would replace parts
+of the first: the k-point deal, the scatter-based ELPA path and
+the valence-density deal would each be reworked rather than
+extended, because all three rest on a custodian that the target
+forbids. That is not an argument against doing it; it is an
+argument for deciding it deliberately and sizing it honestly.
+The prerequisite measurement is one we have never taken -- a
+real multi-node run at TODAY's sizes -- since every number above
+assumes the interconnect and the parallel filesystem behave
+across nodes on the evidence of a single handshake.
+
+Finally, a fork this subsection names rather than assumes past:
+at ten thousand atoms and beyond it is a genuine question
+whether DENSE matrices are the right representation at all. The
+basis is local orbitals, so the matrices are increasingly sparse
+with cell size, and 6.10 measures how sparse they already are.
+
+### 6.10 How Sparse the Matrices Already Are (measured 2026-08-23)
+
+Because the basis is LOCAL orbitals, a pair of atoms beyond some
+separation contributes nothing above the negligibility threshold
+and its block of the matrix is exactly zero. The consequence is
+a crossover rather than a gradient: while the cell is SMALLER
+than the interaction range every atom reaches every other and
+the matrix is dense; once the cell exceeds it, the nonzero count
+PER ROW stops growing, and from there the fill fraction falls as
+1/N. 6.9 asks whether dense matrices are the right
+representation at ten thousand atoms, and this subsection
+measures where that crossover actually sits. Counted directly
+from stored matrices of two glass decks -- exact zeros, and
+elements above 1e-8 of each matrix's own peak.
+
+    deck / matrix           fill    nonzeros   atoms in
+                                    per row      range
+    243 atoms  overlap     95.8 %     2,251        233
+    1296 atoms overlap     31.8 %     3,981        412
+    1296 atoms nuclear     33.2 %     4,164        431
+    1296 atoms kinetic     37.0 %     4,639        480
+
+**The 243-atom cell is too small to have any sparsity to
+exploit.** Its 233 atoms in range out of 243 say that every atom
+sees every other. That is not a property of the material but of
+the cell: the cell vectors (which are in BOHR) give half-widths
+of 7.5, 7.5 and 8.2 Angstroms, and the interaction radius
+implied by the 1296-atom count -- 412 atoms at that deck's
+0.0787 atoms per cubic Angstrom -- is about 10.8 Angstroms. The
+1296-atom cell's smallest half-width, 11.9 Angstroms, only just
+exceeds it. So THE CROSSOVER IS AT ROUGHLY 900 ATOMS FOR THIS
+MATERIAL, and the largest cell we run sits just past it.
+
+Projecting with the per-row count held fixed at about 4,000
+gives 16 % fill near 2,600 atoms, 4 % near 10,000, and 1 % near
+40,000. That projection rests on TWO measured sizes, one of
+which is range-limited by its own cell, so the saturated per-row
+count is really established at a single size; a third deck near
+2,500-5,000 atoms, where the count should be unchanged, is what
+would confirm it. The radius is also material-dependent -- it
+follows from the basis functions' extent and the threshold, so a
+material with more diffuse valence orbitals reaches further.
+
+**The matrices are not one population.** The stored potential
+terms span a thirty-fold range, monotone in the alpha exponent
+and visible both in fill and in how well each compresses on
+disk: the most diffuse term of a type is 30.7 % full
+(compressing 3.3x), the middle of the series 16.2 %, and the
+tightest 1.1 % (compressing 54x). The long-ranged terms are a
+small minority of the set.
+
+Three architectural consequences, none of them decided here:
+
+1. **Sparsity would pay first where the measured bottleneck
+   actually is.** At 4 % fill the ten-thousand-atom integral set
+   falls from the 1.3 TB of 6.9 to under 60 GB, and the 44 GB
+   per iteration the SCF loop currently inflates (DESIGN 9.7)
+   falls with it. That is a storage and I/O win available
+   WITHOUT changing any algorithm.
+2. **It does not by itself help the solve.** ELPA consumes dense
+   block-cyclic matrices, so a sparse Hamiltonian handed to it
+   gains nothing in arithmetic. Sparse storage that expands to
+   dense blocks only at the solve is coherent and is probably
+   the first step; making the SOLVE exploit sparsity is a change
+   of method, not of data structure.
+3. **The program already computes the sparsity pattern and
+   throws it away.** The `anyElecPotInteraction` (pair, cell)
+   negligibility mask of DESIGN 9.5 is exactly the record of
+   which blocks are nonzero. Storing in a sparse format would be
+   using information imago already has.
+
+One thing that will NOT become sparse: the Coulomb interaction
+is genuinely long-ranged and no threshold makes it local. imago
+already handles that separately, by the reciprocal-space
+treatment in the electrostatic setup -- which is WHY the stored
+potential terms can be short-ranged at all. The long-range
+problem is already factored out of these matrices.
+
+Open directions, named so they are weighed rather than drifted
+into: numerical thresholding beyond the present mask (measured
+here to buy a further 30 % on the overlap at 1e-8 of peak);
+hierarchical low-rank treatment of the far field, which
+approximates rather than discards distant blocks; iterative
+subspace solvers that need only sparse products; and
+density-matrix methods that avoid eigenvectors altogether and
+are the only route to genuine linear scaling -- with the caveat
+that their nearsightedness argument requires a gap, and imago
+deliberately targets metals as well as insulators.
+
 ---
 
 ## 7. Python Scripts Refactoring Direction
