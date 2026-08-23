@@ -14558,7 +14558,63 @@ block-cyclic layout of 9.3, the process-grid helper, and the
 redistribution inside the boundary -- the win for the
 one-k-point large cells. The valence-density distribution
 rides the same k-point deal and follows as its own accepted
-step once A is in.
+step once A is in; the paragraphs below say what that step
+actually reaches, which the seam inventory narrowed.
+
+**The valence density (the tail step; seam read 2026-08-23).**
+`makeValenceRho` is called once per SCF iteration from the
+root-only `mainSCF`, after `populateStates`, and loops the
+k-points internally. Per k-point it does two things of quite
+different character. (a) It ACCUMULATES the density matrix from
+the eigenvectors: `numStates` rank-1 updates (`zher` / `dsyr`)
+into a `valeDim` x `valeDim` matrix, the optional Hubbard-U
+phase-one update, the spin recombination, and a pack. (b) It
+CONTRACTS that packed density against the overlap, the nuclear
+potential, the kinetic energy, the optional mass velocity and
+all `potDim` potential matrices, each READ FROM ROOT'S FILE,
+accumulating `potRho` and the traces. Every accumulator is an
+`intent(inout)` running sum over k-points, so a deal that keeps
+the k-point ORDER of those sums reproduces the serial result
+exactly -- this stage can be BIT-exact above one rank, unlike
+9.5's mask floor or the cross-algorithm floor of the ELPA arm.
+
+Only (a) can move. Workers hold no HDF5 handles (the 9.5 run
+shape), and shipping (b)'s `potDim + 4` packed matrices to an
+owner would cost far more traffic than the work is worth --
+about 1.4 GB per k-point on the 4-k-point medium deck (65
+packed matrices of 21 MB each at valeDim 1620, complex)
+against roughly 21 MB for the eigenvector block, a ratio of
+sixty-five to one. So the deal SPLITS the
+body: root ships the k-point's eigenvector block and its
+occupations, the owner accumulates and packs the density and
+ships the packed matrix back, and root contracts as today. That
+is stage A's shape one stage later -- distributed compute,
+root-serial file work, and the stage bounded by what root still
+does.
+
+Two limits, recorded rather than discovered later. FIRST, the
+deal's width is `numKPoints`, so the one-k-point case -- the
+dominant use and the largest deck -- gains nothing from it,
+exactly as it gained nothing for the solve. Its axis is the
+STATE loop inside (a): each rank accumulates a subset of states
+into a private matrix, and one reduction of the packed density
+combines them. That is a SECOND stage and is deliberately not
+specified here. SECOND, the split between (a) and (b) has never
+been measured; PA1's precedent is that the decomposition axis is
+chosen on a measurement and not on symmetry, so the first stage
+stamps (a) and (b) separately and the second stage's design
+waits on that reading. Hubbard-U k-points stay on root as they
+do for the solve, and the deal is skipped entirely on a
+force-computing iteration, because the force block consumes the
+UNPACKED density matrix that the split does not ship back.
+
+One serial optimization the seam exposes and this section does
+NOT adopt: (b) re-reads the same `potDim + 4` datasets for every
+k-point, so reading each once and contracting it against all
+k-points' packed densities would cut that read volume by
+`numKPoints`, at the cost of holding `numKPoints` packed
+densities at once. It is orthogonal to the distribution and is
+recorded here so it is weighed on its own merits.
 
 ### 9.7 Parallel HDF5 Alignment
 

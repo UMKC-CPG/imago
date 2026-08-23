@@ -17197,3 +17197,228 @@ root: write the datasets and the completion attribute, as
 6. **Lifecycle**: no worker files by default; the server
    returns cleanly to solve service afterward (the SCF that
    follows still deals or collects solves correctly).
+
+## 29. The Valence Density on the K-Point Deal
+## (DESIGN 9.6 valence tail; TODO PA4 valence step)
+
+The valence charge density is the third measured cost -- 5-14 %
+of every run and 10.8 % of the post-PA4 headline -- and it is
+the last per-iteration stage still entirely on root. It is
+computed once per SCF iteration by `makeValenceRho`, whose
+k-point loop is the axis DESIGN 9.6 assigns it. This section
+specifies STAGE A, the deal, which is the whole win for the
+multi-k decks. The one-k-point case needs the state axis inside
+one k-point, and DESIGN 9.6 holds that back as stage B until
+this stage's stamps say how much of the work it can reach. Both
+limits are the design's, not omissions: read 9.6's valence
+paragraph before this one.
+
+### 29.1 Seam inventory
+
+- `valeCharge.F90`, `makeValenceRho(inSCF)` (module
+  `O_ValeCharge`) -- called with `inSCF == 1` once per SCF
+  iteration from `mainSCF` (`imago.F90`), immediately after
+  `populateStates` and before `makeSCFPot`. `mainSCF` is
+  root-only under the 9.5 run shape, so root alone enters the
+  routine and the workers are sitting in `solveServerLoop`. The
+  PSCF entry (`inSCF == 0`, called from `bandPSCF`) is NOT
+  touched by this section; it runs in a program path that is
+  serial end to end and belongs with the PSCF work.
+- The routine's per-k-point body has two halves (DESIGN 9.6),
+  and the deal moves only the first:
+  - (a) ACCUMULATE. The negligible-occupation skip test; for
+    each state, `zher`/`dsyr` rank-1 updates of
+    `valeValeRho(valeDim,valeDim,spin)` scaled by that state's
+    occupation; `update1UJ` when `numPlusUJAtoms > 0`; the
+    spin up/down to total/difference recombination; and
+    `packMatrix`/`packMatrixGamma` into
+    `packedValeValeRho(dim1, valeDim(valeDim+1)/2, spin)`.
+    Needs the eigenvectors and the occupations, nothing else.
+  - (b) CONTRACT. Allocate `packedValeVale`; read the overlap
+    (`atomOverlap_did(i)`), nuclear potential
+    (`atomNPOverlap_did(i)`), kinetic energy
+    (`atomKEOverlap_did(i)`), the mass velocity when
+    `rel == 1` (`atomMVOverlap_did(i)`) and each of the
+    `potDim` potential datasets (`atomPotOverlap_did(i,j)`),
+    calling `matrixElementMult` after each. Every handle is
+    root's, created by `initSCFIntegralHDF5` and reopened by
+    `accessSCFIntegralHDF5`, so (b) cannot leave root.
+- What an owner needs, and who has it:
+  - The eigenvector block. In the COMPLEX build `valeVale`
+    holds one k-point at a time, so the routine re-reads each
+    k-point's block from the file with
+    `readDataSCF(h, i, numStates, 0)` -- root's read, which it
+    already performs today. In the GAMMA build `valeValeGamma`
+    stays resident from the solve and is never re-read. Either
+    way root has the block in memory at dispatch time and ships
+    it; the block is `valeDim x numStates` per spin (about
+    21 MB on the 4-k-point medium deck).
+  - The occupations. `structuredElectronPopulation` is built at
+    the top of the routine from `electronPopulation`
+    (`O_Populate`, allocated and filled by `populateStates` on
+    root in the same iteration) or, under
+    `kPointIntgCode == 1`, copied from
+    `electronPopulation_LAT` with the 2/spin convention factor.
+    Root ships the owner only its k-point's slice,
+    `(:, i, :)` -- `numStates * spin` doubles.
+  - Everything else the body reads is replicated setup state
+    alive on every rank: `valeDim` (`O_AtomicSites`),
+    `numStates` (`O_Input`), `numKPoints`/`kPointIntgCode`
+    (`O_KPoints`), `spin`/`rel`/`potDim`/`numPlusUJAtoms`
+    (`O_Potential`), `smallThresh` (`O_Constants`). Verified
+    against the code, not assumed.
+  - `energyEigenValues` is NOT shipped. It feeds only
+    `electronEnergy`, a spin-sized running sum that costs
+    nothing, so root computes that term itself for every
+    k-point from data it already holds. Moving it would be
+    traffic for no work.
+- What comes back: the packed density
+  `packedValeValeRho(:, :, :)` for that k-point,
+  `dim1 * valeDim(valeDim+1)/2 * spin` doubles -- about the
+  size of the eigenvector block that went out. Root then runs
+  (b) on it exactly as today.
+- The accumulators the stage produces -- `potRho(potDim,spin)`,
+  `chargeDensityTrace(spin)`, `nucPotTrace(spin)`,
+  `kineticEnergyTrace(spin)`, `massVelocityTrace(spin)` (module
+  `O_ValeCharge`) -- are `intent(inout)` running sums built
+  inside (b), which never leaves root. So NO reduction exists
+  in this stage: root sums them in k-point order, and the
+  arithmetic is the serial arithmetic in the serial order. This
+  is why the stage can claim bit-exactness where 9.5 and the
+  ELPA arm could not, and the deal must therefore preserve the
+  CONTRACTION order even though the accumulations happen out of
+  order.
+- Downstream: `makeSCFPot` (`potentialUpdate.F90`) consumes
+  `potRho` and the four traces on root and deallocates
+  `potRho`. `packedValeValeRho` is scratch, deallocated at the
+  end of the routine (the same-named array in `dimo.F90` is a
+  separate local and is not coupled to it).
+- Lifecycle: the routine ends by calling `cleanUpPopulation`
+  and `cleanUpSecularEqn`. Both free ROOT-side allocations; a
+  worker never allocated them and must not call either. The
+  worker's entry point is therefore the (a) half alone, not the
+  subroutine.
+- Two guards inherited from the seam, not chosen for taste:
+  `update1UJ` couples (a) to root's previous-iteration state
+  (the same coupling that keeps Hubbard-U k-points on root for
+  the solve), and the force block -- entered only on the
+  converged iteration of a `-force` run -- consumes the
+  UNPACKED `valeValeRho`, which the split does not ship back.
+  Both cases take the serial path whole.
+
+### 29.2 The arm policy and the deal
+
+```
+dealt = (mpiSize > 1) .and. (numKPoints > 1)
+        .and. (numPlusUJAtoms == 0)
+        .and. (this iteration does not compute forces)
+```
+
+Anything else runs today's code path byte for byte -- the
+serial build, one rank, one k-point, Hubbard-U, and the force
+iteration. The deal itself is 26.2's: k-points are handed out
+in ROUNDS of at most one task per rank, the deadlock-free
+discipline of 26.3, which this stage needs for the same reason
+stage A did -- the eigenvector block and the returned density
+are both far past MPI's eager threshold, so every blocking send
+must face a receiver already waiting.
+
+Rounds are dealt in increasing k-point index, and within a
+round root receives replies in the order it dealt them. Both
+facts exist for one purpose: root contracts each k-point's
+density in k-point index order, so the running sums of (b) are
+added in the serial order and the result is bit-identical.
+
+### 29.3 Root's flow (inside makeValenceRho)
+
+```
+build structuredElectronPopulation as today
+if (not dealt): run today's k-point loop unchanged; return
+
+for each round of at most mpiSize-1 dealt k-points:
+   for each worker w with a k-point i in this round:
+      obtain k-point i's eigenvector block (re-read it in the
+            complex build, as today; it is resident in the
+            gamma build)
+      send ctrl (valeChargeTask, i) to w
+      send the eigenvector block and the occupation slice
+   accumulate root's OWN k-point of this round, if it has one,
+         with the existing (a) code
+   for each dealt k-point i of this round, in INCREASING i:
+      receive the packed density from i's owner
+      add electronEnergy for k-point i (root's own small sum)
+      run (b) on that packed density exactly as today
+   run (b) for root's own k-point in its index position
+```
+
+The skip test for a k-point whose every state has negligible
+occupation is evaluated by ROOT before dispatch, so a skipped
+k-point is never dealt and no worker is woken for it.
+
+### 29.4 The worker branch (in solveServerLoop)
+
+```
+case valeChargeTask:
+   receive my eigenvector block and occupation slice
+   allocate my valeValeRho and packedValeValeRho
+   run the (a) half: rank-1 updates over the states, the spin
+         recombination, the pack
+   send the packed density back to root
+   deallocate; stay in the loop
+```
+
+The worker calls a shared routine holding the (a) half, so the
+arithmetic root runs for its own k-point and the arithmetic a
+worker runs for a dealt one are the same code, not two
+spellings of it.
+
+### 29.5 O_MPI additions
+
+One control code, `valeChargeTask = 4`. NO new transport: the
+eigenvector block is the complex or real rank-2 block the 26.5
+wrappers already carry, the occupation slice is the double
+vector, and the packed density has exactly the shape
+`sendPackedMPI`/`recvPackedMPI` were written for.
+
+### 29.6 Instrumentation
+
+Two accumulating timers per call, summed over the k-points a
+rank handled: seconds in (a) and seconds in (b). Root gathers
+them with `gatherTimesMPI` and logs one line per call. This is
+not decoration. DESIGN 9.6 makes stage B's axis wait on the
+(a)/(b) split, and these two numbers ARE that measurement --
+taken on the real decks, at the real sizes, in the same run
+that proves the deal correct.
+
+### 29.7 Checks
+
+1. **Serial unchanged**: the serial build is bit-identical to
+   the accepted PA5a binaries on `bn_small_{c,g}` and on
+   `sio2_243_med_g`.
+2. **One-rank parallel equals serial**, bit-exact files (the
+   deal degenerates; no message is sent).
+3. **The deal is BIT-exact**: `knbo3_333_med_c` (4 k-points) at
+   np 2/4 against the same-build same-node np1 file, with NO
+   tolerance -- h5diff clean at zero, and the iteration and
+   energy traces digit-identical. This stage makes the strong
+   claim because no summation is reordered (29.1); a failure
+   here means the contraction order was not preserved, and it
+   is the check most likely to catch a defect.
+4. **The stamp falls**: the `Valence Charge Density` stamp on
+   the same deck at np 1/2/4, with the per-rank (a)/(b) seconds
+   logged. The stage is bounded by root's serial (b) exactly as
+   PA4-A was bounded by root's assembly; the bound is computed
+   from the stamps and reported, not hoped for.
+5. **The split, measured**: the (a)/(b) seconds at np1 on the
+   4-k-point medium AND on the one-k-point 243-atom glass. The
+   glass reading is what stage B's design consumes -- if (a)
+   dominates, the state axis is worth its machinery; if (b)
+   does, the read-once loop inversion of DESIGN 9.6's last
+   paragraph is the better target and stage B changes shape.
+6. **The guards hold**: a Hubbard-U deck and a converged
+   `-force` run each take the serial path at np4 with results
+   identical to np1 and no control message sent.
+7. **Lifecycle**: no worker files by default; the server
+   returns to solve service (the next iteration's solve still
+   deals or goes collective); a mid-iteration session-kill
+   restarts from the checkpointed potential and reconverges.

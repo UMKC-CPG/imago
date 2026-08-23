@@ -8651,6 +8651,26 @@ is not carried only in conversation.
   fills only the upper one. REMAINING in PA4: the
   valence-density step (now the third cost at 10.8 % of the
   headline run), which rides the same deal.
+  **2026-08-23: DESIGN 9.6 AMENDED + PSEUDOCODE 29 DRAFTED (the
+  valence step).** The seam inventory narrowed what the step can
+  reach and the amendment records it: `makeValenceRho`'s
+  per-k-point body splits into an ACCUMULATE half (rank-1
+  updates from the eigenvectors) that can be dealt and a
+  CONTRACT half (reads of the overlap, nuclear-potential,
+  kinetic-energy and all potDim potential datasets) that cannot,
+  because workers hold no HDF5 handles and shipping those
+  matrices would cost far more than the work. So root ships the
+  eigenvector block and the occupations, the owner returns the
+  packed density, and root contracts in k-point ORDER -- which
+  makes this the first distributed stage that can be BIT-exact
+  above one rank. Two limits are the design's: the deal's width
+  is numKPoints, so the dominant one-k-point case gains nothing
+  and its state axis is a separate stage B; and the accumulate/
+  contract split has never been measured, so stage A stamps both
+  halves and stage B's design waits on that reading (PA1's
+  precedent). Guards: Hubbard-U and force-computing iterations
+  take the serial path whole. Seven checks. Awaits programmer
+  review before any code.
 
 - [ ] PA5a. Distribute the ELECTROSTATIC SETUP under DESIGN 9.2
   -- PULLED FORWARD 2026-08-22 (programmer's ruling on the
