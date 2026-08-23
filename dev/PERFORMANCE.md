@@ -89,9 +89,18 @@ would force one severity scale onto two unrelated questions.
   the round discipline (blocking sends meet MPI's rendezvous
   path on large matrices); the thread-lever measurement
   showed ZHEGV nearly thread-proof, making ELPA the only path
-  for the one-k-point solve. NEXT: PA4 stage B (ELPA behind
-  the same boundary) -- PSEUDOCODE section first, per the
-  chain; then the valence-density step.
+  for the one-k-point solve.
+- **PA4 STAGE B (the collective ELPA solve) CODED and ACCEPTED
+  2026-08-22** (chain: DESIGN 9.6 stage B + PSEUDOCODE 27,
+  reviewed 2026-08-22; numbers in "PA4-B collective ELPA
+  solve" below, closure in TODO PA4). The one-k-point solve is
+  distributed over a block-cyclic grid behind the same
+  boundary, entered through one more server control code. This
+  is the increment the campaign was built for: the 1296-atom
+  glass now runs in 4h33m against 15h55m serial (3.5x), its
+  solve 11.3x faster. Three ELPA protocol facts and the
+  full-triangle unpack were measured, not read from the
+  documentation, and are recorded in 27.
 - **Install no profiling tools yet** (TODO PF6). `gprof` and
   `callgrind` are already present and cover Phases P0 through P2.
   The investigation into `perf` and `gperftools` is recorded below
@@ -498,6 +507,90 @@ Two findings, both feeding stage B:
   touch. ELPA's two-stage algorithm exists precisely because
   of this; it is now measured to be the ONLY path to a faster
   single-k-point solve.
+
+## PA4-B collective ELPA solve (measured 2026-08-22)
+
+The acceptance record for the distributed single solve
+(PSEUDOCODE 27.5; TODO PA4 stage B; jobs 16701920 and 16701921
+on exclusive c084, 16702210 on c049; in-job references from the
+accepted PA3 and PA4-A binaries).
+
+    sio2_243_med_g, Secular Equation stage (12 calls):
+                        np1        np2        np4        np8
+    stage wall        188.0 s     74.3 s     62.5 s     57.2 s
+    per call           15.7 s      6.2 s      5.2 s      4.8 s
+                      LAPACK      ELPA       ELPA       ELPA
+
+At valence dimension 1800 the collective arm beats the serial
+one by 2.5x at two ranks and then flattens: the matrix is too
+small for eight ranks to help, which is the expected shape and
+the reason the headline deck exists. The 135-atom KNbO3 3x3x3
+supercell at one k-point (the COMPLEX arm, job 16702210) gives
+the same picture with more room: whole run 527.3 -> 197.4 s and
+the solve 197.9 -> 65.6 s at np8 (3.0x), energies identical.
+
+The headline -- `sio2_1296_large_g`, valence dimension 5184, at
+np8 against the serial baseline:
+
+    stage                     serial       np8    speedup
+    whole run               15h55m      4h33m       3.5x
+    Secular Equation        21022 s     1863 s     11.3x
+    3-centre term stage     20316 s     3342 s      6.1x
+    Electrostatic Matrices  12045 s     7237 s      (serial;
+                                                  PA5a's target)
+
+Energies IDENTICAL to the baseline. The solve's 11.3x is the
+number to read: ELPA's two-stage algorithm scales far better at
+5184 than at 1800, so the solve fell from 37 % of the run to
+11 % and the once-per-run electrostatic setup became the new
+leader at 44 %. The term stage's per-rank table is the best
+balance the campaign has recorded: compute 3258-3328 s across
+all eight ranks (max/mean 1.007), lock waits <= 14.5 s, writes
+~13 s.
+
+Correctness, per the amended 27.5 criteria: serial bit-exact
+against the PA3 binaries; the 4-k-point medium np4 deal stamp
+unchanged at 308.6 s (the deal path is untouched); the glass at
+np 2/4/8 clean against the same-build same-node np1 file at
+1e-9 ABSOLUTE whole-file and 1e-12 absolute on the eigenvalues,
+eigenvectors excluded, with energies digit-identical. The
+absolute form is required because this comparison crosses
+ALGORITHMS -- the 1e-10 relative criterion of PA3 mis-fires on
+near-zero density coefficients whose absolute differences sit
+at the eigensolver floor, the trap PA3 already recorded. On the
+complex supercell the energies are identical while the
+ITERATION traces differ: floor-level differences move the
+intermediate iterations, and the converged answer does not
+care.
+
+Three ELPA protocol facts the coding measured, each after a
+failed run, all folded into PSEUDOCODE 27:
+
+- **The handle setup is collective.** `elpaHandle%setup()`
+  splits the row and column communicators, so every worker must
+  be woken into its own `ensureELPA` BEFORE root enters its
+  own; the first acceptance run hung with root inside the
+  collective and the workers waiting for a control message.
+- **The generalized path requires a BLACS context.** The
+  standard eigenproblem needs none, but
+  `generalized_eigenvectors` runs ScaLAPACK operations for its
+  Cholesky transformation and refuses without one ("BLACS
+  context has not been set beforehand"). The grid is created
+  column-major so the BLACS view and the scattered data agree.
+- **A fixed block edge can starve a process column.** With
+  nblk = 64 a matrix smaller than 64 x npcols left one column
+  of the grid owning nothing, and the generalized solve
+  returned garbage on the degenerate layout. The edge is now
+  adaptive and the arm policy additionally requires
+  valeDim >= mpiSize. Production sizes (1800-5184) were never
+  affected; a 60-row acceptance deck exposed it.
+
+And one data-shape fact: ELPA consumes the FULL Hermitian
+matrix, while LAPACK's solvers read only the upper triangle --
+so the serial unpack, which fills only that half, fed ELPA
+zeros for the rest and produced garbage eigenvectors and a
+POSITIVE total energy. The collective arm unpacks both
+triangles.
 
 ## The situation, as of 2026-08-09
 

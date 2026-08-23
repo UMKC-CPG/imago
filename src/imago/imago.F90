@@ -17,6 +17,7 @@ subroutine Imago
    use O_MPI, only: mpiRank, mpiSize, barrierMPI, sendCtrlMPI, &
          & solveShutdown
    use O_SecularEquation, only: solveServerLoop
+   use O_ELPASolve, only: teardownELPA
 
    ! Make sure that there are no accidental variable declarations.
    implicit none
@@ -98,6 +99,10 @@ subroutine Imago
             call sendCtrlMPI (solveShutdown, 0, i)
          enddo
       endif
+
+      ! Release the collective solver's handle and library on every
+      !   rank that set them up (a no-op where none did).
+      call teardownELPA
    endif
 
    if ((doPSCF == 1) .and. (mpiRank == 0)) then

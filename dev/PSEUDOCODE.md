@@ -16883,3 +16883,196 @@ blocking send faces a receiver that is already waiting.
    empties every server; exactly one fort.2; no worker files
    by default; `IMAGO_RANK_LOGS=1` shows each worker's served
    k-points.
+
+## 27. The Collective ELPA Solve
+## (DESIGN 9.6 stage B, DESIGN 9.3; TODO PA4 stage B)
+
+When the k-point deal cannot fill the ranks -- the one-k-point
+case, which is the program's dominant use and where the solve
+is 62 % of the largest measured run -- the single solve is
+DISTRIBUTED: ELPA over the block-cyclic layout of DESIGN 9.3,
+behind the same boundary, entered through one more server
+control code exactly as 26.4 reserved. The stage-A measurements
+are the mandate: the deal cannot touch width one, and 16
+OpenBLAS threads bought ZHEGV four percent -- ELPA's two-stage
+algorithm is the only remaining path. The installed API is
+confirmed: `elpa_init(20241105)` handshakes on this cluster,
+and the handle's `generalized_eigenvectors` generic exists for
+double real and double complex, solving H c = e S c directly
+(internal Cholesky), which serves both build variants.
+
+### 27.1 Seam inventory
+
+- `elpaSolve.F90` (NEW file, module `O_ELPASolve`; both variant
+  CMakeLists) -- everything ELPA-specific lives here behind
+  `#ifdef IMAGO_ELPA` (the flag the gfortran-mpi preset already
+  defines, with include and link wiring in place): the
+  most-square process grid and this rank's (row, col) in it,
+  the block-cyclic local-extent arithmetic of DESIGN 9.3
+  (nblk = 64; a small local function, not a ScaLAPACK numroc
+  call, so the layout is readable and testable in isolation),
+  the once-per-run ELPA lifecycle (init, one handle configured
+  with na = valeDim, nev = numStates, the local extents, nblk,
+  MPI_COMM_WORLD and this rank's grid coordinates, AND a BLACS
+  grid over the same layout -- the GENERALIZED solve path runs
+  ScaLAPACK operations for its Cholesky transformation and
+  refuses to run without a blacs_context, though the standard
+  path needs none: measured 2026-08-22, "BLACS context has not
+  been set beforehand"; the grid uses the column-major mapping
+  so the BLACS view and the scattered data agree; reused every
+  iteration; deallocated at teardown), and the
+  scatter/solve/gather core both sides share. Without
+  IMAGO_ELPA the module compiles to a parameter
+  `elpaAvailable = .false.` and stubs, and the policy below
+  never selects the collective arm.
+- `secularEqn.F90`, the ARM POLICY in `secularEqnSCF`: the
+  collective arm is chosen iff ELPA is built, `mpiSize > 1`,
+  `numKPoints == 1`, and no Hubbard-U atoms; otherwise the
+  stage-A deal (which itself degenerates to the local path at
+  width one). K-points many-but-fewer-than-ranks stay on the
+  deal with idle ranks -- the subgrid composition (several
+  k-points, each on its own process subgrid) is the recorded
+  LATER step, not this one.
+- `secularEqn.F90`, `solveServerLoop`: one new case,
+  `solveCollective` -- the worker steps into the collective
+  core (receive my locals, solve cooperatively, return my
+  eigenvector strips) and back to its loop. Same lifecycle,
+  same shutdown.
+- `mpi.F90`: the control code `solveCollective = 2`. NO new
+  transport: the locals and eigenvector strips are rank-2
+  blocks the 26.5 wrappers already carry, and ELPA returns the
+  full eigenvalue vector on every rank, so eigenvalues need no
+  message at all.
+- Root's data path stays inside the boundary: assemble packed
+  H and S as always, unpack to the full matrices exactly as
+  the local arm does, scatter each rank's block-cyclic locals
+  by message (root fills its own directly), solve
+  collectively, gather the strips of the lowest numStates
+  eigenvector columns back into the full-column form, and
+  write eigenvalues, eigenvectors, and the completion
+  attribute exactly as today. Nothing downstream can tell
+  which arm ran.
+
+### 27.2 The grid and the layout (DESIGN 9.3)
+
+```
+nprows x npcols = mpiSize, the factorization with nprows
+      closest to sqrt(mpiSize) from below (most-square;
+      nprows <= npcols)
+processRow = mod (mpiRank, nprows)     ! column-major, the
+processCol = mpiRank / nprows          !   one convention,
+                                       !   defined once here
+nblk = max (1, min (64, valeDim/nprows, valeDim/npcols))
+      ! ADAPTIVE (corrected 2026-08-22): with the fixed 64 a
+      !   matrix smaller than nblk x npcols left one process
+      !   column owning NOTHING, and the generalized solve
+      !   returned garbage on the degenerate layout (measured
+      !   on the 60-row acceptance deck; production sizes,
+      !   1800-5184, are unaffected -- 64 stands there). The
+      !   bound guarantees every grid coordinate owns at least
+      !   one block, and the arm policy additionally requires
+      !   valeDim >= mpiSize so the bound is achievable.
+localExtent (n, myCoord, nCoords):     ! rows with n=valeDim,
+      full = n / (nblk * nCoords)      !   cols likewise
+      rem  = n - full * nblk * nCoords
+      count = full * nblk
+            + max (0, min (nblk, rem - myCoord * nblk))
+globalIndex (localIndex, myCoord, nCoords):
+      block = (localIndex - 1) / nblk
+      offset = localIndex - 1 - block * nblk
+      1 + (block * nCoords + myCoord) * nblk + offset
+```
+
+The same two functions drive the scatter (root walking each
+rank's locals), the gather (root placing each strip), and the
+solve setup (the handle's local extents) -- one spelling of
+the layout, so the three cannot drift.
+
+### 27.3 Root's collective flow (inside secularEqnSCF)
+
+```
+(assemble packed H and S; unpack to full matrices -- BOTH
+      triangles, unlike the local arm: LAPACK's solvers read
+      only the upper triangle, so the serial unpack fills only
+      that half, but ELPA consumes the full Hermitian matrix,
+      and an upper-only scatter feeds it zeros for half of it
+      -- measured 2026-08-22 as garbage eigenvectors and a
+      positive total energy. The existing full-unpack flag
+      serves.)
+send ctrl (solveCollective, k-point) to every worker
+      ! FIRST -- corrected 2026-08-22 after the first
+      !   acceptance run hung: the handle setup below is
+      !   COLLECTIVE over the world communicator (it splits
+      !   the row and column communicators), so every worker
+      !   must be woken into its own ensure call before root
+      !   enters the setup, or root waits in the collective
+      !   while the workers wait for a control message
+ensure the grid, the layout, and the ELPA handle exist
+      (first collective solve of the run does the setup;
+      every later call returns immediately)
+for each rank r (workers by message, root directly):
+      extract r's block-cyclic locals of H and of S from the
+            full matrices; send (H locals, then S locals)
+call handle%generalized_eigenvectors (myHLocal, mySLocal,
+      eigenvalues, myQLocal, is_already_decomposed=.false.)
+      ! every rank gets the FULL eigenvalue vector
+for each rank r: receive r's strips of the eigenvector
+      columns with global index <= numStates; place them
+      (root places its own directly)
+write eigenvalues, eigenvector datasets, completion
+      attribute, as today
+```
+
+S is identical every iteration, so its Cholesky could be
+decomposed once and reused (`is_already_decomposed`); the
+first version re-decomposes every iteration -- correct and
+measured -- and the reuse is a recorded optimization, taken
+only if the measurement says the Cholesky share matters.
+
+### 27.4 The worker branch (in solveServerLoop)
+
+```
+case solveCollective:
+   ensure the grid, the layout, and the handle (as root)
+   receive my H locals, my S locals
+   call handle%generalized_eigenvectors (...)
+   send root my strips of the eigenvector columns with
+         global index <= numStates
+   (stay in the loop; SHUTDOWN also tears the handle down)
+```
+
+### 27.5 Checks
+
+1. **Nothing else moved**: the serial build and the deal paths
+   reproduce their PA4-A results (smalls bit-exact; the
+   4-k-point medium np4 criterion-clean with the same stamps).
+2. **Collective correctness, real** (`sio2_243_med_g`, one
+   k-point, the gamma build's home ground): np 2/4/8 energies
+   digit-identical to the baseline; file clean against the
+   same-build same-node np1 run, whose solves are the LAPACK
+   arm. Because that comparison crosses ALGORITHMS, its
+   criterion is ABSOLUTE, not relative (measured 2026-08-22):
+   eigenvalue datasets within 1e-12 absolute and the whole
+   file within 1e-9 absolute, eigenvectors excluded -- the
+   1e-10 RELATIVE form mis-fires on near-zero density
+   coefficients whose absolute differences sit at the
+   eigensolver floor, the same trap 25.7 records for
+   cross-node comparisons.
+3. **Collective correctness, complex**: a one-shifted-k-point
+   complex deck (the 5-atom KNbO3 auxiliary re-meshed to
+   1 1 1 shifted serves; seconds long) run at np 4 --
+   correctness of the complex path only, the numbers come
+   from elsewhere.
+4. **The falling stamp, medium**: the glass Secular Equation
+   stamp at np 1 (LAPACK arm, 188 s) vs np 2/4/8 (ELPA),
+   sequential on an exclusive node.
+5. **The headline**: `sio2_1296_large_g` at np 8 -- the
+   Secular Equation stamp against the serial baseline's
+   21022 s, plus the whole-run wall against 15h55m. One run;
+   this is the number the campaign exists to move.
+6. **Lifecycle**: shutdown tears down handles cleanly; rank
+   logs show the collective participation under
+   IMAGO_RANK_LOGS; no worker files by default; the
+   mid-iteration restart of 26.6 check 5 revalidated once on
+   the collective arm.
+

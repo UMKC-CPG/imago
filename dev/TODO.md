@@ -8613,6 +8613,44 @@ is not carried only in conversation.
   the ONLY path to a faster one-k-point solve. REMAINING in
   PA4: stage B (ELPA -- pseudocode section next) and the
   valence-density step.
+  **2026-08-22: PSEUDOCODE 27 DRAFTED (stage B).** The
+  collective arm activates for the one-k-point case (built
+  ELPA, mpiSize > 1, no Hubbard-U); one new server control
+  code; a new `elpaSolve.F90` owns the most-square grid, the
+  block-cyclic arithmetic of DESIGN 9.3 (nblk 64, one spelling
+  of the layout driving scatter, gather, and setup), and the
+  once-per-run handle lifecycle; scatter/gather ride the
+  existing 26.5 transport; the installed API is verified
+  (elpa_init(20241105); generalized_eigenvectors in double
+  real and complex). Deliberate deferrals recorded: Cholesky
+  reuse of the constant overlap (is_already_decomposed), and
+  the subgrid composition for k-points fewer than ranks. Six
+  checks, ending with the headline 1296-atom np8 run against
+  the 21022 s serial solve stamp. Reviewed by the programmer
+  2026-08-22.
+  **STAGE B CODED and ACCEPTED 2026-08-22** (record:
+  PERFORMANCE.md "PA4-B collective ELPA solve"; evidence
+  `jobs/bench/pa4b*`, jobs 16701920/16701921/16702210). The
+  27.5 checks pass: the deal and serial paths are unmoved
+  (serial bit-identical to the PA3 binaries, the 4-k-point
+  medium np4 stamp unchanged at 308.6 s); the collective arm
+  is correct on both variants; the one-k-point glass solve
+  falls 188.0 -> 74.3 -> 62.5 -> 57.2 s at np 1/2/4/8; and the
+  HEADLINE 1296-atom run at np8 finishes in 4h33m against
+  15h55m serial (3.5x), with the solve 21022 -> 1863 s (11.3x)
+  and the term stage 20316 -> 3342 s (6.1x), energies
+  identical. Three protocol facts the coding measured, all
+  folded into PSEUDOCODE 27: the ELPA handle setup is
+  COLLECTIVE (workers must be woken BEFORE root enters it);
+  the GENERALIZED path needs a BLACS context that the standard
+  path does not; and a fixed nblk of 64 leaves a process
+  column owning nothing on small matrices, so the block edge
+  is adaptive and the arm policy requires valeDim >= mpiSize.
+  ELPA also consumes the FULL Hermitian matrix, so the
+  collective arm unpacks both triangles where the LAPACK arm
+  fills only the upper one. REMAINING in PA4: the
+  valence-density step (now the third cost at 10.8 % of the
+  headline run), which rides the same deal.
 
 - [ ] PA5. Parallel HDF5 (DESIGN 9.7) and the grid-work
   distribution (DESIGN 9.2) -- last, and only if the map after

@@ -55,6 +55,7 @@ subroutine secularEqnSCF(spinDirection, numStates)
    use O_MPI, only: mpiSize, sendCtrlMPI, sendPackedMPI, &
          & recvDblVecMPI, solveTask, mpiTagHam, mpiTagOvlp, &
          & mpiTagVals, mpiTagVecs
+   use O_ELPASolve, only: elpaAvailable, rootCollectiveSolve
 #ifndef GAMMA
    use O_MPI, only: recvCmplxBlockMPI
    use O_LAPACKZHEGV
@@ -100,6 +101,9 @@ subroutine secularEqnSCF(spinDirection, numStates)
    integer :: numRounds  ! Deal rounds; each hands every rank at most
          ! one k-point (the deadlock-free discipline of 26.3).
    integer :: roundIdx
+   logical :: useCollective ! The stage-B arm (PSEUDOCODE 27): one
+         ! k-point, several ranks, ELPA built -- the single solve is
+         ! distributed instead of dealt.
    real (kind=double), allocatable, dimension (:) :: valsPlusTime
 #ifndef GAMMA
    complex (kind=double), allocatable, dimension (:,:) :: eigVecBlock
@@ -186,6 +190,15 @@ subroutine secularEqnSCF(spinDirection, numStates)
          & (numPlusUJAtoms == 0)) then
       dealWidth = mpiSize
    endif
+
+   ! The arm choice (PSEUDOCODE 27.1): at one k-point the deal cannot
+   !   help, so the single solve is distributed across every rank
+   !   with ELPA -- when it is built, there are ranks to use, and no
+   !   Hubbard-U coupling holds the solve on root. Everything outside
+   !   the solver call itself is identical between the arms.
+   useCollective = elpaAvailable .and. (mpiSize > 1) .and. &
+         & (numKPoints == 1) .and. (numPlusUJAtoms == 0) .and. &
+         & (valeDim >= mpiSize)
    j = 0
    do i = 1, numKPoints
       if (kPointDone(i) == 1) cycle
@@ -255,20 +268,33 @@ subroutine secularEqnSCF(spinDirection, numStates)
       call assembleSecularSCF (i, spinDirection, packedValeVale,&
             & packedOverlap, tempPackedValeVale)
 
-      ! Unpack the hamiltonian matrix.
+      ! Unpack the hamiltonian and overlap matrices. The LAPACK arm
+      !   reads only the upper triangle its solvers consume; the
+      !   collective arm unpacks BOTH triangles, because ELPA takes
+      !   the full Hermitian matrix (an upper-only scatter fed it
+      !   zeros for half the matrix -- measured 2026-08-22 as
+      !   garbage eigenvectors and a positive total energy).
+      if (useCollective) then
+#ifndef GAMMA
+         call unpackMatrix(valeVale(:,:,spinDirection),&
+               & packedValeVale,valeDim,1)
+         call unpackMatrix(valeValeOL(:,:),packedOverlap,valeDim,1)
+#else
+         call unpackMatrixGamma(valeValeGamma(:,:,spinDirection),&
+               & packedValeVale,valeDim,1)
+         call unpackMatrixGamma(valeValeOLGamma(:,:),packedOverlap,&
+               & valeDim,1)
+#endif
+      else
 #ifndef GAMMA
       call unpackMatrix(valeVale(:,:,spinDirection),packedValeVale,valeDim,0)
+      call unpackMatrix(valeValeOL(:,:),packedOverlap,valeDim,0)
 #else
       call unpackMatrixGamma(valeValeGamma(:,:,spinDirection),&
             & packedValeVale,valeDim,0)
-#endif
-
-      ! Unpack the overlap matrix.
-#ifndef GAMMA
-      call unpackMatrix(valeValeOL(:,:),packedOverlap,valeDim,0)
-#else
       call unpackMatrixGamma(valeValeOLGamma(:,:),packedOverlap,valeDim,0)
 #endif
+      endif
 
       ! For each atom with a Hubbard U and Hund J term, we need to apply its
       !   effect on relevant matrix elements of the Hamiltonian. This is only
@@ -297,7 +323,22 @@ subroutine secularEqnSCF(spinDirection, numStates)
          call update2AndApplyUJ(i,spinDirection)
       endif
 
-      ! Solve the eigen problem with a LAPACK routine.
+      ! Solve the eigen problem: collectively with ELPA when the arm
+      !   policy chose it (the workers were woken by
+      !   rootCollectiveSolve; the eigenvectors land in the leading
+      !   columns exactly as the LAPACK contract puts them), or with
+      !   the serial LAPACK routine as always.
+      if (useCollective) then
+#ifndef GAMMA
+         call rootCollectiveSolve (valeVale(:,:,spinDirection),&
+               & valeValeOL(:,:),&
+               & energyEigenValues(:,i,spinDirection))
+#else
+         call rootCollectiveSolve (valeValeGamma(:,:,spinDirection),&
+               & valeValeOLGamma(:,:),&
+               & energyEigenValues(:,i,spinDirection))
+#endif
+      else
 #ifndef GAMMA
 !write(20,*) "valeValeSCF"
 !do j = 1,valeDim
@@ -312,6 +353,7 @@ subroutine secularEqnSCF(spinDirection, numStates)
       call solveDSYGV(valeDim,numStates,valeValeGamma(:,:,spinDirection),&
             & valeValeOLGamma(:,:),energyEigenValues(:,i,spinDirection))
 #endif
+      endif
 
 !! Test normalization.
 !allocate (identity(numStates,numStates))
@@ -581,8 +623,9 @@ subroutine solveServerLoop
    use O_AtomicSites, only: valeDim
    use O_LAPACKParameters, only: setBlockSize
    use O_MPI, only: recvCtrlMPI, recvPackedMPI, sendDblVecMPI, &
-         & solveShutdown, solveTask, stopMPI, &
+         & solveShutdown, solveTask, solveCollective, stopMPI, &
          & mpiTagHam, mpiTagOvlp, mpiTagVals, mpiTagVecs
+   use O_ELPASolve, only: workerCollectiveSolve
 #ifndef GAMMA
    use O_MPI, only: sendCmplxBlockMPI
    use O_LAPACKZHEGV
@@ -630,6 +673,15 @@ subroutine solveServerLoop
    do
       call recvCtrlMPI (code, kPointIndex, 0)
       if (code == solveShutdown) exit
+      if (code == solveCollective) then
+         ! Join the collective ELPA solve (PSEUDOCODE 27.4) and
+         !   return to the loop -- the extensible-control design of
+         !   26.4 doing exactly what it was built for.
+         call workerCollectiveSolve (valeDim, numStates)
+         write (20,*) 'Joined collective solve for k-point ',&
+               & kPointIndex
+         cycle
+      endif
       if (code /= solveTask) then
          call stopMPI ('Solve server received an unknown code.')
       endif

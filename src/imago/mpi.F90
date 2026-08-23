@@ -75,6 +75,8 @@ module O_MPI
    !   one more code, not a new worker structure.
    integer, parameter :: solveShutdown = 0 ! End the server loop.
    integer, parameter :: solveTask     = 1 ! One k-point, serial solve.
+   integer, parameter :: solveCollective = 2 ! Join a collective ELPA
+         ! solve of one k-point (PSEUDOCODE 27).
    integer, parameter :: mpiTagCtrl  = 100 ! (code, k-point) pair.
    integer, parameter :: mpiTagHam   = 101 ! Packed Hamiltonian.
    integer, parameter :: mpiTagOvlp  = 102 ! Packed overlap.
