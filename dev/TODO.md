@@ -8762,6 +8762,42 @@ is not carried only in conversation.
   precedent). Guards: Hubbard-U and force-computing iterations
   take the serial path whole. Seven checks. Awaits programmer
   review before any code.
+  **2026-08-23, LATER: 9.6's one-k-point block REORDERED and
+  PSEUDOCODE 30 WRITTEN (`d217fdc` and the commit after it).**
+  Reviewing 29 against the accumulation code showed the deal
+  excludes the deck it was wanted for, and that the state axis
+  9.6 named for stage B was the wrong candidate to try first:
+  the accumulate half is numStates separate zher/dsyr calls,
+  a BLAS level-2 loop whose traffic on the large cell is near
+  four terabytes against under a teraflop of arithmetic, so
+  dividing it across ranks that share a node divides what was
+  never the constraint while multiplying the square accumulator
+  by the rank count. 9.6 now carries three ordered candidates --
+  (i) recast the accumulate half as a rank-k update, (ii) deal
+  the contract half BY DATASET (every accumulator is fed by
+  exactly one dataset, so ranks share none and it is bit-exact
+  for free, with a real width at one k-point), (iii) the state
+  axis, last -- and an exactness paragraph keeping zero
+  tolerance for the deals and relaxing it only for (i)'s own
+  before/after. The traffic figures are marked as arithmetic,
+  not measurement.
+  **NEXT, and it is small: PSEUDOCODE 30**, a SERIAL instrument
+  (four wall-clock regions -- eigenvector read, accumulate,
+  integral read, contract arithmetic -- plus a rank-1-update
+  counter and a k-point counter, logged one line per call). No
+  MPI, no deal; buildable and runnable before 29 is coded, and
+  29.6 later extends the same accumulators with the per-rank
+  gather. It exists because the candidate ordering above is a
+  PREDICTION: the thread sweep of 29.7 check 5 is what
+  separates a compute-limited accumulate from a
+  bandwidth-limited one, the rank-update counter is what turns
+  9.6's asserted state count into a measured one, and the
+  read/arithmetic split inside the contract half is what prices
+  candidate (ii) against the read-once cache. Take the reading
+  on the large one-k-point glass, NOT the 243-atom deck, whose
+  triangle can sit in last-level cache. Eight checks, one of
+  which is that 9.6 gets re-read against the stamps before any
+  candidate is specified.
 
 - [ ] PA5a. Distribute the ELECTROSTATIC SETUP under DESIGN 9.2
   -- PULLED FORWARD 2026-08-22 (programmer's ruling on the

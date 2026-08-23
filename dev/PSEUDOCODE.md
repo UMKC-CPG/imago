@@ -17457,3 +17457,256 @@ that decides stage B's shape.
    returns to solve service (the next iteration's solve still
    deals or goes collective); a mid-iteration session-kill
    restarts from the checkpointed potential and reconverges.
+
+
+## 30. The Valence Density Split Measurement
+## (DESIGN 9.6 one-k-point block; TODO PA4 valence step)
+
+### 30.1 What this is for, and what it must not become
+
+DESIGN 9.6's amended one-k-point block orders three candidates
+for stage B, and it orders them on a reading nobody has taken:
+how the valence-density stage divides between building the
+density matrix and contracting it, and whether the building
+half is limited by arithmetic or by memory bandwidth. The block
+marks its own traffic figures as arithmetic from the array
+shapes rather than measurements, and says the ordering should
+be re-read against real stamps before anything is built. This
+section specifies those stamps.
+
+It is deliberately a SERIAL instrument. It adds no MPI, no
+deal, no arm policy and no new algorithm; it can be built and
+run before PSEUDOCODE 29 is coded, and it answers a question 29
+would otherwise leave until after its own increment is
+finished. Section 29.6 then extends these same accumulators
+with the per-rank gather -- one definition of the timers, used
+twice.
+
+Two things it must not become. It must NOT turn `O_TimeStamps`
+into an accumulating timer: PF3 is the open question of whether
+that module changes character, this measurement does not need
+the answer, and pre-empting it would settle a project-wide
+question as a side effect of a local one. So the accumulators
+are module state in `O_ValeCharge`, local to the one routine
+that fills them. And it must not grow a second purpose: it
+reports raw seconds and raw counts, and every ratio, rate and
+projection is computed offline from the log.
+
+### 30.2 Seam inventory
+
+- The routine is `makeValenceRho(inSCF)` in `valeCharge.F90`
+  (module `O_ValeCharge`), the same routine 29.1 inventories.
+  Nothing about its inputs, outputs, allocations or call sites
+  changes; this section only reads a clock at points inside it.
+- The instrument consumes only quantities the routine already
+  holds at the point of measurement: `valeDim`
+  (`O_AtomicSites`), `numStates` (`O_Input`), `numKPoints`
+  (`O_KPoints`), `spin`, `potDim` and `rel` (`O_Potential`),
+  and the `inSCF` dummy argument. Nothing new is allocated,
+  loaded, broadcast or read from the file. There is no new
+  quantity whose provenance needs settling, which is why this
+  inventory is short and why that shortness is itself the
+  argument for doing the measurement first.
+- What it produces: four wall-clock accumulators and two
+  counters, all module-level scalars in `O_ValeCharge`, all
+  written only inside `makeValenceRho`, and all consumed only
+  by the single log line at the end of the same call. Nothing
+  downstream reads them. They are therefore safe to add ahead
+  of any decision about what stage B becomes.
+- Both entry points are instrumented -- `inSCF == 1` from
+  `mainSCF` and `inSCF == 0` from `bandPSCF` -- because the
+  measurement costs nothing on the post-SCF path and a reading
+  that silently covered only one path would be a trap. The log
+  line carries `inSCF` so the two are never confused.
+
+### 30.3 The four regions, and where each begins and ends
+
+29.6 asks for two timers, accumulate and contract. The code
+says four, and the two extra ones are not decoration: each
+separates two mechanisms that a single number would blend, and
+in both cases the blend would fall on the exact comparison the
+reading has to make.
+
+```
+per k-point i:
+
+  [skip test]        cheap; not timed, but counted
+  region R  READ EIGENVECTORS
+                     complex build only: the spin loop calling
+                     readDataSCF / readDataPSCF
+  region A  ACCUMULATE
+                     begins at the zeroing of valeValeRho (or
+                     valeValeRhoGamma) -- the zeroing is a full
+                     valeDim x valeDim write and belongs with
+                     the half it serves -- and ends after the
+                     packMatrix / packMatrixGamma spin loop.
+                     Contains the state loop with its zher /
+                     dsyr calls, the electronEnergy sum and the
+                     optional update1UJ.
+  region I  READ INTEGRALS
+                     every readPackedMatrix call in the
+                     contract half: the overlap, the nuclear
+                     potential, the kinetic energy, the
+                     optional mass velocity, and each of the
+                     potDim potential datasets.
+  region M  CONTRACT ARITHMETIC
+                     every matrixElementMult /
+                     matrixElementMultGamma call.
+```
+
+Regions I and M interleave -- read a dataset, contract it, read
+the next -- so each is entered and left `potDim + 3` or
+`potDim + 4` times per k-point and the accumulators simply add
+up. The `allocate` of `packedValeVale` sits between A and I and
+belongs to neither; leave it outside all four so the regions
+sum to slightly less than the stage, which is the honest shape.
+
+Why R is separated from A: in the complex build the routine
+re-reads each k-point's eigenvector block from the file, and
+folding that read into A would report file time as arithmetic
+time on exactly the deck where the comparison is delicate. In
+the gamma build there is no such read and R stays zero, which
+is itself worth seeing in the log rather than inferring.
+
+Why M is separated from I: this is the ratio that prices two of
+DESIGN 9.6's mid-term candidates against each other. The
+dataset deal of candidate (ii) divides I AND M; the read-once
+cache removes I alone and leaves M untouched. A single
+contract number cannot tell you what the cache is worth on its
+own, and that is a question we will otherwise answer by
+guessing.
+
+### 30.4 The clock
+
+Wall clock, from `system_clock`, with the count and count-rate
+arguments declared at an integer kind of at least eighteen
+digits (`selected_int_kind(18)`, declared as a parameter local
+to `O_ValeCharge` rather than added to `O_Kinds`, which is
+shared by every subprogram and should not change for this).
+Two hazards, both settled here rather than left to the coder:
+
+- `cpu_time` is WRONG for this measurement and must not be
+  used. It reports processor time summed over threads, so a
+  region that runs eight-way threaded reports roughly eight
+  times its wall duration -- and the whole point of 30.7 is to
+  vary the thread count and watch wall time respond. A timer
+  that scales with threads by construction would report
+  perfect insensitivity and look like a clean result.
+- `system_clock` returns a count rate of zero when no clock is
+  available. Query the rate once at routine entry, and if it
+  is zero, write the log line with the seconds fields marked
+  unavailable rather than dividing by it. The counters are
+  still meaningful and should still be reported.
+
+At a large integer kind the tick count does not wrap within a
+run, so no rollover handling is specified. The narrower default
+kind wraps in about a month, which is why the kind is stated
+rather than left to the default.
+
+### 30.5 Module state and lifecycle
+
+Six module-level scalars in `O_ValeCharge`, with names that say
+what they hold:
+
+```
+valeRhoReadVectorSeconds     region R
+valeRhoAccumulateSeconds     region A
+valeRhoReadIntegralSeconds   region I
+valeRhoContractSeconds       region M
+valeRhoRankUpdateCount       zher / dsyr calls actually issued
+valeRhoKPointsProcessed      k-points not skipped
+```
+
+Zeroed at the TOP of `makeValenceRho`, not at module load, so
+every call reports its own iteration. Read once, by the log
+line at the bottom of the same call. No other routine touches
+them.
+
+`valeRhoRankUpdateCount` earns its place: DESIGN 9.6's traffic
+arithmetic multiplies a per-call matrix footprint by "several
+thousand" states carrying occupation above the skip threshold,
+and that state count is asserted, not measured. One integer
+increment inside the existing loop turns the load-bearing
+number of the whole ordering into a measured one.
+`valeRhoKPointsProcessed` does the same for the skip test,
+which silently changes the denominator of every per-k-point
+figure derived from the log.
+
+### 30.6 The log line
+
+One line per call, written to unit 20 -- the unit
+`O_TimeStamps` already writes and which is open throughout the
+stage, so the closed-unit truncation hazard does not arise
+here. It is written immediately before `cleanUpPopulation`, so
+it appears inside the existing `Valence Charge Density` stamp
+pair and a reader finds it where the stage is.
+
+Fields, in order, on one greppable line with a fixed leading
+label: the label, `inSCF`, `numKPoints`, `valeDim`,
+`numStates`, `potDim`, `spin`, then the four region seconds,
+then the two counts. Raw values only. Every derived quantity --
+the accumulate share, the bytes the rank-1 updates touched, the
+implied traffic rate, the read rate -- is computed offline from
+these fields, because a derived number written by the code is a
+number nobody re-checks when the derivation turns out to be
+wrong.
+
+### 30.7 Running the sweep
+
+The thread sweep is an ENVIRONMENT matter, not a code matter:
+the same binary is run repeatedly with the BLAS thread count
+varied, and nothing in this section reads or sets it. The
+variable that governs it depends on the BLAS in the build
+(`OPENBLAS_NUM_THREADS` for OpenBLAS, `OMP_NUM_THREADS` where
+the library takes the OpenMP setting), and the run log must
+record which was set and to what.
+
+Confirm the setting actually reaches the library rather than
+assuming it did. PA4-A recorded threads being close to
+worthless for `ZHEGV`, and that was a measurement, not a
+prediction; a sweep whose settings silently did nothing would
+produce the same flat curve as a genuinely bandwidth-limited
+loop and would be read as the answer.
+
+Per 29.7 check 5, the reading is taken on the large one-k-point
+glass rather than the 243-atom one, whose stored triangle is
+small enough to sit in a last-level cache and whose thread
+behaviour therefore says nothing about the large cell. Two SCF
+iterations are enough, since the log line is per call.
+
+The 4-k-point medium deck is run once at one thread as well.
+It is the deck where region R is non-zero, and it is the only
+way to see what the eigenvector re-read costs.
+
+### 30.8 Checks
+
+1. **Nothing moved**: the instrumented serial build reproduces
+   the accepted PA5a binaries bit-identically on
+   `bn_small_{c,g}` and `sio2_243_med_g`. A clock read and two
+   integer increments must not change a result; if anything
+   differs, the instrument was placed inside something it
+   should have been outside of.
+2. **The regions sum**: R + A + I + M is slightly less than the
+   `Valence Charge Density` stamp span, and the shortfall is
+   small and stable. A shortfall that is large means a region
+   boundary is misplaced; a NEGATIVE shortfall means a region
+   is being double-counted.
+3. **The gamma build reports R as exactly zero**, and the
+   complex build reports it as non-zero. This is the cheapest
+   check that the regions are where the section says.
+4. **The counters agree with the deck**:
+   `valeRhoKPointsProcessed` equals `numKPoints` less the
+   skipped ones, and `valeRhoRankUpdateCount` divided by
+   `spin` and by the k-points processed is a plausible state
+   count for the deck -- and is the number DESIGN 9.6's
+   traffic arithmetic assumed.
+5. **The sweep is real**: across the thread settings, at least
+   one region's seconds move. If NOTHING moves, the thread
+   setting is not reaching the library and the sweep has
+   measured its own plumbing.
+6. **The reading is recorded before it is acted on**: the four
+   region seconds at each thread setting go into
+   PERFORMANCE.md, and DESIGN 9.6's one-k-point block is
+   re-read against them and amended where they contradict it,
+   BEFORE any of its three candidates is specified. The
+   ordering there is a prediction; this is what tests it.
