@@ -17534,7 +17534,7 @@ per k-point i:
   region R  READ EIGENVECTORS
                      complex build only: the spin loop calling
                      readDataSCF / readDataPSCF
-  region A  ACCUMULATE
+  region A  ACCUMULATE, first span
                      begins at the zeroing of valeValeRho (or
                      valeValeRhoGamma) -- the zeroing is a full
                      valeDim x valeDim write and belongs with
@@ -17543,6 +17543,12 @@ per k-point i:
                      Contains the state loop with its zher /
                      dsyr calls, the electronEnergy sum and the
                      optional update1UJ.
+  region A  ACCUMULATE, second span
+                     the spin up/down to total/difference
+                     recombination of packedValeValeRho, which
+                     the code places after the overlap read.
+                     Runs only when spin == 2. See the note
+                     below the block.
   region I  READ INTEGRALS
                      every readPackedMatrix call in the
                      contract half: the overlap, the nuclear
@@ -17560,6 +17566,27 @@ the next -- so each is entered and left `potDim + 3` or
 up. The `allocate` of `packedValeVale` sits between A and I and
 belongs to neither; leave it outside all four so the regions
 sum to slightly less than the stage, which is the honest shape.
+
+**Region A is TWO spans, not one, and this is a property of the
+code rather than a choice.** 29.1 counts the spin up/down to
+total/difference recombination as part of the accumulate half,
+and it is: it rewrites the packed density and touches no stored
+integral. But the code does not place it with the pack. It sits
+AFTER the overlap read, because that read is what the
+recombined density is first contracted against. So region A
+opens a second span around that recombination loop and adds
+into the same accumulator. Accumulators add; a half made of two
+spans is still one half.
+
+Leaving it unregioned instead would be wrong in a way that
+hides itself. The loop runs over `valeDim(valeDim+1)/2`
+elements -- about 78 million on the large cell -- and it is
+skipped entirely when `spin == 1`. Every benchmark deck in the
+campaign is `spin == 1`, so an unregioned recombination would
+cost nothing on every deck we measure and would quietly widen
+check 2's shortfall on the first spin-polarized deck anybody
+ran, which is exactly the kind of defect that surfaces long
+after the reading it corrupted was believed.
 
 Why R is separated from A: in the complex build the routine
 re-reads each k-point's eigenvector block from the file, and
@@ -17691,6 +17718,20 @@ way to see what the eigenvector re-read costs.
    small and stable. A shortfall that is large means a region
    boundary is misplaced; a NEGATIVE shortfall means a region
    is being double-counted.
+
+   This check has a floor, and it must be read against that
+   floor rather than at face value. The stage span comes from
+   `O_TimeStamps`, which writes a `date_and_time` string at
+   millisecond resolution, while the regions are summed from a
+   clock some six orders finer. On a deck whose stage lasts
+   tens of milliseconds, one millisecond of rounding is a
+   couple of percent of the span and the sign of the shortfall
+   is noise: small negatives will appear and mean nothing. The
+   check discriminates only where the stage is long against a
+   millisecond, which is every deck of interest and none of the
+   small ones. Confirm the boundaries on a medium or large
+   deck; on a small deck this check can do no more than show
+   that nothing is wildly wrong.
 3. **The gamma build reports R as exactly zero**, and the
    complex build reports it as non-zero. This is the cheapest
    check that the regions are where the section says.

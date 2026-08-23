@@ -29,10 +29,110 @@ module O_ValeCharge
    real (kind=double), allocatable, dimension (:,:)   :: packedValeVale
    real (kind=double), allocatable, dimension (:,:,:) :: packedValeValeRho
 
+
+   ! Split measurement of the valence charge density stage (PSEUDOCODE
+   !   30).  Building the density matrix from the eigenvectors and
+   !   contracting it against the stored integral matrices are two kinds
+   !   of work with two different limits: the first is arithmetic over a
+   !   resident matrix, the second is dominated by reading matrices back
+   !   from the HDF5 file.  How the stage divides between them, and
+   !   whether the building half is limited by arithmetic or by memory
+   !   bandwidth, decides which parallel decomposition is worth building
+   !   (DESIGN 9.6).  Nothing in the program reads these values; they
+   !   exist to be logged once per call and read by a person.
+
+   ! An integer kind wide enough to hold a clock tick count for the
+   !   duration of a run.  Eighteen decimal digits is far more than a
+   !   nanosecond-resolution counter needs, so no tick rollover handling
+   !   is required.  Declared here rather than in the shared O_Kinds,
+   !   which every subprogram in the project compiles against and which
+   !   should not change to serve one measurement.
+   integer, parameter :: clockIntKind = selected_int_kind(18)
+
+   ! Ticks per second, as reported by system_clock at the top of each
+   !   call.  A value of zero means the system has no usable clock, in
+   !   which case the seconds below stay zero and the log line says so
+   !   rather than dividing by it.
+   integer (kind=clockIntKind) :: valeRhoClockRate
+
+   ! Wall-clock seconds accumulated in each of the four regions, summed
+   !   over the k-points of one call.  Wall clock, not processor time:
+   !   the measurement these serve varies the BLAS thread count and
+   !   watches the duration respond, and a processor-time total would
+   !   grow with the thread count by construction and report perfect
+   !   insensitivity no matter what the code did.
+   real (kind=double) :: valeRhoReadVectorSeconds   ! Eigenvector reads
+   real (kind=double) :: valeRhoAccumulateSeconds   ! Build the density
+   real (kind=double) :: valeRhoReadIntegralSeconds ! Integral reads
+   real (kind=double) :: valeRhoContractSeconds     ! Contract arithmetic
+
+   ! Rank-1 update calls actually issued, and k-points not skipped.  The
+   !   first turns a load-bearing but assumed quantity into a measured
+   !   one: the traffic estimate that orders the candidate
+   !   decompositions multiplies the size of the density matrix by the
+   !   number of states whose occupation clears the negligibility
+   !   threshold, and that state count has never been counted.  The
+   !   second records how many k-points the skip test let through, which
+   !   silently sets the denominator of every per-k-point figure derived
+   !   from the log.
+   integer :: valeRhoRankUpdateCount
+   integer :: valeRhoKPointsProcessed
+
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    ! Begin list of module subroutines.!
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    contains
+
+
+! Read the wall clock into a caller-held marker, opening a timed region.
+!   The marker is a local of the calling routine rather than module data
+!   so that the regions cannot accidentally share one start time.
+subroutine beginTimedRegion (regionStartTicks)
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define passed parameters.
+   integer (kind=clockIntKind), intent(out) :: regionStartTicks
+
+   call system_clock (count=regionStartTicks)
+
+end subroutine beginTimedRegion
+
+
+! Close a timed region opened by beginTimedRegion and add its duration to
+!   a running total.  Regions do not nest, but one region may be entered
+!   and left many times per call (the integral reads and the contractions
+!   alternate, once per stored matrix), which is why the total
+!   accumulates here instead of being assigned.
+subroutine endTimedRegion (regionStartTicks,accumulatedSeconds)
+
+   ! Import the precision variables.
+   use O_Kinds
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define passed parameters.
+   integer (kind=clockIntKind), intent(in) :: regionStartTicks
+   real (kind=double), intent(inout) :: accumulatedSeconds
+
+   ! Define the local variables.
+   integer (kind=clockIntKind) :: regionEndTicks
+
+   ! Without a usable clock there is nothing to add.  The counters in
+   !   this module remain meaningful and are still reported.
+   if (valeRhoClockRate <= 0) then
+      return
+   endif
+
+   call system_clock (count=regionEndTicks)
+
+   accumulatedSeconds = accumulatedSeconds + &
+         & real(regionEndTicks - regionStartTicks,double) / &
+         & real(valeRhoClockRate,double)
+
+end subroutine endTimedRegion
 
 subroutine makeValenceRho(inSCF)
 
@@ -104,8 +204,26 @@ subroutine makeValenceRho(inSCF)
    real    (kind=double), allocatable, dimension (:,:,:) :: valeValeRhoGamma
 #endif
 
+   ! Marker holding the tick count at which the currently open timed
+   !   region began (PSEUDOCODE 30).  The four regions run one after
+   !   another and never nest, so a single marker serves all of them.
+   integer (kind=clockIntKind) :: clockAtRegionStart
+
    ! Log the date and time that we start.
    call timeStampStart (17)
+
+   ! Begin the split measurement of this call (PSEUDOCODE 30).  The
+   !   totals are cleared here rather than at module load so that every
+   !   call reports its own iteration instead of a running sum over the
+   !   whole self-consistency loop.  The clock rate is asked for once,
+   !   because it does not change during a run.
+   call system_clock (count_rate=valeRhoClockRate)
+   valeRhoReadVectorSeconds   = 0.0_double
+   valeRhoAccumulateSeconds   = 0.0_double
+   valeRhoReadIntegralSeconds = 0.0_double
+   valeRhoContractSeconds     = 0.0_double
+   valeRhoRankUpdateCount     = 0
+   valeRhoKPointsProcessed    = 0
 
    ! Define whether the packed arrays have two rows (complex) or one (real).
    !   This also defines the size of some other small arrays.
@@ -233,8 +351,20 @@ subroutine makeValenceRho(inSCF)
             cycle
          endif
 
+         ! This k-point survived the skip test above and its work will be
+         !   done, so count it (PSEUDOCODE 30).
+         valeRhoKPointsProcessed = valeRhoKPointsProcessed + 1
+
          ! Determine if we are doing the valeCharge in a post-SCF calculation
          !   or within an SCF calculation.
+         ! This read is timed on its own (PSEUDOCODE 30 region R) rather
+         !   than being folded into the accumulation that follows it.
+         !   Only the complex build reads wave functions back: it holds
+         !   one k-point at a time.  Folding a file read into the
+         !   arithmetic total would report reading as computing on
+         !   precisely the multi-k-point decks where the two must be
+         !   told apart.
+         call beginTimedRegion (clockAtRegionStart)
          do h = 1, spin
             if (inSCF == 1) then
                call readDataSCF(h,i,numStates,0) ! Read wave functions only.
@@ -242,12 +372,30 @@ subroutine makeValenceRho(inSCF)
                call readDataPSCF(h,i,numStates,0) ! Read wave functions only.
             endif
          enddo
+         call endTimedRegion (clockAtRegionStart,valeRhoReadVectorSeconds)
 !      endif
+
+      ! Open the accumulation region (PSEUDOCODE 30 region A, first
+      !   span).  It opens before the zeroing rather than after it
+      !   because zeroing writes the whole valence-by-valence matrix,
+      !   which is the same memory traffic the accumulation itself is
+      !   made of and belongs with the half it serves.
+      call beginTimedRegion (clockAtRegionStart)
 
       ! Initialize matrix to receive the valeVale density matrix (square of the
       !   wave function).
       valeValeRho(:,:,:) = cmplx(0.0_double,0.0_double,double)
 #else
+      ! The gamma build keeps its single k-point resident, so there is no
+      !   read to time here and region R stays exactly zero for the whole
+      !   run.  That zero is worth seeing in the log rather than being
+      !   inferred from the build name.
+      valeRhoKPointsProcessed = valeRhoKPointsProcessed + 1
+
+      ! Open the accumulation region (PSEUDOCODE 30 region A, first
+      !   span).  See the note in the complex arm above.
+      call beginTimedRegion (clockAtRegionStart)
+
       ! All of the information we need is already available in system memory.
       !   The only thing we need to do is initialize this matrix to zero.
       valeValeRhoGamma(:,:,:) = 0.0_double
@@ -265,6 +413,13 @@ subroutine makeValenceRho(inSCF)
                & energyEigenValues(j,i,:)
 
          do k = 1, spin
+            ! Count the update before issuing it (PSEUDOCODE 30).  Each
+            !   one streams the whole upper triangle of the density
+            !   matrix through memory, so this count times that
+            !   triangle's size is the memory traffic of the
+            !   accumulation -- the quantity DESIGN 9.6 estimates and
+            !   this measurement exists to check.
+            valeRhoRankUpdateCount = valeRhoRankUpdateCount + 1
             call zher('U',valeDim,currentPopulation(k),valeVale(:,j,k),1,&
                   & valeValeRho(:,:,k),valeDim)
          enddo
@@ -310,6 +465,10 @@ subroutine makeValenceRho(inSCF)
                & energyEigenValues(j,i,:)
 
          do k = 1, spin
+            ! Count the update before issuing it (PSEUDOCODE 30).  See
+            !   the note in the complex arm above for what the count is
+            !   used to compute.
+            valeRhoRankUpdateCount = valeRhoRankUpdateCount + 1
             call dsyr('U',valeDim,currentPopulation(k),&
                   & valeValeGamma(:,j,k),1,valeValeRhoGamma(:,:,k),valeDim)
          enddo
@@ -329,13 +488,29 @@ subroutine makeValenceRho(inSCF)
       enddo
 #endif
 
+      ! Close the accumulation region (PSEUDOCODE 30 region A, first
+      !   span).  Placed after the build-variant block so that one
+      !   statement closes the span for both the complex and the real
+      !   arm.
+      call endTimedRegion (clockAtRegionStart,valeRhoAccumulateSeconds)
+
 
       ! Allocate space to hold the overlap matrix. Later, this will also be
       !   used to read in the Hamiltonian matrix terms (KE, nuclear, electronic
       !   potential, and (if needed) the mass velocity).
+      ! The allocation belongs to neither region and is deliberately left
+      !   outside both, so the four regions sum to slightly less than the
+      !   stage as a whole rather than appearing to account for all of it.
       allocate (packedValeVale(dim1,valeDim*(valeDim+1)/2))
 
       ! Read the overlap matrix into the packedValeVale representation.
+      ! Reading a stored matrix and contracting against it alternate from
+      !   here to the end of the k-point body, and they are timed apart
+      !   (PSEUDOCODE 30 regions I and M).  The ratio between them is
+      !   what says whether holding these matrices in memory would be
+      !   worth more than dividing the work of reading them, which a
+      !   single combined total could not distinguish.
+      call beginTimedRegion (clockAtRegionStart)
       if (inSCF == 1) then
          call readPackedMatrix (atomOverlap_did(i),packedValeVale,&
                & packedVVDims,dim1,valeDim)
@@ -343,17 +518,29 @@ subroutine makeValenceRho(inSCF)
          call readPackedMatrix (atomOverlapPSCF_did(i),packedValeVale,&
                & packedVVDimsPSCF,dim1,valeDim)
       endif
+      call endTimedRegion (clockAtRegionStart,valeRhoReadIntegralSeconds)
 
       ! In the case that the calculation is spin polarized (spin=2) then we
       !   need to convert the values in the packedValeValeRho density matrix
       !   from being spin up and spin down to being spin up + spin down and
       !   spin up - spin down.  This is accomplished with a temporary variable.
+      ! This rewrite of the density matrix is part of building it, not of
+      !   contracting it, so it is timed into the accumulation total as
+      !   its second span (PSEUDOCODE 30 region A).  It sits here, rather
+      !   than beside the packing above, only because the overlap read is
+      !   what the recombined density is first contracted against.
+      !   Leaving it untimed would cost nothing on every deck in the
+      !   benchmark set, all of which are unpolarized and skip it
+      !   entirely, and would then quietly misreport the first
+      !   spin-polarized deck anyone measured.
       if (spin == 2) then
+         call beginTimedRegion (clockAtRegionStart)
          do j = 1, valeDim*(valeDim+1)/2
             tempDensity(:) = packedValeValeRho(:,j,1)
             packedValeValeRho(:,j,1)=tempDensity(:)+packedValeValeRho(:,j,2)
             packedValeValeRho(:,j,2)=tempDensity(:)-packedValeValeRho(:,j,2)
          enddo
+         call endTimedRegion (clockAtRegionStart,valeRhoAccumulateSeconds)
       endif
 
       ! In the next section, we will read in the hamiltonian terms (and
@@ -367,6 +554,7 @@ subroutine makeValenceRho(inSCF)
 
       if (inSCF == 1) then
 
+         call beginTimedRegion (clockAtRegionStart)
          do j = 1, spin ! j=1 -> Total; j=2 -> Difference
 #ifndef GAMMA
             call matrixElementMult (chargeDensityTrace(j),packedValeVale,&
@@ -376,10 +564,14 @@ subroutine makeValenceRho(inSCF)
                   & packedValeVale,packedValeValeRho(:,:,j),dim1,valeDim)
 #endif
          enddo
+         call endTimedRegion (clockAtRegionStart,valeRhoContractSeconds)
 
          ! Compute the nuclear contribution to the fitted potential first.
+         call beginTimedRegion (clockAtRegionStart)
          call readPackedMatrix (atomNPOverlap_did(i),packedValeVale,&
                & packedVVDims,dim1,valeDim)
+         call endTimedRegion (clockAtRegionStart,valeRhoReadIntegralSeconds)
+         call beginTimedRegion (clockAtRegionStart)
          do j = 1, spin ! j=1 -> Total; j=2 -> Difference
 #ifndef GAMMA
             call matrixElementMult (nucPotTrace(j),packedValeVale,&
@@ -389,10 +581,14 @@ subroutine makeValenceRho(inSCF)
                   & packedValeValeRho(:,:,j),dim1,valeDim)
 #endif
          enddo
+         call endTimedRegion (clockAtRegionStart,valeRhoContractSeconds)
 
          ! Now compute the kinetic energy.
+         call beginTimedRegion (clockAtRegionStart)
          call readPackedMatrix (atomKEOverlap_did(i),packedValeVale,&
                & packedVVDims,dim1,valeDim)
+         call endTimedRegion (clockAtRegionStart,valeRhoReadIntegralSeconds)
+         call beginTimedRegion (clockAtRegionStart)
          do j = 1, spin ! j=1 -> Total; j=2 -> Difference
 #ifndef GAMMA
             call matrixElementMult (kineticEnergyTrace(j),packedValeVale,&
@@ -402,11 +598,16 @@ subroutine makeValenceRho(inSCF)
                   & packedValeValeRho(:,:,j),dim1,valeDim)
 #endif
          enddo
+         call endTimedRegion (clockAtRegionStart,valeRhoContractSeconds)
 
          ! If needed, compute the mass velocity.
          if (rel == 1) then
+            call beginTimedRegion (clockAtRegionStart)
             call readPackedMatrix (atomMVOverlap_did(i),packedValeVale,&
                   & packedVVDims,dim1,valeDim)
+            call endTimedRegion (clockAtRegionStart,&
+                  & valeRhoReadIntegralSeconds)
+            call beginTimedRegion (clockAtRegionStart)
             do j = 1, spin ! j=1 -> Total; j=2 -> Difference
 #ifndef GAMMA
                call matrixElementMult (massVelocityTrace(j),packedValeVale,&
@@ -416,12 +617,20 @@ subroutine makeValenceRho(inSCF)
                      & packedValeValeRho(:,:,j),dim1,valeDim)
 #endif
             enddo
+            call endTimedRegion (clockAtRegionStart,valeRhoContractSeconds)
          endif
 
          ! Loop over atomic potential terms next.
+         ! These are the bulk of both regions: one stored matrix per
+         !   potential term, read and then contracted, so the two timed
+         !   regions below are opened and closed potDim times each.
          do j = 1, potDim
+            call beginTimedRegion (clockAtRegionStart)
             call readPackedMatrix (atomPotOverlap_did(i,j),packedValeVale,&
                   & packedVVDims,dim1,valeDim)
+            call endTimedRegion (clockAtRegionStart,&
+                  & valeRhoReadIntegralSeconds)
+            call beginTimedRegion (clockAtRegionStart)
             do k = 1, spin ! j=1 -> Total; j=2 -> Difference
 #ifndef GAMMA
                call matrixElementMult (potRho(j,k),packedValeVale,&
@@ -431,6 +640,7 @@ subroutine makeValenceRho(inSCF)
                      & packedValeValeRho(:,:,k),dim1,valeDim)
 #endif
             enddo
+            call endTimedRegion (clockAtRegionStart,valeRhoContractSeconds)
          enddo
       endif ! inSCF == 1
 
@@ -539,6 +749,38 @@ subroutine makeValenceRho(inSCF)
                & sumElecEnergy
       endif
    endif
+
+   ! Report how this call divided between building the density matrix
+   !   and contracting it (PSEUDOCODE 30).  One line per call, written
+   !   inside the stage's own start/end stamps so a reader finds it where
+   !   the stage is, and carrying a fixed leading label so that a whole
+   !   run's worth can be pulled out of the log with a single search.
+   !
+   ! Raw values only.  Every ratio, rate and projection a reader wants
+   !   from these -- the share spent accumulating, the memory traffic
+   !   implied by the update count, the read rate per stored matrix -- is
+   !   computed outside the program, because a derived number written
+   !   here is one that nobody re-checks when the derivation behind it
+   !   turns out to be wrong.
+   !
+   ! inSCF is reported because the post-SCF path calls this same routine
+   !   with a different set of stored matrices, and a reading that
+   !   silently mixed the two would be worse than no reading.
+   if (valeRhoClockRate > 0) then
+      write (20,fmt='(a,6(1x,i0),4(1x,es14.6),2(1x,i0))') &
+            & 'VALEDENSITY SPLIT', inSCF, numKPoints, valeDim, &
+            & numStates, potDim, spin, &
+            & valeRhoReadVectorSeconds, valeRhoAccumulateSeconds, &
+            & valeRhoReadIntegralSeconds, valeRhoContractSeconds, &
+            & valeRhoRankUpdateCount, valeRhoKPointsProcessed
+   else
+      write (20,fmt='(a,6(1x,i0),a,2(1x,i0))') &
+            & 'VALEDENSITY SPLIT', inSCF, numKPoints, valeDim, &
+            & numStates, potDim, spin, &
+            & '  seconds unavailable (no system clock)', &
+            & valeRhoRankUpdateCount, valeRhoKPointsProcessed
+   endif
+   call flush (20)
 
    ! Deallocate arrays associated with the electron population.
    call cleanUpPopulation
