@@ -8466,13 +8466,24 @@ is not carried only in conversation.
   - [x] Pin both environments to one compiler build, or upgrade
     `cpg`'s.  DONE by the raise above; `dev/env/cpgp.yml` and
     BUILD.md now state the sysroot rule.
-  - [ ] Rebuild the serial preset against it and re-run
-    `sio2_243_med_g`.  The check is whether its
-    `Electrostatic Matrices` stamp lands near 58 s rather than
-    100 s.  (Job 16783290, `base` flavour.)
-  - [ ] Measure `-march=x86-64-v3` on its own.  (Job 16783290,
-    `v3` flavour.)  If it pays, it belongs in the Release flags
-    in `CMakeLists.txt`, not in an environment.
+  - [x] Rebuild the serial preset against it and re-run
+    `sio2_243_med_g`.  DONE 2026-08-25 (job 16784017,
+    exclusive): `Electrostatic Matrices` 58.7 s against the old
+    101.6 s, every other stage within 1 %.  The raised `cpg` is
+    the serial baseline toolchain from here on.
+  - [x] Measure `-march=x86-64-v3` on its own.  DONE 2026-08-25
+    (same job): 1.14x on the three-centre integrals, 1.17x on
+    the electrostatic setup, 1.08x whole run, BLAS stages
+    unmoved, energies identical (PERFORMANCE.md, same section,
+    with a provenance caveat that the repeat from a committed
+    tree removes).
+  - [ ] DECIDE whether `-march=x86-64-v3` goes into the Release
+    flags in `CMakeLists.txt`.  It is a build-rule change (the
+    binary then refuses to run on pre-Haswell hardware), so it
+    is recorded in BUILD.md if adopted; the cluster's nodes all
+    carry AVX2.  Repeat the measurement on the large deck when
+    the recast baseline is taken, watching the 6 % slower
+    exchange-correlation mesh.
   - RE-TAKE the serial baselines.  Every whole-run parallel
     ratio in PERFORMANCE.md is quoted against a `cpg` baseline,
     so the headline 3.5x is really about 3.2x once the

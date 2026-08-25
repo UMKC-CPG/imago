@@ -17876,6 +17876,15 @@ provenance, read from `valeCharge.F90` at `e353f74`:
   orthogonalization, so the call shape is established in this
   code base. Here the transpose argument is `'N'`: the columns
   ARE the states, and the update forms `W W^H` (`W W^T` real).
+  One correction to those interfaces is part of this section:
+  they declared the matrix argument `A` as `dimension(LDA,N)`,
+  which is its shape only for the transposed call `intgOrtho`
+  makes; for `'N'` it is `LDA` by `K`. The declaration becomes
+  `dimension(LDA,*)`, the assumed-size form BLAS itself uses,
+  so that the two groups can be passed as the first element of
+  their column block (`W(1,1)` and `W(1, numPositive + 1)`) by
+  sequence association, with no copy and no shape check to
+  fail. `intgOrtho`'s existing calls are unaffected.
 - Threads: the call inherits `OPENBLAS_NUM_THREADS` exactly as
   `zher`/`dsyr` do today. Nothing in this section sets it.
 

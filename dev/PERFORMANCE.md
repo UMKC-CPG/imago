@@ -777,8 +777,55 @@ other): the raised `cpg` at default flags, which is the new
 serial baseline toolchain and must land at `cpgp`'s 58.6 s on
 the electrostatic setup; and the same build with
 `-march=x86-64-v3` added and nothing else changed, which
-isolates the AVX2 codegen item above. Results are recorded
-below this paragraph when the job returns.
+isolates the AVX2 codegen item above.
+
+**Results (job 16784017, exclusive on c084, EPYC 7713, 2026-08-25;
+a first non-exclusive attempt, job 16783290, ran under a load
+average of 92 and its timings were discarded).** Same commit
+`2a45a94`, same node, one thread, energies identical to every
+printed digit across all four binaries:
+
+    stage (sio2_243_med_g)         cpg old   cpgp    base     v3
+    Electronic Potential Integrals  316.5   315.7   315.1   277.4
+    Secular Equation                189.3   188.9   189.8   189.2
+    Electrostatic Matrices          101.6    58.6    58.7    50.2
+    Valence Charge Density           31.5    31.3    31.8    31.8
+    Nuclear Potential Integrals      20.9    20.8    21.3    21.2
+    Make SCF Potential               18.8    18.7    19.0    18.7
+    Make Exchange Correlation Mesh   15.4    15.3    15.4    16.3
+    whole run                      11m43s  10m58s  11m00s  10m13s
+
+(The `cpg old` and `cpgp` columns are PF7's non-exclusive run on
+the same node; every stage but the electrostatic setup agrees
+with `base` within 1 %, so the sharing cost them nothing
+visible.) Two conclusions, one per column.
+
+`base` against `cpg old`: the raise took, and it did exactly
+what the attribution said it would -- the electrostatic setup
+fell from 101.6 s to 58.7 s (1.73x) and no other stage moved.
+`base` is the serial baseline toolchain from here on; the
+libmvec effect is a single stage, a single cause, and a single
+number.
+
+`v3` against `base`: `-march=x86-64-v3` alone -- the compiler
+emitting AVX2 and fused multiply-add (36,592 `vfmadd`
+instructions in the binary against zero) for the loops it
+generates -- buys 1.14x on the three-centre integrals, 1.17x on
+the electrostatic setup, and 1.08x on the whole run. The
+secular equation and the valence density do not move, which is
+the expected control: they are OpenBLAS calls, and OpenBLAS
+dispatches to AVX2 kernels at run time whatever the compiler
+flags say. The exchange-correlation mesh is 6 % SLOWER, a real
+effect at this size or noise at 1 s; it would be watched on the
+large deck. PROVENANCE CAVEAT: the `v3` binary was compiled
+from the working tree while PSEUDOCODE 31's source edits were
+beginning (see the recast section below). Its `VALEDENSITY
+SPLIT` line has fourteen fields, not the recast's fifteen, and
+its accumulate region matches `base` to 0.2 %, which together
+show it compiled the pre-recast density loop; the only foreign
+content is an unused module scalar. The comparison is therefore
+valid, and it is repeated from a committed tree when the recast
+baseline is taken, so the paper never has to cite a caveat.
 
 ## Integral storage layout and read cost (measured 2026-08-23)
 

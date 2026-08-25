@@ -78,6 +78,14 @@ module O_ValeCharge
    integer :: valeRhoRankUpdateCount
    integer :: valeRhoKPointsProcessed
 
+   ! Columns gathered into the NEGATIVE-occupation group of the rank-k
+   !   update (PSEUDOCODE 31.6), summed over k-points and spins.  It is
+   !   zero under Gaussian and Fermi filling and non-zero only when the
+   !   linear tetrahedron method's Bloechl correction hands a state a
+   !   negative weight, and it is the only evidence in the log that the
+   !   subtracting update was ever exercised.
+   integer :: valeRhoNegativeColumnCount
+
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
    ! Begin list of module subroutines.!
    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -153,13 +161,13 @@ subroutine makeValenceRho(inSCF)
          & atomMVOverlap_did,atomNPOverlap_did,atomPotOverlap_did,packedVVDims
    use O_PSCFIntegralsHDF5, only: atomOverlapPSCF_did,packedVVDimsPSCF
 #ifndef GAMMA
-   use O_BLASZHER
+   use zherkInterface
    use O_SecularEquation, only: valeVale,cleanUpSecularEqn,energyEigenValues,&
          & update1UJ, readDataSCF, readDataPSCF
    use O_MatrixSubs, only: readPackedMatrix,matrixElementMult,packMatrix
    use O_Force, only: computeForce
 #else
-   use O_BLASDSYR
+   use dsyrkInterface
    use O_SecularEquation, only: valeValeGamma, cleanUpSecularEqn, &
          & energyEigenValues, update1UJ, readDataSCF, readDataPSCF
    use O_MatrixSubs, only: readPackedMatrix, &
@@ -204,6 +212,28 @@ subroutine makeValenceRho(inSCF)
    real    (kind=double), allocatable, dimension (:,:,:) :: valeValeRhoGamma
 #endif
 
+   ! The density matrix is built as a rank-k update (PSEUDOCODE 31):
+   !   the occupied eigenvector columns of one k-point and spin, each
+   !   scaled by the square root of its occupation, are gathered into
+   !   this work array and multiplied by their own (conjugate) transpose
+   !   in one BLAS call, instead of streaming the whole density matrix
+   !   through memory once per state.  It is sized by the STATE count,
+   !   not by copying valeVale's shape, which on the SCF path has a
+   !   second extent of valeDim and would cost 2.4 times the memory.
+   !   Columns with positive occupation are gathered first and those
+   !   with negative occupation (possible only under the linear
+   !   tetrahedron method) after them, so that each group can be fed
+   !   to the update as one contiguous block.
+#ifndef GAMMA
+   complex (kind=double), allocatable, dimension (:,:) :: scaledEigenvectors
+#else
+   real    (kind=double), allocatable, dimension (:,:) :: scaledEigenvectors
+#endif
+   integer, allocatable, dimension (:) :: numPositiveColumns ! Per spin
+   integer, allocatable, dimension (:) :: numNegativeColumns ! Per spin
+   integer :: positiveFill ! Next free column of the positive group
+   integer :: negativeFill ! Next free column of the negative group
+
    ! Marker holding the tick count at which the currently open timed
    !   region began (PSEUDOCODE 30).  The four regions run one after
    !   another and never nest, so a single marker serves all of them.
@@ -224,6 +254,7 @@ subroutine makeValenceRho(inSCF)
    valeRhoContractSeconds     = 0.0_double
    valeRhoRankUpdateCount     = 0
    valeRhoKPointsProcessed    = 0
+   valeRhoNegativeColumnCount = 0
 
    ! Define whether the packed arrays have two rows (complex) or one (real).
    !   This also defines the size of some other small arrays.
@@ -233,12 +264,19 @@ subroutine makeValenceRho(inSCF)
    dim1 = 1
 #endif
 
-   ! Allocate the main valence valence density matrix.
+   ! Allocate the main valence valence density matrix, and beside it the
+   !   work array of scaled eigenvector columns that builds it
+   !   (PSEUDOCODE 31.2): one array, refilled for every k-point and
+   !   spin, freed together with the density matrix at the end.
 #ifndef GAMMA
    allocate (valeValeRho(valeDim,valeDim,spin)) ! Complex
+   allocate (scaledEigenvectors(valeDim,numStates))
 #else
    allocate (valeValeRhoGamma(valeDim,valeDim,spin)) ! Real
+   allocate (scaledEigenvectors(valeDim,numStates))
 #endif
+   allocate (numPositiveColumns(spin))
+   allocate (numNegativeColumns(spin))
 
    ! Allocate a temporary packed valeVale matrix with a spin component.
    allocate (packedValeValeRho(dim1,valeDim*(valeDim+1)/2,spin))
@@ -402,27 +440,95 @@ subroutine makeValenceRho(inSCF)
 #endif
 
 
-      ! Accumulate the valeValeRho matrix upper triangle and electron energy.
+      ! Accumulate the valeValeRho matrix upper triangle and electron
+      !   energy (PSEUDOCODE 31.3).  The density matrix of one k-point
+      !   and spin is the occupation-weighted sum of the outer products
+      !   of the occupied eigenvectors.  Written as a rank-1 update per
+      !   state that sum streams the whole matrix through memory once
+      !   per state and is limited by memory bandwidth; written as ONE
+      !   rank-k update of the block of occupied columns it reads the
+      !   block once, walks the matrix a handful of times, and runs at
+      !   the processor's multiply-add rate.  The two are the same
+      !   arithmetic in a different summation order.
 #ifndef GAMMA
+      ! Pass 1, once per k-point: the electron energy sum and the
+      !   per-spin count of columns of each sign, exactly the work the
+      !   old state loop did apart from the update itself.  A state is
+      !   skipped when its occupation summed over spins is negligible,
+      !   the same test as before.
+      numPositiveColumns(:) = 0
+      numNegativeColumns(:) = 0
       do j = 1, numStates
          currentPopulation(:) = structuredElectronPopulation(j,i,:)
-
          if (sum(abs(currentPopulation(:))) < smallThresh) cycle
 
          electronEnergy(:) = electronEnergy(:) + currentPopulation(:) * &
                & energyEigenValues(j,i,:)
 
          do k = 1, spin
-            ! Count the update before issuing it (PSEUDOCODE 30).  Each
-            !   one streams the whole upper triangle of the density
-            !   matrix through memory, so this count times that
-            !   triangle's size is the memory traffic of the
-            !   accumulation -- the quantity DESIGN 9.6 estimates and
-            !   this measurement exists to check.
-            valeRhoRankUpdateCount = valeRhoRankUpdateCount + 1
-            call zher('U',valeDim,currentPopulation(k),valeVale(:,j,k),1,&
-                  & valeValeRho(:,:,k),valeDim)
+            if (currentPopulation(k) > 0.0_double) then
+               numPositiveColumns(k) = numPositiveColumns(k) + 1
+            else if (currentPopulation(k) < 0.0_double) then
+               numNegativeColumns(k) = numNegativeColumns(k) + 1
+            endif
          enddo
+      enddo
+
+      ! Pass 2, per spin: gather the scaled columns and issue the two
+      !   updates.  The update forms W W^H, and sqrt(o) * sqrt(o) = o, so
+      !   scaling each column by the square root of its occupation makes
+      !   the product the occupation-weighted sum -- for occupations
+      !   that are not negative.  A negative occupation (the linear
+      !   tetrahedron method's Bloechl correction can produce one) has
+      !   no real square root, so its column is scaled by the root of
+      !   its magnitude, placed in a second group after all the positive
+      !   columns, and that group's update is SUBTRACTED with alpha = -1.
+      !   Both groups are gathered in ascending state order so the
+      !   column order, and with it the rounding, is fixed by the deck.
+      do k = 1, spin
+         positiveFill = 0
+         negativeFill = numPositiveColumns(k)
+         do j = 1, numStates
+            currentPopulation(:) = structuredElectronPopulation(j,i,:)
+            if (sum(abs(currentPopulation(:))) < smallThresh) cycle
+
+            if (currentPopulation(k) > 0.0_double) then
+               positiveFill = positiveFill + 1
+               scaledEigenvectors(:,positiveFill) = &
+                     & sqrt(currentPopulation(k)) * valeVale(:,j,k)
+            else if (currentPopulation(k) < 0.0_double) then
+               negativeFill = negativeFill + 1
+               scaledEigenvectors(:,negativeFill) = &
+                     & sqrt(-currentPopulation(k)) * valeVale(:,j,k)
+            endif
+         enddo
+
+         ! Count the columns before issuing the updates (PSEUDOCODE 30
+         !   and 31.6).  The first counter keeps the meaning it had for
+         !   the rank-1 loop -- the number of states that contribute to
+         !   the density -- so that the traffic estimate DESIGN 9.6
+         !   rests on stays a measured quantity; the second is the
+         !   evidence that the subtracting update was exercised.
+         valeRhoRankUpdateCount = valeRhoRankUpdateCount &
+               & + numPositiveColumns(k) + numNegativeColumns(k)
+         valeRhoNegativeColumnCount = valeRhoNegativeColumnCount &
+               & + numNegativeColumns(k)
+
+         ! In zherk the scalars alpha and beta are real by definition,
+         !   which the occupations are; the routine sets the imaginary
+         !   parts of the diagonal to zero, as zher did.  The first
+         !   element of each group's block is passed, and the leading
+         !   dimension tells the routine how the columns are laid out.
+         if (numPositiveColumns(k) > 0) then
+            call zherk('U','N',valeDim,numPositiveColumns(k),1.0_double, &
+                  & scaledEigenvectors(1,1),valeDim,1.0_double, &
+                  & valeValeRho(:,:,k),valeDim)
+         endif
+         if (numNegativeColumns(k) > 0) then
+            call zherk('U','N',valeDim,numNegativeColumns(k),-1.0_double, &
+                  & scaledEigenvectors(1,numPositiveColumns(k)+1),valeDim, &
+                  & 1.0_double,valeValeRho(:,:,k),valeDim)
+         endif
       enddo
 
       ! In the event that the calculation includes plusUJ terms, then we need
@@ -457,6 +563,13 @@ subroutine makeValenceRho(inSCF)
                & valeDim)
       enddo
 #else
+      ! The real-build copy of the rank-k build above (PSEUDOCODE 31.3);
+      !   the reasoning in the complex arm applies here unchanged, with
+      !   dsyrk forming W W^T.
+      !
+      ! Pass 1: electron energy and the per-spin column counts.
+      numPositiveColumns(:) = 0
+      numNegativeColumns(:) = 0
       do j = 1, numStates
          currentPopulation(:) = structuredElectronPopulation(j,i,:)
          if (sum(abs(currentPopulation(:))) < smallThresh) cycle
@@ -465,13 +578,51 @@ subroutine makeValenceRho(inSCF)
                & energyEigenValues(j,i,:)
 
          do k = 1, spin
-            ! Count the update before issuing it (PSEUDOCODE 30).  See
-            !   the note in the complex arm above for what the count is
-            !   used to compute.
-            valeRhoRankUpdateCount = valeRhoRankUpdateCount + 1
-            call dsyr('U',valeDim,currentPopulation(k),&
-                  & valeValeGamma(:,j,k),1,valeValeRhoGamma(:,:,k),valeDim)
+            if (currentPopulation(k) > 0.0_double) then
+               numPositiveColumns(k) = numPositiveColumns(k) + 1
+            else if (currentPopulation(k) < 0.0_double) then
+               numNegativeColumns(k) = numNegativeColumns(k) + 1
+            endif
          enddo
+      enddo
+
+      ! Pass 2, per spin: gather the square-root-scaled columns,
+      !   positive group first, then the two updates.
+      do k = 1, spin
+         positiveFill = 0
+         negativeFill = numPositiveColumns(k)
+         do j = 1, numStates
+            currentPopulation(:) = structuredElectronPopulation(j,i,:)
+            if (sum(abs(currentPopulation(:))) < smallThresh) cycle
+
+            if (currentPopulation(k) > 0.0_double) then
+               positiveFill = positiveFill + 1
+               scaledEigenvectors(:,positiveFill) = &
+                     & sqrt(currentPopulation(k)) * valeValeGamma(:,j,k)
+            else if (currentPopulation(k) < 0.0_double) then
+               negativeFill = negativeFill + 1
+               scaledEigenvectors(:,negativeFill) = &
+                     & sqrt(-currentPopulation(k)) * valeValeGamma(:,j,k)
+            endif
+         enddo
+
+         ! Count the columns (PSEUDOCODE 30 and 31.6); see the complex
+         !   arm for what each counter means.
+         valeRhoRankUpdateCount = valeRhoRankUpdateCount &
+               & + numPositiveColumns(k) + numNegativeColumns(k)
+         valeRhoNegativeColumnCount = valeRhoNegativeColumnCount &
+               & + numNegativeColumns(k)
+
+         if (numPositiveColumns(k) > 0) then
+            call dsyrk('U','N',valeDim,numPositiveColumns(k),1.0_double, &
+                  & scaledEigenvectors(1,1),valeDim,1.0_double, &
+                  & valeValeRhoGamma(:,:,k),valeDim)
+         endif
+         if (numNegativeColumns(k) > 0) then
+            call dsyrk('U','N',valeDim,numNegativeColumns(k),-1.0_double, &
+                  & scaledEigenvectors(1,numPositiveColumns(k)+1),valeDim, &
+                  & 1.0_double,valeValeRhoGamma(:,:,k),valeDim)
+         endif
       enddo
 
       ! Note: the documentation written above for the plusUJ applies here too.
@@ -766,19 +917,23 @@ subroutine makeValenceRho(inSCF)
    ! inSCF is reported because the post-SCF path calls this same routine
    !   with a different set of stored matrices, and a reading that
    !   silently mixed the two would be worse than no reading.
+   ! The negative-column count (PSEUDOCODE 31.6) is the LAST field, so
+   !   that offline readers taking fields by position are undisturbed.
    if (valeRhoClockRate > 0) then
-      write (20,fmt='(a,6(1x,i0),4(1x,es14.6),2(1x,i0))') &
+      write (20,fmt='(a,6(1x,i0),4(1x,es14.6),3(1x,i0))') &
             & 'VALEDENSITY SPLIT', inSCF, numKPoints, valeDim, &
             & numStates, potDim, spin, &
             & valeRhoReadVectorSeconds, valeRhoAccumulateSeconds, &
             & valeRhoReadIntegralSeconds, valeRhoContractSeconds, &
-            & valeRhoRankUpdateCount, valeRhoKPointsProcessed
+            & valeRhoRankUpdateCount, valeRhoKPointsProcessed, &
+            & valeRhoNegativeColumnCount
    else
-      write (20,fmt='(a,6(1x,i0),a,2(1x,i0))') &
+      write (20,fmt='(a,6(1x,i0),a,3(1x,i0))') &
             & 'VALEDENSITY SPLIT', inSCF, numKPoints, valeDim, &
             & numStates, potDim, spin, &
             & '  seconds unavailable (no system clock)', &
-            & valeRhoRankUpdateCount, valeRhoKPointsProcessed
+            & valeRhoRankUpdateCount, valeRhoKPointsProcessed, &
+            & valeRhoNegativeColumnCount
    endif
    call flush (20)
 
@@ -794,6 +949,9 @@ subroutine makeValenceRho(inSCF)
    deallocate (currentPopulation)
    deallocate (electronEnergy)
    deallocate (tempDensity)
+   deallocate (scaledEigenvectors)
+   deallocate (numPositiveColumns)
+   deallocate (numNegativeColumns)
 #ifndef GAMMA
    deallocate (valeValeRho)
 #else

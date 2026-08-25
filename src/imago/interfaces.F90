@@ -379,7 +379,11 @@ module zherkInterface
          integer :: LDA
          integer :: LDC
          real (kind=double) :: ALPHA
-         complex (kind=double), dimension(LDA,N) :: A
+         ! A is LDA by K when TRANS is 'N' and LDA by N when it is 'C',
+         !   so its second extent is left assumed; callers may then pass
+         !   the first element of a column block (sequence association)
+         !   as well as a whole array.
+         complex (kind=double), dimension(LDA,*) :: A
          real (kind=double) :: BETA
          complex (kind=double), dimension(LDC,N) :: C
       end subroutine zherk
@@ -417,7 +421,9 @@ module dsyrkInterface
          integer :: LDA
          integer :: LDC
          real (kind=double) :: ALPHA
-         real (kind=double), dimension(LDA,N) :: A
+         ! A is LDA by K when TRANS is 'N' and LDA by N when it is 'T',
+         !   so its second extent is left assumed (see zherk above).
+         real (kind=double), dimension(LDA,*) :: A
          real (kind=double) :: BETA
          real (kind=double), dimension(LDC,N) :: C
       end subroutine dsyrk
