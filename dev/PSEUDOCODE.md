@@ -17813,16 +17813,24 @@ provenance, read from `valeCharge.F90` at `e353f74`:
   variant under `#ifndef GAMMA` / `#else`. Both entry points run
   it -- `inSCF == 1` from `mainSCF`, `inSCF == 0` from
   `bandPSCF` -- so the recast serves both without a switch.
-- The eigenvector columns. Complex build: `valeVale(valeDim,
-  numStates, spin)` (module `O_SecularEquation`), holding ONE
-  k-point at a time; for `inSCF == 1` it is the solve's array,
-  re-read per k-point by `readDataSCF` inside region R; for
-  `inSCF == 0` it is allocated at the top of this routine and
-  filled by `readDataPSCF`. Real build: `valeValeGamma`, resident
-  from the solve, never re-read. Column `j` of spin `k` is state
-  `j`'s eigenvector at the current k-point. Neither array is
-  modified by the recast; it is read as the source of the
-  gather below.
+- The eigenvector columns, and their SHAPE, which differs by
+  entry point. For `inSCF == 1` the array is the solve's:
+  `valeVale(valeDim, valeDim, spin)` complex or `valeValeGamma`
+  real (`secularEqn.F90:137` and `:139`, module
+  `O_SecularEquation`) -- the second extent is `valeDim`, and
+  only the first `numStates` columns hold eigenvectors. In the
+  complex build it holds ONE k-point at a time and is re-read
+  per k-point by `readDataSCF` inside region R; in the real
+  build it is resident from the solve. For `inSCF == 0` this
+  routine allocates it itself as `(valeDim, numStates, spin)`
+  and `readDataPSCF` fills it. Either way column `j <= numStates`
+  of spin `k` is state `j`'s eigenvector at the current k-point,
+  the leading dimension is `valeDim`, and the gather below reads
+  only those columns. The work array `W` is therefore sized from
+  the STATE COUNT, `(valeDim, numStates)`, and never by copying
+  the shape of `valeVale` -- which on the SCF path would allocate
+  1.26 GB instead of 0.5. Neither array is modified by the
+  recast.
 - The occupations. `structuredElectronPopulation(numStates,
   numKPoints, spin)`, local, built at the top of the routine
   from `electronPopulation` (`O_Populate`; Gaussian or Fermi
@@ -17878,17 +17886,21 @@ zeroing of the density matrix before it and everything after it
 (31.5) stay where they are.
 
 ```
+-- pass 1, once per k-point: what today's state loop does per
+--   state except the update itself, plus a count per spin
+numPositive(1:spin) = 0;  numNegative(1:spin) = 0
+for j = 1, numStates in ascending order:
+   pop(:) = structuredElectronPopulation(j, i, :)
+   if (sum(abs(pop(:))) < smallThresh) cycle          -- as today
+   electronEnergy(:) += pop(:) * energyEigenValues(j, i, :)
+   for k = 1, spin:
+      if (pop(k) > 0) numPositive(k) += 1
+      if (pop(k) < 0) numNegative(k) += 1
+
+-- pass 2, per spin: gather the scaled columns, positive group
+--   first, and issue the two updates
 for each spin k = 1, spin:
-   -- pass 1: count, and accumulate the electron energy
-   numPositive = 0;  numNegative = 0
-   for j = 1, numStates in ascending order:
-      pop(:) = structuredElectronPopulation(j, i, :)
-      if (sum(abs(pop(:))) < smallThresh) cycle       -- as today
-      if (k == 1) electronEnergy(:) += pop(:) * energyEigenValues(j, i, :)
-      if (pop(k) > 0) numPositive += 1
-      if (pop(k) < 0) numNegative += 1
-   -- pass 2: gather the scaled columns, positive group first
-   p = 0;  m = numPositive
+   p = 0;  m = numPositive(k)
    for j = 1, numStates in ascending order:
       pop(:) = structuredElectronPopulation(j, i, :)
       if (sum(abs(pop(:))) < smallThresh) cycle
@@ -17897,12 +17909,15 @@ for each spin k = 1, spin:
       else if (pop(k) < 0) then
          m += 1;  W(:, m) = sqrt(-pop(k)) * V(:, j, k)
       endif
-   valeRhoRankUpdateCount += numPositive + numNegative
+   valeRhoRankUpdateCount += numPositive(k) + numNegative(k)
+   valeRhoNegativeColumnCount += numNegative(k)
    -- the two updates, on the upper triangle, accumulating
-   if (numPositive > 0) call syrk('U', 'N', valeDim, numPositive,
-         +1.0, W(:, 1),               valeDim, 1.0, rho(:, :, k), valeDim)
-   if (numNegative > 0) call syrk('U', 'N', valeDim, numNegative,
-         -1.0, W(:, numPositive + 1), valeDim, 1.0, rho(:, :, k), valeDim)
+   if (numPositive(k) > 0) call syrk('U', 'N', valeDim,
+         numPositive(k), +1.0, W(:, 1), valeDim,
+         1.0, rho(:, :, k), valeDim)
+   if (numNegative(k) > 0) call syrk('U', 'N', valeDim,
+         numNegative(k), -1.0, W(:, numPositive(k) + 1), valeDim,
+         1.0, rho(:, :, k), valeDim)
 ```
 
 `V` is `valeVale` or `valeValeGamma`, `rho` is `valeValeRho` or
@@ -17973,12 +17988,16 @@ scaling almost ideally -- and the region A stamp of PSEUDOCODE
 PSEUDOCODE 30 applies unchanged: region A's first span encloses
 both passes, the gather and the two updates, and the log line
 of 30.6 reports the same fields. One field is ADDED at the end
-of that line: the number of NEGATIVE columns gathered in the
-call, summed over k-points and spins. It is zero on every deck
-in the benchmark set and non-zero only under the tetrahedron
-method, and it is the evidence that the negative group was
-exercised (check 3) -- without it a run that never entered the
-second update would look identical to one that did.
+of that line: `valeRhoNegativeColumnCount`, the number of
+NEGATIVE columns gathered in the call, summed over k-points and
+spins -- a seventh module scalar beside the six of 30.5, zeroed
+and reported with them. Offline readers of the line take
+fields by position, so adding at the END breaks none of them.
+It is zero on every deck in the benchmark set and non-zero only
+under the tetrahedron method, and it is the evidence that the
+negative group was exercised (check 3) -- without it a run that
+never entered the second update would look identical to one
+that did.
 
 ### 31.7 The tolerance, measured
 
@@ -18010,12 +18029,15 @@ the reference that every later zero-tolerance deal (candidate
    binaries per 31.7 -- both variants, one and four k-points,
    with the maximum absolute difference recorded per deck.
 3. **The negative group is exercised**: a deck run under the
-   tetrahedron method (`kPointIntgCode == 1`) whose log line
-   reports a NON-ZERO negative-column count, compared against the
-   pre-recast binary at the floor of check 2. If no accepted deck
-   produces a negative occupation, one is made (a metal on a
-   coarse mesh does), because an untested update path is the
-   defect this check exists to catch.
+   tetrahedron method -- `KPOINT_INTG_CODE 1` in `imago.dat`
+   (`kpoints.f90:262`) -- whose log line reports a NON-ZERO
+   negative-column count, compared against the pre-recast binary
+   at the floor of check 2. The aluminium deck under `jobs/al` is
+   the natural choice: a metal is where the Bloechl correction
+   produces negative corner weights. If it reports zero, a
+   coarser mesh or a different metal is tried until the count is
+   non-zero, because an untested update path is the defect this
+   check exists to catch.
 4. **Thread invariance**: the same deck at one and eight BLAS
    threads. The library parallelizes the update over output
    tiles, so each element's sum should run in one fixed order
@@ -18024,13 +18046,20 @@ the reference that every later zero-tolerance deal (candidate
 5. **The stamp falls**: the `VALEDENSITY SPLIT` line on
    `sio2_1296_large_g` at one and eight threads, region A against
    the 128.0 / 50.8 s of PSEUDOCODE 30's sweep, and against the
-   `syrkprobe` prediction. Regions I and M must not move.
-6. **The parallel build is unmoved**: the MPI build's one-rank
-   run is bit-identical to the recast serial build, and the
-   np8 collective run of the headline deck is clean against its
-   np1 file at PA4-B's criterion (1e-9 absolute, eigenvectors
-   excluded) -- the recast runs on root after the gather and
-   the deal never sees it.
+   `syrkprobe` prediction. Regions I and M must not move. ONE
+   iteration per setting suffices (`LAST_ITERATION 1` on the
+   probe deck): the stamp is per call, and the second iteration
+   of 30.7's sweep bought only a repeat at the cost of a
+   solve-dominated hour and a half.
+6. **The parallel build is unmoved**, at the cost PA4-B paid and
+   no more: the MPI build's one-rank run is bit-identical to the
+   recast serial build on `sio2_243_med_g`; that deck at np8 is
+   clean against its same-build same-node np1 file at PA4-B's
+   criterion (1e-9 absolute, eigenvectors excluded); and the
+   headline `sio2_1296_large_g` np8 run reproduces the recorded
+   baseline energies to print precision. A one-rank run of the
+   large deck is fifteen hours and is not required -- the recast
+   runs on root after the gather and the deal never sees it.
 7. **Spin-polarized**: a small spin-polarized deck (a copy of
    `bn_small_g` with spin polarization on) against the
    pre-recast binary at the floor of check 2, so the per-spin

@@ -8438,7 +8438,22 @@ is not carried only in conversation.
   identical results to every printed digit; the electrostatic
   setup, being exp-bound, showed 1.7x end to end.  It is not a
   flag imago sets -- both builds compile at `-O3 -fimplicit-none
-  -Wall`.  What remains:
+  -Wall`.
+  **ATTRIBUTION CLOSED 2026-08-24** (job 16771227, `jobs/pf7`;
+  PERFORMANCE.md "The two toolchains are not equally fast",
+  closing block): the same commit built through each
+  environment's wrapper and run on the same node gives the
+  electrostatic setup at 101.6 s against 58.6 s (1.73x) and
+  EVERY other stage within 1 % -- the exchange-correlation mesh
+  and the three-centre integrals do not move -- with energies
+  identical to every digit. The mechanism is the sysroot: glibc
+  2.28 in `cpgp` ships `math-vector-fortran.h` (pre-included by
+  the compiler), glibc 2.17 in `cpg` predates libmvec. The
+  headline correction is therefore exactly the 3.2x already
+  stated. NEW ITEM from the same log: both builds target
+  `-march=x86-64` (no AVX) -- a candidate free speedup for the
+  compiler-generated loops, to be tested with `-march=x86-64-v3`
+  on the 243 deck once the pin is settled. What remains:
 
   - Pin both environments to one compiler build, or upgrade
     `cpg`'s.  Prefer pinning: the two environments differing at

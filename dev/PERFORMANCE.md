@@ -711,11 +711,54 @@ What follows, in order of consequence:
    unchanged and now better founded: bit-level comparisons are
    meaningful only same-build AND same-node.
 
-What is NOT yet done, and is TODO PF7: rebuild the serial
-preset against a toolchain that emits libmvec, confirm the
-243-atom glass setup lands near 58 s rather than 100 s, and
-re-take the serial baselines that every parallel ratio in this
-file is quoted against.
+**Attribution CLOSED 2026-08-24 (job 16771227, `jobs/pf7`).**
+The same commit, same options (Release, profile symbols, MPI
+paths OFF), built twice -- through `cpg`'s `h5fc` and through
+`cpgp`'s `h5pfc` -- and the 243-atom glass run once under each
+on the same node in the same job:
+
+    stage                            cpg build   cpgp build   ratio
+    Electrostatic Matrices             101.6 s      58.6 s    1.73x
+    Electronic Potential Integrals     316.5 s     315.7 s    1.00x
+    Secular Equation (12 calls)        189.3 s     188.9 s    1.00x
+    Valence Charge Density (11)         31.5 s      31.3 s    1.01x
+    Make Exchange Correlation Mesh      15.4 s      15.3 s    1.00x
+    whole run                          11m43s      10m58s     1.07x
+
+Energies identical to every printed digit. The mechanism is
+now visible in the build log rather than inferred: the `cpgp`
+compiler is invoked with `-fpre-include=<sysroot>/usr/include/
+finclude/math-vector-fortran.h`, a header that only the glibc
+2.28 sysroot ships and that declares the SIMD variants of exp,
+sin, cos and pow; `cpg` sits on a glibc 2.17 sysroot, which
+predates libmvec, so its compiler cannot emit vector calls
+whatever flags it is given. Both environments carry the same
+`gfortran` wrapper package (`15.2.0 h834e499_7`); what differs
+is `gfortran_impl` (`_7` against `_20`) and the sysroot.
+
+Two consequences, one of them a correction to the bullets
+above. FIRST, the vector math reaches exactly ONE stage. The
+exchange-correlation mesh and the Gaussian evaluation inside
+the three-centre integrals, named above as plausible
+beneficiaries, do not move at all; their exponentials are
+evidently not in vectorizable loops. So the whole-run
+correction is precisely the electrostatic setup's share and no
+more: the headline is 3.2x, as already stated, and nothing
+further is hidden in it. SECOND, a separate free speedup
+surfaced from the same compiler string: both builds compile
+for `-march=x86-64 -mtune=generic`, baseline x86-64 with no
+AVX, so every Fortran loop the compiler vectorizes is limited
+to 128-bit SSE2 on a machine with 256-bit units. The BLAS is
+unaffected (OpenBLAS dispatches at run time), but the
+electrostatic setup, the integral stages and the mesh work are
+all compiler-generated loops. Untested; recorded under PF7 as
+its own item.
+
+What remains of PF7 is the PIN, which is the programmer's
+decision because `cpg` is the group's shared environment:
+either raise `cpg`'s sysroot and compiler build to match
+`cpgp`, or create a pinned serial sibling, then re-take the
+serial baselines under it and record the rule in BUILD.md.
 
 ## Integral storage layout and read cost (measured 2026-08-23)
 
