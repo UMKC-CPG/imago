@@ -14871,6 +14871,16 @@ inflation is processor work that divides across ranks
 perfectly, while storage bandwidth on a shared filesystem
 divides much less predictably.
 
+DECIDED 2026-08-24 (PF8; PERFORMANCE "The integral-read cost is
+inflation, not storage"): it is INFLATION. Read whole through
+the program's own call, a 628 MB dataset costs 1.23 s warm when
+stored DEFLATE-1 at 3.3x and 0.075 s when stored uncompressed;
+cold reads add a few hundredths of a second. So the
+whole-dataset deal below divides the cost ideally, the cache
+removes it, and a third option is on record -- storing the
+integrals uncompressed, which makes every read a copy at the
+expense of 5.7x the disk.
+
 **What the aligned unit of work is.** If the cost is
 inflation, then the natural division is not a piece of a matrix
 but a WHOLE MATRIX. The datasets are independent, there are

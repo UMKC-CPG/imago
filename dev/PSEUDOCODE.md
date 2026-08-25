@@ -17671,7 +17671,9 @@ pair and a reader finds it where the stage is.
 Fields, in order, on one greppable line with a fixed leading
 label: the label, `inSCF`, `numKPoints`, `valeDim`,
 `numStates`, `potDim`, `spin`, then the four region seconds,
-then the two counts. Raw values only. Every derived quantity --
+then the two counts, then (added by 31.6) the count of
+negative-occupation columns gathered. Raw values only. Every
+derived quantity --
 the accumulate share, the bytes the rank-1 updates touched, the
 implied traffic rate, the read rate -- is computed offline from
 these fields, because a derived number written by the code is a
@@ -17751,3 +17753,288 @@ way to see what the eigenvector re-read costs.
    re-read against them and amended where they contradict it,
    BEFORE any of its three candidates is specified. The
    ordering there is a prediction; this is what tests it.
+
+
+## 31. The Density-Matrix Build as a Rank-k Update
+## (DESIGN 9.6 candidate (i); TODO PA4 ordered plan, step 2)
+
+### 31.1 What this is, and what it is not
+
+The valence density stage builds the density matrix by adding
+one state's contribution at a time: for every occupied state it
+calls the rank-1 update routine (`zher` in the complex build,
+`dsyr` in the real one), which streams the whole stored triangle
+of the matrix through memory to add one outer product to it.
+PSEUDOCODE 30 measured that loop on the 1296-atom glass at 128 s
+per call: 3456 passes over a 628 MB triangle, 4.34 TB of memory
+traffic for 542 GFLOP of arithmetic, an eighth of a flop per
+byte, and threads buying 2.5x at eight of them because the loop
+is limited by memory and not by the processor.
+
+The same sum is, mathematically, ONE symmetric rank-k update:
+take the eigenvector columns of the occupied states, scale each
+by its occupation, and multiply the block by its own transpose
+(conjugate transpose in the complex build). The BLAS routine for
+that (`dsyrk` / `zherk`) reads the eigenvector block once and
+walks the triangle a handful of times instead of 3456, so it is
+limited by the processor and not by memory, and it threads the
+way a matrix multiplication does. This section replaces the
+state loop's 3456 calls with two calls -- one for the
+positive-occupation states and one for the negative ones -- and
+changes nothing else in the stage.
+
+Three things it is NOT. It is not parallel: no message passing,
+no deal, no arm policy; it is a serial improvement that every
+build gets, and it is the precondition DESIGN 9.6 names for any
+later distribution of this half. It is not exact against the old
+binary: a rank-k update sums each element's contributions in a
+different order than a sequence of rank-1 updates does, so the
+serial baseline moves once, at a tolerance MEASURED on the
+accepted decks (31.7). And its speed is a measurement, not a
+claim: `jobs/recast/syrkprobe.f90` timed `dsyrk` on the exact
+shape (n = 12528, k = 3456, random data, OpenBLAS 0.3.30, one
+EPYC 7713 node shared with other work) at 11.66 s on one thread
+(46.5 GFLOP/s) and 1.49 s on eight (364 GFLOP/s, 7.8x), with the
+column gather at 0.03 s (PERFORMANCE "The rank-k update, timed").
+Against the rank-1 loop's 128.0 s and 50.8 s at the same thread
+counts that is 11x serial and 34x at eight threads, and it is
+the number the region A stamp of check 5 must reproduce inside
+the program.
+
+### 31.2 Seam inventory
+
+Everything the new code consumes or produces, with its
+provenance, read from `valeCharge.F90` at `e353f74`:
+
+- The routine is `makeValenceRho(inSCF)` in `valeCharge.F90`
+  (module `O_ValeCharge`). The loop being replaced is the state
+  loop `do j = 1, numStates` inside the per-k-point body, inside
+  PSEUDOCODE 30's region A first span, one copy per build
+  variant under `#ifndef GAMMA` / `#else`. Both entry points run
+  it -- `inSCF == 1` from `mainSCF`, `inSCF == 0` from
+  `bandPSCF` -- so the recast serves both without a switch.
+- The eigenvector columns. Complex build: `valeVale(valeDim,
+  numStates, spin)` (module `O_SecularEquation`), holding ONE
+  k-point at a time; for `inSCF == 1` it is the solve's array,
+  re-read per k-point by `readDataSCF` inside region R; for
+  `inSCF == 0` it is allocated at the top of this routine and
+  filled by `readDataPSCF`. Real build: `valeValeGamma`, resident
+  from the solve, never re-read. Column `j` of spin `k` is state
+  `j`'s eigenvector at the current k-point. Neither array is
+  modified by the recast; it is read as the source of the
+  gather below.
+- The occupations. `structuredElectronPopulation(numStates,
+  numKPoints, spin)`, local, built at the top of the routine
+  from `electronPopulation` (`O_Populate`; Gaussian or Fermi
+  filling, unpacked in state-major order) or, when
+  `kPointIntgCode == 1`, copied from `electronPopulation_LAT`
+  with the 2/spin convention factor. Values follow the
+  kPointWeight convention (they sum to 2 for `spin == 1`). They
+  are non-negative under Gaussian and Fermi filling and CAN BE
+  NEGATIVE under the linear tetrahedron method, whose Bloechl
+  corner correction shifts weight between corners and sums to
+  zero (`populate.F90`, the LAT block). This is the only reason
+  the recast issues two updates instead of one.
+- The skip threshold `smallThresh` (`O_Constants`): today a
+  state is skipped when the sum over spins of its absolute
+  occupation is below it, and that test is kept verbatim.
+- Sizes: `valeDim` (`O_AtomicSites`), `numStates` (`O_Input`),
+  `spin` (`O_Potential`), all replicated setup state.
+- The output. `valeValeRho(valeDim, valeDim, spin)` (complex) or
+  `valeValeRhoGamma` (real): local allocatables, zeroed per
+  k-point at the top of region A, filled on the UPPER triangle
+  only (`'U'`) by today's rank-1 calls and by the rank-k calls
+  alike, so every consumer sees the same contract as before:
+  `update1UJ` (when `numPlusUJAtoms > 0`), `packMatrix` /
+  `packMatrixGamma` into `packedValeValeRho`, and
+  `computeForce` / `computeForceGamma` on a force iteration.
+  None of these is touched.
+- `electronEnergy(spin)`: the running sum over surviving states
+  of occupation times `energyEigenValues(j, i, :)`, accumulated
+  inside the same state loop today. It stays in the loop, in the
+  same order, and is not part of the recast.
+- ONE new allocation: a work array of scaled eigenvector
+  columns, `scaledEigenvectors(valeDim, numStates)` in the
+  build's precision (complex or real), allocated once per call
+  beside `valeValeRho` and freed with it. Its footprint is
+  `valeDim * numStates * 8` bytes real or `* 16` complex -- about
+  0.5 GB on the large real cell (12528 x 5184), 1 GB complex --
+  against a measured peak resident set of 6.3 GB serial. It is
+  refilled for every k-point and every spin, so one array serves
+  the whole call.
+- The BLAS interfaces already exist: `zherkInterface` and
+  `dsyrkInterface` in `interfaces.F90`, and `intgOrtho.F90`
+  already calls `zherk('U','C', ...)` for the core
+  orthogonalization, so the call shape is established in this
+  code base. Here the transpose argument is `'N'`: the columns
+  ARE the states, and the update forms `W W^H` (`W W^T` real).
+- Threads: the call inherits `OPENBLAS_NUM_THREADS` exactly as
+  `zher`/`dsyr` do today. Nothing in this section sets it.
+
+### 31.3 The recast, per k-point and per spin
+
+Inside region A's first span, replacing the state loop; the
+zeroing of the density matrix before it and everything after it
+(31.5) stay where they are.
+
+```
+for each spin k = 1, spin:
+   -- pass 1: count, and accumulate the electron energy
+   numPositive = 0;  numNegative = 0
+   for j = 1, numStates in ascending order:
+      pop(:) = structuredElectronPopulation(j, i, :)
+      if (sum(abs(pop(:))) < smallThresh) cycle       -- as today
+      if (k == 1) electronEnergy(:) += pop(:) * energyEigenValues(j, i, :)
+      if (pop(k) > 0) numPositive += 1
+      if (pop(k) < 0) numNegative += 1
+   -- pass 2: gather the scaled columns, positive group first
+   p = 0;  m = numPositive
+   for j = 1, numStates in ascending order:
+      pop(:) = structuredElectronPopulation(j, i, :)
+      if (sum(abs(pop(:))) < smallThresh) cycle
+      if (pop(k) > 0) then
+         p += 1;  W(:, p) = sqrt( pop(k)) * V(:, j, k)
+      else if (pop(k) < 0) then
+         m += 1;  W(:, m) = sqrt(-pop(k)) * V(:, j, k)
+      endif
+   valeRhoRankUpdateCount += numPositive + numNegative
+   -- the two updates, on the upper triangle, accumulating
+   if (numPositive > 0) call syrk('U', 'N', valeDim, numPositive,
+         +1.0, W(:, 1),               valeDim, 1.0, rho(:, :, k), valeDim)
+   if (numNegative > 0) call syrk('U', 'N', valeDim, numNegative,
+         -1.0, W(:, numPositive + 1), valeDim, 1.0, rho(:, :, k), valeDim)
+```
+
+`V` is `valeVale` or `valeValeGamma`, `rho` is `valeValeRho` or
+`valeValeRhoGamma`, `W` is `scaledEigenvectors`, and `syrk` is
+`zherk` or `dsyrk` by build. In `zherk` the scalars alpha and
+beta are REAL by definition, which is exactly what the
+occupations are; the diagonal's imaginary parts are set to zero
+by the routine, as `zher` sets them today.
+
+Why square roots, and why two groups. `syrk` forms `W W^H`, and
+`sqrt(o) * sqrt(o) = o` to within one rounding, so scaling each
+column by the square root of its occupation makes the product
+the occupation-weighted sum -- but only for non-negative
+occupations. A negative occupation cannot be pushed through a
+square root, so its columns are scaled by the root of its
+magnitude and their update is SUBTRACTED with alpha = -1. Both
+groups are gathered in ascending state index, positive block
+first, so the column order is fixed by the deck and not by the
+run. The alternative that avoids the sign split -- the rank-2k
+form `zher2k` with `B = 0.5 * occ * V`, which handles any sign in
+one call -- costs twice the arithmetic and is recorded here as
+the fallback if the split ever proves awkward, not adopted.
+
+What counts as a column. A state enters the gather for spin `k`
+when it passes today's skip test AND its occupation for that
+spin is nonzero. For `spin == 1` that is precisely the set of
+states whose rank-1 call did work today (BLAS returns at once
+for alpha = 0), so `valeRhoRankUpdateCount` keeps the meaning
+PSEUDOCODE 30.5 gave it and check 4 of 30.8 is unchanged --
+3456 on the large glass. For `spin == 2` the old count included
+zero-alpha calls for a spin with no weight in an otherwise
+surviving state, and the new count does not; the log line says
+which build wrote it, and the difference is recorded rather than
+papered over.
+
+### 31.4 What the traffic becomes
+
+The rank-1 loop moved `k * 2 * T` bytes, `T` the triangle: 4.34
+TB on the large glass. The rank-k form reads the column block
+`W` once (0.35 GB real) and walks the triangle once per internal
+column block of the library; at a block width of a few hundred
+that is ten to twenty passes, tens of gigabytes rather than
+terabytes. The arithmetic is unchanged at `n (n + 1) k` flops.
+`syrkprobe` measured the library reaching 46.5 GFLOP/s on one
+core and 364 on eight for this shape -- a compute-bound rate,
+scaling almost ideally -- and the region A stamp of PSEUDOCODE
+30 is what confirms it inside the program.
+
+### 31.5 What stays exactly as it is
+
+- The zeroing of the density matrix at the top of region A. It
+  costs one 1.26 GB write and it is what guarantees the lower
+  triangle is zero for the consumers that may read it.
+- Region R, the per-k-point eigenvector re-read of the complex
+  build.
+- `update1UJ`, the pack, the spin recombination (region A's
+  second span), the force block, and the whole contract half
+  (b) with regions I and M.
+- `electronEnergy`, accumulated in pass 1 in the same state
+  order as today.
+- The arm policy of PSEUDOCODE 29 (when it is coded) and the
+  solve deal: the recast runs on whichever rank builds the
+  density, and a worker that later builds a dealt k-point's
+  density calls the same routine.
+
+### 31.6 Instrumentation
+
+PSEUDOCODE 30 applies unchanged: region A's first span encloses
+both passes, the gather and the two updates, and the log line
+of 30.6 reports the same fields. One field is ADDED at the end
+of that line: the number of NEGATIVE columns gathered in the
+call, summed over k-points and spins. It is zero on every deck
+in the benchmark set and non-zero only under the tetrahedron
+method, and it is the evidence that the negative group was
+exercised (check 3) -- without it a run that never entered the
+second update would look identical to one that did.
+
+### 31.7 The tolerance, measured
+
+The recast build is compared against the pre-recast build of
+the same commit, same environment, same node -- the discipline
+of PA3 and PA4-B -- with `h5diff` on the whole scratch file at
+an ABSOLUTE tolerance, eigenvectors excluded, and the energy and
+iteration traces compared as text. The tolerance is not chosen:
+the largest absolute difference on each accepted deck is
+measured and reported in PERFORMANCE.md, and DESIGN 9.6's
+exactness paragraph is amended to carry the number. The
+expectation, from the arithmetic, is a floor at the level of
+double-precision summation reordering (relative 1e-14 or better
+on the density elements) and energies identical to print
+precision; iteration traces may differ at that floor, as PA4-B
+recorded across algorithms. Once accepted, the recast binary is
+the reference that every later zero-tolerance deal (candidate
+(ii), PSEUDOCODE 29) is measured against.
+
+### 31.8 Checks
+
+1. **The counter is unchanged where it must be**:
+   `valeRhoRankUpdateCount` on every `spin == 1` deck equals the
+   pre-recast value (3456 on `sio2_1296_large_g`, 648 on
+   `sio2_243_med_g`, 1944 on `knbo3_333_med_c`), and the
+   negative-column count is zero on all of them.
+2. **The floor, measured**: `bn_small_c`, `bn_small_g`,
+   `sio2_243_med_g` and `knbo3_333_med_c` against the pre-recast
+   binaries per 31.7 -- both variants, one and four k-points,
+   with the maximum absolute difference recorded per deck.
+3. **The negative group is exercised**: a deck run under the
+   tetrahedron method (`kPointIntgCode == 1`) whose log line
+   reports a NON-ZERO negative-column count, compared against the
+   pre-recast binary at the floor of check 2. If no accepted deck
+   produces a negative occupation, one is made (a metal on a
+   coarse mesh does), because an untested update path is the
+   defect this check exists to catch.
+4. **Thread invariance**: the same deck at one and eight BLAS
+   threads. The library parallelizes the update over output
+   tiles, so each element's sum should run in one fixed order
+   and the files should be bit-identical; if they are not, the
+   thread floor is measured and recorded beside check 2's.
+5. **The stamp falls**: the `VALEDENSITY SPLIT` line on
+   `sio2_1296_large_g` at one and eight threads, region A against
+   the 128.0 / 50.8 s of PSEUDOCODE 30's sweep, and against the
+   `syrkprobe` prediction. Regions I and M must not move.
+6. **The parallel build is unmoved**: the MPI build's one-rank
+   run is bit-identical to the recast serial build, and the
+   np8 collective run of the headline deck is clean against its
+   np1 file at PA4-B's criterion (1e-9 absolute, eigenvectors
+   excluded) -- the recast runs on root after the gather and
+   the deal never sees it.
+7. **Spin-polarized**: a small spin-polarized deck (a copy of
+   `bn_small_g` with spin polarization on) against the
+   pre-recast binary at the floor of check 2, so the per-spin
+   column rule of 31.3 is tested rather than argued.
+8. **PSEUDOCODE 30 check 2 still holds**: the four regions still
+   sum to the stage span within the millisecond floor, on the
+   243-atom and the 1296-atom glass.

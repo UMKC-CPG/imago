@@ -8464,8 +8464,16 @@ is not carried only in conversation.
     same compiler build" is now a build rule and not a
     preference.
 
-- [ ] PF8. Settle whether the SCF loop's integral-read cost is
-  DEFLATE INFLATION or STORAGE.  DESIGN 9.7 turns on this and
+- [x] PF8. Settle whether the SCF loop's integral-read cost is
+  DEFLATE INFLATION or STORAGE.  **CLOSED 2026-08-24: INFLATION**
+  (job 16771229, instrument `dev/tools/readprobe.f90`, record in
+  PERFORMANCE.md "The integral-read cost is inflation, not
+  storage"). A 628 MB dataset reads in 1.23 s warm compressed
+  against 0.075 s uncompressed, cold adds a few hundredths; the
+  dense term costs three times the sparse one. The dealt cache
+  divides the cost ideally; storing uncompressed is recorded as
+  a third option. The method below worked as written.
+  DESIGN 9.7 turns on this and
   cannot be closed without it; the stored volumes are already
   measured (PERFORMANCE.md "Integral storage layout and read
   cost") and they do NOT decide it -- about 448 MB/s of
@@ -8826,7 +8834,10 @@ is not carried only in conversation.
      section claims a number. Serial; no MPI. Moves the serial
      baseline once at a MEASURED tolerance. Must precede any
      coding of PSEUDOCODE 29, which calls the routine it
-     rewrites. Expected: 128 -> ~15-20 s per call on one core.
+     rewrites. MEASURED on the shape (`jobs/recast/syrkprobe`,
+     job 16771238): 11.66 s at one thread, 1.49 s at eight, so
+     128 -> ~12 s per call serial, 51 -> ~1.5 s at eight
+     threads. PSEUDOCODE 31 WRITTEN 2026-08-24; awaits review.
   3. PF8, the inflation-vs-storage probe (~1 h; already
      specified). Independent of 2; gates only the DEALT form
      of 4.

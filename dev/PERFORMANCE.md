@@ -889,6 +889,96 @@ predicts a compute-bound `dsyrk`, but no `dsyrk` has been timed
 on this shape, and that measurement belongs in the section that
 specifies candidate (i).
 
+## The rank-k update, timed (2026-08-24)
+
+The measurement the paragraph above asked for.
+`jobs/recast/syrkprobe.f90` calls `dsyrk('U','N', n, k, ...)` on
+random data at exactly the large glass's shape, n = 12528 rows
+and k = 3456 occupied states, after scaling each column by the
+square root of a random occupation (the gather PSEUDOCODE 31
+needs). Job 16771238 on c085 -- a node shared with another
+user's work, load 34 -- OpenBLAS 0.3.30 from `cpg`, second of
+two passes (the first pays thread start-up):
+
+    threads   gather    dsyrk    GFLOP/s    rank-1 loop    ratio
+    1         0.03 s   11.66 s     46.5       128.0 s       11x
+    2         0.03 s    5.86 s     92.6       103.7 s       18x
+    4         0.03 s    2.95 s    184.2        72.4 s       25x
+    8         0.03 s    1.49 s    364.0        50.8 s       34x
+
+The rank-1 column is PSEUDOCODE 30's measured region A at the
+same thread counts. The rank-k form does the same 542 GFLOP
+compute-bound -- 46.5 GFLOP/s on one core is near the core's
+double-precision peak -- and scales 7.8x on eight threads where
+the rank-1 loop managed 2.5x. It is 11x faster serial and 34x
+faster at eight threads. The probe is on random data, so it
+measures the library on the shape and not the program; the
+`VALEDENSITY SPLIT` line after PSEUDOCODE 31 is coded is what
+measures the program, and check 5 there holds it to this.
+
+Projected onto the stage: region A from 128 s to about 12 s
+serial, so the valence call on the large glass falls from 161 s
+to about 45 s at one thread (about 15 s of it at eight), and the
+integral reads at 30.5 s become two thirds of what is left --
+which is why the read-once cache is this recast's partner.
+
+## The integral-read cost is inflation, not storage (PF8, 2026-08-24)
+
+Instrument `dev/tools/readprobe.f90`: one program, one named
+dataset, read whole through the same `h5dread_f` call
+`readPackedMatrix` makes and linked against the same serial HDF5,
+timed by `system_clock`. Job 16771229 on c085 (shared node,
+4 cores). Four datasets were extracted on the
+HEAD node beforehand so that the compute node's first read of
+each was genuinely cold, and uncompressed copies of the same
+datasets were made with `h5repack -f NONE`. Each read five times;
+repeat 1 is cold, repeats 2-5 warm.
+
+    dataset, 627.85 MB logical     on disk    cold    warm      rate
+    large term 1, DEFLATE-1        191.6 MB   1.26 s  1.23 s   510 MB/s
+    large term 16, DEFLATE-1        11.6 MB   0.47 s  0.43 s  1460 MB/s
+    large term 1, uncompressed     627.9 MB   0.13 s  0.075 s 8400 MB/s
+    large term 16, uncompressed    627.9 MB   0.12 s  0.076 s 8200 MB/s
+
+    dataset, 21.0 MB logical
+    medium term 28, DEFLATE-1        4.1 MB   0.047   0.040    530 MB/s
+    medium term 46, DEFLATE-1       0.15 MB   0.018   0.016   1340 MB/s
+    medium term 28, uncompressed    21.0 MB   0.009   0.0025 8200 MB/s
+    medium term 46, uncompressed    21.0 MB   0.004   0.0024 8900 MB/s
+
+The originals inside the benchmark scratch files, read the same
+way, agree with the extracts to the millisecond and to every
+digit of the checksum.
+
+**Decided: the cost is DEFLATE inflation.** Cold and warm differ
+by a few hundredths of a second, so storage is nearly free on
+this filesystem even for a 192 MB fetch; the compressed reads sit
+6x to 16x above the uncompressed floor, and the dense term costs
+three times the sparse one -- inflating real data is slower per
+output byte than inflating mostly zeros, exactly the inflation
+signature the PF8 method predicted. The rate follows the
+compressibility: about 500 MB/s of output for a 3.3x-compressed
+matrix, about 1450 MB/s for a 54x one. Region I's 30.5 s for 35
+datasets on the large cell (0.87 s each) is that mixture.
+
+What follows:
+
+1. **The dealt cache divides the cost perfectly.** Inflation is
+   processor work on one core per dataset, so N ranks inflating
+   N disjoint datasets scale ideally; DESIGN 9.7's whole-dataset
+   deal is confirmed as the aligned unit and its parallel form is
+   worth building.
+2. **A third option exists: store the integrals uncompressed.**
+   Every read would then run at the 8 GB/s copy floor -- region I
+   would fall from 30.5 s to about 3 s per call with no cache and
+   no deal -- at 5.7x the disk (22 GB instead of 3.85 GB for the
+   large run) and a proportionally larger write in the term
+   stage. It is recorded as an option and not adopted; the cache
+   removes the reads entirely and the deal spreads the memory,
+   and either is preferable to paying the disk on every run.
+3. **The 448 MB/s assembly figure of PA4-A is explained**: it is
+   the inflation rate of a typical mix, not a storage rate.
+
 ## The situation, as of 2026-08-09
 
 Three things are true at once, and the campaign has to be planned
