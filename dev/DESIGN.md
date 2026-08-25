@@ -14612,6 +14612,23 @@ decomposition axis is chosen on a measurement and not on
 symmetry, so the first stage stamps (a) and (b) separately and
 the second stage's design waits on that reading -- it is that
 reading which chooses among the three candidates below.
+
+**The split, measured (2026-08-23; PSEUDOCODE 30, PERFORMANCE
+"Valence density split and thread sweep").** The reading is
+now taken, and it DEMOTES the k-point deal. On the 4-k-point
+medium cell the accumulate half (a) is 1.0 s of a 10.6 s call
+and the integral reads are 8.4 s -- 79 % -- because (b)
+re-reads every one of the `potDim + 3` datasets for EVERY
+k-point. The deal reaches only (a), so its ceiling on that
+deck is about 13 s of a 1494 s run: under one percent. It is
+therefore not the whole win for the multi-k decks; the win
+there is the READS, and the reads are what candidate (ii)
+below and the read-once cache remove, for multi-k and
+one-k-point cells alike. The eigenvector re-read (region R)
+is exactly zero at one k-point and 4.8 % of the call at four,
+so it is not a design concern. PSEUDOCODE 29 stays specified
+but is DEFERRED behind candidates (i) and (ii), and is worth
+coding only if (a) still shows on a multi-k deck after both.
 Hubbard-U k-points stay on root as they do for the solve, and
 the deal is skipped entirely on a force-computing iteration,
 because the force block consumes the UNPACKED density matrix
@@ -14633,13 +14650,17 @@ the large cell each call touches about 628 MB, and several
 thousand states carry occupation above the skip threshold,
 which puts the accumulation near four terabytes of memory
 traffic against under a teraflop of arithmetic: roughly an
-eighth of a flop per byte moved. Those two figures are
-arithmetic from the array shapes rather than measurements --
-the stamps of check 5 are what confirm or refute them, and
-this ordering should be re-read against those stamps before
-anything is built. If they hold, it is a bandwidth-limited
-loop, not a
-compute-limited one, and it changes what dividing it is worth.
+eighth of a flop per byte moved. Those two figures were
+arithmetic from the array shapes when first written; the
+stamps of PSEUDOCODE 30 have since confirmed them exactly
+(2026-08-23): 3456 updates on a 628 MB triangle, 4.34 TB of
+traffic against 542 GFLOP, 128 s per call on one core --
+33.9 GB/s and 4.2 GFLOP/s, an eighth of a flop per byte. The
+thread sweep says the same thing from the other side: eight
+BLAS threads return 2.52x at 31 % efficiency, with run-to-run
+spread growing to 19 %. It is a bandwidth-limited loop, not a
+compute-limited one, and that changes what dividing it is
+worth.
 Ranks on one node share one memory system, so splitting the
 states among them divides work that was not the constraint,
 while giving each rank a full square accumulator of its own
@@ -14697,6 +14718,22 @@ divides the stage's reading by the rank count. Its width is the
 dataset count, about 35 per k-point, so unlike the k-point deal
 it is a real width at one k-point.
 
+Measured, (ii) is not a follow-on to (i) but its PARTNER. The
+reads cost 30.5 s per call at every thread setting -- nothing
+in them is threaded -- which is 19 % of the stage today and
+the largest region left once (i) lands; on the multi-k medium
+cell they are 79 % of the call before anything is done. The
+same 35 datasets are read a second time each iteration by the
+assembly above, so removing the reads pays twice. The simplest
+form of (ii) is the read-once cache of 9.7 held on root alone:
+no deal, no dependence on PF8. The dealt form spreads the
+memory across ranks and divides the contract arithmetic as
+well. The two compose -- a dealt cache is a cache that each
+rank fills with its own datasets -- and the section that
+specifies (ii) chooses the form on PF8's reading. (i) is
+listed first only because it is serial and smaller, not
+because it matters more.
+
 (iii) THE STATE AXIS, and only if (a) still dominates after
 (i). At that point it is the blocking of a compute-limited
 operation, and the private matrices and the reduction are being
@@ -14727,9 +14764,10 @@ further reason it comes last, and its acceptance criterion has
 to be settled when it is specified rather than inherited from
 here.
 
-Two serial optimizations the seam exposes and this section does
-NOT adopt, kept apart from each other because they pay in
-opposite places. WITHIN one call, (b) re-reads the same
+Two serial optimizations the seam exposes, kept apart from each
+other because they pay in opposite places. The second is
+ADOPTED (2026-08-23) as the first form of candidate (ii), and
+it subsumes the first. WITHIN one call, (b) re-reads the same
 `potDim + 4` datasets for every k-point, so reading each once
 and contracting it against all k-points' packed densities would
 cut that read volume by `numKPoints`, at the cost of holding
@@ -14741,9 +14779,14 @@ iteration and (b) re-reads all of them on every iteration
 after, about 22 GB per iteration on the large cell. Holding
 them instead is 9.7's read-once cache; it is largest exactly
 where the loop inversion is worthless, and candidate (ii) is
-how such a cache gets filled and held in parallel. Both are
-orthogonal to the distribution and are recorded here so they
-are weighed on their own merits.
+how such a cache gets filled and held in parallel. The cache
+subsumes the inversion: once the datasets are resident there
+is no read left to invert the loop around, and the per-k-point
+contraction order -- which is what keeps the stage bit-exact
+-- is untouched. The measurement prices the cache at about
+60 s per iteration on the large cell (two consumers at 30 s
+each, about 11 minutes per run) and at 79 % of the valence
+stage on the 4-k-point medium cell.
 
 ### 9.7 Parallel HDF5 Alignment
 
@@ -14876,13 +14919,20 @@ in memory from the solve. The reads discussed above are of the
 stored INTEGRALS, which the eigensolver never touches. The two
 questions are independent and both must be answered.
 
-Finally, all of this is subordinate to a measurement that has
-not been taken: 9.6's valence paragraph records that the split
-between building the density matrix and contracting it against
-the stored integrals is unmeasured. If the building half
-dominates, everything in these paragraphs is second-order. The
-stamps that decide it are part of that step's first increment,
-and this section should be re-read against them.
+Finally, the measurement this section was waiting on has been
+taken (2026-08-23; PSEUDOCODE 30, PERFORMANCE "Valence density
+split and thread sweep"), and it makes these paragraphs
+FIRST-order rather than second. On the large one-k-point cell
+the building half does dominate today -- 128 s of a 161 s call
+-- but it does so as a bandwidth-bound level-2 loop that 9.6's
+candidate (i) turns into a level-3 one, after which the 30.5 s
+of reads is the largest thing left in the stage. On the
+4-k-point medium cell the reads are 79 % of the call before
+anything is done, because the routine re-reads every dataset
+per k-point. So the read-once cache is adopted (9.6, closing
+paragraph), and the only question still open here is PF8's:
+whether the cache's dealt form divides decompression work or
+disk time.
 
 ### 9.8 Open Design Questions
 
@@ -14921,7 +14971,21 @@ and this section should be re-read against them.
   of the cheap solve refinements (root's per-iteration
   assembly cached in memory; the constant overlap's Cholesky
   reused), which follow it; the grid work in the per-iteration
-  SCF potential loop stays last. The validation gate between
+  SCF potential loop stays last. RE-ORDERED A THIRD TIME
+  2026-08-23, by the valence split measurement (9.6, 9.7):
+  the two remaining root-serial stages -- the valence density
+  and the once-per-run two-centre integrals (overlap, kinetic,
+  nuclear) -- become the ceiling as soon as the rank count
+  rises, so they come next, and the valence step is taken in
+  the order 9.6 now gives: (1) the rank-k recast of the
+  density-matrix build, serial; (2) the read-once integral
+  cache serving both the assembly and the valence density,
+  root-held first and dealt by dataset once PF8 says which
+  cost it divides; then (3) the two-centre integral stages by
+  atom pair. The k-point deal of the valence build (PSEUDOCODE
+  29) is deferred behind (1) and (2); the state axis is last,
+  if ever. PF7's toolchain pin precedes any new baseline. The
+  validation gate between
   stages is unchanged: each stage must reproduce the serial
   benchmark results (energies to print precision, HDF5 content
   by h5diff under the measured criteria of 9.5) before the

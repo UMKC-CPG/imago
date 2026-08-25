@@ -774,6 +774,121 @@ arithmetic slip -- it read the 12 s as one k-point's worth and
 derived 26 MB/s, which nothing here would explain. Corrected
 here and there. TODO PF8 settles it directly.
 
+## Valence density split and thread sweep (measured 2026-08-23)
+
+PSEUDOCODE 30's instrument, run to decide the order of DESIGN
+9.6's three one-k-point candidates. Four regions are stamped
+inside `makeValenceRho`: R reads eigenvectors, A accumulates the
+density by rank-1 update, I reads the integral datasets, M is
+the contract arithmetic. Binary `jobs/p30_check/bin` at commit
+e353f74; one exclusive node (c085, AMD EPYC 7713, 128 cores);
+the SAME binary at every thread setting, so the toolchain
+difference recorded above cancels out of every ratio here.
+
+**The instrument checks out.** Check 2: the four regions sum to
+the stage's own start-to-end stamp within 9 ms on every one of
+the ten readings, always slightly under and never over, which
+is the `date_and_time` resolution floor rather than unaccounted
+work. Check 4: the 1296-atom cell reports 3456 rank-1 updates,
+and 432 SiO2 units at 16 valence electrons each over 2 is
+exactly 3456 -- written down as a prediction before the job
+ran. Check 5: A moves by 2.5x across the sweep while I and M
+sit still, so the thread setting is reaching the library and
+the sweep is not measuring its own plumbing.
+
+**Where the cost sits depends entirely on cell size.** One
+k-point, gamma-point real build, seconds per call:
+
+    deck              valeDim  updates  triangle       A        I    A share
+    bn_small_g             64       16     16 KB   0.0000   0.0025      1.5%
+    sio2_243_probe       2349      648     22 MB   1.029    3.247      23.1%
+    sio2_1296_probe     12528     3456    628 MB 127.96    30.51       79.4%
+
+The change-over sits between the middle and the large cell, and
+it sits exactly where the accumulator's stored triangle stops
+fitting in a last-level cache. Below that size the integral
+read dominates and the accumulation is nearly free; above it
+the accumulation is the stage. A design chosen on either of the
+two smaller decks would have parallelized the wrong half, which
+is what PSEUDOCODE 29.7's deck constraint was written to
+prevent. (The 243-atom probe's thread setting was not recorded,
+so it belongs to this ladder but not to the sweep below.)
+
+**The thread sweep on the large cell.** Two calls per setting:
+
+    threads  A call 1  A call 2  A mean  speedup  eff    GB/s       I       M
+    1         128.00    127.91   127.96    1.00  100%    33.9   30.51   2.782
+    2         103.61    103.84   103.72    1.23   62%    41.8   30.67   2.782
+    4          69.05     75.77    72.41    1.77   44%    59.9   30.50   2.781
+    8          46.01     55.63    50.82    2.52   31%    85.4   30.60   2.781
+
+**DESIGN 9.6's traffic arithmetic held.** The stored triangle is
+12528 * 12529 / 2 = 78,481,656 doubles = 627,853,248 bytes,
+which is the same number `h5ls` reports for a packed matrix
+chunk in the section above. Each `dsyr` reads and writes all of
+it, so 3456 updates move 4.34 TB against 542 GFLOP of
+arithmetic: 0.125 flop per byte, the eighth that 9.6 predicted
+from the array shapes. The serial rate follows -- 4.24 GFLOP/s
+on a core with roughly fifty available. The arithmetic unit is
+idle while the memory system works flat out.
+
+**Threads are not a substitute for fixing that.** Eight of them
+return 2.52x at 31 % efficiency, and the run-to-run spread
+grows from 0.07 % at one thread to 19 % at eight. The sweep
+sets no `OMP_PROC_BIND` or `OMP_PLACES`, so on a 128-core part
+the four or eight threads may land inside one core complex on
+one call and spread across several on the next, changing how
+many memory controllers serve the traffic. Treat the t4 and t8
+points as carrying +/- 10 to 20 %; t1 and t2 are tight. Note
+also that the curve has NOT flattened at eight threads -- each
+doubling still returns 1.3 to 1.6x -- so this sweep did not
+find the bandwidth ceiling, only established that it is above
+85 GB/s.
+
+**The multi-k-point decks behave oppositely.** Seconds per
+call, complex build:
+
+    deck              nk  valeDim  updates      R       A       I    I share
+    bn_small_c         8       64      128  0.0031  0.0007  0.0478     89.9%
+    knbo3_333_probe    4     1620     1944  0.509   1.040   8.439      79.0%
+
+Region R is exactly zero on every one-k-point reading and 4.8 %
+of the stage at four k-points: the eigenvector re-read that
+DESIGN 9.6 worried about does not exist in the case 9.6 is
+about.
+
+**What this settles for DESIGN 9.6, and what it changes.** The
+ordering is confirmed, but the second candidate is worth more
+than 9.6 gave it.
+
+1. **Candidate (i), the rank-k recast, goes first** -- and by a
+   wider margin than 9.6 argued. It is the only move that
+   attacks the 0.125 flop per byte itself. Blocking the update
+   over columns of width nb cuts the traffic to roughly
+   (3456 / nb) * 1.26 GB, which at nb = 64 is 68 GB instead of
+   4.34 TB. The measured alternative -- eight threads on the
+   existing rank-1 loop -- buys 2.52x with 19 % noise and costs
+   eight cores that MPI ranks would otherwise use.
+2. **Candidate (ii), the dataset deal, is promoted to a near
+   sibling of (i) rather than a distant second.** I is
+   invariant: 30.5 s at every thread setting, because nothing
+   in it is threaded. It is 19 % of the stage today, but once
+   (i) lands and A falls toward the tens of seconds, the
+   integral read becomes the largest region in the stage. 9.6
+   treats (ii) as a follow-on; the measurement says it is the
+   next bottleneck, immediately.
+3. **Candidate (iii), the state axis, recedes further.** After
+   (i) there is little left for it to divide, and it remains
+   the only one of the three that would break
+   parallel-equals-serial.
+
+**What is NOT established here.** The bandwidth ceiling, per
+above. Whether I's 30.5 s is inflation or storage -- that is
+PF8, unchanged. And the recast's actual speed: 68 GB of traffic
+predicts a compute-bound `dsyrk`, but no `dsyrk` has been timed
+on this shape, and that measurement belongs in the section that
+specifies candidate (i).
+
 ## The situation, as of 2026-08-09
 
 Three things are true at once, and the campaign has to be planned

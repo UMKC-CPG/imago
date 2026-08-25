@@ -8798,6 +8798,61 @@ is not carried only in conversation.
   triangle can sit in last-level cache. Eight checks, one of
   which is that 9.6 gets re-read against the stamps before any
   candidate is specified.
+  **2026-08-23/24: PSEUDOCODE 30 CODED (`e353f74`), the SWEEP
+  TAKEN (jobs 16731229/16731230), and 9.6/9.7/9.8 AMENDED from
+  it** (record: PERFORMANCE.md "Valence density split and
+  thread sweep"). All eight 30.8 checks pass; the traffic
+  arithmetic held exactly (3456 updates, 4.34 TB, 128 s per
+  call, an eighth of a flop per byte); eight BLAS threads buy
+  2.52x at 31 % efficiency, so the build is bandwidth-bound;
+  the integral reads are 30.5 s per call at every thread
+  setting and 79 % of the call on the 4-k-point medium cell.
+  Two design claims fell: the k-point deal (PSEUDOCODE 29)
+  reaches under one percent of the multi-k run and is
+  DEFERRED, and the read-once cache is ADOPTED as the first
+  form of candidate (ii). The steps below are complementary --
+  none excludes another -- and are listed in the order they
+  should be taken; the only hard dependencies are named.
+  **THE ORDERED PLAN (agreed 2026-08-24):**
+  1. PF7, the toolchain pin. Independent; ~15 min of compute;
+     do it BEFORE any new baseline is taken, or every ratio
+     quoted afterward inherits the 1.7x contamination.
+  2. Candidate (i), the rank-k recast of the density-matrix
+     build: its own PSEUDOCODE section (seam inventory: the
+     occupation-scaled eigenvector block, the positive and
+     negative Bloechl columns as two updates, the skip as a
+     column gather, the fixed column blocking), then code. It
+     must TIME `dsyrk`/`zherk` on the large shape before the
+     section claims a number. Serial; no MPI. Moves the serial
+     baseline once at a MEASURED tolerance. Must precede any
+     coding of PSEUDOCODE 29, which calls the routine it
+     rewrites. Expected: 128 -> ~15-20 s per call on one core.
+  3. PF8, the inflation-vs-storage probe (~1 h; already
+     specified). Independent of 2; gates only the DEALT form
+     of 4.
+  4. Candidate (ii), the read-once integral cache, ROOT-HELD
+     first: its own PSEUDOCODE section (seam inventory: who
+     fills it at the end of the integral stage or on first
+     read, who frees it, the assembly and the valence density
+     both consuming it, restart with a populated file), then
+     code. Bit-exact by construction. Then the DEALT form
+     (each rank holds and contracts its own datasets; gather of
+     `potDim + 4` doubles) once PF8 has said what it divides.
+     Expected: ~60 s per iteration removed on the large cell,
+     79 % of the valence stage on the multi-k medium cell.
+  5. Re-take the map: the headline deck at np8 and np32 on the
+     PF7-pinned toolchain, serial baseline re-taken alongside.
+     This is where the next ceiling is read, not assumed.
+  6. The two-centre integral stages (overlap, kinetic, nuclear:
+     1746 s once per run at 1296 atoms) dealt by atom pair --
+     needs its own DESIGN section first. Independent of 2-4.
+  7. PSEUDOCODE 29, the k-point deal of the build -- ONLY if
+     the accumulate half still shows on a multi-k deck after 2
+     and 4. Its ceiling on today's medium deck is under 1 %.
+  8. Later: the state axis (column blocking of 2's update),
+     and the 9.4 endgame of building the density from the
+     eigenvectors ELPA already holds distributed, without the
+     gather to root.
 
 - [ ] PA5a. Distribute the ELECTROSTATIC SETUP under DESIGN 9.2
   -- PULLED FORWARD 2026-08-22 (programmer's ruling on the
@@ -8849,7 +8904,9 @@ is not carried only in conversation.
   specific things: a whole-dataset read deal (gated on PF8) and
   a read-once in-memory cache of the constant integrals serving
   both the assembly and the valence density (not gated on PF8).
-  Neither is adopted yet.
+  The cache was ADOPTED 2026-08-23 by the valence split
+  measurement (DESIGN 9.6 closing paragraph, 9.8 order) and is
+  step 4 of PA4's ordered plan; the dealt form follows PF8.
 
 ## TOOLING (lint helpers)
 
