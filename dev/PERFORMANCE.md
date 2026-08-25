@@ -754,11 +754,31 @@ electrostatic setup, the integral stages and the mesh work are
 all compiler-generated loops. Untested; recorded under PF7 as
 its own item.
 
-What remains of PF7 is the PIN, which is the programmer's
-decision because `cpg` is the group's shared environment:
-either raise `cpg`'s sysroot and compiler build to match
-`cpgp`, or create a pinned serial sibling, then re-take the
-serial baselines under it and record the rule in BUILD.md.
+**The pin, taken 2026-08-25: `cpg` was raised in place.** The
+programmer chose to raise the shared environment rather than
+create a serial sibling. Nothing had to move but the sysroot:
+`mamba install sysroot_linux-64=2.28` in `cpg` replaced
+`sysroot_linux-64 2.17 h0157908_18` and `kernel-headers 3.10.0`
+with `2.28 h4ee821c_9` and `4.18.0`, and removed three orphan
+`libx11-*-cos7` packages that had pinned the old sysroot and
+that nothing in the environment depended on (they were the
+only reason mamba 1.4.2 refused the solve). The compiler
+package did not change (`gfortran_impl 15.2.0 _7`), which
+settles the earlier guess that the `_7`/`_20` build difference
+mattered: it does not. Immediately after the raise the `cpg`
+driver reports the same `-fpre-include=.../finclude/
+math-vector-fortran.h` that `cpgp`'s does. The two toolchains
+now differ only in the parallel libraries, which is what
+BUILD.md always claimed.
+
+Two follow-on measurements run as ONE job (`jobs/pf7/
+pf7b.sbatch`, same commit, same node, one binary after the
+other): the raised `cpg` at default flags, which is the new
+serial baseline toolchain and must land at `cpgp`'s 58.6 s on
+the electrostatic setup; and the same build with
+`-march=x86-64-v3` added and nothing else changed, which
+isolates the AVX2 codegen item above. Results are recorded
+below this paragraph when the job returns.
 
 ## Integral storage layout and read cost (measured 2026-08-23)
 

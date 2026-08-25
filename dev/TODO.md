@@ -8453,20 +8453,26 @@ is not carried only in conversation.
   stated. NEW ITEM from the same log: both builds target
   `-march=x86-64` (no AVX) -- a candidate free speedup for the
   compiler-generated loops, to be tested with `-march=x86-64-v3`
-  on the 243 deck once the pin is settled. What remains:
+  on the 243 deck once the pin is settled.
+  **PIN TAKEN 2026-08-25: `cpg` RAISED IN PLACE** to
+  `sysroot_linux-64 2.28` (compiler unchanged; three orphan
+  `libx11-*-cos7` packages that pinned 2.17 removed; record in
+  PERFORMANCE.md's closing block of the same section). Job
+  16783290 (`jobs/pf7/pf7b.sbatch`) runs the raised toolchain
+  at default flags and, separately, with `-march=x86-64-v3`,
+  on `sio2_243` in one job so the AVX2 effect is isolated.
+  What remains:
 
-  - Pin both environments to one compiler build, or upgrade
-    `cpg`'s.  Prefer pinning: the two environments differing at
-    all is what produced this, and `dev/env/*.yml` is where the
-    pin belongs.
-  - Rebuild the serial preset against it and re-run
+  - [x] Pin both environments to one compiler build, or upgrade
+    `cpg`'s.  DONE by the raise above; `dev/env/cpgp.yml` and
+    BUILD.md now state the sysroot rule.
+  - [ ] Rebuild the serial preset against it and re-run
     `sio2_243_med_g`.  The check is whether its
     `Electrostatic Matrices` stamp lands near 58 s rather than
-    100 s; if it does, the attribution is closed.
-  - Measure which OTHER stages move.  The exchange-correlation
-    mesh and the Gaussian evaluation inside the three-centre
-    integrals are the candidates; the coarse time map on the
-    rebuilt binary answers it in one run.
+    100 s.  (Job 16783290, `base` flavour.)
+  - [ ] Measure `-march=x86-64-v3` on its own.  (Job 16783290,
+    `v3` flavour.)  If it pays, it belongs in the Release flags
+    in `CMakeLists.txt`, not in an environment.
   - RE-TAKE the serial baselines.  Every whole-run parallel
     ratio in PERFORMANCE.md is quoted against a `cpg` baseline,
     so the headline 3.5x is really about 3.2x once the

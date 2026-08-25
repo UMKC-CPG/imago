@@ -148,6 +148,21 @@ h5pfc -showconfig | grep -i "parallel hdf5"   # -> yes
 The Python side does not move: imago's venv is self-contained
 and links neither HDF5 nor MPI, so one venv serves both envs.
 
+**Build rule: both environments must carry the same sysroot
+(`sysroot_linux-64=2.28`).** The sysroot is not a formality.
+glibc 2.28's sysroot ships `finclude/math-vector-fortran.h`,
+which gfortran pre-includes so that `exp`, `sin`, `cos` and
+`pow` inside vectorizable loops become calls into libmvec, the
+SIMD math library; a 2.17 sysroot predates that library, and a
+compiler sitting on one emits scalar `libm` calls whatever
+flags it is given. The difference is worth 1.7x on imago's
+electrostatic setup and nothing on any other stage
+(`dev/PERFORMANCE.md`, "The two toolchains are not equally
+fast"). `cpg` was raised to 2.28 on 2026-08-25 to match
+`cpgp`; if either is ever rebuilt, check with
+`gfortran -v -c -x f95 /dev/null -o /dev/null 2>&1 | grep
+fpre-include` that the pre-include is present in both.
+
 Build with the preset, which sets `FC=h5pfc` and turns on
 `IMAGO_MPI` and `IMAGO_ELPA` (plus `IMAGO_PROFILE`, so parallel
 runs profile like serial ones):
