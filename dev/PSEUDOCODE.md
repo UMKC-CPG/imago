@@ -18086,3 +18086,301 @@ the reference that every later zero-tolerance deal (candidate
 8. **PSEUDOCODE 30 check 2 still holds**: the four regions still
    sum to the stage span within the millisecond floor, on the
    243-atom and the 1296-atom glass.
+
+## 32. Dealing the Atom-Pair Loop of the Two-Centre Stages
+## (DESIGN 9.9, SCF-path increment; TODO PA4 ordered plan, step 6)
+
+### 32.1 What this is, and what it is not
+
+The four two-centre integral stages of the SCF setup --
+overlap, kinetic energy, mass velocity and nuclear potential --
+each walk every atom pair once, adding the pair's block into
+full in-memory matrices, and then core-orthogonalize and
+write those matrices on root. Today the four run on root
+alone while the workers wait (the guard at `imago.F90:399`
+and `:440`). This section deals the pair loop of each stage
+across all ranks in the form DESIGN 9.9 decided: every rank
+walks a contiguous range of the packed pair index with the
+EXISTING loop body into its own zeroed copy of the matrices,
+the copies are summed onto root, and root finishes the stage
+exactly as it does now. It is DESIGN 9.2's pattern, coded
+once already for the electrostatic setup (PSEUDOCODE 28), on
+a different index.
+
+Three things it is NOT. It is not the post-SCF path: the same
+loop shape carries the post-SCF Hamiltonian, and DESIGN 9.9
+records that as its own later step, which will call the dealt
+loop this section writes without changing it. It is not 9.4:
+every rank holds a FULL copy of the matrices, which the
+programmer accepted for today's cells and no longer (DESIGN
+9.9, "how long it lasts"); the pair partition and the
+per-rank walk below are written so that they carry unchanged
+into 9.4's block-cyclic form, where only the destination of a
+pair's block and the combine change. And it is not a memory
+saving: the parallel run holds the serial program's matrices
+once per rank.
+
+### 32.2 Seam inventory
+
+Everything the dealt loop consumes or produces, with its
+provenance, read from `imago.F90`, `integrals.F90`,
+`intgSaving.F90` and `mpi.F90` at `5915991`:
+
+- The four routines: `gaussOverlapOL(numComponents,
+  fullCVDims, packedVVDims, did, CVdid, aid)`,
+  `gaussOverlapKE(packedVVDims, did, aid)`,
+  `gaussOverlapMV(...)` (relativistic runs only) and
+  `gaussOverlapNP(...)`, all in `integrals.F90`, module
+  `O_Integrals`. Each has the same skeleton: a completion-
+  attribute read at entry (`h5aread_f(aid, ...)` at lines
+  315, 822, 1265, 1709) that returns early when the stage is
+  done; the allocations of the per-pair work arrays; the
+  zeroing of the three accumulators; the pair loop `do i = 1,
+  numAtomSites` / `do j = i, numAtomSites` (lines 371/381,
+  861/871, 1304/1314, 1748/1758) whose body is
+  `initializeAtomSite` for each atom, the negligibility test,
+  the lattice-cell sum and `saveCurrentPair`; the work-array
+  deallocations; and the stage's `ortho` call that consumes
+  the accumulators through root's HDF5 handles. Nothing is
+  carried from one pair to the next: no counter, no mask
+  (`anyElecPotInteraction` belongs to the three-centre stage
+  alone), no running index. That is what makes any partition
+  of the pairs exact.
+- The call sites: `imago.F90:399-421` (overlap, kinetic, mass
+  velocity) and `:440-443` (nuclear), each inside `if
+  (mpiRank == 0)`. Those two guards are REMOVED; every rank
+  calls the four routines, as every rank already calls
+  `elecPotGaussOverlap` and `makeElectrostatics`. Between
+  them `makeAlphaNucDist` is already called by all ranks, and
+  the `bcastMPI(coreValeOL)` after the overlap stage
+  (PSEUDOCODE 25.1) stays: root's copy is the REDUCED matrix
+  after this section, or the file's copy on a restart, and
+  either is what the workers need for the term stage's
+  `ortho`.
+- The inputs of the loop body, all replicated setup state
+  alive on every rank when the stages run: `numAtomSites`
+  and the site table (`O_AtomicSites`), the type table
+  (`O_AtomicTypes`, `maxNumAtomAlphas`, `maxNumStates`), the
+  basis (`initializeAtomSite` in `O_Basis`), the lattice
+  (`O_Lattice`), and the alpha-distance tables (`alphaDist`
+  from `makeAlphaDist` at `imago.F90:384`, `makeAlphaNucDist`
+  at `:429`, both OUTSIDE root's guard). Verified against the
+  code: none of these is created inside a root-only block.
+- The accumulators: `valeVale(valeDim, valeDim, numKPoints)`,
+  `coreValeOL(coreDim, valeDim, numKPoints)`,
+  `coreCore(coreDim, coreDim, numKPoints)`, complex, in the
+  general build; `valeValeGamma(valeDim, valeDim)`,
+  `coreValeOLGamma(coreDim, valeDim)`, `coreCoreGamma(coreDim,
+  coreDim)`, real, in the Gamma build. All six live in
+  `O_Integrals` and are allocated by `allocateIntegralsSCF` /
+  `...Gamma` at `imago.F90:389/391`, OUTSIDE root's guard, so
+  every rank already owns them. Each stage zeroes them at its
+  top and `saveCurrentPair` (`intgSaving.F90:363`; Gamma form
+  at `:757`) adds a pair's block into rows `i`'s states and
+  columns `j`'s states -- and, for `i /= j`, the conjugate
+  block, so that each pair touches only its own rows and
+  columns. (The kinetic, mass-velocity and nuclear stages
+  reuse `valeVale` and `coreCore` and accumulate their
+  core-valence part into a stage-local `coreVale`, allocated
+  beside the work arrays at lines 841, 1284, 1728; it is
+  reduced with the others.)
+- The outputs: unchanged. Root's `orthoOL` / `ortho(2|3|5,
+  ...)` consume the accumulators and write through `did`,
+  `CVdid`, `aid` -- handles only root holds from
+  `initHDF5_SCF`. A worker passes whatever its (never
+  initialised) copies of those module variables hold and
+  never touches them: the attribute read at entry and the
+  `ortho` call both sit behind `mpiRank == 0`.
+- The skip verdict. The entry test reads `aid` on root; with
+  every rank in the routine, all must take the same branch,
+  so root broadcasts the verdict (`bcastIntVecMPI` on a
+  one-element vector, the helper PSEUDOCODE 25 introduced) and
+  every rank returns together when the stage is done. On the
+  overlap stage the done-branch also reads `coreValeOL` back
+  from the file -- root only, as today -- and the existing
+  broadcast after the stage delivers it.
+- `mpi.F90`: `loadBalMPI(toBalance, initialIdx, finalIdx)` is
+  the deal (contiguous ranges, the top `remainder` ranks one
+  item longer; `(1, toBalance)` at width one). `reduceSumMPI`
+  is a generic over real rank-1 and rank-2 today
+  (`reduceSumVector`, `reduceSumMatrix`: `MPI_Reduce` with
+  `MPI_IN_PLACE` on root, `MPI_SUM`, serial stub a no-op).
+  This section adds ONE specific procedure under the same
+  generic name, `reduceSumComplexCube` for a complex rank-3
+  array (modelled on `bcastComplexCube` at `:272` for the
+  type and on `reduceSumMatrix` at `:560` for the contract),
+  which covers all three complex accumulators; the Gamma
+  build's real rank-2 accumulators use `reduceSumMatrix` as
+  it stands. `gatherTimesMPI(myTimes, allTimes)` gathers the
+  per-rank seconds as PSEUDOCODE 28 uses it.
+- One new pure helper, `pairRangeBounds`, in `O_Integrals`
+  beside the stages (32.3): the packed-pair-index range to
+  `(i, j)` bounds map. It is the piece 9.4 will reuse.
+
+### 32.3 The pair range
+
+The loop walks pairs `(i, j)` with `j >= i` in row-major
+order, so pair number `p` runs from 1 to `numPairs =
+numAtomSites (numAtomSites + 1) / 2`, and row `i` holds
+`numAtomSites - i + 1` pairs. Given the rank's `[firstPair,
+lastPair]` from `loadBalMPI(numPairs)`, the bounds are found
+by walking rows -- `numAtomSites` steps, negligible against
+the loop -- and the loop becomes:
+
+```
+pairRangeBounds (firstPair, lastPair, numAtomSites,
+                 iFirst, jFirst, iLast, jLast):
+   p = 0
+   for i = 1, numAtomSites:
+      rowLength = numAtomSites - i + 1
+      if (p + rowLength >= firstPair and iFirst unset):
+         iFirst = i;  jFirst = i + (firstPair - p - 1)
+      if (p + rowLength >= lastPair):
+         iLast = i;   jLast = i + (lastPair - p - 1);  exit
+      p += rowLength
+
+-- the dealt loop, replacing `do i = 1, N` / `do j = i, N`
+for i = iFirst, iLast:
+   initializeAtomSite (i, 1, ...)                 -- as today
+   jStart = i;              if (i == iFirst) jStart = jFirst
+   jStop  = numAtomSites;   if (i == iLast)  jStop  = jLast
+   for j = jStart, jStop:
+      EXISTING loop body, unchanged from initializeAtomSite
+         (j, 2, ...) through saveCurrentPair
+```
+
+At width one `firstPair = 1` and `lastPair = numPairs`, so
+`iFirst = jFirst = 1`, `iLast = jLast = numAtomSites`, and the
+loop is today's loop statement for statement. Within a rank
+the pairs are visited in the serial order, so the partial
+matrices are built by the serial arithmetic; only which pairs
+a rank sees changes. The deal is over pair COUNT, and DESIGN
+9.9 gives the measurement (row cost flat in the row index,
+max/mean about 2) that says count balances within that
+factor; the per-rank seconds of 32.6 are what confirm it, and
+a snake over rows is the recorded refinement if they do not.
+
+### 32.4 The flow, per stage, on every rank
+
+```
+call timeStampStart (as today)
+root: read the completion attribute (as today)
+bcast the verdict; if done: root's done-branch as today
+      (overlap: read coreValeOL back), every rank returns
+allocate the per-pair work arrays (as today)
+zero the accumulators (as today)
+loadBalMPI (numPairs) -> firstPair, lastPair
+pairRangeBounds (...) -> iFirst, jFirst, iLast, jLast
+begin the loop clock
+run the dealt loop of 32.3
+end the loop clock -> myLoopSeconds
+deallocate the work arrays (as today)
+begin the reduce clock
+reduceSumMPI (valeVale); reduceSumMPI (coreValeOL or the
+      stage-local coreVale); reduceSumMPI (coreCore)
+      -- Gamma build: the three real matrices
+end the reduce clock -> myReduceSeconds
+gatherTimesMPI; root logs the two per-rank lines (32.6)
+root only: ortho (as today: orthogonalize, pack, write,
+      set the completion attribute)
+call timeStampEnd (as today)
+```
+
+No control message, no server: the four stages run before
+the term stage, where every rank is still executing
+`setupSCF` in lockstep, so a plain call from every rank is
+the dispatch -- the same shape as the term stage itself. The
+serial build and the one-rank parallel run take today's path
+statement for statement (identity deal, reduce a no-op or an
+in-place sum of one contribution).
+
+### 32.5 What stays exactly as it is
+
+- The loop body, from `initializeAtomSite(j, 2, ...)` to
+  `saveCurrentPair`, in all four stages, including the
+  negligibility test and the lattice-cell sum.
+- `saveCurrentPair` and its Gamma form.
+- Every `ortho` routine, the pack, the datasets, their names,
+  and the completion attributes; the restart semantics.
+- The three-centre term stage, the electrostatic setup and
+  everything after them.
+- `allocateIntegralsSCF` and the accumulators' shapes: the
+  memory footprint per rank is the serial program's.
+
+### 32.6 Instrumentation
+
+Two lines per stage on root's unit 20, in PSEUDOCODE 28's
+form so the same offline reader serves both:
+
+```
+<Stage> per-rank loop seconds:   t_0 t_1 ... t_{N-1}
+<Stage> per-rank reduce seconds: r_0 r_1 ... r_{N-1}
+```
+
+with `<Stage>` one of `Overlap`, `KineticEnergy`,
+`MassVelocity`, `NuclearPotential`. The first line is the
+balance record DESIGN 9.9 requires; the second is the cost of
+the full-copy form -- the number that grows with cell size and
+that the expiry of this form will be called on -- kept on the
+record from the first run. The stage stamps of `O_TimeStamps`
+(operations 8 overlap, 9 kinetic, 30 mass velocity, 10
+nuclear -- read from the `timeStampStart` calls at
+`integrals.F90:309/816/1259/1703`) are unchanged and remain
+the acceptance measure.
+
+### 32.7 Exactness
+
+Within a rank the serial arithmetic and the serial pair order
+are kept, so a one-rank run is BIT-IDENTICAL to the serial
+build of the same commit. Across ranks the reduce adds the
+partial matrices in rank order, which reassociates each
+element's sum of pair blocks -- but an element receives
+contributions from exactly ONE pair (the pair whose rows and
+columns it lies in; `saveCurrentPair` touches no other), so
+the reduce adds one nonzero to zeros and the multi-rank
+matrix is bit-identical to the one-rank matrix as well,
+before `ortho`. The expected floor is therefore ZERO on the
+integral datasets of these four stages, and the whole file
+follows unless the library's in-place reduction perturbs a
+value it should merely copy (it must not; a nonzero floor
+here is a defect, not a floor). This is stronger than PA5a's
+case, where every accumulator element sums over sites. The
+claim is tested, not assumed (check 3).
+
+### 32.8 Checks
+
+1. **Serial unchanged**: the serial build of this commit is
+   bit-identical (`h5maxdiff.py` at tolerance 0, eigenvectors
+   included) to the pre-change serial build on `bn_small_c`,
+   `bn_small_g` and `sio2_243_med_g`, energies and iteration
+   traces identical.
+2. **One rank is serial**: the MPI build at `mpirun -np 1` is
+   bit-identical to the MPI build's pre-change one-rank run on
+   the same decks (same build lineage, as PA3 established).
+3. **The zero floor**: np 2, 4 and 8 on `sio2_243_med_g` and
+   np 4 on `knbo3_333_med_c` (complex, four k-points) against
+   the same-build np1 file: the four stages' datasets
+   (`atomOverlap`, `atomKEOverlap`, `atomNPOverlap`, and
+   `atomMVOverlap` on a relativistic copy of `bn_small_c`)
+   bit-identical; the whole file at the floor PA5a left
+   (5.6e-9 on the 243 deck), which the reduce of 32.4 must not
+   raise; energies and traces identical.
+4. **The stamps fall**: `Overlap Integrals`, `Kinetic Energy
+   Integrals` and `Nuclear Potential Integrals` on
+   `sio2_243_med_g` at np 1/2/4/8, and the per-rank loop and
+   reduce lines of 32.6 logged, with the loop imbalance within
+   the row measurement's factor of 2 and the reduce seconds
+   recorded.
+5. **The large deck**: the three stamps on `sio2_1296_large_g`
+   at np8 against the serial baseline (overlap, kinetic and
+   nuclear together are the N-squared share DESIGN 9.8's third
+   ordering named), and the reduce seconds at 2.5 GB.
+6. **Restart**: a run killed after the overlap stage's
+   attribute is set and before the kinetic stage's, rerun at
+   np4: every rank takes the skip branch of the overlap stage
+   together (no hang, the verdict broadcast working), the
+   kinetic stage runs dealt, the file is identical to an
+   uninterrupted np4 run.
+7. **The relativistic stage**: `bn_small_c` with `rel = 1`,
+   np1 against serial (bit-identical) and np4 against np1, so
+   the mass-velocity stage is exercised rather than assumed.

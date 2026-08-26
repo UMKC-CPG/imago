@@ -8902,8 +8902,14 @@ is not carried only in conversation.
      PF7-pinned toolchain, serial baseline re-taken alongside.
      This is where the next ceiling is read, not assumed.
   6. The two-centre integral stages (overlap, kinetic, nuclear:
-     1746 s once per run at 1296 atoms) dealt by atom pair --
-     needs its own DESIGN section first. Independent of 2-4.
+     1746 s once per run at 1296 atoms) dealt by atom pair.
+     DESIGN 9.9 WRITTEN 2026-08-25 (one deal for the seven
+     pair-loop stages; SCF-path increment first, post-SCF run
+     shape as its own later step; full accumulators per rank
+     accepted for today's cells only, 9.4's form the
+     destination for 10,000-atom cells) and PSEUDOCODE 32
+     WRITTEN the same day; awaits review before coding.
+     Independent of 2-4.
   7. PSEUDOCODE 29, the k-point deal of the build -- ONLY if
      the accumulate half still shows on a multi-k deck after 2
      and 4. Its ceiling on today's medium deck is under 1 %.
