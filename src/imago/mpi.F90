@@ -67,7 +67,8 @@ module O_MPI
    !   28). Serial build: a no-op -- root's data IS the sum at
    !   width one.
    interface reduceSumMPI
-      module procedure reduceSumVector, reduceSumMatrix
+      module procedure reduceSumVector, reduceSumMatrix, &
+            & reduceSumComplexCube
    end interface reduceSumMPI
 
    ! The identity of this process within the parallel run. The values
@@ -582,6 +583,38 @@ subroutine reduceSumMatrix (buffer)
 #endif
 
 end subroutine reduceSumMatrix
+
+
+subroutine reduceSumComplexCube (buffer)
+
+   ! The complex rank-3 form of reduceSumVector; same contract.  It
+   !   serves the two-centre integral stages' accumulators
+   !   (PSEUDOCODE 32.2): the valence-valence, core-valence and
+   !   core-core matrices of the general build, one slab per k-point,
+   !   which every rank fills for its own atom pairs and which root
+   !   needs summed before it orthogonalizes and writes them.
+
+   implicit none
+
+   ! Define passed parameters.
+   complex (kind=double), dimension (:,:,:), intent (inout) :: buffer
+
+#ifdef IMAGO_MPI
+   complex (kind=double), dimension (1) :: unusedSink
+   if (mpiRank == 0) then
+      call MPI_Reduce (MPI_IN_PLACE, buffer, size (buffer),&
+            & MPI_DOUBLE_COMPLEX, MPI_SUM, 0, MPI_COMM_WORLD)
+   else
+      call MPI_Reduce (buffer, unusedSink, size (buffer),&
+            & MPI_DOUBLE_COMPLEX, MPI_SUM, 0, MPI_COMM_WORLD)
+   endif
+#else
+   ! Serial no-op; see bcastIntVecMPI.
+   associate (unused => buffer)
+   end associate
+#endif
+
+end subroutine reduceSumComplexCube
 
 
 subroutine gatherTimesMPI (myTimes, allTimes)

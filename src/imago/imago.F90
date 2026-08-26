@@ -392,29 +392,30 @@ subroutine setupSCF
 #endif
 
 
-   ! ROOT ONLY: these cheap integral stages (a few percent of a run,
-   !   ARCHITECTURE 6.8) write through the handles root holds from
-   !   initHDF5_SCF, so root computes them alone while the workers
-   !   wait for the term stage.
-   if (mpiRank == 0) then
+   ! EVERY RANK: the two-centre integral stages deal their atom-pair
+   !   loops across all ranks (DESIGN 9.9, PSEUDOCODE 32).  Each rank
+   !   walks its share of the pairs into its own copy of the matrices
+   !   and the copies are summed onto root inside the stage; only root
+   !   then orthogonalizes and writes through the handles it holds
+   !   from initHDF5_SCF.  A worker passes its unallocated handle
+   !   arrays, which the stages accept and never dereference.
 
-      ! Calculate the matrix elements of the overlap between all LCAO
-      !   basis fns.
-      call gaussOverlapOL(numComponents,fullCVDims,packedVVDims,&
-            & atomOverlap_did,atomOverlapCV_did,atomOverlap_aid)
+   ! Calculate the matrix elements of the overlap between all LCAO
+   !   basis fns.
+   call gaussOverlapOL(numComponents,fullCVDims,packedVVDims,&
+         & atomOverlap_did,atomOverlapCV_did,atomOverlap_aid)
 
-      ! Calculate the matrix elements of the kinetic energy between
-      !   all LCAO basis functions.
-      call gaussOverlapKE(packedVVDims,atomKEOverlap_did,&
-            & atomKEOverlap_aid)
+   ! Calculate the matrix elements of the kinetic energy between
+   !   all LCAO basis functions.
+   call gaussOverlapKE(packedVVDims,atomKEOverlap_did,&
+         & atomKEOverlap_aid)
 
-      ! Calculate the matrix elements of the mass velocity between
-      !   all LCAO basis functions if needed for the scalar
-      !   relativistic calculation.
-      if (rel == 1) then
-         call gaussOverlapMV(packedVVDims,atomMVOverlap_did,&
-               & atomMVOverlap_aid)
-      endif
+   ! Calculate the matrix elements of the mass velocity between
+   !   all LCAO basis functions if needed for the scalar
+   !   relativistic calculation.
+   if (rel == 1) then
+      call gaussOverlapMV(packedVVDims,atomMVOverlap_did,&
+            & atomMVOverlap_aid)
    endif
 
    ! The overlap stage leaves more than its file datasets behind: the
@@ -435,12 +436,10 @@ subroutine setupSCF
 
 
    ! Calculate the matrix elements of the overlap between all LCAO
-   !   wave functions and the nuclear potentials. ROOT ONLY, as the
-   !   stages above.
-   if (mpiRank == 0) then
-      call gaussOverlapNP(packedVVDims,atomNPOverlap_did,&
-            & atomNPOverlap_aid)
-   endif
+   !   wave functions and the nuclear potentials.  Every rank, dealt
+   !   by atom pair, as the stages above.
+   call gaussOverlapNP(packedVVDims,atomNPOverlap_did,&
+         & atomNPOverlap_aid)
 
 
    ! Create the alpha distance matrix with potential alpha factor

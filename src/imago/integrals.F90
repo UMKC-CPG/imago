@@ -190,13 +190,153 @@ end subroutine reallocateIntegralsPSCFGamma
 
 
 ! Standard two center overlap integral.
+! Deal this rank its share of the atom pairs (PSEUDOCODE 32.3).  The
+!   two-centre stages below walk every pair (i, j) with j >= i, row by
+!   row, adding each pair's block into the full accumulator matrices.
+!   Nothing is carried from one pair to the next, so any partition of
+!   the pairs across ranks is exact: each rank's partial matrices
+!   summed onto root are the serial matrices.  The pairs are numbered
+!   in the order the loops visit them -- row i holds the
+!   numAtomSites - i + 1 pairs (i, i..numAtomSites) -- and loadBalMPI
+!   deals a contiguous range of that numbering to each rank.  This
+!   routine converts the rank's range into loop bounds: the first and
+!   last row it owns and, within those two rows, the first and last
+!   column; the rows in between are whole.  At one rank the range is
+!   every pair and the bounds are (1, 1) to (numAtomSites,
+!   numAtomSites), which is the serial loop exactly.  The deal is by
+!   pair COUNT; DESIGN 9.9 records the row-cost measurement that says
+!   count balances the work within a factor of two, and the per-rank
+!   seconds every stage logs are what confirm it.
+!
+! A rank with more ranks than pairs receives an empty range (last
+!   before first); the bounds then make the outer loop or the inner
+!   loop empty and the rank contributes zeros to the sum.
+subroutine dealPairRange (iFirst, jFirst, iLast, jLast)
+
+   ! Import necessary modules.
+   use O_AtomicSites, only: numAtomSites
+   use O_MPI, only: loadBalMPI
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define passed parameters.
+   integer, intent(out) :: iFirst ! First row this rank walks.
+   integer, intent(out) :: jFirst ! First column within that first row.
+   integer, intent(out) :: iLast  ! Last row this rank walks.
+   integer, intent(out) :: jLast  ! Last column within that last row.
+
+   ! Define local variables.
+   integer :: numPairs    ! numAtomSites * (numAtomSites + 1) / 2
+   integer :: firstPair   ! This rank's range in the pair numbering.
+   integer :: lastPair
+   integer :: pairsBefore ! Pairs in the rows above the current row.
+   integer :: rowLength   ! Pairs in the current row.
+   integer :: i
+
+   numPairs = numAtomSites * (numAtomSites + 1) / 2
+   call loadBalMPI (numPairs, firstPair, lastPair)
+
+   ! Walk the rows once (numAtomSites steps, nothing against the loop
+   !   itself) to find the rows holding the first and the last pair.
+   pairsBefore = 0
+   iFirst = 0
+   jFirst = 0
+   iLast  = 0
+   jLast  = 0
+   do i = 1, numAtomSites
+      rowLength = numAtomSites - i + 1
+      if ((iFirst == 0) .and. (pairsBefore + rowLength >= firstPair)) then
+         iFirst = i
+         jFirst = i + (firstPair - pairsBefore - 1)
+      endif
+      if (pairsBefore + rowLength >= lastPair) then
+         iLast = i
+         jLast = i + (lastPair - pairsBefore - 1)
+         exit
+      endif
+      pairsBefore = pairsBefore + rowLength
+   enddo
+
+end subroutine dealPairRange
+
+
+! Combine the partial accumulators of a dealt two-centre stage onto
+!   root and log the per-rank costs (PSEUDOCODE 32.4 and 32.6).  Every
+!   rank calls this after its share of the pair loop: the three
+!   accumulator matrices are summed onto root in place (a no-op in the
+!   serial build), the reduce is timed, and root writes two lines to
+!   the log -- each rank's loop seconds, which are the balance record
+!   DESIGN 9.9 asks for, and each rank's reduce seconds, which are the
+!   price of every rank holding a full copy of the matrices (the form
+!   accepted for today's cell sizes and expected to be replaced; the
+!   number that decides when is kept on the record from the first
+!   run).  The core-valence accumulator is passed in because the
+!   overlap stage fills coreValeOL while the other three fill
+!   coreVale; the valence-valence and core-core accumulators are the
+!   module's own in every stage.
+subroutine reducePairStage (stageName, coreValeTarget, loopSeconds)
+
+   ! Import necessary modules.
+   use O_Kinds
+   use O_MPI, only: mpiRank, mpiSize, reduceSumMPI, gatherTimesMPI
+   use, intrinsic :: iso_fortran_env, only: int64
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define passed parameters.
+   character (len=*), intent(in) :: stageName ! For the log lines.
+#ifndef GAMMA
+   complex (kind=double), dimension (:,:,:), intent(inout) :: coreValeTarget
+#else
+   real    (kind=double), dimension (:,:),   intent(inout) :: coreValeTarget
+#endif
+   real (kind=double), intent(in) :: loopSeconds ! This rank's loop time.
+
+   ! Define local variables.
+   integer (kind=int64) :: ticksBefore, ticksAfter, ticksPerSecond
+   real (kind=double), dimension (2) :: mySeconds ! Loop, then reduce.
+   real (kind=double), allocatable, dimension (:,:) :: allSeconds
+
+   ! Sum the three accumulators onto root, timing the whole exchange.
+   call system_clock (ticksBefore, ticksPerSecond)
+#ifndef GAMMA
+   call reduceSumMPI (valeVale)
+   call reduceSumMPI (coreValeTarget)
+   call reduceSumMPI (coreCore)
+#else
+   call reduceSumMPI (valeValeGamma)
+   call reduceSumMPI (coreValeTarget)
+   call reduceSumMPI (coreCoreGamma)
+#endif
+   call system_clock (ticksAfter)
+
+   ! Gather every rank's two times onto root and log them.
+   mySeconds(1) = loopSeconds
+   mySeconds(2) = real (ticksAfter - ticksBefore, double) &
+         & / real (ticksPerSecond, double)
+   allocate (allSeconds (2, mpiSize))
+   call gatherTimesMPI (mySeconds, allSeconds)
+   if (mpiRank == 0) then
+      write (20,*) stageName, ' per-rank loop seconds:  ', allSeconds(1,:)
+      write (20,*) stageName, ' per-rank reduce seconds:', allSeconds(2,:)
+      call flush (20)
+   endif
+   deallocate (allSeconds)
+
+end subroutine reducePairStage
+
+
 subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
 
    ! Import necessary modules.
    use O_Kinds
    use O_TimeStamps
    use O_Constants, only: dim3
-   use O_KPoints, only: numKPoints
+#ifndef GAMMA
+   use O_KPoints, only: numKPoints ! Gamma build: no k-point slabs.
+#endif
    use O_GaussianRelations, only: alphaDist
    use O_AtomicSites, only: valeDim, coreDim, numAtomSites
    use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
@@ -205,6 +345,8 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
    use O_GaussianIntegrals, only: overlap2CIntg
    use O_Basis, only: initializeAtomSite
    use O_IntgSaving
+   use O_MPI, only: mpiRank, bcastIntVecMPI
+   use, intrinsic :: iso_fortran_env, only: int64
 #ifndef GAMMA
    use O_MatrixSubs, only: readMatrix
 #else
@@ -214,16 +356,31 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
    ! Make sure that there are not accidental variable declarations.
    implicit none
 
-   ! Define passed parameters.
+   ! Define passed parameters.  The HDF5 handles are declared
+   !   allocatable (PSEUDOCODE 32.2) because only root allocates them:
+   !   every rank calls this routine, and an unallocated worker copy is
+   !   a conforming actual argument for an allocatable dummy where it
+   !   would not be for an explicit-shape one.  Only root dereferences
+   !   them, at the attribute read below and in orthoOL.
    integer, intent(in) :: numComponents
    integer(hsize_t), dimension(2), intent(in) :: fullCVDims
    integer(hsize_t), dimension(2), intent(in) :: packedVVDims
-   integer(hid_t), dimension(numKPoints), intent(in) :: did
-   integer(hid_t), dimension(numComponents,numKPoints), intent(in) :: CVdid
+   integer(hid_t), allocatable, dimension(:), intent(in) :: did
+   integer(hid_t), allocatable, dimension(:,:), intent(in) :: CVdid
    integer(hid_t), intent(in) :: aid
 
    ! Define local variables for logging and loop control
    integer :: i,j,k,l,m ! Loop index variables
+
+   ! The dealt pair range of this rank and the loop clock (PSEUDOCODE
+   !   32.3, 32.6): the first and last row this rank walks, the first
+   !   and last column within those rows, the inner-loop bounds of the
+   !   current row, and the loop's wall time for the per-rank log.
+   integer :: iFirst, jFirst, iLast, jLast
+   integer :: jStart, jStop
+   integer (kind=int64) :: loopTicksBefore, loopTicksAfter, ticksPerSecond
+   real (kind=double) :: loopSeconds
+   integer, dimension (1) :: stageDoneVerdict ! Root's attribute read
    integer :: hdf5Status
    integer :: hdferr
    integer(hsize_t), dimension (1) :: attribIntDims ! Attribute dataspace dim
@@ -309,35 +466,50 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
    call timeStampStart(8)
 
    ! Determine if this calculation has already been completed by a previous
-   !   Imago execution.
+   !   Imago execution.  Only root holds the attribute handle
+   !   (PSEUDOCODE 32.2), so root reads the verdict and every rank
+   !   receives it: all ranks then take the same branch, and a finished
+   !   stage is skipped by everyone together.
    hdf5Status = 0
-   attribIntDims(1) = 1
-   call h5aread_f(aid,H5T_NATIVE_INTEGER,hdf5Status,attribIntDims,hdferr)
-   if (hdferr /= 0) stop 'Failed to read atom overlap status.'
+   if (mpiRank == 0) then
+      attribIntDims(1) = 1
+      call h5aread_f(aid,H5T_NATIVE_INTEGER,hdf5Status,attribIntDims,hdferr)
+      if (hdferr /= 0) stop 'Failed to read atom overlap status.'
+   endif
+   stageDoneVerdict(1) = hdf5Status
+   call bcastIntVecMPI (stageDoneVerdict)
+   hdf5Status = stageDoneVerdict(1)
    if (hdf5Status == 1) then
       write(20,*) "Two-center overlap already exists. Skipping."
       call timeStampEnd(8)
-      call h5aclose_f(aid,hdferr)
-      if (hdferr /= 0) stop 'Failed to close atom overlap status.'
+      ! The file work of the skip branch is root's: closing the
+      !   attribute and reading the core-valence overlap back.  The
+      !   workers receive that matrix by the broadcast that follows
+      !   this stage in setupSCF (PSEUDOCODE 25.1).
+      if (mpiRank == 0) then
+         call h5aclose_f(aid,hdferr)
+         if (hdferr /= 0) stop 'Failed to close atom overlap status.'
 
-      write(20,*) "Reading in overlap CV results."
+         write(20,*) "Reading in overlap CV results."
 #ifndef GAMMA
-      if (coreDim > 0) then
-         allocate(tempRealCoreVale(coreDim,valeDim))
-         allocate(tempImagCoreVale(coreDim,valeDim))
-         do i = 1, numKPoints
-            call readMatrix (CVdid(:,i),coreValeOL(:,:,i),tempRealCoreVale,&
-                  & tempImagCoreVale,fullCVDims,coreDim,valeDim)
-         enddo
-         deallocate(tempRealCoreVale)
-         deallocate(tempImagCoreVale)
-      endif
+         if (coreDim > 0) then
+            allocate(tempRealCoreVale(coreDim,valeDim))
+            allocate(tempImagCoreVale(coreDim,valeDim))
+            do i = 1, numKPoints
+               call readMatrix (CVdid(:,i),coreValeOL(:,:,i),&
+                     & tempRealCoreVale,tempImagCoreVale,fullCVDims,&
+                     & coreDim,valeDim)
+            enddo
+            deallocate(tempRealCoreVale)
+            deallocate(tempImagCoreVale)
+         endif
 #else
-      if (coreDim > 0) then
-         call readMatrixGamma (CVdid(1,1),coreValeOLGamma(:,:),fullCVDims,&
-               & coreDim,valeDim) 
-      endif
+         if (coreDim > 0) then
+            call readMatrixGamma (CVdid(1,1),coreValeOLGamma(:,:),&
+                  & fullCVDims,coreDim,valeDim)
+         endif
 #endif
+      endif
       return
    endif
 
@@ -367,8 +539,14 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
    coreCoreGamma   (:,:) = 0.0_double
 #endif
 
-   ! Begin atom-atom overlap loops.
-   do i = 1, numAtomSites
+   ! Take this rank's share of the atom pairs (PSEUDOCODE 32.3) and
+   !   start the loop clock.  At one rank the share is every pair and
+   !   the loops below are the serial loops exactly.
+   call dealPairRange (iFirst, jFirst, iLast, jLast)
+   call system_clock (loopTicksBefore, ticksPerSecond)
+
+   ! Begin atom-atom overlap loops over this rank's rows.
+   do i = iFirst, iLast
 
       ! Obtain local copies of key data from larger global data structures for
       !   the first looped atom.
@@ -377,8 +555,14 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
             & currentNumAlphas,currentlmIndex,currentlmAlphaIndex,&
             & currentPosition,currentAlphas,currentBasisFns)
 
-      ! Begin a loop over the other atoms in the system
-      do j = i, numAtomSites
+      ! Begin a loop over the other atoms in the system: the whole row
+      !   j = i .. numAtomSites, except that this rank's first and last
+      !   rows may begin or end part way along.
+      jStart = i
+      jStop  = numAtomSites
+      if (i == iFirst) jStart = jFirst
+      if (i == iLast)  jStop  = jLast
+      do j = jStart, jStop
 
          ! Obtain local copies of key data from larger global data structures
          !   for the second looped atom.
@@ -709,8 +893,25 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
    deallocate (currentPairGamma)
 #endif
 
-   ! Perform orthogonalization and save the results to disk.
-   call orthoOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
+   ! Stop the loop clock and combine every rank's partial matrices onto
+   !   root (PSEUDOCODE 32.4); the per-rank loop and reduce seconds go
+   !   to the log.  In the serial build the reduce is a no-op.
+   call system_clock (loopTicksAfter)
+   loopSeconds = real (loopTicksAfter - loopTicksBefore, double) &
+         & / real (ticksPerSecond, double)
+#ifndef GAMMA
+   call reducePairStage ('Overlap', coreValeOL, loopSeconds)
+#else
+   call reducePairStage ('Overlap', coreValeOLGamma, loopSeconds)
+#endif
+
+   ! Perform orthogonalization and save the results to disk.  Root
+   !   only: it holds the file handles and the summed matrices.  The
+   !   core-valence overlap stays allocated on every rank because the
+   !   term stage's orthogonalization needs it there (PSEUDOCODE 25.1).
+   if (mpiRank == 0) then
+      call orthoOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
+   endif
 
    ! Record the completion of this gaussian integration set.
    call timeStampEnd (8)
@@ -725,7 +926,9 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
    use O_Kinds
    use O_TimeStamps
    use O_Constants, only: dim3
-   use O_KPoints, only: numKPoints
+#ifndef GAMMA
+   use O_KPoints, only: numKPoints ! Gamma build: no k-point slabs.
+#endif
    use O_GaussianRelations, only: alphaDist
    use O_AtomicSites, only: valeDim, coreDim, numAtomSites
    use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
@@ -734,17 +937,29 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
    use O_GaussianIntegrals, only: kinetic2CIntg
    use O_Basis, only: initializeAtomSite
    use O_IntgSaving
+   use O_MPI, only: mpiRank, bcastIntVecMPI
+   use, intrinsic :: iso_fortran_env, only: int64
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
 
-   ! Define passed parameters.
+   ! Define passed parameters.  The dataset handles are allocatable
+   !   because only root allocates them (PSEUDOCODE 32.2; see the note
+   !   in gaussOverlapOL).
    integer(hsize_t), dimension(2), intent(in) :: packedVVDims
-   integer(hid_t), dimension(numKPoints), intent(in) :: did
+   integer(hid_t), allocatable, dimension(:), intent(in) :: did
    integer(hid_t), intent(in) :: aid
 
    ! Define local variables for logging and loop control
    integer :: i,j,k,l,m ! Loop index variables
+
+   ! The dealt pair range of this rank and the loop clock (PSEUDOCODE
+   !   32.3, 32.6); see gaussOverlapOL.
+   integer :: iFirst, jFirst, iLast, jLast
+   integer :: jStart, jStop
+   integer (kind=int64) :: loopTicksBefore, loopTicksAfter, ticksPerSecond
+   real (kind=double) :: loopSeconds
+   integer, dimension (1) :: stageDoneVerdict ! Root's attribute read
    integer :: hdf5Status
    integer :: hdferr
    integer(hsize_t), dimension (1) :: attribIntDims ! Attribute dataspace dim
@@ -817,16 +1032,25 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
 
    ! Determine if this calculation has already been completed by a previous
    !   Imago execution.
+   ! Root reads the completion attribute and every rank receives the
+   !   verdict (PSEUDOCODE 32.2; see gaussOverlapOL).
    hdf5Status = 0
-   attribIntDims(1) = 1
-   call h5aread_f(aid,H5T_NATIVE_INTEGER,hdf5Status,&
-         & attribIntDims,hdferr)
-   if (hdferr /= 0) stop 'Failed to read atom KE overlap status.'
+   if (mpiRank == 0) then
+      attribIntDims(1) = 1
+      call h5aread_f(aid,H5T_NATIVE_INTEGER,hdf5Status,&
+            & attribIntDims,hdferr)
+      if (hdferr /= 0) stop 'Failed to read atom KE overlap status.'
+   endif
+   stageDoneVerdict(1) = hdf5Status
+   call bcastIntVecMPI (stageDoneVerdict)
+   hdf5Status = stageDoneVerdict(1)
    if (hdf5Status == 1) then
       write(20,*) "Two-center KE overlap already exists. Skipping."
       call timeStampEnd(9)
-      call h5aclose_f(aid,hdferr)
-      if (hdferr /= 0) stop 'Failed to close atom KE overlap status.'
+      if (mpiRank == 0) then
+         call h5aclose_f(aid,hdferr)
+         if (hdferr /= 0) stop 'Failed to close atom KE overlap status.'
+      endif
       return
    endif
 
@@ -857,8 +1081,13 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
    coreCoreGamma (:,:) = 0.0_double
 #endif
 
-   ! Begin atom-atom overlap loops.
-   do i = 1, numAtomSites
+   ! Take this rank's share of the atom pairs (PSEUDOCODE 32.3) and
+   !   start the loop clock; see gaussOverlapOL.
+   call dealPairRange (iFirst, jFirst, iLast, jLast)
+   call system_clock (loopTicksBefore, ticksPerSecond)
+
+   ! Begin atom-atom overlap loops over this rank's rows.
+   do i = iFirst, iLast
 
       ! Obtain local copies of key data from larger global data structures for
       !   the first looped atom.
@@ -867,8 +1096,13 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
             & currentNumAlphas,currentlmIndex,currentlmAlphaIndex,&
             & currentPosition,currentAlphas,currentBasisFns)
 
-      ! Begin a loop over the other atoms in the system
-      do j = i, numAtomSites
+      ! Begin a loop over the other atoms in the system: the whole row
+      !   except in this rank's first and last rows (see gaussOverlapOL).
+      jStart = i
+      jStop  = numAtomSites
+      if (i == iFirst) jStart = jFirst
+      if (i == iLast)  jStop  = jLast
+      do j = jStart, jStop
 
          ! Obtain local copies of key data from larger global data structures
          !   for the second looped atom.
@@ -1150,11 +1384,32 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
    deallocate (currentPairGamma)
 #endif
 
+   ! Stop the loop clock and combine every rank's partial matrices onto
+   !   root (PSEUDOCODE 32.4); see gaussOverlapOL.
+   call system_clock (loopTicksAfter)
+   loopSeconds = real (loopTicksAfter - loopTicksBefore, double) &
+         & / real (ticksPerSecond, double)
+#ifndef GAMMA
+   call reducePairStage ('KineticEnergy', coreVale, loopSeconds)
+#else
+   call reducePairStage ('KineticEnergy', coreValeGamma, loopSeconds)
+#endif
+
    ! Perform orthogonalization and save the results to disk.  The 2 is an
    !   operation code signifying that a non-overlap orthogonalization should be
    !   done, and specifically that the result is for kinetic energy and that
-   !   it should be written to the KE portion of the hdf5 file.
-   call ortho(2,packedVVDims,did,aid)
+   !   it should be written to the KE portion of the hdf5 file.  Root
+   !   only; ortho frees the core-valence accumulator on its way out, so
+   !   a worker, which never enters it, frees its own copy here.
+   if (mpiRank == 0) then
+      call ortho(2,packedVVDims,did,aid)
+   else
+#ifndef GAMMA
+      deallocate (coreVale)
+#else
+      deallocate (coreValeGamma)
+#endif
+   endif
 
    ! Record the completion of this gaussian integration set.
    call timeStampEnd (9)
@@ -1169,7 +1424,9 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
    use O_Kinds
    use O_TimeStamps
    use O_Constants, only: dim3
-   use O_KPoints, only: numKPoints
+#ifndef GAMMA
+   use O_KPoints, only: numKPoints ! Gamma build: no k-point slabs.
+#endif
    use O_GaussianRelations, only: alphaDist
    use O_AtomicSites, only: valeDim, coreDim, numAtomSites
    use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
@@ -1178,17 +1435,29 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
    use O_GaussianIntegrals, only: massVel2CIntg
    use O_Basis, only: initializeAtomSite
    use O_IntgSaving
+   use O_MPI, only: mpiRank, bcastIntVecMPI
+   use, intrinsic :: iso_fortran_env, only: int64
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
 
-   ! Define passed parameters.
+   ! Define passed parameters.  The dataset handles are allocatable
+   !   because only root allocates them (PSEUDOCODE 32.2; see the note
+   !   in gaussOverlapOL).
    integer(hsize_t), dimension(2), intent(in) :: packedVVDims
-   integer(hid_t), dimension(numKPoints), intent(in) :: did
+   integer(hid_t), allocatable, dimension(:), intent(in) :: did
    integer(hid_t), intent(in) :: aid
 
    ! Define local variables for logging and loop control
    integer :: i,j,k,l,m ! Loop index variables
+
+   ! The dealt pair range of this rank and the loop clock (PSEUDOCODE
+   !   32.3, 32.6); see gaussOverlapOL.
+   integer :: iFirst, jFirst, iLast, jLast
+   integer :: jStart, jStop
+   integer (kind=int64) :: loopTicksBefore, loopTicksAfter, ticksPerSecond
+   real (kind=double) :: loopSeconds
+   integer, dimension (1) :: stageDoneVerdict ! Root's attribute read
    integer :: hdf5Status
    integer :: hdferr
    integer(hsize_t), dimension (1) :: attribIntDims ! Attribute dataspace dim
@@ -1260,16 +1529,25 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
 
    ! Determine if this calculation has already been completed by a previous
    !   Imago execution.
+   ! Root reads the completion attribute and every rank receives the
+   !   verdict (PSEUDOCODE 32.2; see gaussOverlapOL).
    hdf5Status = 0
-   attribIntDims(1) = 1
-   call h5aread_f(aid,H5T_NATIVE_INTEGER,hdf5Status,&
-         & attribIntDims,hdferr)
-   if (hdferr /= 0) stop 'Failed to read atom MV overlap status.'
+   if (mpiRank == 0) then
+      attribIntDims(1) = 1
+      call h5aread_f(aid,H5T_NATIVE_INTEGER,hdf5Status,&
+            & attribIntDims,hdferr)
+      if (hdferr /= 0) stop 'Failed to read atom MV overlap status.'
+   endif
+   stageDoneVerdict(1) = hdf5Status
+   call bcastIntVecMPI (stageDoneVerdict)
+   hdf5Status = stageDoneVerdict(1)
    if (hdf5Status == 1) then
       write(20,*) "Two-center MV overlap already exists. Skipping."
       call timeStampEnd(30)
-      call h5aclose_f(aid,hdferr)
-      if (hdferr /= 0) stop 'Failed to close atom MV overlap status.'
+      if (mpiRank == 0) then
+         call h5aclose_f(aid,hdferr)
+         if (hdferr /= 0) stop 'Failed to close atom MV overlap status.'
+      endif
       return
    endif
 
@@ -1300,8 +1578,13 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
    coreCoreGamma (:,:) = 0.0_double
 #endif
 
-   ! Begin atom-atom overlap loops.
-   do i = 1, numAtomSites
+   ! Take this rank's share of the atom pairs (PSEUDOCODE 32.3) and
+   !   start the loop clock; see gaussOverlapOL.
+   call dealPairRange (iFirst, jFirst, iLast, jLast)
+   call system_clock (loopTicksBefore, ticksPerSecond)
+
+   ! Begin atom-atom overlap loops over this rank's rows.
+   do i = iFirst, iLast
 
       ! Obtain local copies of key data from larger global data structures for
       !   the first looped atom.
@@ -1310,8 +1593,13 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
             & currentNumAlphas,currentlmIndex,currentlmAlphaIndex,&
             & currentPosition,currentAlphas,currentBasisFns)
 
-      ! Begin a loop over the other atoms in the system
-      do j = i, numAtomSites
+      ! Begin a loop over the other atoms in the system: the whole row
+      !   except in this rank's first and last rows (see gaussOverlapOL).
+      jStart = i
+      jStop  = numAtomSites
+      if (i == iFirst) jStart = jFirst
+      if (i == iLast)  jStop  = jLast
+      do j = jStart, jStop
 
          ! Obtain local copies of key data from larger global data structures
          !   for the second looped atom.
@@ -1599,11 +1887,32 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
    deallocate (currentPairGamma)
 #endif
 
+   ! Stop the loop clock and combine every rank's partial matrices onto
+   !   root (PSEUDOCODE 32.4); see gaussOverlapOL.
+   call system_clock (loopTicksAfter)
+   loopSeconds = real (loopTicksAfter - loopTicksBefore, double) &
+         & / real (ticksPerSecond, double)
+#ifndef GAMMA
+   call reducePairStage ('MassVelocity', coreVale, loopSeconds)
+#else
+   call reducePairStage ('MassVelocity', coreValeGamma, loopSeconds)
+#endif
+
    ! Perform orthogonalization and save the results to disk.  The 5 is an
    !   operation code signifying that a non-overlap orthogonalization should be
    !   done, and specifically that the result is for mass velocity and that
-   !   it should be written to the MV portion of the hdf5 file.
-   call ortho(5,packedVVDims,did,aid)
+   !   it should be written to the MV portion of the hdf5 file.  Root
+   !   only; a worker frees the core-valence accumulator itself (see
+   !   gaussOverlapKE).
+   if (mpiRank == 0) then
+      call ortho(5,packedVVDims,did,aid)
+   else
+#ifndef GAMMA
+      deallocate (coreVale)
+#else
+      deallocate (coreValeGamma)
+#endif
+   endif
 
    ! Record the completion of this gaussian integration set.
    call timeStampEnd (30)
@@ -1618,7 +1927,9 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
    use O_Kinds
    use O_TimeStamps
    use O_Constants, only: dim3
-   use O_KPoints, only: numKPoints
+#ifndef GAMMA
+   use O_KPoints, only: numKPoints ! Gamma build: no k-point slabs.
+#endif
    use O_GaussianRelations, only: alphaDist
    use O_AtomicSites, only: valeDim, coreDim, numAtomSites
    use O_AtomicTypes, only: maxNumAtomAlphas, maxNumStates
@@ -1626,17 +1937,29 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
          & findLatticeVector
    use O_Basis, only: initializeAtomSite
    use O_IntgSaving
+   use O_MPI, only: mpiRank, bcastIntVecMPI
+   use, intrinsic :: iso_fortran_env, only: int64
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
 
-   ! Define passed parameters.
+   ! Define passed parameters.  The dataset handles are allocatable
+   !   because only root allocates them (PSEUDOCODE 32.2; see the note
+   !   in gaussOverlapOL).
    integer(hsize_t), dimension(2), intent(in) :: packedVVDims
-   integer(hid_t), dimension(numKPoints), intent(in) :: did
+   integer(hid_t), allocatable, dimension(:), intent(in) :: did
    integer(hid_t), intent(in) :: aid
 
    ! Define local variables for logging and loop control
    integer :: i,j,k,l,m ! Loop index variables
+
+   ! The dealt pair range of this rank and the loop clock (PSEUDOCODE
+   !   32.3, 32.6); see gaussOverlapOL.
+   integer :: iFirst, jFirst, iLast, jLast
+   integer :: jStart, jStop
+   integer (kind=int64) :: loopTicksBefore, loopTicksAfter, ticksPerSecond
+   real (kind=double) :: loopSeconds
+   integer, dimension (1) :: stageDoneVerdict ! Root's attribute read
    integer :: hdf5Status
    integer :: hdferr
    integer(hsize_t), dimension (1) :: attribIntDims ! Attribute dataspace dim
@@ -1704,16 +2027,25 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
 
    ! Determine if this calculation has already been completed by a previous
    !   Imago execution.
+   ! Root reads the completion attribute and every rank receives the
+   !   verdict (PSEUDOCODE 32.2; see gaussOverlapOL).
    hdf5Status = 0
-   attribIntDims(1) = 1
-   call h5aread_f(aid,H5T_NATIVE_INTEGER,hdf5Status,&
-         & attribIntDims,hdferr)
-   if (hdferr /= 0) stop 'Failed to read atom nuclear overlap status.'
+   if (mpiRank == 0) then
+      attribIntDims(1) = 1
+      call h5aread_f(aid,H5T_NATIVE_INTEGER,hdf5Status,&
+            & attribIntDims,hdferr)
+      if (hdferr /= 0) stop 'Failed to read atom nuclear overlap status.'
+   endif
+   stageDoneVerdict(1) = hdf5Status
+   call bcastIntVecMPI (stageDoneVerdict)
+   hdf5Status = stageDoneVerdict(1)
    if (hdf5Status == 1) then
       write(20,*) "Three-center nuclear overlap already exists. Skipping."
       call timeStampEnd(10)
-      call h5aclose_f(aid,hdferr)
-      if (hdferr /= 0) stop 'Failed to close atom Nuc overlap status.'
+      if (mpiRank == 0) then
+         call h5aclose_f(aid,hdferr)
+         if (hdferr /= 0) stop 'Failed to close atom Nuc overlap status.'
+      endif
       return
    endif
 
@@ -1744,8 +2076,13 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
    coreCoreGamma (:,:) = 0.0_double
 #endif
 
-   ! Begin atom-atom overlap loops.
-   do i = 1, numAtomSites
+   ! Take this rank's share of the atom pairs (PSEUDOCODE 32.3) and
+   !   start the loop clock; see gaussOverlapOL.
+   call dealPairRange (iFirst, jFirst, iLast, jLast)
+   call system_clock (loopTicksBefore, ticksPerSecond)
+
+   ! Begin atom-atom overlap loops over this rank's rows.
+   do i = iFirst, iLast
 
       ! Obtain local copies of key data from larger global data structures for
       !   the first looped atom.
@@ -1754,8 +2091,13 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
             & currentNumAlphas,currentlmIndex,currentlmAlphaIndex,&
             & currentPosition,currentAlphas,currentBasisFns)
 
-      ! Begin a loop over the other atoms in the system
-      do j = i, numAtomSites
+      ! Begin a loop over the other atoms in the system: the whole row
+      !   except in this rank's first and last rows (see gaussOverlapOL).
+      jStart = i
+      jStop  = numAtomSites
+      if (i == iFirst) jStart = jFirst
+      if (i == iLast)  jStop  = jLast
+      do j = jStart, jStop
 
          ! Obtain local copies of key data from larger global data structures
          !   for the second looped atom.
@@ -2024,11 +2366,32 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
    deallocate (currentPairGamma)
 #endif
 
+   ! Stop the loop clock and combine every rank's partial matrices onto
+   !   root (PSEUDOCODE 32.4); see gaussOverlapOL.
+   call system_clock (loopTicksAfter)
+   loopSeconds = real (loopTicksAfter - loopTicksBefore, double) &
+         & / real (ticksPerSecond, double)
+#ifndef GAMMA
+   call reducePairStage ('NuclearPotential', coreVale, loopSeconds)
+#else
+   call reducePairStage ('NuclearPotential', coreValeGamma, loopSeconds)
+#endif
+
    ! Perform orthogonalization and save the results to disk.  The 3 is an
    !   operation code signifying that a non-overlap orthogonalization should be
    !   done, and specifically that the result is for the nuclear potential and
-   !   that it should be written to the NP portion of the hdf5 file.
-   call ortho (3,packedVVDims,did,aid)
+   !   that it should be written to the NP portion of the hdf5 file.  Root
+   !   only; a worker frees the core-valence accumulator itself (see
+   !   gaussOverlapKE).
+   if (mpiRank == 0) then
+      call ortho (3,packedVVDims,did,aid)
+   else
+#ifndef GAMMA
+      deallocate (coreVale)
+#else
+      deallocate (coreValeGamma)
+#endif
+   endif
 
    ! Record the completion of this gaussian integration set.
    call timeStampEnd (10)
