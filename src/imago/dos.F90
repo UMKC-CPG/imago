@@ -302,6 +302,11 @@ subroutine computeDOS(inSCF)
    ! The pdosAccum array and the waveFnSqrd/overlap arrays are only needed for
    !   the Gaussian path. The LAT path handles its own allocations inside
    !   computeProjections_LAT.
+   ! The eigenvector array is ONE slab on the post-SCF path: the spins
+   !   are processed one at a time and the reader delivers each spin's
+   !   vectors to slab 1 on request (slab = 1 at the read).  On the SCF
+   !   path the solver's own spin-slab array is still allocated and the
+   !   reader delivers into its slab 1 the same way (DESIGN 2.8).
    if (kPointIntgCode /= 1) then
       if     (detailCodePDOS == 0) then
          allocate (pdosAccum (valeDim))
@@ -651,13 +656,16 @@ subroutine computeDOS(inSCF)
          endif
 
          ! Determine if we are doing the DOS in a post-SCF calculation, or
-         !   within an SCF calculation. 
+         !   within an SCF calculation.  Either way the eigenvectors of
+         !   this spin are delivered to slab 1 (slab = 1): this routine
+         !   processes the spins one at a time and holds a single slab,
+         !   and it reads slab 1 below (DESIGN 2.8, PSEUDOCODE 33).
          if (inSCF == 1) then
             ! Read necessary data from SCF (setup,main) data structures.
-            call readDataSCF(h,i,numStates,1) ! 1 = Overlap matrixCode
+            call readDataSCF(h,i,numStates,1,slab=1) ! 1 = Overlap matrixCode
          else
             ! Read necessary data from post SCF (intg,band) data structures.
-            call readDataPSCF(h,i,numStates,1) ! 1 = Overlap matrixCode
+            call readDataPSCF(h,i,numStates,1,slab=1) ! 1 = Overlap matrixCode
          endif
 
 
@@ -1675,7 +1683,9 @@ subroutine computeProjections_LAT(inSCF, spinIdx, &
    allocate (projArr(cumDOSTotal, numSt, numKP))
    projArr(:,:,:) = 0.0_double
 
-   ! Allocate work arrays for the Mulliken product.
+   ! Allocate work arrays for the Mulliken product.  The eigenvector
+   !   array is one slab: this pass runs for one spin and the reader
+   !   delivers that spin's vectors to slab 1 on request (DESIGN 2.8).
 #ifndef GAMMA
    allocate (waveFnSqrd(vDim))
    allocate (valeValeOL(vDim, vDim))
@@ -1695,10 +1705,13 @@ subroutine computeProjections_LAT(inSCF, spinIdx, &
    do i = 1, numKP
 
       ! Read eigenvectors + overlap for this IBZ kpoint and spin orientation.
+      !   The eigenvectors are delivered to slab 1 (slab = 1): this pass
+      !   holds a single slab and reads slab 1 below (DESIGN 2.8,
+      !   PSEUDOCODE 33).
       if (inSCF == 1) then
-         call readDataSCF(spinIdx, i, numSt, 1)
+         call readDataSCF(spinIdx, i, numSt, 1, slab=1)
       else
-         call readDataPSCF(spinIdx, i, numSt, 1)
+         call readDataPSCF(spinIdx, i, numSt, 1, slab=1)
       endif
 
       do j = 1, numSt

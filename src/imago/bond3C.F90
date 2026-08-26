@@ -151,6 +151,9 @@ subroutine computeBond3C(inSCF)
    allocate (numOrbIndex     (numAtomTypes + 1))
    allocate (bondIndex       (valeDim))
    allocate (numAtomStates   (numAtomSites))
+   ! The eigenvector array is ONE slab: the spins are processed one at
+   !   a time and the reader delivers each spin's vectors to slab 1 on
+   !   request (DESIGN 2.8).
 #ifndef GAMMA
    allocate (waveFnSqrd (maxNumValeStates))
    if (inSCF == 0) then
@@ -439,12 +442,16 @@ subroutine computeBond3C(inSCF)
 
          ! Determine if we are doing bond+Q* in a post-SCF calculation, or
          !   within an SCF calculation.
+         !   The eigenvectors of this spin are delivered to slab 1
+         !   (slab = 1): this routine processes the spins one at a time,
+         !   holds a single slab, and reads slab 1 below (DESIGN 2.8,
+         !   PSEUDOCODE 33).
          if (inSCF == 1) then
             ! Read necessary data from SCF (setup,main) data structures.
-            call readDataSCF(h,i,numStates,1) ! 1 = Overlap matrixCode
+            call readDataSCF(h,i,numStates,1,slab=1) ! 1 = Overlap matrixCode
          else
             ! Read necessary data from post SCF (intg,band) data structures.
-            call readDataPSCF(h,i,numStates,1) ! 1 = Overlap matrixCode
+            call readDataPSCF(h,i,numStates,1,slab=1) ! 1 = Overlap matrixCode
          endif
 
          ! Begin collecting the three center bond order.

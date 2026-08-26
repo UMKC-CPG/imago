@@ -147,6 +147,9 @@ subroutine computeBond (inSCF)
    allocate (numOrbIndex      (numAtomSites + 1)) ! Store Q for all atoms+orb
    allocate (chargeIndex      (valeDim))
    allocate (numAtomBasisFns  (numAtomSites))
+   ! The eigenvector array is ONE slab: the spins are processed one at
+   !   a time and the reader delivers each spin's vectors to slab 1 on
+   !   request (DESIGN 2.8).
 #ifndef GAMMA
    allocate (waveFnSqrd (valeDim))
    allocate (valeValeOL (valeDim,valeDim))
@@ -287,12 +290,16 @@ subroutine computeBond (inSCF)
          ! Depending on whether we are doing bondorder+Q* in a post-SCF
          !   calculation, or within an SCF calculation we will access the
          !   wave function and overlap from different sources.
+         !   The eigenvectors of this spin are delivered to slab 1
+         !   (slab = 1): this routine processes the spins one at a time,
+         !   holds a single slab, and reads slab 1 below (DESIGN 2.8,
+         !   PSEUDOCODE 33).
          if (inSCF == 1) then
             ! Read necessary data from SCF (setup,main) data structures.
-            call readDataSCF(h,i,numStates,1) ! 1 = Overlap matrixCode
+            call readDataSCF(h,i,numStates,1,slab=1) ! 1 = Overlap matrixCode
          else
             ! Read necessary data from post SCF (intg,band) data structures.
-            call readDataPSCF(h,i,numStates,1) ! 1 = Overlap matrixCode
+            call readDataPSCF(h,i,numStates,1,slab=1) ! 1 = Overlap matrixCode
          endif
 
          ! Zero the IBZ-kpoint projection buffers before

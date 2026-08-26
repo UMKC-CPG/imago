@@ -925,7 +925,9 @@ subroutine computeTransitions(inSCF,doOPTC)
    call timeStampStart (23)
 
    ! Allocate the matrix to hold the wave function and momentum matrix
-   !   elements and initialize them.
+   !   elements and initialize them.  The wave function array is ONE
+   !   slab: the spins are processed one at a time and the reader
+   !   delivers each spin's vectors to slab 1 on request (DESIGN 2.8).
 #ifndef GAMMA
    if (inSCF == 0) then
       allocate (valeVale (valeDim,numStates,1))
@@ -1029,19 +1031,23 @@ subroutine computeTransitions(inSCF,doOPTC)
          ! Determine if we are doing the OPTC in a post-SCF calculation, or
          !   within an SCF calculation. Generally, we will not need to read in
          !   the energy eigenvalues here because we already did it.
+         !   The eigenvectors of this spin are delivered to slab 1
+         !   (slab = 1): this routine processes the spins one at a time,
+         !   holds a single slab, and every use below reads slab 1
+         !   (DESIGN 2.8, PSEUDOCODE 33).
          if (inSCF == 1) then
             ! Read necessary data from SCF (setup,main) data structures.
             if (doOPTC /= 2) then ! Not doing a PACS calculation
-               call readDataSCF(h,i,numStates,2) ! 2 = regular MME matrixCode
+               call readDataSCF(h,i,numStates,2,slab=1) ! 2 = regular MME
             else
-               call readDataSCF(h,i,numStates,3) ! 3 = PACS MME matrixCode
+               call readDataSCF(h,i,numStates,3,slab=1) ! 3 = PACS MME
             endif
          else
             ! Read necessary data from post SCF data structures.
             if (doOPTC /= 2) then ! Not doing a PACS calculation
-               call readDataPSCF(h,i,numStates,2) ! 2 = regular MME matrixCode
+               call readDataPSCF(h,i,numStates,2,slab=1) ! 2 = regular MME
             else
-               call readDataPSCF(h,i,numStates,3) ! 3 = PACS MME matrixCode
+               call readDataPSCF(h,i,numStates,3,slab=1) ! 3 = PACS MME
             endif
          endif
 

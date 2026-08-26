@@ -1459,7 +1459,23 @@ end subroutine shiftEnergyEigenValues
 
 
 
-subroutine readDataSCF(h,i,numStates,matrixCode)
+subroutine readDataSCF(h,i,numStates,matrixCode,slab)
+
+   ! Deliver one k-point's eigenvectors, and the integral matrices the
+   !   caller names by matrixCode, from the SCF data structures.  The
+   !   contract for the eigenvectors (DESIGN 2.8, PSEUDOCODE 33): after
+   !   this call the eigenvectors of spin h at k-point i occupy slab
+   !   `slab` of valeVale (Gamma build: valeValeGamma), whatever the
+   !   build and whichever routine allocated that array.  The slab is
+   !   the CALLER's to name because only the caller knows the shape it
+   !   allocated: a consumer that holds one slab per spin (the valence
+   !   density, dimo, field, mtop) omits the argument and receives slab
+   !   h; a consumer that processes the spins one at a time and holds a
+   !   single slab (the DOS, bond order and optical programs) passes
+   !   slab = 1.  Before this argument existed those consumers read
+   !   slab 1 while the eigenvectors of spin two were delivered to slab
+   !   2, so every spin-polarized result for spin two was wrong or an
+   !   out-of-bounds write (DEBUG.md BUG-028).
 
    ! Import necessary data modules.
    use O_AtomicSites, only: valeDim
@@ -1478,20 +1494,19 @@ subroutine readDataSCF(h,i,numStates,matrixCode)
    use O_MatrixSubs, only: readPackedMatrix,unpackMatrixGamma
 #endif
 
-   ! Define passed parameters. The h and numStates arguments feed only
-   !   the matrixCode 0 eigenvector re-read below, which exists in the
-   !   multi-k build alone because the gamma build keeps its single
-   !   k-point's eigenvectors resident in memory. The gamma compile
-   !   therefore reports both arguments unused. They are kept anyway:
-   !   this routine is shared by both builds, and its argument list
-   !   deliberately mirrors readDataPSCF, which needs h and numStates
-   !   in both builds. That warning is accepted.
+   ! Define passed parameters.  In the multi-k build h and numStates
+   !   drive the eigenvector re-read from the file; in the gamma build
+   !   the single k-point's eigenvectors stay resident in the solver's
+   !   array, and the two arguments drive only the copy that delivers
+   !   them to the requested slab.
    integer, intent(in) :: h ! Spin variable.
    integer, intent(in) :: i ! KPoint variable
    integer, intent(in) :: numStates
    integer, intent(in) :: matrixCode
+   integer, intent(in), optional :: slab ! Destination slab; default h.
 
    ! Define local variables.
+   integer :: destSlab ! Where the eigenvectors of spin h are delivered.
    integer :: dim1
    integer :: j ! Loop index (usually xyz).
    real (kind=double), allocatable, dimension (:,:) :: packedValeVale
@@ -1578,17 +1593,22 @@ subroutine readDataSCF(h,i,numStates,matrixCode)
 
    endif
 
+   ! The destination slab for the eigenvectors: the caller's choice, or
+   !   the spin index when the caller holds one slab per spin.
+   destSlab = h
+   if (present(slab)) destSlab = slab
+
 #ifndef GAMMA
    ! Read the wave functions for this kpoint from the datasets into
-   !   the valeVale matrix.  If numKPoints==1, the wave functions should
-   !   already be in the valeVale(1:valeDim,1:numStates) matrix.
+   !   the requested slab of the valeVale matrix.
 !   if (numKPoints > 1) then
 
       ! Allocate space to read the wave functions.
       allocate (tempRealValeVale (valeDim,numStates))
       allocate (tempImagValeVale (valeDim,numStates))
 
-      call readMatrix(eigenVectors_did(:,i,h),valeVale(:,:numStates,h),&
+      call readMatrix(eigenVectors_did(:,i,h),&
+            & valeVale(:,:numStates,destSlab),&
             & tempRealValeVale(:,:),tempImagValeVale(:,:),&
             & valeStates,valeDim,numStates)
 
@@ -1597,13 +1617,30 @@ subroutine readDataSCF(h,i,numStates,matrixCode)
       deallocate (tempImagValeVale)
 !   endif
 
+#else
+   ! The gamma build never writes its single k-point's eigenvectors to
+   !   the file during the SCF: they stay in slab h of the solver's
+   !   valeValeGamma(valeDim,valeDim,spin) from the last solve.  To
+   !   deliver them to another slab is therefore a copy, not a read.
+   !   It is a valeDim by numStates copy, once per spin per consumer,
+   !   and it happens only for a one-slab consumer on spin two.
+   if (destSlab /= h) then
+      valeValeGamma(:,:numStates,destSlab) = valeValeGamma(:,:numStates,h)
+   endif
 #endif
 
 end subroutine readDataSCF
 
 
 
-subroutine readDataPSCF(h,i,numStates,matrixCode)
+subroutine readDataPSCF(h,i,numStates,matrixCode,slab)
+
+   ! The post-SCF twin of readDataSCF, with the same eigenvector
+   !   contract (DESIGN 2.8, PSEUDOCODE 33): the eigenvectors of spin h
+   !   at k-point i are delivered to slab `slab` of valeVale (Gamma
+   !   build: valeValeGamma), default slab h.  See readDataSCF for why
+   !   the caller names the slab.  Here both builds read the vectors
+   !   from the post-SCF file, so the slab is simply the read target.
 
    ! Use necessary modules.
 !   use O_KPoints, only: numKPoints
@@ -1629,8 +1666,10 @@ subroutine readDataPSCF(h,i,numStates,matrixCode)
    integer, intent(in) :: i ! KPoint variable
    integer, intent(in) :: numStates
    integer, intent(in) :: matrixCode
+   integer, intent(in), optional :: slab ! Destination slab; default h.
 
    ! Define local variables.
+   integer :: destSlab ! Where the eigenvectors of spin h are delivered.
    integer :: dim1
    integer :: j ! Loop index (usually xyz).
    real (kind=double), allocatable, dimension (:,:) :: packedValeVale
@@ -1638,6 +1677,11 @@ subroutine readDataPSCF(h,i,numStates,matrixCode)
    real (kind=double), allocatable, dimension (:,:) :: tempRealValeVale
    real (kind=double), allocatable, dimension (:,:) :: tempImagValeVale
 #endif
+
+   ! The destination slab for the eigenvectors: the caller's choice, or
+   !   the spin index when the caller holds one slab per spin.
+   destSlab = h
+   if (present(slab)) destSlab = slab
 
    ! Initialize the dimension of the packed matrices to include two components
    !   (real,imaginary) or just a real component.
@@ -1731,8 +1775,10 @@ subroutine readDataPSCF(h,i,numStates,matrixCode)
       allocate (tempRealValeVale (valeDim,numStates))
       allocate (tempImagValeVale (valeDim,numStates))
 
-      ! Read the complex wave function from the datasets.
-      call readMatrix(eigenVectorsPSCF_did(:,i,h),valeVale(:,:numStates,h),&
+      ! Read the complex wave function from the datasets into the
+      !   requested slab.
+      call readMatrix(eigenVectorsPSCF_did(:,i,h),&
+         & valeVale(:,:numStates,destSlab),&
          & tempRealValeVale(:,:),tempImagValeVale(:,:),&
          & valeStatesPSCF,valeDim,numStates)
 
@@ -1741,9 +1787,11 @@ subroutine readDataPSCF(h,i,numStates,matrixCode)
       deallocate (tempImagValeVale)
 !   endif
 #else
-   ! Read the real wave function from the datasets.
+   ! Read the real wave function from the datasets into the requested
+   !   slab.
    call readMatrixGamma(eigenVectorsPSCF_did(1,i,h),&
-         & valeValeGamma(:,:numStates,h),valeStatesPSCF,valeDim,numStates)
+         & valeValeGamma(:,:numStates,destSlab),valeStatesPSCF,valeDim,&
+         & numStates)
 #endif
 
 end subroutine readDataPSCF
