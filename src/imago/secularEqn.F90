@@ -812,15 +812,16 @@ subroutine secularEqnPSCF(spinDirection,numStates,numComponents,ol_did,&
    dim1 = 1
 #endif
 
-   ! Only allocate for first spin to prevent double allocation because we do
-   !   spin sequentially. All these arrays are deallocated !  . These arrays
-   !   will be deallocated in the makeValenceRho subroutine to accomodate the
-   !   common case of one kpoint SCF calculations where it is not necessary
-   !   (or efficient) to write the energy eigen values and wave function to
-   !   disk with each iteration.  These matrices can simply be kept in memory
-   !   and used directly when needed in makeValenceRho.  Note that only 1
-   !   kpoint is needed at a time, that is the meaning of the "1" in the
-   !   valeVale and valeValeOL allocation statements.
+   ! These three arrays span all spins in their last dimension, so
+   !   they are allocated ONCE, on the first spin, and each spin fills
+   !   its own slab as bandPSCF calls this routine per spin.  The
+   !   eigenvalues stay allocated after the loop because the DOS reads
+   !   them; the eigenvector arrays are freed at the end of this
+   !   routine -- but only on the LAST spin, so that the second spin
+   !   still finds them allocated (DEBUG.md BUG-030).  The guard was
+   !   copied from secularEqnSCF, whose arrays live on until
+   !   makeValenceRho; the post-SCF path has no makeValenceRho, so it
+   !   frees them itself and the free must match this allocation.
    if (spinDirection == 1) then
       allocate(energyEigenValues (numStates,numKPoints,spin))
 #ifndef GAMMA
@@ -1025,15 +1026,19 @@ subroutine secularEqnPSCF(spinDirection,numStates,numComponents,ol_did,&
       if (hdferr /= 0) stop 'Failed to close eigenvector attribute PSCF.'
    enddo ! Loop i over kpoints.
 
-   ! Deallocate unnecessary arrays and matrices.
+   ! Deallocate unnecessary arrays and matrices.  The overlap work
+   !   array is allocated and freed on every call.  The eigenvector
+   !   array spans all spins and is allocated on the first spin, so it
+   !   is freed only on the LAST spin -- otherwise the second spin's
+   !   call would dereference a freed array (DEBUG.md BUG-030).
    deallocate (packedValeVale)
    deallocate (tempPackedValeVale)
 #ifndef GAMMA
-   deallocate(valeVale)
    deallocate(valeValeOL)
+   if (spinDirection == spin) deallocate(valeVale)
 #else
-   deallocate(valeValeGamma)
    deallocate(valeValeOLGamma)
+   if (spinDirection == spin) deallocate(valeValeGamma)
 #endif
 
    ! Record the date and time that we finish.

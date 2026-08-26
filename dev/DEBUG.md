@@ -2953,6 +2953,51 @@ Ordered by severity (S1 first).
             aborted here, runs through the post-SCF Hamiltonian
             stage after the fix.
 
+### BUG-030 -- secularEqnPSCF allocates the eigenvector array on
+### spin one but frees it on every call, so spin two dereferences
+### an unallocated array
+- File:     `src/imago/secularEqn.F90:824` (the
+            `spinDirection == 1` allocate guard) and `:1032`
+            (the every-call deallocate), in `secularEqnPSCF`,
+            called per spin from `bandPSCF` (`imago.F90:1023`)
+- Variant:  [BOTH]
+- Category: ALLOC
+- Severity: S2 -- every spin-polarized POST-SCF calculation
+            (`-dos`, `-bond`, `-optc`, `-sybd`) segfaults in the
+            band solve; surfaced only now, because BUG-029 was
+            what let a spin-polarized post-SCF run reach the band
+            solve for the first time.
+- Status:   confirmed 2026-08-26 (SIGSEGV at
+            `secularEqn.F90:871` on the second spin of a magnetic
+            O2 `-dos`, backtrace through `bandPSCF`); fixed the
+            same day.
+- Evidence: `valeVale` / `valeValeGamma` (and
+            `energyEigenValues`) are allocated only under
+            `if (spinDirection == 1)`, but `valeVale` /
+            `valeValeGamma` are deallocated at the END of every
+            call. `bandPSCF` calls the routine in a
+            `do i = 1, spin` loop, so the spin-one call allocates
+            and then frees the array, and the spin-two call skips
+            the allocation and segfaults zeroing
+            `valeValeGamma(:,:,2)` at `:871`. The guard and its
+            comment were copied from `secularEqnSCF`, whose arrays
+            are deliberately NOT freed there -- they live until
+            `makeValenceRho` -- but the post-SCF path has no
+            `makeValenceRho` and frees them itself, so the copied
+            allocate-once guard and the added every-call free
+            disagree. `valeValeOL` is allocated and freed every
+            call and is correct; `energyEigenValues` is not freed
+            here (the DOS needs it) and is correct.
+- Fix:      Free `valeVale` / `valeValeGamma` only on the LAST
+            spin (`spinDirection == spin`), matching the
+            first-spin allocation, so allocate and free are
+            symmetric across the spin loop. The non-polarized
+            case (`spin == 1`) is unchanged: the one call both
+            allocates and frees, as before. Independent of
+            BUG-028 and BUG-029; the three had to be fixed in
+            order before a spin-polarized post-SCF run could
+            complete.
+
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing
 that is correct but undocumented, and each now says so:
