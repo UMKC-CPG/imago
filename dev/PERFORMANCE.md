@@ -817,15 +817,36 @@ the expected control: they are OpenBLAS calls, and OpenBLAS
 dispatches to AVX2 kernels at run time whatever the compiler
 flags say. The exchange-correlation mesh is 6 % SLOWER, a real
 effect at this size or noise at 1 s; it would be watched on the
-large deck. PROVENANCE CAVEAT: the `v3` binary was compiled
-from the working tree while PSEUDOCODE 31's source edits were
-beginning (see the recast section below). Its `VALEDENSITY
-SPLIT` line has fourteen fields, not the recast's fifteen, and
-its accumulate region matches `base` to 0.2 %, which together
-show it compiled the pre-recast density loop; the only foreign
-content is an unused module scalar. The comparison is therefore
-valid, and it is repeated from a committed tree when the recast
-baseline is taken, so the paper never has to cite a caveat.
+large deck. (The `v3` binary of that job had been compiled from
+the working tree while PSEUDOCODE 31's edits were beginning; its
+log showed it still carried the old density loop, and the
+comparison was repeated anyway.)
+
+**Repeated from the committed tree `658af0e` (job 16788512,
+exclusive on c084, 2026-08-25, the recast in both binaries):**
+
+    stage (sio2_243_med_g)          base      v3    ratio
+    Electronic Potential Integrals  314.0   275.9    1.14x
+    Secular Equation                188.5   190.1    0.99x
+    Electrostatic Matrices           58.7    50.2    1.17x
+    Valence Charge Density           27.3    28.2    0.97x
+    Nuclear Potential Integrals      20.9    21.1    0.99x
+    Make SCF Potential               18.2    18.7    0.97x
+    Make Exchange Correlation Mesh   15.3    16.3    0.94x
+    whole run                      10m51s  10m09s    1.07x
+
+Same numbers as the first attempt to within 1 % on every
+stage, energies identical to every digit, so the `-march`
+effect is settled without a caveat: 1.14x on the three-centre
+integrals, 1.17x on the electrostatic setup, 1.07x whole run,
+the BLAS-bound stages unmoved, and the exchange-correlation
+mesh reproducibly 6 % SLOWER -- a real codegen effect on that
+loop, small in absolute terms (1 s), and the one thing to
+look at on the large deck before the flag is adopted. The
+`base` column is also the recast's serial baseline on this
+deck: the valence density is 27.3 s against 31.8 s
+pre-recast (2.48 s per call against 2.89), the rest of the
+map within 1 % of the pre-recast `base`.
 
 ## Integral storage layout and read cost (measured 2026-08-23)
 
@@ -1088,6 +1109,99 @@ What follows:
    and either is preferable to paying the disk on every run.
 3. **The 448 MB/s assembly figure of PA4-A is explained**: it is
    the inflation rate of a typical mix, not a storage rate.
+
+## The rank-k density build, accepted (PSEUDOCODE 31, 2026-08-25)
+
+The density-matrix build of `makeValenceRho` is now two
+`zherk`/`dsyrk` calls per k-point and spin instead of one
+`zher`/`dsyr` per occupied state (commit `658af0e`; DESIGN 9.6
+candidate (i)). Acceptance ran as jobs 16784817 and 16784884
+(checks 1-4, 7, 8; `jobs/recast/check31*.sbatch`, c085 shared)
+and 16788668 (check 6, `check6.sbatch`, c085 shared); check 5
+is job 16788512 and its numbers are appended below when it
+returns. Every comparison is against the pre-recast binary of
+the SAME commit and toolchain (`jobs/pf7/bin_base`, built
+before the recast was coded) on the same node, and the floors
+are measured by `dev/tools/h5maxdiff.py` -- the largest
+absolute difference over every dataset but the eigenvectors --
+rather than chosen.
+
+    deck                      updates neg  A s/call old->new  floor
+    bn_small_c                   128    0  0.0008 -> 0.0004  8.9e-11
+    bn_small_g                    --    0  --                9.4e-11
+    bn_small_g, XC 150 (LSDA)     --    0  --                9.3e-11
+    al, tetrahedron (INTG 1)      73    5  --                5.1e-9
+    sio2_243_med_g               648    0  1.036  -> 0.341   2.7e-10
+    same, 8 threads vs 1         648    0  0.341  -> 0.061   1.0e-10
+    knbo3_333_med_c (4 k, cplx) 1944    0  1.168  -> 0.459   1.6e-7
+
+Energies and iteration traces are identical on every row.
+
+The update counts are unchanged on every deck (check 1), the
+negative-occupation group was exercised -- five columns on
+aluminium under the tetrahedron method, where the Bloechl
+correction hands states negative weights -- and agrees at
+5e-9 (check 3), and regions R, I and M never moved. The
+accumulate region falls 3.0x on the 243-atom glass at one
+thread and 17x at eight against the old loop's one-thread
+figure; at this size the stored triangle (44 MB) still fits
+the last-level cache, so the memory-traffic argument that
+predicts 11x is only fully in force on the 1296-atom deck,
+which check 5 measures. The knbo3 floor of 1.6e-7 is the
+largest and is the honest number: thirteen iterations of
+complex arithmetic over four k-points propagate the
+summation-order floor through the SCF loop further than the
+real one-k-point decks do, and every printed energy and every
+iteration line is nevertheless identical. Thread count changes
+the file (check 4): OpenBLAS's threaded `dsyrk` sums in a
+different order, at a floor of 1.0e-10 on this deck -- a fact
+the rank-1 loop never exposed because `dsyr` had nothing to
+thread.
+
+**Check 6, the parallel build.** The MPI build's one-rank run
+agrees with the serial recast at 1.6e-10 (the cross-build
+OpenBLAS floor PA3 recorded; bit-identity between the two
+builds was never available and the check's first wording
+asked for it wrongly -- corrected in 31.8). np8 against np1,
+same build and node: 5.7e-9 absolute, relative 1.4e-10, on
+the same `potCoeffs` datasets that carry PA5a's floor --
+measured today with the same tool on PA5a's own files,
+PA5a's np8-vs-np1 floor on this deck is 5.64e-9. The recast
+therefore added nothing to the parallel path's floor. Stage
+stamps on the shared node, orientation only: solve 4.74 s
+per call at np8, valence density 2.51 s, electrostatic setup
+7.5 s.
+
+One harness defect found and fixed on the way: `check6`'s
+comparison printed "WITHIN tolerance" from `sed`'s exit
+status rather than the tool's; the numbers it printed were
+right and were read by eye. The gate now tests `PIPESTATUS`.
+
+**Check 5, the stamp on the 1296-atom deck** (job 16788512,
+`check5.sbatch`, exclusive on c084, built from the committed
+tree; `sio2_1296_probe` restarted in its finished scratch at
+`LAST_ITERATION 1`):
+
+    threads   region A rank-1 loop   region A recast   speedup   I s    M s
+    1               128.0 s              12.08 s        10.6x   30.8   2.78
+    8                50.8 s               1.79 s        28x     31.0   2.84
+
+`syrkprobe` predicted 11.66 s and 1.49 s on random data; the
+program reproduces the one-thread figure within 4 % and the
+eight-thread one within 20 % (the gather and the two smaller
+matrices are inside the stamp, the probe timed the update
+alone). The stage's own stamp, `Valence Charge Density`, falls
+from 161 s per call to 45.6 s at one thread and 35.6 s at
+eight -- the projection DESIGN 9.6 made from the probe was
+"about 45 s" -- and what remains of it is now the read half:
+30.8 s of integral inflation (region I) that the read-once
+cache (ordered plan step 4) removes, then 2.8 s of contraction.
+The accumulate half went from 79 % of the stage to 26 % at one
+thread and 5 % at eight. Resident set 6.9 GB against the
+serial baseline's 6.3 GB: the 0.35 GB work array plus the
+library's buffers. The whole one-iteration run is
+solve-bound as before (two solves, 3489 s of 3565 s), which
+is the ELPA arm's business, not this section's.
 
 ## The situation, as of 2026-08-09
 

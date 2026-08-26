@@ -18060,11 +18060,21 @@ the reference that every later zero-tolerance deal (candidate
    probe deck): the stamp is per call, and the second iteration
    of 30.7's sweep bought only a repeat at the cost of a
    solve-dominated hour and a half.
-6. **The parallel build is unmoved**, at the cost PA4-B paid and
-   no more: the MPI build's one-rank run is bit-identical to the
-   recast serial build on `sio2_243_med_g`; that deck at np8 is
-   clean against its same-build same-node np1 file at PA4-B's
-   criterion (1e-9 absolute, eigenvectors excluded); and the
+6. **The parallel build is unmoved**, at the cost PA5a paid and
+   no more. (Corrected 2026-08-25 when the check ran: the first
+   wording asked for the MPI build's one-rank run to be
+   BIT-identical to the serial build, which PA3 had already
+   recorded as unavailable -- the two builds link different
+   OpenBLAS builds and differ in the last bit -- so the
+   cross-build comparison is at the floor, not at zero.) The
+   MPI build's one-rank run agrees with the recast serial build
+   on `sio2_243_med_g` at the cross-build floor (measured
+   1.6e-10 absolute, energies identical); that deck at np8 is
+   clean against its same-build same-node np1 file at PA5a's
+   accepted criterion (1e-6 absolute whole-file, eigenvectors
+   excluded), and its measured floor must not exceed PA5a's own
+   np8-vs-np1 floor on the same deck (5.6e-9, set by the
+   electrostatic reduce and carried into `potCoeffs`); and the
    headline `sio2_1296_large_g` np8 run reproduces the recorded
    baseline energies to print precision. A one-rank run of the
    large deck is fifteen hours and is not required -- the recast

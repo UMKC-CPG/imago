@@ -780,6 +780,30 @@ that order:
   is the LAST target, not the first; the earlier draft of this list
   had it first on inherited authority, and the measurement reversed
   that.
+- **The atom-pair loop family** (added 2026-08-25; DESIGN 9.9) --
+  the two-centre integral stages (overlap, kinetic, mass velocity,
+  nuclear potential) of the SCF setup and EVERY integral stage of
+  the post-SCF setup (`intgPSCF`: the overlap again, the full
+  Hamiltonian `gaussOverlapHamPSCF`, and the dipole, momentum and
+  k-overlap property integrals). All share one loop over atom
+  pairs accumulating into full in-memory matrices that root then
+  orthogonalizes and writes. A few percent of an SCF run at the
+  medium sizes, N-squared in growth; but on the post-SCF path the
+  Hamiltonian stage carries the ENTIRE three-centre cost with no
+  term axis, so a band-structure or optical run's setup is
+  root-serial in full today. The deal is the 9.2 pattern on the
+  packed pair index with a sum-onto-root reduce, taken in two
+  steps (programmer's ruling, 2026-08-25): the SCF-path stages
+  first, with no change to the run shape; then the post-SCF path,
+  which changes the RUN SHAPE -- every rank enters `intgPSCF` for
+  the integral stages and then serves `bandPSCF`'s solves, which
+  the k-point deal of DESIGN 9.6 already distributes. The
+  sum-onto-root form holds a full copy of every matrix on every
+  rank and is accepted for TODAY's cells only: the stated target
+  of 10,000 atoms and more (6.9) makes a full copy impossible per
+  rank, so the block-cyclic assembly of DESIGN 9.4 -- nothing
+  assembled whole -- is the destination, and the first form is
+  built so that its pair partition carries over into it.
 
 Two patterns to name so they are not mistaken for progress: the
 replicate-and-broadcast form (rank 0 computes, `MPI_BCAST` makes

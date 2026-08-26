@@ -14757,6 +14757,19 @@ tolerance MEASURED on the accepted decks and reported, the way
 Everything downstream of the recast returns to zero tolerance,
 and the recast is blocked in a fixed column order so that its
 serial and parallel forms agree with each other bit for bit.
+MEASURED 2026-08-25 (PERFORMANCE "The rank-k density build,
+accepted"): the floor against the old baseline is 9e-11
+absolute on the small decks, 2.7e-10 on `sio2_243_med_g`,
+5e-9 on aluminium under the tetrahedron method and 1.6e-7 on
+`knbo3_333_med_c` (thirteen complex iterations over four
+k-points), with every printed energy and iteration line
+identical on every deck; the parallel path's own floor did
+not move. One qualification the measurement added: the
+library's threaded `dsyrk` sums in a thread-dependent order,
+so the recast's serial and parallel forms agree bit for bit
+only at EQUAL thread counts -- across thread counts the file
+differs at 1e-10 on the 243-atom glass, a floor recorded
+beside the others.
 Candidate (iii) is the one that would genuinely break
 parallel-equals-serial, since combining private matrices
 reorders sums the serial code adds in state order; that is a
@@ -15000,7 +15013,244 @@ disk time.
   benchmark results (energies to print precision, HDF5 content
   by h5diff under the measured criteria of 9.5) before the
   next begins, and replicate-and-broadcast forms are never
-  counted as progress.
+  counted as progress. Step (3), the two-centre stages by
+  atom pair, is designed in 9.9 (2026-08-25), which also
+  brings the post-SCF integral stages -- root-serial in their
+  entirety today -- under the same deal.
+
+### 9.9 The Atom-Pair Loop Family: One Deal for Every Two-Centre Stage
+
+**What the family is.** Seven integral stages share one loop
+shape, written seven times in `integrals.F90`: an outer loop
+over atom sites `i`, an inner loop over sites `j >= i`, a
+negligibility test on the pair's separation against the
+alpha-distance table (most distant pairs cycle at once), a
+sum over the real-space lattice cells within the pair's
+reach, and at the end of the pair a call to `saveCurrentPair`
+that adds the pair's block into three FULL in-memory
+matrices: valence-valence, core-valence and core-core, one
+per k-point, complex in the general build and real in the
+Gamma build. After the last pair the stage's `ortho` routine
+core-orthogonalizes those matrices, packs them, writes one
+dataset per k-point and sets the stage's completion
+attribute. The seven are, on the SCF setup path,
+`gaussOverlapOL` (overlap), `gaussOverlapKE` (kinetic),
+`gaussOverlapMV` (mass velocity, relativistic runs only) and
+`gaussOverlapNP` (nuclear potential); and on the post-SCF
+path, `gaussOverlapOL` again, `gaussOverlapHamPSCF` and the
+property integrals `gaussOverlapDM`, `gaussOverlapMM` and
+`gaussKOverlap` (`integrals3Terms.F90`, same shape). The
+three-centre term stage (9.5) is the one integral loop NOT in
+this family: its outermost axis is the potential term, and it
+is already dealt on that axis.
+
+**Why one design serves them all, and why now.** Two facts
+from the code and one from the measurements. First, the
+accumulators are private per pair: `saveCurrentPair` writes
+the pair's block into rows and columns owned by that pair
+alone, so any partition of the PAIRS across ranks produces
+partial matrices whose SUM is the serial matrix, exactly --
+the same arithmetic in the same order within each pair, and
+only the order in which pairs are added differs. Second, the
+work after the loop (`ortho` and the write) needs the WHOLE
+matrix and the HDF5 handles, both of which live on root. So
+the natural first form is the one 9.2 gave the electrostatic
+setup and PA5a proved: deal the loop's index range, let every
+rank run the EXISTING loop body over its share into its own
+private accumulators, `reduceSumMPI` the accumulators onto
+root, and let root finish the stage as today. Third, the
+measurement: these stages are "a few percent" of an SCF run
+on the medium decks (overlap 3.6 s, kinetic 3.4 s, nuclear
+20.9 s of 660 s on `sio2_243_med_g`) and scale as the pair
+count, N-squared, so they grow into the root-serial ceiling
+at the large size exactly as 9.8's third re-ordering says --
+but the reason to design them NOW is the post-SCF path. There
+the same loop shape carries the ENTIRE Hamiltonian:
+`gaussOverlapHamPSCF` folds every potential term into the
+pair loop (a loop over all `numPotSites` inside every pair,
+for every spin), because the post-SCF program needs one
+Hamiltonian at the converged potential rather than `potDim`
+term matrices to be recombined per iteration. That stage has
+no term axis to deal, it is the whole cost of a band-structure
+or optical run's setup, and today it is root-serial with the
+workers parked at the certificate barrier. A pair deal is the
+only decomposition it admits, and the one design covers the
+SCF stages as a by-product. DECIDED 2026-08-25: this
+increment codes the SCF-path stages only; the post-SCF path
+needs a run-shape change (below) and is taken as its own
+later step, using the same deal.
+
+**Seam inventory (read from `imago.F90` and `integrals.F90`
+at `658af0e`).**
+
+- The loop's inputs are all replicated setup state, alive on
+  every rank when the stage runs: `numAtomSites`, the site and
+  type tables (`O_AtomicSites`, `O_AtomicTypes`), the basis
+  (`initializeAtomSite` copies a site's alphas and basis
+  functions from `O_Basis`), the lattice (`O_Lattice`'s cell
+  lists and `findLatticeVector`), the alpha-distance tables
+  (`makeAlphaDist`, `makeAlphaNucDist`, `makeAlphaPotDist`;
+  on the SCF path these are called OUTSIDE root's guard, so
+  every rank already holds them), and for the Hamiltonian
+  stage the converged potential coefficients (`initPotCoeffs`,
+  read from file by root today) and the potential site tables.
+- The accumulators. On the SCF path `allocateIntegralsSCF`
+  (`valeVale(valeDim,valeDim,numKPoints)`,
+  `coreValeOL(coreDim,valeDim,numKPoints)`,
+  `coreCore(coreDim,coreDim,numKPoints)`, complex; the Gamma
+  forms real and two-dimensional) is called on EVERY rank
+  (`imago.F90:389`, outside the guard), so the workers already
+  own zeroed copies. On the post-SCF path `intgPSCF` runs on
+  root only (`imago.F90:108`), so `allocateIntegralsPSCF`,
+  `reallocateIntegralsPSCF` (which swaps the overlap
+  accumulators for the spin-resolved Hamiltonian ones,
+  `valeValeHam(valeDim,valeDim,numKPoints,spin)`) and the
+  `3Terms` allocations exist on root alone -- the run-shape
+  change below moves them to every rank. Memory per rank is
+  the accumulators' size, the same the serial program already
+  needs on root: 2.5 GB for the complex valence block of the
+  1296-atom deck at one k-point, times `numKPoints` on
+  multi-k decks, times `spin` for the Hamiltonian. The deal
+  does not reduce memory; that is 9.4's later job.
+- The outputs. Each stage's `ortho` consumes the reduced
+  accumulators on root and writes through handles root holds
+  from `initHDF5_SCF` / `initHDF5_PSCF`; the completion
+  attribute it sets is the restart gate, read at the stage's
+  entry. Both stay root-only and unchanged.
+- One cross-stage coupling, already handled: after the SCF
+  overlap stage root broadcasts `coreValeOL` (PSEUDOCODE 25.1)
+  because the term stage's `ortho` on the workers needs it. It
+  keeps working -- root broadcasts the REDUCED matrix -- and
+  the post-SCF path acquires the same need: the post-SCF
+  `ortho` routines run on root, so no new broadcast there.
+- `mpi.F90`: `reduceSumMPI` is a real rank-1/rank-2 generic
+  today. The family needs complex rank-3 and rank-4 instances
+  (`valeVale`, `valeValeHam`) and real rank-2/rank-3 ones for
+  the Gamma build -- the same `MPI_IN_PLACE` sum onto root,
+  new specific procedures under the existing generic name.
+- Dispatch. On the SCF path no control message is needed:
+  the two-centre stages run BEFORE the term stage, where the
+  workers are still executing `setupSCF` in lockstep, so
+  every rank simply calls the stage routine as it calls the
+  term stage. On the post-SCF path the workers are at the
+  certificate barrier; the run shape below brings them into
+  `intgPSCF` instead.
+
+**The deal.** The unit is the PAIR, indexed in the packed
+upper-triangular order the loop already walks (`i` outer,
+`j >= i` inner; `numAtomSites (numAtomSites + 1) / 2` pairs).
+`loadBalMPI` over that count gives each rank a contiguous
+range of packed pair indices, which the loop converts to its
+`(i, j)` bounds (first and last pair of the range; the rows
+between are whole). Contiguity is chosen over a snake for a
+reason the PA1 row measurement supplies: the cost of an outer
+row `i`, summed over its pairs, has max/mean about 2 and is
+FLAT in the row index (the negligibility cutoff, not the
+shrinking triangular row length, decides how many pairs do
+work), so a contiguous split of the packed index -- which
+gives every rank about the same NUMBER of pairs -- balances
+within that factor, and the per-rank loop seconds the stage
+logs (as PA3 and PA5a log theirs) are what confirm it. If the
+logged imbalance ever exceeds the row measurement's factor,
+a snake over rows is the recorded refinement; it costs one
+index map and nothing else.
+
+**The flow, per stage, on every rank.**
+
+```
+root: read the completion attribute (as today); if done,
+      skip the stage -- on the SCF path every rank must take
+      the same branch, so root broadcasts the verdict
+all ranks:
+   loadBalMPI (numPairs) -> my [firstPair, lastPair]
+   zero my accumulators
+   run the EXISTING pair-loop body over my range
+         -- same negligibility test, same lattice sum, same
+         -- saveCurrentPair; only the outer bounds change
+   record my loop seconds
+reduceSumMPI each accumulator onto root
+gather the per-rank loop seconds; root logs one line
+root: ortho, pack, write, set the attribute -- as today
+```
+
+The one-rank run and the serial build take today's path with
+one difference: the pair loop is entered through the range
+bounds, which at width one are `(1, numPairs)` -- the identity
+deal, and `reduceSumMPI` is the identity. Within a rank the
+pairs are added in the serial order; across ranks the reduce
+adds the partial matrices in rank order. So a one-rank file
+is BIT-IDENTICAL to serial, and a multi-rank file agrees with
+it at the floating-point reassociation floor of the pair sum
+-- the same floor class as PA5a's, measured by
+`h5maxdiff.py` and recorded, not chosen.
+
+**Run shape on the post-SCF path (ARCHITECTURE 6.5) --
+DEFERRED to its own step.** Today `intgPSCF` and everything
+after it is root's alone. When the post-SCF step is taken,
+the integral stages inside it -- the overlap, the
+Hamiltonian, and the property integrals -- become the
+post-SCF path's distributed region: every rank enters
+`intgPSCF`, runs the replicated setup it contains
+(`parseInput` on the post-SCF input, `makeAlphaDist` and its
+siblings, the allocations, `initPotCoeffs`), takes its share
+of every pair loop, and reduces; root alone opens the
+post-SCF HDF5 file (`initHDF5_PSCF`), runs the `ortho`
+routines, and writes. After the last integral stage the
+workers leave `intgPSCF` and, exactly as after the SCF term
+stage, go to the solve server: `bandPSCF`'s solves are the
+k-point deal of 9.6 already (PSEUDOCODE 26 serves both entry
+points), so a band-structure run gains the dealt setup AND
+the dealt solves from the same run shape. The DOS, bond and
+optical post-processing stay root-serial; they are the
+family after that. The SCF-path increment is shaped so this
+step adds the run shape and nothing else: the dealt loop is
+written once, inside each stage routine, and the post-SCF
+stages call it exactly as the SCF stages do.
+
+**What this is not, and how long it lasts (DECIDED
+2026-08-25).** It is not 9.4. Strategy 3 of 9.4 -- each rank
+computing the pairs its block-cyclic blocks need and keeping
+only those elements -- produces the matrix already
+DISTRIBUTED for a distributed solve and never assembles it
+anywhere. The deal here keeps a FULL copy of every
+accumulator on EVERY rank: each rank fills only its pairs'
+blocks, and the copies are summed onto root, so total memory
+is the serial program's times the rank count -- 8 x 2.5 GB
+at eight ranks on the 1296-atom complex deck, a fifth of a
+node. It buys the stage's wall time, not its memory. The
+programmer accepted that for the cells run TODAY and no
+longer: the stated destination is cells of 10,000 atoms and
+more, where ARCHITECTURE 6.9's arithmetic puts one full
+matrix at 75 GB real and twice that complex -- impossible per
+rank, and possible at all only if nothing is ever assembled
+whole. So the full-copy form is a STEPPING STONE with a
+known expiry, and it is built to be replaced cheaply: the
+pair partition (`loadBalMPI` over the packed pair index and
+the `(i, j)` bounds it yields), the per-rank walk of the
+existing loop body, and the per-rank timing all carry over
+unchanged into 9.4's form; what changes there is only WHERE
+a pair's block lands (`saveCurrentPair` writing into the
+rank's own block-cyclic tiles instead of a private full
+copy, with the edge pairs computed redundantly as 9.4
+prescribes) and the combine (none -- the matrix is already
+where the solve wants it, and `ortho` and the write become
+distributed operations of their own). The reduction this
+form costs -- one sum of the accumulators per stage, 2.5 GB
+at the largest current deck, seconds on a node -- is stamped
+per rank so that its growth with cell size is on record when
+the expiry is called.
+
+**Acceptance (carried into the PSEUDOCODE section).** Serial
+and one-rank bit-identical to the pre-change serial binary on
+the small pair and `sio2_243_med_g`; multi-rank files clean
+against the same-build one-rank file at the measured floor,
+energies and iteration traces digit-identical; every stage's
+per-rank loop seconds and reduce seconds logged and the stage
+stamp falling with rank count. The post-SCF step, when taken,
+adds its own: a band-structure run (`-sybd`) and an optical
+run (`-optc`) at np 1 and np 4 producing digit-identical
+spectra against the serial run -- the first parallel post-SCF
+result this project will have.
 
 ---
 

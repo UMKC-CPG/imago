@@ -8478,12 +8478,15 @@ is not carried only in conversation.
     with a provenance caveat that the repeat from a committed
     tree removes).
   - [ ] DECIDE whether `-march=x86-64-v3` goes into the Release
-    flags in `CMakeLists.txt`.  It is a build-rule change (the
-    binary then refuses to run on pre-Haswell hardware), so it
-    is recorded in BUILD.md if adopted; the cluster's nodes all
-    carry AVX2.  Repeat the measurement on the large deck when
-    the recast baseline is taken, watching the 6 % slower
-    exchange-correlation mesh.
+    flags in `CMakeLists.txt`.  REPEATED CLEAN 2026-08-25 from
+    the committed tree (job 16788512): same numbers within 1 %
+    -- 1.14x three-centre, 1.17x electrostatic setup, 1.07x
+    whole run, exchange-correlation mesh reproducibly 6 %
+    slower (1 s).  It is a build-rule change (the binary then
+    refuses to run on pre-Haswell hardware), so it is recorded
+    in BUILD.md if adopted; the cluster's nodes all carry
+    AVX2.  Check the mesh stage on the large deck before
+    adopting.
   - RE-TAKE the serial baselines.  Every whole-run parallel
     ratio in PERFORMANCE.md is quoted against a `cpg` baseline,
     so the headline 3.5x is really about 3.2x once the
@@ -8869,7 +8872,19 @@ is not carried only in conversation.
      rewrites. MEASURED on the shape (`jobs/recast/syrkprobe`,
      job 16771238): 11.66 s at one thread, 1.49 s at eight, so
      128 -> ~12 s per call serial, 51 -> ~1.5 s at eight
-     threads. PSEUDOCODE 31 WRITTEN 2026-08-24; awaits review.
+     threads. PSEUDOCODE 31 WRITTEN 2026-08-24, reviewed
+     2026-08-25, CODED and COMMITTED `658af0e` 2026-08-25 with
+     checks 1-4, 7 and 8 passed (jobs 16784817, 16784884;
+     floors 9e-11 to 1.6e-7, energies and traces identical,
+     negative group exercised on aluminium). Checks 5 and 6
+     PASSED from the commit (jobs 16788512 and 16788668,
+     PERFORMANCE "The rank-k density build, accepted"): region
+     A on the 1296-atom deck 128.0 -> 12.08 s at one thread
+     (10.6x) and 50.8 -> 1.79 s at eight (28x), the stage
+     161 -> 45.6 s per call; MPI np8 at PA5a's floor
+     unchanged. STEP CLOSED 2026-08-25. What remains of the
+     stage is the read half (30.8 s per call of inflation),
+     which step 4 removes.
   3. PF8, the inflation-vs-storage probe (~1 h; already
      specified). Independent of 2; gates only the DEALT form
      of 4.
