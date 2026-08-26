@@ -340,9 +340,17 @@ subroutine initPSCFIntegralHDF5 (pscf_fid, attribIntPSCF_dsid,&
       if (hdferr /= 0) stop 'Failed to create atom overlap did PSCF'
 
       do j = 1, spin
-         call h5dcreate_f (atomHamOverlapPSCF_gid,currentName,H5T_NATIVE_DOUBLE,&
-               & packedVVPSCF_dsid,atomHamOverlapPSCF_did(i,j),hdferr,&
-               & packedVVPSCF_plid)
+         ! The Hamiltonian holds one matrix per k-point AND spin, so
+         !   its name carries both indices (DESIGN 2.6, BUG-029).  With
+         !   only the k-point in the name the second spin's create
+         !   collided with the first and no spin-polarized post-SCF run
+         !   could start.  The eigenvector datasets name their per-spin
+         !   matrices the same way.
+         write (currentName,fmt="(i7.7,i7.7)") i, j
+         currentName = trim (currentName)
+         call h5dcreate_f (atomHamOverlapPSCF_gid,currentName,&
+               & H5T_NATIVE_DOUBLE,packedVVPSCF_dsid,&
+               & atomHamOverlapPSCF_did(i,j),hdferr,packedVVPSCF_plid)
          if (hdferr /= 0) stop 'Failed to create hamiltonian overlap did PSCF'
       enddo
 
@@ -578,6 +586,10 @@ subroutine accessPSCFIntegralHDF5 (pscf_fid)
       if (hdferr /= 0) stop 'Failed to open atom overlap did PSCF'
 
       do j = 1, spin
+         ! Name by k-point and spin, matching the create loop above
+         !   (DESIGN 2.6, BUG-029).
+         write (currentName,fmt="(i7.7,i7.7)") i, j
+         currentName = trim (currentName)
          call h5dopen_f (atomHamOverlapPSCF_gid,currentName,&
                & atomHamOverlapPSCF_did(i,j),hdferr)
          if (hdferr /= 0) stop 'Failed to open hamiltonian overlap did PSCF'

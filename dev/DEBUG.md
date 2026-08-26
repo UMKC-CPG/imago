@@ -2912,6 +2912,47 @@ Ordered by severity (S1 first).
             spin-one outputs are bit-identical before and after;
             a non-magnetic spin-polarized deck is unchanged.
 
+### BUG-029 -- spin-polarized post-SCF Hamiltonian datasets are
+### created under one name for both spins, so spin two collides
+- File:     `src/imago/hdf5PSCFIntg.F90:343` (create,
+            `initPSCFIntegralHDF5`) and `:581` (open,
+            `accessPSCFIntegralHDF5`), the `do j = 1, spin` loops
+            over `atomHamOverlapPSCF_did(i,j)`
+- Variant:  [BOTH]
+- Category: HDF5 / LOGIC
+- Severity: S2 -- no spin-polarized post-SCF calculation
+            (`-dos`, `-bond`, `-optc`, `-sybd` with spin two) has
+            ever run: the run aborts in the post-SCF HDF5
+            initializer before any property is computed.
+- Status:   confirmed 2026-08-26 (surfaced while running the
+            BUG-028 checks on a magnetic O2 deck); fixed the same
+            day. DESIGN 2.6 (the HDF5 naming paragraph) states the
+            rule; not committed until the fix builds.
+- Evidence: The Hamiltonian dataset name is `currentName`, which
+            is set to the k-point index alone (`fmt="(i7.7)"`)
+            once per `do i = 1, numKPoints` iteration. Inside it
+            the `do j = 1, spin` loop calls `h5dcreate_f` with
+            that same name for every spin, so spin two aborts with
+            "name already exists" (`STOP Failed to create
+            hamiltonian overlap did PSCF`). The handle array
+            `atomHamOverlapPSCF_did(numKPoints, spin)` is sized for
+            per-spin datasets; only the NAME failed to encode the
+            spin. The eigenvector modules already name their
+            per-spin datasets by k-point AND spin
+            (`fmt="(i7.7,i7.7)"`, `hdf5PSCFEigVec.F90:138`), and
+            that is the model.
+- Fix:      Name the Hamiltonian dataset by k-point and spin,
+            `fmt="(i7.7,i7.7)"` with `(i, j)`, in both the create
+            and the open loop, so the two agree. The reader reaches
+            the dataset through the handle array, not by name, so
+            no reader changes. Independent of BUG-028 (that one is
+            the eigenvector SLAB the consumer reads; this one is
+            the Hamiltonian dataset NAME on disk); both had to be
+            fixed before a spin-polarized post-SCF run could
+            complete. Proof: `-dos` on a magnetic O2 deck, which
+            aborted here, runs through the post-SCF Hamiltonian
+            stage after the fix.
+
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing
 that is correct but undocumented, and each now says so:

@@ -1767,6 +1767,24 @@ initializer on their respective passes.  Nothing else -- no
 script, no other Fortran -- reads a group name back by format,
 so the two files share the form and cannot drift apart.
 
+**Within a k-point group, a per-spin dataset carries the spin
+in its name.**  The eigenvector datasets, and the post-SCF
+Hamiltonian datasets, hold one matrix per k-point AND per spin;
+their handle arrays are sized `(numKPoints, spin)`.  The
+eigenvector modules name them by both indices
+(`fmt="(i7.7,i7.7)"`), so spin one and spin two are distinct
+links.  The post-SCF Hamiltonian create and open loops did not:
+they named the dataset by the k-point alone inside a
+`do j = 1, spin` loop, so the second spin's `h5dcreate_f`
+collided with the first ("name already exists") and no
+spin-polarized post-SCF run could pass the HDF5 initializer
+(DEBUG.md BUG-029).  The rule is the eigenvector modules':
+a dataset whose handle is indexed by spin is named by k-point
+and spin.  The readers reach these datasets through the handle
+array, never by re-formatting the name, so create and open are
+the only two places the name is built and the only two that had
+to agree.
+
 The downstream consumers of `atomPerm` and `invAtomPerm`
 are `computeBond` (effective charge / bond order star
 distribution) and the LAT PDOS channel-permutation step
