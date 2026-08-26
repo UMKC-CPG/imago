@@ -18164,8 +18164,15 @@ provenance, read from `imago.F90`, `integrals.F90`,
   basis (`initializeAtomSite` in `O_Basis`), the lattice
   (`O_Lattice`), and the alpha-distance tables (`alphaDist`
   from `makeAlphaDist` at `imago.F90:384`, `makeAlphaNucDist`
-  at `:429`, both OUTSIDE root's guard). Verified against the
-  code: none of these is created inside a root-only block.
+  at `:429`, both OUTSIDE root's guard), and the dimension
+  arguments `numComponents`, `packedVVDims` and `fullCVDims`,
+  which `setIntegralDims` (`hdf5SCFIntg.F90:1005`, called by
+  every rank at `imago.F90:363`) sets without touching the
+  file. Verified against the code: none of these is created
+  inside a root-only block. Inside the four routines the
+  handles are dereferenced at exactly two places -- the
+  attribute read at entry and the `ortho` call -- and at no
+  other (grep of `did`, `CVdid`, `aid` over lines 193-2040).
 - The accumulators: `valeVale(valeDim, valeDim, numKPoints)`,
   `coreValeOL(coreDim, valeDim, numKPoints)`,
   `coreCore(coreDim, coreDim, numKPoints)`, complex, in the
@@ -18181,16 +18188,42 @@ provenance, read from `imago.F90`, `integrals.F90`,
   block, so that each pair touches only its own rows and
   columns. (The kinetic, mass-velocity and nuclear stages
   reuse `valeVale` and `coreCore` and accumulate their
-  core-valence part into a stage-local `coreVale`, allocated
-  beside the work arrays at lines 841, 1284, 1728; it is
-  reduced with the others.)
+  core-valence part into `coreVale` -- NOT a stage local but
+  a MODULE array of `O_Integrals` (`integrals.F90:41`;
+  `coreValeGamma` at `:52`), allocated by each of those stages
+  beside its work arrays (lines 841, 1284, 1728) and
+  deallocated by root's `ortho` (`:4079`). Found in review:
+  a worker never enters `ortho`, so after the reduce a worker
+  must deallocate `coreVale` itself or leak it once per
+  stage; 32.4 places that deallocation.)
 - The outputs: unchanged. Root's `orthoOL` / `ortho(2|3|5,
   ...)` consume the accumulators and write through `did`,
   `CVdid`, `aid` -- handles only root holds from
-  `initHDF5_SCF`. A worker passes whatever its (never
-  initialised) copies of those module variables hold and
-  never touches them: the attribute read at entry and the
-  `ortho` call both sit behind `mpiRank == 0`.
+  `initHDF5_SCF`. FOUND IN REVIEW, a seam defect in the first
+  draft: the handle arrays (`atomOverlap_did(numKPoints)`,
+  `atomOverlapCV_did(numComponents, numKPoints)` and their
+  siblings; the PSCF path's likewise) are ALLOCATABLE module
+  arrays allocated only inside `initSCFIntegralHDF5` and
+  `accessSCFIntegralHDF5`, both root-only, so on a worker
+  they are UNALLOCATED -- and passing an unallocated
+  allocatable to the explicit-shape dummies the four routines
+  declare today (`did(numKPoints)`, `CVdid(numComponents,
+  numKPoints)`) is non-conforming Fortran that the
+  `IMAGO_CHECKS` build (`-fcheck=all`) aborts on. PA3 avoided
+  this by giving the term stage no handle arguments; that is
+  not open here, because the same four routines serve the
+  post-SCF path with different handles. The conforming form:
+  the handle dummies become `allocatable, dimension(:)` /
+  `(:,:)` with `intent(in)`, which the standard permits an
+  unallocated actual for, and which every existing caller
+  already satisfies (all the actuals are allocatable module
+  arrays). The scalar attribute handle `aid` is an ordinary
+  `integer(hid_t)` whose worker copy is merely undefined,
+  which is harmless to pass and is never read. Inside the
+  routines nothing else changes: the attribute read at entry
+  and the `ortho` call, the only places the handles are
+  dereferenced, both sit behind `mpiRank == 0`, and `ortho`'s
+  own dummies are reached only from root.
 - The skip verdict. The entry test reads `aid` on root; with
   every rank in the routine, all must take the same branch,
   so root broadcasts the verdict (`bcastIntVecMPI` on a
@@ -18282,7 +18315,10 @@ reduceSumMPI (valeVale); reduceSumMPI (coreValeOL or the
 end the reduce clock -> myReduceSeconds
 gatherTimesMPI; root logs the two per-rank lines (32.6)
 root only: ortho (as today: orthogonalize, pack, write,
-      set the completion attribute)
+      set the completion attribute; it deallocates coreVale)
+workers only: deallocate coreVale (kinetic, mass-velocity
+      and nuclear stages -- the module array root's ortho
+      frees; see 32.2)
 call timeStampEnd (as today)
 ```
 
@@ -18306,6 +18342,11 @@ in-place sum of one contribution).
   everything after them.
 - `allocateIntegralsSCF` and the accumulators' shapes: the
   memory footprint per rank is the serial program's.
+- The four routines' argument LISTS and every caller's call
+  (the post-SCF callers included). The one interface change
+  is the declaration of the handle dummies, `allocatable`
+  assumed-shape instead of explicit-shape (32.2), which no
+  caller sees.
 
 ### 32.6 Instrumentation
 
