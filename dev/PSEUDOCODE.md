@@ -18416,12 +18416,36 @@ claim is tested, not assumed (check 3).
    at np8 against the serial baseline (overlap, kinetic and
    nuclear together are the N-squared share DESIGN 9.8's third
    ordering named), and the reduce seconds at 2.5 GB.
-6. **Restart**: a run killed after the overlap stage's
-   attribute is set and before the kinetic stage's, rerun at
-   np4: every rank takes the skip branch of the overlap stage
-   together (no hang, the verdict broadcast working), the
-   kinetic stage runs dealt, the file is identical to an
-   uninterrupted np4 run.
+6. **Restart** (AMENDED 2026-08-26; the code is verified, the
+   original kill-based method is not achievable). The intent is
+   unchanged: on a restart every rank must take the skip branch
+   of a finished stage TOGETHER (no hang -- root reads the
+   completion attribute and broadcasts the verdict), and the
+   next unfinished stage must run dealt and reproduce the file.
+   The method changes because a hard kill mid-setup CANNOT be
+   used: the HDF5 file stays open across the whole setup and a
+   stage's dataset creation rewrites the file's heap free list,
+   so a process killed at any point mid-setup leaves the file
+   corrupt ("bad heap free list" on the next open -- the known
+   behaviour recorded in DEBUG.md), stage boundary or not. So
+   the finished-stage state is produced WITHOUT a kill: run np4
+   to completion, copy the finished scratch HDF5 into a fresh
+   run directory, and reset the nuclear stage's completion
+   attribute (`status` on the `atomIntgGroup/atomNPOverlap`
+   group) to zero with `h5py`. Rerun at np4 on that copy: the
+   overlap and kinetic stages, still marked done, are skipped by
+   every rank together (their "already exists" lines appear once
+   each, no rank hangs); the nuclear stage, marked undone, runs
+   dealt; and the resulting file -- the recomputed
+   `atomNPOverlap` datasets and the whole file after the SCF
+   re-runs -- is BIT-IDENTICAL to the uninterrupted np4 run,
+   because the deal is bit-exact at a fixed rank count and the
+   nuclear recompute adds each element from one pair only. The
+   all-ranks-skip-together property was ALSO demonstrated
+   independently by a run killed mid-SCF (after the whole setup
+   was on disk and consistent): its restart skipped all
+   thirty-six setup stages with no hang and re-converged to the
+   same energy.
 7. **The relativistic stage**: `bn_small_c` with `rel = 1`,
    np1 against serial (bit-identical) and np4 against np1, so
    the mass-velocity stage is exercised rather than assumed.
