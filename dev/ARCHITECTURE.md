@@ -804,6 +804,30 @@ that order:
   rank, so the block-cyclic assembly of DESIGN 9.4 -- nothing
   assembled whole -- is the destination, and the first form is
   built so that its pair partition carries over into it.
+- **The post-SCF analysis family** (added 2026-08-26; DESIGN
+  9.10) -- the density of states, bond order, optical, dipole and
+  field programs that run after the eigenpairs exist. One shape
+  for all of them: per spin and k-point, read that k-point's
+  eigenvectors and integral matrices from root's file, contract
+  them state by state, add into accumulators that are plain sums
+  over k-points and states. Root-serial in full today, on both
+  entry points. Designed on the PDOS first (programmer's choice):
+  the projection is a matrix product in disguise (`T = S C`, one
+  GEMM per k-point in place of a strided intrinsic sum per
+  state-and-basis-function pair -- the largest gain, single-core,
+  taken first and measured on its own), then a deal chosen by
+  DESIGN 9.6's rule -- whole k-points to ranks when k-points are
+  plentiful, contiguous blocks of STATES within every k-point
+  when they are not, which is what gives a one-k-point cell of
+  10,000 atoms an axis with width -- and a sum-onto-root combine.
+  Run shape ruled 2026-08-26: no server; root shuts the solve
+  servers right after the last solve and every rank calls the
+  analysis routines in lockstep, root alone reading and writing
+  the file. The state deal holds the full overlap on every rank,
+  the same stepping stone as the pair family with the same
+  expiry: at the target sizes the product becomes a PBLAS
+  operation on the block-cyclic layout with the eigenvectors
+  left where ELPA put them.
 
 Two patterns to name so they are not mistaken for progress: the
 replicate-and-broadcast form (rank 0 computes, `MPI_BCAST` makes

@@ -18425,3 +18425,191 @@ claim is tested, not assumed (check 3).
 7. **The relativistic stage**: `bn_small_c` with `rel = 1`,
    np1 against serial (bit-identical) and np4 against np1, so
    the mass-velocity stage is exercised rather than assumed.
+
+## 33. The Eigenvector Destination Slab of the Analysis Readers
+## (DESIGN 2.8; DEBUG.md BUG-028)
+
+### 33.1 What this is
+
+Two readers in `secularEqn.F90`, `readDataSCF(h, i, numStates,
+matrixCode)` (`:1462`) and `readDataPSCF(...)` (`:1606`), hand
+every analysis program one k-point's eigenvectors and the
+integral matrices it asks for. They write the eigenvectors of
+spin `h` into slab `h` of `valeVale` (Gamma build:
+`valeValeGamma`). The consumers that process the spins one at
+a time allocate ONE slab and read slab 1, so for spin two the
+writer and the reader disagree: an out-of-bounds write on the
+post-SCF path, and spin one's vectors projected against spin
+two's eigenvalues on the SCF path (DESIGN 2.8 states both).
+This section makes the destination slab an explicit argument
+of the readers, defaulting to today's `h`, and has the
+one-slab consumers pass 1. Nothing else changes: not the
+consumers that hold one slab per spin, not the solver, not
+any memory size, not any output for spin one or for a
+non-magnetic deck.
+
+### 33.2 Seam inventory (read at `6367aaa` plus the working
+### tree)
+
+The writers, and what they write today:
+
+```
+readDataSCF   complex   secularEqn.F90:1590
+              readMatrix(eigenVectors_did(:,i,h),
+                         valeVale(:,:numStates,h), ...)
+readDataSCF   Gamma     NO READ (:1580-1600 is #ifndef GAMMA
+              only): the SCF path at Gamma keeps the solve's
+              eigenvectors in memory, in slab h of the
+              SOLVER's valeValeGamma(valeDim, valeDim, spin)
+              (secularEqn.F90:139, :353, :421), and the reader
+              does nothing for them.
+readDataPSCF  complex   :1735  readMatrix(eigenVectorsPSCF_did
+              (:,i,h), valeVale(:,:numStates,h), ...)
+readDataPSCF  Gamma     :1745  readMatrixGamma(
+              eigenVectorsPSCF_did(1,i,h),
+              valeValeGamma(:,:numStates,h), ...)
+```
+
+The array they write into, by path: SCF path -- the solver's
+own `valeVale(valeDim, valeDim, spin)` (allocated at `:135`
+/ `:139`, alive until `cleanUpSecularEqn`, which `cleanUpSCF`
+calls AFTER the analysis programs, `imago.F90:83`); post-SCF
+path -- `secularEqnPSCF` frees the solver's array at `:1032`
+/ `:1035`, so whichever consumer runs next allocates its own.
+
+The consumers, their allocation, and the slab they read:
+
+```
+consumer      allocation (post-SCF)              reads slab
+dos.F90       :319 valeVale(valeDim,numStates,1)   1 (:702,:723)
+  LAT pass    :1683 valeVale(vDim,numSt,1)         1 (:1732)
+bond.F90      :154/:160 (...,1)                    1 (:446,:463,
+                                                   :539,:551)
+bond3C.F90    :157/:163 (...,1)                    1 (:771,:784)
+optc.F90      :931/:938 (...,1)                    1 (:1436,:1464,
+                                                   :1683,:1715,
+                                                   :1966,:1997,
+                                                   :2135,:2192,
+                                                   :2307)
+dimo.F90      :85/:90  (...,spin)                  k = spin
+field.F90     :441/:459 (...,spin)                 j = spin
+mtop.F90      :172 (...,spin)                      all slabs
+valeCharge    :311/:314 (...,spin)                 h
+```
+
+The first four are the one-slab consumers and the defect.
+The last four hold one slab per spin, read slab `h`, and are
+correct; they are why the readers write slab `h`, and they
+are untouched. Reader call sites (all of them, so none is
+missed): `dos.F90:657/660/1699/1701`, `bond.F90:292/295`,
+`bond3C.F90:444/447`, `optc.F90:1035/1037/1042/1044`,
+`dimo.F90:156/158`, `field.F90:520/522`,
+`mtop.F90:281/283/289/291/303/305`,
+`valeCharge.F90:408/410`. The readers are module procedures
+of `O_SecularEquation`, so an added OPTIONAL argument is seen
+through the module interface by every caller; no entry in
+`interfaces.F90` exists or is needed.
+
+### 33.3 The readers
+
+Both readers gain one trailing optional argument and one
+local:
+
+```
+subroutine readDataSCF (h, i, numStates, matrixCode, slab)
+   integer, intent(in), optional :: slab
+   integer :: destSlab
+   destSlab = h
+   if (present (slab)) destSlab = slab
+   ... every read of eigenvectors writes slab destSlab in
+       place of slab h:
+       complex:  valeVale(:, :numStates, destSlab)
+       Gamma, readDataPSCF:  valeValeGamma(:, :numStates,
+                                           destSlab)
+       Gamma, readDataSCF:  the eigenvectors are already in
+          memory in slab h of the solver's array; DELIVER
+          means copy when the caller asked for another slab:
+          if (destSlab /= h)
+             valeValeGamma(:, :numStates, destSlab) =
+                valeValeGamma(:, :numStates, h)
+```
+
+The contract, stated in the header comment of each reader:
+after the call, the eigenvectors of spin `h` at k-point `i`
+are in slab `slab` (default `h`) of the module array,
+whatever the build and whichever path allocated the array.
+The Gamma copy is `valeDim * numStates` reals, once per spin
+per consumer, against a projection of `valeDim^2 *
+numStates`: negligible, and it happens only for spin two of
+a one-slab consumer on the SCF path -- exactly the case that
+was wrong. The integral-matrix reads (`matrixCode`) are not
+spin-indexed and do not change.
+
+### 33.4 The consumers
+
+Every reader call in the four one-slab consumers passes
+`slab = 1`: `dos.F90:657/660/1699/1701`, `bond.F90:292/295`,
+`bond3C.F90:444/447`, `optc.F90:1035/1037/1042/1044` --
+twelve calls. Their reads of slab 1 are now correct as
+written and do not change. The header comment of each
+consumer's allocation states why it is one slab: the spins
+are processed sequentially and the reader delivers into slab
+1 on request. The four spin-slab consumers and the solver
+pass nothing and are untouched.
+
+### 33.5 The test deck
+
+A MAGNETIC cell, so that the two spins' eigenvectors differ:
+the O2 molecule in a 10 A cubic box (space group 1, the two
+oxygens at +-0.6 A along z about the centre), `XC_CODE 150`
+(Ceperley-Alder LSDA, spin two), `NUM_SPLIT_TYPES__DEFAULT_SPLIT`
+raised from `0 0.01` to `0 0.5` so the starting density is
+split enough to settle in the triplet rather than the
+non-magnetic state. Two decks: `o2_spin_g` (Gamma, `imagoG`)
+and `o2_spin_c` (a 2x2x2 mesh, `imago`), so both builds and
+both reader branches are exercised. A magnetic result is
+confirmed before any comparison by the spin-up and spin-down
+electron counts in the log (`Electrons Expected` per spin)
+differing by two. Control: `bnspin` (`bn_small_g`, `XC_CODE
+150`, non-magnetic), whose two spins coincide.
+
+### 33.6 Checks
+
+1. **The post-SCF defect exists**: the `IMAGO_CHECKS` build
+   of the UNFIXED tree, `-dos` on `o2_spin_c` and `o2_spin_g`,
+   aborts with a bounds error naming `valeVale` at
+   `secularEqn.F90:1735` (Gamma: `valeValeGamma` at `:1746`)
+   during spin two. This is the proof that the finding is
+   real and not a reading error.
+2. **The SCF-path defect exists**: `-scfdos` on the unfixed
+   release build, both O2 decks: `fort.80` and `fort.81` (the
+   localization index per state, a function of the
+   eigenvectors alone) are IDENTICAL column for column while
+   the two spins' electron counts differ -- spin two was
+   computed from spin one's vectors.
+3. **The fix removes both**: the fixed tree, `IMAGO_CHECKS`
+   build, `-dos` runs clean on both decks; release build,
+   `-scfdos` and `-dos` on both decks, `fort.80` and `fort.81`
+   differ.
+4. **Self-consistency of the fix**: `-scfdos` and `-dos` of
+   the fixed build (same FB basis) give spin-two PDOS
+   (`fort.71`) and localization index (`fort.81`) that agree
+   with each other at the floor the two paths' independent
+   integral stages already leave between spin-ONE outputs.
+5. **Spin one untouched**: `fort.60`, `fort.70`, `fort.80`
+   bit-identical between the unfixed and fixed release builds
+   on both O2 decks and on `bnspin`, `-scfdos` and `-dos`.
+6. **Non-magnetic control**: on `bnspin` every output file
+   (60/61, 70/71, 80/81, energies, HDF5) is bit-identical
+   between unfixed and fixed builds: where the two spins
+   coincide, slab 1 and slab 2 held the same vectors and the
+   fix changes nothing.
+7. **The other members**: `-scfbond` and `-bond` on
+   `o2_spin_g`, unfixed vs fixed: the spin-two bond order
+   changes and spin one does not (the same slab pattern, the
+   same fix; the localization argument does not apply, so the
+   check is the weaker "changed where it must, unchanged where
+   it must not"). `-optc` likewise, on the spin-two spectrum.
+8. **No regression elsewhere**: `bn_small_c`, `bn_small_g`,
+   `sio2_243_med_g` SCF runs bit-identical to the pre-fix
+   build (the readers' default path is unchanged).

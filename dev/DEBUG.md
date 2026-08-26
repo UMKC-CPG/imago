@@ -2864,6 +2864,54 @@ Ordered by severity (S1 first).
             `makeSYBD.py` then fails on a missing `fort.31` while
             `imago.py` still exits 0.
 
+### BUG-028 -- spin-polarized analysis reads the eigenvectors into
+### slab `h` but the consumers allocate and read slab 1
+- File:     `src/imago/secularEqn.F90:1590` (`readDataSCF`) and
+            `:1735` (`readDataPSCF`), the writers; the one-slab
+            consumers `src/imago/dos.F90:319,702,723,1683,1732`
+            (`computeDOS`, `computeProjections_LAT`),
+            `bond.F90:154,446,539`, `bond3C.F90:157,771`,
+            `optc.F90:931,1436,1683,1966,2135,2307`
+- Variant:  [BOTH]
+- Category: BOUNDS (post-SCF path) / LOGIC (SCF path)
+- Severity: S2 -- every spin-polarized PDOS, bond order and
+            optical result for spin two is wrong or reads past an
+            array, on both entry points; masked on non-magnetic
+            decks because both spins' eigenvectors coincide.
+- Status:   confirmed 2026-08-26 by reading (DESIGN 9.10 found it;
+            DESIGN 2.8 states the contract; PSEUDOCODE 33 is the
+            fix and its checks). Not yet run.
+- Evidence: The two readers write the eigenvectors of spin `h`
+            into `valeVale(:, :numStates, h)` because the array
+            they were written for -- `secularEqnSCF`'s
+            `valeVale(valeDim, valeDim, spin)` -- has one slab per
+            spin. Four analysis consumers allocate ONE slab on the
+            post-SCF path (`secularEqnPSCF` frees the solver's
+            array at `:1032` first) and read slab 1 for every
+            spin. Post-SCF path, spin two: the read is an
+            out-of-bounds write into slab 2 of a one-slab array.
+            SCF path: the solver's `spin`-slab array is still
+            allocated when `dos(1)` runs (freed by
+            `cleanUpSecularEqn` from `cleanUpSCF`), so the spin-two
+            read lands in slab 2 and the consumer then projects
+            slab 1 -- the spin-UP vectors left by the first pass --
+            against the spin-DOWN eigenvalues. `dimo.F90:85`,
+            `field.F90:441`, `mtop.F90:172` and `valeCharge.F90:311`
+            allocate `spin` slabs and read slab `h`; they are
+            correct and are the reason the readers write slab `h`.
+- Fix:      The readers take an explicit destination slab
+            (PSEUDOCODE 33): an optional `slab` argument defaulting
+            to `h`, which the one-slab consumers pass as 1. No
+            memory change, no change to the correct consumers, the
+            contract visible at every call. Proof of the defect
+            and of the fix on a magnetic deck: `IMAGO_CHECKS` run
+            of `-dos` aborts today at `secularEqn.F90:1735` and
+            runs clean after; the localization index files
+            `fort.80` and `fort.81` are identical today (spin two
+            computed from spin-one vectors) and differ after; the
+            spin-one outputs are bit-identical before and after;
+            a non-magnetic spin-polarized deck is unchanged.
+
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing
 that is correct but undocumented, and each now says so:

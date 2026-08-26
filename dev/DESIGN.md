@@ -2000,6 +2000,71 @@ checked; denominators with no crystallographic basis
 (7, 9, 11, ...) are excluded so a general-position
 coordinate near, say, 2/9 is never falsely rejected.
 
+### 2.8 The Eigenvector Slab Contract of the Analysis Readers
+
+Every eigenvector consumer after the solve -- the density
+(`valeCharge.F90`), the DOS, bond order, optical, dipole,
+field and mtop programs -- gets one k-point's eigenvectors
+through two readers, `readDataSCF(h, i, numStates,
+matrixCode)` and `readDataPSCF(...)` in `secularEqn.F90`,
+which also read the integral matrices the consumer names by
+`matrixCode`. The readers write the eigenvectors of spin `h`
+into `valeVale(:, :numStates, h)` (Gamma build:
+`valeValeGamma`). That slab index was chosen for the array
+they were first written against, `secularEqnSCF`'s
+`valeVale(valeDim, valeDim, spin)`, and for the consumers
+that hold both spins at once and index them by spin
+(`valeCharge`, `dimo`, `field`, `mtop`, which allocate
+`spin` slabs).
+
+The consumers that run the spins ONE AT A TIME -- the DOS
+(both integration paths), the bond order (two- and
+three-centre) and the optical properties -- need only one
+slab and allocate one on the post-SCF path, then read slab 1
+for every spin. The readers still write slab `h`. For spin
+one the two agree; for spin two they do not, and the
+disagreement takes two forms (DEBUG.md BUG-028):
+
+- POST-SCF PATH: the solver freed its array; the consumer's
+  one-slab array receives an out-of-bounds write for spin
+  two. Undetected in a release build.
+- SCF PATH: the solver's `spin`-slab array is still alive
+  when the analysis runs, so the write lands in slab 2 and
+  the consumer projects slab 1 -- the spin-one vectors left
+  by its first pass -- against the spin-two eigenvalues.
+  Silent, and invisible on any non-magnetic deck, where the
+  two spins' eigenvectors coincide.
+
+**The contract (DECIDED 2026-08-26).** The destination slab
+is the CALLER's to name, because only the caller knows the
+shape of the array it allocated. The readers take an
+explicit destination-slab argument; a consumer that holds
+one slab passes 1, a consumer that holds one slab per spin
+passes `h`. The argument is optional and defaults to `h`, so
+the correct consumers and the solver's own use are untouched
+and the one-slab consumers change exactly where they were
+wrong. No consumer's memory changes. This is preferred over
+the alternative -- the one-slab consumers allocating `spin`
+slabs and reading slab `h` -- which would double their
+eigenvector memory on every spin-polarized post-SCF run for
+a slab they never use, and would leave the contract implicit
+in an allocation statement rather than stated at the call.
+
+**Why the tests can be sharp without a physics reference.**
+The localization index of a state (`fort.80` spin one,
+`fort.81` spin two) is a function of the eigenvectors alone,
+not of the eigenvalues. Under the SCF-path defect spin two's
+index is computed from spin one's vectors, so on a MAGNETIC
+deck the two files are identical column for column, which
+cannot be right when the spin densities differ; after the
+fix they differ. The post-SCF defect is a bounds violation,
+which the `IMAGO_CHECKS` build reports by line. Spin one's
+outputs are untouched by the fix and must be bit-identical
+before and after; a non-magnetic spin-polarized deck must be
+unchanged in every output. PSEUDOCODE 33 carries the fix and
+those checks. DESIGN 9.10's recast of the projection sits on
+the corrected reader.
+
 ---
 
 ## 3. K-Point Mesh: Density Input, Selection, and Reduction
@@ -15251,6 +15316,283 @@ adds its own: a band-structure run (`-sybd`) and an optical
 run (`-optc`) at np 1 and np 4 producing digit-identical
 spectra against the serial run -- the first parallel post-SCF
 result this project will have.
+
+### 9.10 The Post-SCF Analysis Family: PDOS First
+
+**What the family is.** After the eigenpairs exist, imago's
+analysis programs -- the density of states (`dos.F90`), the
+bond order and effective charge (`bond.F90`, `bond3C.F90`),
+the optical properties (`optc.F90`, `optcSpectra.F90`), the
+dipole moments (`dimo.F90`) and the field (`field.F90`) --
+all have one shape: for every spin and every k-point, read
+that k-point's eigenvectors and one or more integral matrices
+from the file root holds, contract them state by state, and
+add the result into accumulators that are plain sums over
+k-points and over states. Nothing is carried from one k-point
+or one state to the next. They run on root alone today, on
+both entry points (`dos(1)` after `mainSCF`, `imago.F90:63`;
+`dos(0)` in the post-SCF block, `:113`), while the workers
+wait. This subsection designs their parallel form on the
+PDOS, the member the programmer chose first (2026-08-26),
+and names what the other members inherit from it. It is
+written to scale on BOTH axes the programmer asked for:
+many k-points at moderate basis size, and one k-point at the
+basis sizes of 6.9's target cells.
+
+**The PDOS as it exists (seam inventory, read from
+`dos.F90`, `secularEqn.F90`, `populate.F90` and `imago.F90`
+at `6367aaa`).** `dos(inSCF)` (`imago.F90:1134`) opens the
+output units 60/70/80 (61/71/81 for spin two) with
+`status='new'`, calls `populateStates`, shifts the
+eigenvalues by `occupiedEnergy`, and calls
+`computeTDOS_LAT` (tetrahedron path, eigenvalues only) and
+`computeDOS(inSCF)`. Inside `computeDOS`, per spin `h` and
+per k-point `i`, three steps:
+
+1. READ: `readDataSCF(h, i, numStates, 1)` or
+   `readDataPSCF(...)` (`secularEqn.F90:1462/1606`) reads the
+   packed overlap from `atomOverlap_did(i)` (or the post-SCF
+   sibling), unpacks it into `valeValeOL(valeDim, valeDim)`,
+   and reads the eigenvectors of that k-point and spin from
+   `eigenVectors_did(:, i, h)` into
+   `valeVale(:, :numStates, h)`. Root's handles; root's
+   memory.
+2. PROJECT: for every state `j` and every basis function
+   `mu`, the Mulliken weight `P(mu, j) = Re[ conj(C(mu, j))
+   * sum_nu S(nu, mu) C(nu, j) ]` (`dos.F90:700-729`),
+   formed as an explicit `valeDim`-long `sum` per `(j, mu)`
+   pair with a temporary vector rebuilt each time:
+   `numStates * valeDim^2` multiply-adds as strided intrinsic
+   sums, no BLAS. The weight is binned by `pdosIndex(mu)`
+   into `pdosAccum` (one entry per channel: type-orbital,
+   atom, atom-orbital or atom-orbital-m by `detailCodePDOS`),
+   and feeds `electronNumber(l, k)` and
+   `localizationIndex(j)`. The tetrahedron path
+   (`computeProjections_LAT`, `:1623`) computes the same
+   weight and stores it in `projArr(channel, j, i)` instead.
+3. BROADEN or INTEGRATE: the Gaussian path adds
+   `pdosAccum * exp(...)` into `pdosComplete(channel,
+   energyPoint)` over the window where the exponent is under
+   50 (`:733-767`); the tetrahedron path sweeps (state,
+   tetrahedron, energy point) over `projArr` with Bloechl
+   corner weights (`integratePDOS_LAT`, `:1831`). Then the
+   symmetrizations (1.7, PSEUDOCODE 23), the electron-count
+   normalization and the writes -- cheap and root's.
+
+Who holds what, and when:
+
+- `energyEigenValues(numStates, numKPoints, spin)`: a module
+  array of `O_SecularEquation`, allocated on ROOT ONLY
+  (`secularEqn.F90:135` SCF, `:825` post-SCF); root receives
+  every dealt k-point's eigenvalues from its owner
+  (`:444`, PSEUDOCODE 26.3), so after the last solve root
+  holds them all and no worker holds any. Shifted in place by
+  `shiftEnergyEigenValues` (`:1295`). Small (numStates times
+  k-points times spin doubles): a broadcast.
+- `occupiedEnergy` and `electronPopulation(numStates *
+  numKPoints * spin)`: produced by `populateStates` on root
+  from the eigenvalues (`populate.F90:163/276`); the second
+  is read by `computeDOS` only for the electron-count
+  normalization. Root computes them as today and broadcasts
+  the scalar and the vector.
+- `kPointWeight`, `numKPoints`, `kPointIntgCode`, the
+  tetrahedron tables, `numPointOps`, `symmetrizeLATPartials`
+  (`O_KPoints`); `atomSites`, `atomTypes`, `valeDim`,
+  `numAtomSites` (`O_AtomicSites`, `O_AtomicTypes`); the
+  input settings `numStates`, `sigmaDOS`, `eminDOS`,
+  `emaxDOS`, `deltaDOS`, `detailCodePDOS` (`O_Input`): all
+  set by `parseInput` and the setup that follows it. On the
+  SCF path `parseInput(1)` (`imago.F90:295`) and the setup
+  through `makeAlphaNucDist` run on EVERY rank, before root's
+  guard at `:374`, so the workers hold them. On the post-SCF
+  path `parseInput(0)` is called INSIDE `intgPSCF`
+  (`:817`), which is root's alone today -- the workers hold
+  nothing of the post-SCF input until the run-shape step of
+  9.9 brings them into `intgPSCF`. That settles the order:
+  the SCF-path entry (`dos(1)`) is the first increment, and
+  the post-SCF entry follows 9.9's run-shape step, exactly
+  as the two-centre stages were ordered.
+- `invAtomPerm` and `channelPermTable`: the first is built
+  by the symmetry setup (every run but SYBD, 2.6), the
+  second from it inside `computeDOS`; whether the first is
+  built on every rank is to be VERIFIED at PSEUDOCODE time
+  (it is consumed only by root's symmetrization, so a worker
+  without it is harmless as long as the guard
+  `allocated(invAtomPerm)` at `dos.F90:489` is evaluated on
+  root and the verdict broadcast, not evaluated per rank).
+- The channel bookkeeping (`cumulNumDOS`, `pdosIndex`,
+  `numAtomStates`, `cumulDOSTotal`, `energyScale`): computed
+  in `computeDOS` from replicated data; every rank computes
+  its own identical copy.
+- The file handles (`eigenVectors_did`, `atomOverlap_did`
+  and their post-SCF siblings) and the output units: root's
+  alone, as in 9.9.
+- The accumulators: `pdosComplete(cumulDOSTotal,
+  numEnergyPoints)`, `electronNumber(maxNumValeStates,
+  numAtomSites)`, `localizationIndex(numStates)` -- all
+  additive over k-points and states; `projArr(cumulDOSTotal,
+  numStates, numKPoints)` on the tetrahedron path, each
+  `(state, k-point)` column written by exactly one
+  contribution.
+
+**Where the time is (arithmetic, not yet measured -- the
+baseline is step (a) below).** On `sio2_1296_large_g`,
+`valeDim = 12528` and `numStates = 5184`: step 2 is 1.6 x
+10^12 real multiply-adds per spin per k-point. Written as it
+is, each `(j, mu)` pair streams three `valeDim`-long vectors,
+about 20 TB of memory traffic per spin per k-point -- tens of
+minutes at Gamma and twice that in the complex build, on one
+core, memory-bound. Step 3 is of order 10^10 operations and
+step 1 is one k-point's read. So the PDOS on a large cell is
+the projection, and the projection is a matrix product in
+disguise.
+
+**Step 0 -- the serial recast, before any deal (the
+PSEUDOCODE 31 lesson).** `T = S C` is ONE `zgemm` / `dgemm`
+per k-point (`valeDim x valeDim` times `valeDim x numStates`;
+`T` is a new `valeDim x numStates` workspace, 1 GB complex on
+the large deck), and the weight is then element-wise,
+`P(mu, j) = Re( conj(C(mu, j)) T(mu, j) )`: the same flop
+count at BLAS-3 speed -- tens of seconds on one core, seconds
+on eight threads. The same product is the core of the bond
+order (Mulliken pair populations from `C`, `S` and `C`) and
+of the optical transitions (`C^H M C` on the momentum
+matrices), so it is written ONCE as a shared
+"project the states onto the basis" routine that the family
+calls. The recast changes the arithmetic, so it carries a
+floating-point floor against today's output; that floor is
+measured and recorded on its own (the 31.8 pattern) before
+the deal is layered on top, so that each effect is cited
+independently.
+
+**Step 1 -- the deal, chosen by 9.6's rule.** Two axes, both
+exact partitions of the sums:
+
+- MANY K-POINTS (`numKPoints * spin >= mpiSize`): deal whole
+  k-points, `loadBalMPI` over the k-point index (or 9.6's
+  round deal, which is the same partition with restart
+  bookkeeping the analysis does not need). A rank needs `S_k`
+  and `C_k` for its own k-points and nothing else. Root reads
+  each k-point's packed `S` and `C` from the file exactly as
+  today and SHIPS them to the owner -- 9.6's dispatch:
+  matrices move, file access does not. Total traffic is the
+  file volume once.
+- FEW K-POINTS (`numKPoints * spin < mpiSize`): deal STATES,
+  in contiguous column blocks of `C_k`, within every k-point,
+  all ranks in lockstep over k-points. Root reads `S_k` and
+  `C_k`, broadcasts the packed `S_k`, and scatters each rank
+  its block of columns (contiguous in column-major storage:
+  one `MPI_Scatterv`). Each rank computes `T_r = S C_r` for
+  its columns and everything downstream for its states.
+
+The state axis is the right second axis for three reasons.
+The broadening is per state, so a rank that owns states owns
+everything after the projection for them: its `pdosAccum`,
+its slice of `localizationIndex`, its contribution to
+`pdosComplete` and `electronNumber`. On the tetrahedron path
+it owns `projArr(:, its states, k)` outright. And it is the
+axis 9.6 already named for the valence density, so one
+vocabulary and one partition helper serve both. The rule is
+9.6's because the reason is 9.6's: with plentiful k-points a
+k-point deal ships every matrix once, while a state deal
+would broadcast every `S_k` to every rank and synchronize per
+k-point -- cost that exceeds the work when the matrices are
+small; with one k-point the state deal is the ONLY axis with
+width.
+
+**Step 2 -- the combine.** Every rank accumulates into
+private copies of `pdosComplete`, `electronNumber` and
+`localizationIndex`, one `reduceSumMPI` of each onto root
+after the k-point loop (per spin), and root then normalizes,
+symmetrizes and writes exactly as today. `pdosComplete` is
+the largest: `cumulDOSTotal x numEnergyPoints` doubles,
+hundreds of megabytes at the finest detail codes on the
+large deck, seconds to reduce. On the tetrahedron path
+`projArr` is gathered onto root by slab (k-point slabs under
+the k-point deal, state slabs under the state deal -- each
+element written by exactly one rank, so the gather is
+exact), and the tetrahedron sweep runs on root first; it is
+per-state independent too, so it can be dealt on the state
+axis later if a stamp ever shows it.
+
+**Step 3 -- the run shape (DECIDED 2026-08-26: every rank
+calls the analysis routines in lockstep).** The analysis
+does not sit behind a server the way the solves do. Root
+shuts the solve servers as soon as the last solve is done --
+directly after `mainSCF` on the SCF path (the shutdown loop
+at `imago.F90:86-89` moves up), and after `bandPSCF` on the
+post-SCF path -- and then EVERY rank runs the same
+`if (doDOS...) call dos(...)` sequence, workers included,
+the way every rank runs the two-centre stages in PSEUDOCODE
+32: no control message, the routine itself is the dispatch.
+Inside, root does the file reads and the writes and
+broadcasts the small things the workers lack (the shifted
+eigenvalues, `occupiedEnergy`, `electronPopulation`, the
+`invAtomPerm` verdict); the progress dots and the
+diagnostics on unit 20 stay root's. `cleanUpSCF` and
+`closeHDF5_SCF` remain root's, after the family. A worker
+that reaches an analysis routine whose flag is off skips it
+with root, because the flags come from the replicated input.
+This is the shape 9.9 deferred for `intgPSCF`, and the
+post-SCF analysis entry is sequenced BEHIND that step (the
+input seam above); the SCF-path entry needs nothing but the
+moved shutdown.
+
+**Memory and expiry, stated as 9.9 states them.** Under the
+state deal every rank holds the full `S_k` (1.26 GB real,
+2.5 GB complex at 1296 atoms) plus its block of `C_k` and
+its `T_r`: the same full-copy stepping stone the programmer
+accepted for the two-centre stages, with the same expiry. At
+10,000 atoms `S` is 75 GB real and 150 GB complex (6.9) and
+cannot be held per rank; the destination is `T = S C` as a
+PBLAS product on the block-cyclic layout of 9.3, with `C`
+arriving from ELPA already distributed and never assembled
+whole, and the weights formed on the tiles each rank owns.
+The state partition, the per-rank accumulate-and-reduce and
+the per-rank timing carry over unchanged; only where `S`
+lives and what multiplies it change.
+
+**Exactness.** One rank equals the serial build bit for bit
+(identity deal, reduce a no-op or a sum of one term). Across
+ranks the reduce reassociates a sum over k-points or over
+states, so the multi-rank result carries a floating-point
+floor -- PA5a's situation, not PSEUDOCODE 32's zero floor,
+because every accumulator element here is a genuine sum over
+many contributions. The tetrahedron path's `projArr` gather
+IS exact, and its integration then runs on root in the
+serial order, so its PDOS is bit-identical across rank
+counts up to the `electronNumber` and `localizationIndex`
+reductions. Acceptance: electron counts and integrated areas
+to print precision, the spectra at a measured and recorded
+tolerance against the serial run, and the `DOS` stage stamp
+falling with rank count on both regimes.
+
+**Order of work.** (a) A measured baseline: `-dos` runs with
+the stage stamp on `sio2_243_med_g`, `knbo3_333_med_c` and
+`sio2_1296_large_g`, both PDOS paths where the deck allows,
+so the recast has a number to beat and the "where the time
+is" paragraph above becomes a record rather than an estimate.
+(b) The serial GEMM recast, its own PSEUDOCODE section and
+floor measurement. (c) The moved shutdown and the two-axis
+deal on the SCF-path entry, its own PSEUDOCODE section with
+the inventory above re-verified. (d) The post-SCF entry, once
+9.9's run-shape step exists. (e) Bond order and optical on
+the shared projection routine and the same deal: one kernel,
+one deal, one run shape for the family.
+
+**Found in the reading, outside this design (to be checked
+before (b) touches the code).** `readDataSCF` and
+`readDataPSCF` read the eigenvectors into slab `h` of
+`valeVale(:, :, h)` (`secularEqn.F90:1590`, `:1735`), but
+`computeDOS` allocates ONE slab for the post-SCF case
+(`dos.F90:319`, `valeVale(valeDim, numStates, 1)`) and reads
+slab 1 for every spin (`:702`). For spin two that is an
+out-of-bounds write on the post-SCF path and, on the SCF
+path (where `secularEqnSCF` allocated `spin` slabs), a
+spin-down PDOS broadened over spin-down eigenvalues but
+projected with SPIN-UP eigenvectors. `bond.F90:154`,
+`bond3C.F90:157` and `optc.F90:931` allocate the same single
+slab. Not run to confirm; recorded here so it is not lost.
 
 ---
 

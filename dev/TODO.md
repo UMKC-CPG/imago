@@ -8560,6 +8560,20 @@ is not carried only in conversation.
   is worth doing, so PF8 gates the parallel-read design, not the
   cache.
 
+- [ ] PF9. Baseline the DENSITY OF STATES stage (DESIGN 9.10,
+  order of work (a)): `-dos` runs with the `PDOS/TDOS/LI
+  Calculation` stamp (operation 19) on `sio2_243_med_g`,
+  `knbo3_333_med_c` and `sio2_1296_large_g`, the Gaussian path
+  and, where the deck's mesh allows, the tetrahedron path, at
+  detail code 2 (atom-orbital) so the largest channel count is
+  on record. Records in PERFORMANCE.md: the stage seconds, the
+  share that is the projection (a stamp or a clock around the
+  `(j, mu)` loop -- the arithmetic in 9.10 puts it at nearly all
+  of the stage on the large deck, tens of minutes per spin), and
+  the memory. This is the number the GEMM recast (PA6 step 1)
+  has to beat and the number the deal is measured against.
+  Serial build, one thread, exclusive node, the PF1 protocol.
+
 > **Parallel implementation (PA).**  Ruled 2026-08-18: MPI + ELPA
 > first, threads inside a rank as a companion.  ARCHITECTURE 6.5,
 > 6.6 and 6.8 are the level above these; DESIGN 9 is the level
@@ -8971,6 +8985,57 @@ is not carried only in conversation.
   The cache was ADOPTED 2026-08-23 by the valence split
   measurement (DESIGN 9.6 closing paragraph, 9.8 order) and is
   step 4 of PA4's ordered plan; the dealt form follows PF8.
+
+- [ ] PA6. The POST-SCF ANALYSIS FAMILY, PDOS first -- DESIGN 9.10
+  WRITTEN 2026-08-26 (programmer's choice of member and two
+  rulings: every rank calls the analysis routines in lockstep,
+  no server; scale on both the many-k-point and the large
+  one-k-point axes). The family: DOS, bond order, optical,
+  dipole, field -- one shape (per spin and k-point, read root's
+  eigenvectors and integrals, contract state by state, add into
+  sums over k-points and states), root-serial in full today.
+  Steps, each its own PSEUDOCODE section and each measured on
+  its own so the report can cite the effects separately:
+  1. PF9 first (the baseline).
+  2. The serial recast of the projection as `T = S C`, one GEMM
+     per k-point, written once as a shared routine for the
+     family (DESIGN 9.10 step 0). Floor against today's output
+     measured and recorded (the 31.8 pattern). Expected to be
+     the largest gain and single-core.
+  3. The deal on the SCF-path entry (`dos(1)`): move the solve
+     shutdown to directly after `mainSCF`, every rank calls
+     `dos`; k-point deal when `numKPoints * spin >= mpiSize`,
+     state-block deal within every k-point otherwise; root
+     reads and ships (9.6's dispatch), private accumulators
+     summed onto root, root writes. Seam inventory of 9.10
+     re-verified at PSEUDOCODE time (in particular whether
+     `invAtomPerm` is built on every rank). Acceptance: np1
+     bit-identical to serial; electron counts and areas to
+     print precision and spectra at a recorded tolerance at
+     np 2/4/8 on `sio2_243_med_g` (state deal) and np 4 on
+     `knbo3_333_med_c` (k-point deal); the stamp falling.
+  4. The post-SCF entry (`dos(0)`), AFTER DESIGN 9.9's run-shape
+     step gives the workers the post-SCF input (`parseInput(0)`
+     is inside `intgPSCF`, root-only today).
+  5. Bond order and optical on the shared projection routine and
+     the same deal.
+  Before step 2 touches `dos.F90`: BUG-028 (DEBUG.md), the
+  spin-two slab defect DESIGN 9.10 found -- CONFIRMED by reading
+  2026-08-26 on both paths and both builds (post-SCF: an
+  out-of-bounds write; SCF: spin one's vectors projected against
+  spin two's eigenvalues; Gamma SCF: no read at all, the solver's
+  slab `h` is never consulted). DESIGN 2.8 states the contract
+  (the caller names the destination slab), PSEUDOCODE 33 is the
+  fix (one optional `slab` argument on the two readers, twelve
+  call sites pass 1) and its eight checks on a magnetic O2 deck
+  (`IMAGO_CHECKS` abort before / clean after; `fort.80` ==
+  `fort.81` before / differ after; spin one and the non-magnetic
+  control bit-identical). Code it first, so the recast is
+  compared against a correct serial output.
+  Expiry, as for PA4 step 6: the state deal holds the full
+  overlap on every rank; the destination at 10,000 atoms is the
+  PBLAS product on DESIGN 9.3's layout with the eigenvectors
+  left where ELPA put them.
 
 ## TOOLING (lint helpers)
 
