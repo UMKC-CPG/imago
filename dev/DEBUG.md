@@ -2998,6 +2998,50 @@ Ordered by severity (S1 first).
             order before a spin-polarized post-SCF run could
             complete.
 
+### BUG-031 -- the post-SCF Hamiltonian phase-factor call passes
+### the whole spin-resolved pair array to a one-slab dummy, so
+### every spin lands in slab one and spin two stays zero
+- File:     `src/imago/integrals.F90:4167` (complex) and `:4174`
+            (gamma), the `applyPhaseFactors` / `...Gamma` calls in
+            `gaussOverlapHamPSCF`; dummies at
+            `intgSaving.F90:725` (gamma) and the complex twin
+- Variant:  [BOTH]
+- Category: ALLOC / IFACE (sequence-association slab aliasing)
+- Severity: S2 -- every spin-polarized post-SCF calculation gets
+            a ZERO spin-two Hamiltonian (so spin-two eigenvalues
+            are all zero and its DOS/bond/optical are empty) and a
+            CORRUPTED spin-one Hamiltonian (spin two's contribution
+            added into it). The last of the spin-polarized
+            post-SCF chain; the three before it (BUG-028/029/030)
+            let a run reach this stage for the first time.
+- Status:   confirmed 2026-08-26 by reading the on-disk
+            Hamiltonian (spin one max 1.89, spin two exactly 0.0
+            on the O2 gamma deck) and the code; fixed the same day.
+- Evidence: `gaussOverlapHamPSCF` builds the pair Hamiltonian per
+            spin in `currentPairHam(...,spin)` /
+            `currentPairHamGamma(...,spin)` and, in a
+            `do q = 1, spin` loop, calls `applyPhaseFactorsGamma
+            (currentPairHamGamma, pairXBasisFn12Ham(...,q), ...)`
+            -- the WHOLE (maxNumStates,maxNumStates,spin) array
+            with no slab index. The dummy `currentPairGamma` is
+            declared (maxNumStates,maxNumStates) -- a SINGLE slab
+            -- so sequence association makes it alias slab one for
+            every q. Spin one accumulates both spins' pieces; spin
+            two's slab is never touched. `saveCurrentPairGamma`
+            then reads slab two (zero), so the spin-two Hamiltonian
+            written to disk is zero and the generalized solve
+            H x = lambda S x returns all-zero eigenvalues. The
+            complex `applyPhaseFactors` (3D dummy, 4D actual) has
+            the same aliasing. Non-spin-polarized runs (spin == 1)
+            are correct: one slab, one q. The overlap, kinetic,
+            mass-velocity and nuclear stages call the same routines
+            with a genuinely 2D pair array and are unaffected.
+- Fix:      Pass the explicit spin slab at the two call sites --
+            `currentPairHamGamma(:,:,q)` and
+            `currentPairHam(:,:,:,q)` -- so each q writes its own
+            slab. The dummies are unchanged; every other caller
+            already passes a 2D / 3D actual and is unaffected.
+
 ### The rest of -Wconversion: implicit, justified, now explicit
 The remaining `-Wconversion` sites were all implicit narrowing
 that is correct but undocumented, and each now says so:

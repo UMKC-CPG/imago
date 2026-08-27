@@ -4163,15 +4163,20 @@ subroutine gaussOverlapHamPSCF(did,aid)
                !   that the k index is over the number of cells in the
                !   superlattice.
                do q = 1, spin
+                  ! Pass this spin's OWN slab (:,:,:,q) / (:,:,q).  The
+                  !   phase-factor routines take a single-spin pair
+                  !   array, so handing them the whole spin-resolved
+                  !   array would alias slab one for every spin and
+                  !   leave spin two zero (DEBUG.md BUG-031).
 #ifndef GAMMA
-                  call applyPhaseFactors (currentPairHam,&
+                  call applyPhaseFactors (currentPairHam(:,:,:,q),&
                         & pairXBasisFn12Ham(1:&
                         & currentNumTotalStates(1),1:&
                         & currentNumTotalStates(2),q),&
                         & currentNumTotalStates(1),&
                         & currentNumTotalStates(2),k,0)
 #else
-                  call applyPhaseFactorsGamma (currentPairHamGamma,&
+                  call applyPhaseFactorsGamma (currentPairHamGamma(:,:,q),&
                         & pairXBasisFn12Ham(1:&
                         & currentNumTotalStates(1),1:&
                         & currentNumTotalStates(2),q),&
