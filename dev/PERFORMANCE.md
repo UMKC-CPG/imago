@@ -1203,6 +1203,53 @@ library's buffers. The whole one-iteration run is
 solve-bound as before (two solves, 3489 s of 3565 s), which
 is the ELPA arm's business, not this section's.
 
+## The density-of-states baseline (PF9, 2026-08-26)
+
+DESIGN 9.10's order-of-work step (a): the density-of-states
+stage timed before the projection is recast, so the recast
+(PA6 step 2) and its parallel deal have a number to beat.
+Serial `cpg` build from HEAD (all four spin-polarized
+post-SCF fixes), one thread, `IMAGO_PROFILE`; each deck
+restarts from its finished benchmark SCF, so the setup stages
+are skipped and the run is the SCF re-solve plus the
+`PDOS/TDOS/LI Calculation` stamp (operation 19). Detail code
+2 (one channel per atom and orbital), the largest channel
+count. Evidence: `jobs/pf9`, job 16823638.
+
+```
+deck              valeDim  path          DOS stamp   % run   peak RSS
+sio2_243_med_g       2349  Gaussian, G     22.5 s     38 %    0.32 GB
+knbo3_333_med_c      1620  Gaussian, 4k    35.2 s      -      0.30 GB
+knbo3_333_med_c      1620  tetrahedron     52.9 s      -      0.32 GB
+sio2_1296_large_g   12528  Gaussian, G    2339.0 s     40 %   6.9 GB
+```
+
+Three facts the recast and the deal rest on. First, the stage
+is the projection: on the large cell it is 2339 s (39 minutes,
+one thread), second only to the secular solve, and it is the
+`numStates * valeDim^2` Mulliken product written today as a
+strided intrinsic sum per state and basis function -- memory-
+bound, no BLAS. From the 243 cell to the 1296 cell the stamp
+grows 104x for a 5.3x rise in `valeDim`, close to the
+`valeDim^2 * numStates` the arithmetic predicts, so the large
+cell is where the recast is decided. Second, the tetrahedron
+path costs about 1.5x the Gaussian path on the same cell (52.9
+vs 35.2 s), its two-pass structure -- project, then the
+corner-weight sweep -- adding real time on top of the same
+projection. Third, the multi-k-point complex cell is already
+the 35 s case at only 2349 basis functions, because the
+projection is per k-point and the k-points multiply it: at
+1620 basis functions over four k-points it already costs more
+than the 2349-function single-k cell -- the measured reason
+9.10 deals whole k-points to ranks in that regime and blocks
+of states within a k-point in the large single-k regime.
+
+Harness note: `pf9.sbatch`'s inline summary greps
+`gs_scf-fb.out`, but a DOS job writes `gs_scf+dos-fb.out`, so
+its per-deck stamp lines did not print; the stamps were read
+from the output files after the run. The runs themselves are
+unaffected. Fix the filename before the job is reused.
+
 ## The situation, as of 2026-08-09
 
 Three things are true at once, and the campaign has to be planned

@@ -8560,19 +8560,19 @@ is not carried only in conversation.
   is worth doing, so PF8 gates the parallel-read design, not the
   cache.
 
-- [ ] PF9. Baseline the DENSITY OF STATES stage (DESIGN 9.10,
-  order of work (a)): `-dos` runs with the `PDOS/TDOS/LI
-  Calculation` stamp (operation 19) on `sio2_243_med_g`,
-  `knbo3_333_med_c` and `sio2_1296_large_g`, the Gaussian path
-  and, where the deck's mesh allows, the tetrahedron path, at
-  detail code 2 (atom-orbital) so the largest channel count is
-  on record. Records in PERFORMANCE.md: the stage seconds, the
-  share that is the projection (a stamp or a clock around the
-  `(j, mu)` loop -- the arithmetic in 9.10 puts it at nearly all
-  of the stage on the large deck, tens of minutes per spin), and
-  the memory. This is the number the GEMM recast (PA6 step 1)
-  has to beat and the number the deal is measured against.
-  Serial build, one thread, exclusive node, the PF1 protocol.
+- [x] PF9. Baseline the DENSITY OF STATES stage (DESIGN 9.10,
+  order of work (a)). DONE 2026-08-26 (job 16823638,
+  PERFORMANCE.md "The density-of-states baseline (PF9)"). The
+  `PDOS/TDOS/LI Calculation` stamp at detail code 2, restarting
+  each deck from its finished SCF: `sio2_243_med_g` 22.5 s
+  (Gaussian, G), `knbo3_333_med_c` 35.2 s (Gaussian, 4k) and
+  52.9 s (tetrahedron), `sio2_1296_large_g` 2339 s (39 minutes,
+  one thread, 6.9 GB) -- the projection, second only to the
+  solve on the large deck, growing 104x for a 5.3x rise in
+  valeDim. The tetrahedron path is ~1.5x the Gaussian; the
+  multi-k complex deck is dear at small valeDim because the
+  projection is per k-point. This is the number the GEMM recast
+  (PA6 step 2) must beat and the deal is measured against.
 
 > **Parallel implementation (PA).**  Ruled 2026-08-18: MPI + ELPA
 > first, threads inside a rank as a companion.  ARCHITECTURE 6.5,
