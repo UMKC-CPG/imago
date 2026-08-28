@@ -8999,7 +8999,11 @@ is not carried only in conversation.
   1. PF9 first (the baseline).
   2. The serial recast of the projection as `T = S C`, one GEMM
      per k-point, written once as a shared routine for the
-     family (DESIGN 9.10 step 0). Floor against today's output
+     family (DESIGN 9.10 step 0). PSEUDOCODE 34 WRITTEN
+     2026-08-26 (the arithmetic identity verified against the
+     loop, the seam inventory, the shared `projectStatesOntoBasis`
+     routine, the two DOS callers, the floor and the five checks);
+     awaits review before coding. Floor against today's output
      measured and recorded (the 31.8 pattern). Expected to be
      the largest gain and single-core.
   3. The deal on the SCF-path entry (`dos(1)`): move the solve

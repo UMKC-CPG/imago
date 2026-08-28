@@ -18637,3 +18637,271 @@ differing by two. Control: `bnspin` (`bn_small_g`, `XC_CODE
 8. **No regression elsewhere**: `bn_small_c`, `bn_small_g`,
    `sio2_243_med_g` SCF runs bit-identical to the pre-fix
    build (the readers' default path is unchanged).
+
+
+## 34. The State Projection as a Matrix Product
+## (DESIGN 9.10, order-of-work step (b); TODO PA6, step 2)
+
+### 34.1 What this is, and what it is not
+
+The density-of-states calculation spends nearly all of its
+time on one operation: for every electron state and every
+basis function, it works out how much of that state sits on
+that basis function. This is the Mulliken projection. Today
+it is written as a hand-rolled loop that, for each (state,
+basis function) pair, walks a whole row of the overlap matrix
+and sums products -- a `numStates * valeDim^2` inner
+arithmetic that moves through memory instead of staying in the
+processor, so it is slow far out of proportion to the number
+of operations. PF9 measured it: 2339 seconds (39 minutes) on
+the 1296-atom cell, one core, second only to the secular
+solve (dev/PERFORMANCE.md, "The density-of-states baseline").
+
+This section rewrites that projection as what it mathematically
+is -- one matrix product followed by a cheap element-by-element
+step -- so that the level-3 BLAS library does the heavy part at
+the speed the hardware allows. It is the serial, single-core
+recast of DESIGN 9.10's Step 0, done BEFORE any work is spread
+across processors, exactly as PSEUDOCODE 31 recast the
+density-matrix build before its deal. It changes no result by
+more than the last few digits, and it is the number the later
+parallel deal (PA6 step 3) is measured against.
+
+Two things it is NOT. It is not the parallel deal: every
+quantity here stays on one rank, and the state/k-point
+partition of 9.10 sits on top of this later, unchanged. And it
+is not only for the density of states: the same matrix product
+is the core of the bond-order and optical calculations
+(DESIGN 9.10), so it is written ONCE as a shared routine that
+those two will call when their own recasts are taken (PA6 step
+5). This section codes the shared routine and the two
+density-of-states callers; it does not touch bond order or
+optics.
+
+### 34.2 The arithmetic identity (verified against the code)
+
+Write `C` for the eigenvector matrix (`valeDim` basis
+functions by `numStates` states, one k-point and spin) and
+`S` for the overlap matrix (`valeDim` by `valeDim`). The loop
+in `computeDOS` (`dos.F90:709-733`) forms, for basis function
+`mu` (the running index `valeDimIndex`) and state `j`:
+
+```
+   complex build (dos.F90:709):
+      waveFnSqrd(nu) = conjg(C(mu,j)) * C(nu,j)        for all nu
+      oneValeRealAccum =
+         sum over nu of  Re(waveFnSqrd(nu)) * Re(S(nu,mu))
+                       + Im(waveFnSqrd(nu)) * Im(S(nu,mu))
+```
+
+Because `Re(a)Re(b) + Im(a)Im(b) = Re(conj(a) b)`, and because
+the overlap is Hermitian (`S(nu,mu) = conj(S(mu,nu))`), this
+sum collapses:
+
+```
+   oneValeRealAccum
+      = sum_nu Re[ C(mu,j) conj(C(nu,j)) S(nu,mu) ]
+      = Re[ C(mu,j) * conj( sum_nu S(mu,nu) C(nu,j) ) ]
+      = Re[ conj(C(mu,j)) * T(mu,j) ] ,   where  T = S C .
+```
+
+In the Gamma build everything is real and the overlap is
+symmetric, so the same reduction gives simply
+
+```
+   oneValeRealAccum = C(mu,j) * T(mu,j) ,   T = S C .
+```
+
+So the entire projection is: form `T = S C` once, then take
+the element-by-element product of `conj(C)` (or `C`) with `T`
+and keep the real part. `T` is the states carried through the
+overlap -- "the states projected onto the basis". This is
+DESIGN 9.10's `P(mu,j) = Re( conj(C(mu,j)) T(mu,j) )`,
+confirmed line for line against the current loop.
+
+### 34.3 Seam inventory (read at `45d6e13`)
+
+Everything the recast consumes, produces, or removes, in
+`computeDOS` and `computeProjections_LAT` (`dos.F90`):
+
+- The eigenvectors `C`: the module array `valeVale` (complex,
+  `O_SecularEquation`) or `valeValeGamma` (real), slab
+  `(valeDim, numStates, 1)`, filled per k-point and spin by
+  `readDataSCF` / `readDataPSCF(..., slab=1)` inside the
+  k-point loop (PSEUDOCODE 33). Unchanged: the recast reads
+  the same array.
+- The overlap `S`: the module array `valeValeOL` (complex) or
+  `valeValeOLGamma` (real), a FULL `(valeDim, valeDim)` matrix
+  unpacked from the file by the same reader per k-point (the
+  Hermitian/symmetric overlap is stored whole, not packed, at
+  this point). Unchanged as input.
+- The per-basis-function work vector `waveFnSqrd` /
+  `waveFnSqrdGamma` (`valeDim`), allocated at `dos.F90:317`
+  (Gaussian) and inside `computeProjections_LAT`: REMOVED. It
+  held one `conjg(C(mu,j)) C(:,j)` column at a time; the recast
+  needs no such per-`mu` temporary.
+- New workspace `T`, `(valeDim, numStates)`, complex or real,
+  allocated once per call beside the overlap: `valeDim *
+  numStates` numbers. On the 1296-atom Gamma deck
+  (`valeDim = 12528`, `numStates = 3456`) that is 0.35 GB real;
+  the complex form is twice that. It is freed at the end of the
+  routine. This is the recast's only new memory, and it is
+  smaller than the overlap matrix the routine already holds.
+- The projection result: today the scalar `oneValeRealAccum`,
+  recomputed inside the `mu` loop. After the recast it is the
+  matrix `P(mu,j)`, formed once. The three things the loop does
+  with it are UNCHANGED in formula:
+  - `electronNumber(l,k)` (`dos.F90:740`): accumulates
+    `P(mu,j) * kPointWeight(i) * occupancyNumber`, indexed by
+    the atom `k` and its state `l` -- the `(k,l)` to `mu`
+    mapping is the loop's own visiting order and is kept.
+  - `pdosAccum(pdosIndex(mu))` (`:746`): accumulates
+    `P(mu,j) / spin` into the channel `pdosIndex(mu)` gives.
+  - `localizationIndex(j)` (`:753`): accumulates
+    `P(mu,j)^2 * kPointWeight(i) / spin`.
+  In `computeProjections_LAT` the same `P(mu,j)` feeds
+  `projArr(pIndex(mu), j, i)`, `elecNum`, `locIdx`
+  (`dos.F90:1720-1760`), identically.
+- The broadening that follows each state (`dos.F90:763`), the
+  channel table `pdosIndex`, the per-atom state counts
+  `numAtomStates`, `kPointWeight`, `occupancyNumber`,
+  `energyEigenValues`: all unchanged, all still read exactly as
+  now.
+- The matrix product itself: one call to the level-3 BLAS
+  routine already linked for the solves. The overlap is
+  Hermitian (complex) or symmetric (real), so the specialized
+  `zhemm` / `dsymm` is the natural call; the general `zgemm` /
+  `dgemm` gives the same result and is the fallback. The
+  element-by-element step is Fortran array syntax, no library.
+
+### 34.4 The shared routine
+
+One routine, in a module the analysis family shares (working
+name `O_StateProjection`, `projectStatesOntoBasis`):
+
+```
+projectStatesOntoBasis (G, C, numBasis, numStates, T):
+   ! T = G C, one level-3 BLAS product.  G is the valeDim by
+   !   valeDim Hermitian (complex) or symmetric (real) matrix
+   !   the states are carried through -- the overlap for the
+   !   density of states and for bond order, a momentum matrix
+   !   for optics.  C is valeDim by numStates.  T is the
+   !   caller's workspace, valeDim by numStates.
+   complex build:  call zhemm (left, upper, numBasis,
+                      numStates, (1,0), G, C, (0,0), T)
+   Gamma build:    call dsymm (left, upper, numBasis,
+                      numStates, 1.0, G, C, 0.0, T)
+```
+
+The Mulliken projection `P(mu,j) = Re(conj(C) .* T)` is the
+density-of-states and bond-order combination; optics forms its
+own combination from `C` and `T`. So the shared routine returns
+`T` and each caller finishes; the element-by-element `P` is one
+line at each density-of-states caller and is not worth a second
+routine. (When bond order and optics are recast in PA6 step 5
+they call this same routine with their own `G`; that is why it
+is shared now rather than inlined.)
+
+### 34.5 The recast, at each caller
+
+Both callers keep their k-point-and-spin loop, their reads,
+their binning, and their broadening. Only the innermost
+projection changes:
+
+```
+   -- computeDOS, Gaussian path (replacing dos.F90:699-761's
+      per-mu inner loops) --
+   per k-point i, per spin (already the loop structure):
+      read C and S for this k-point (as today)
+      call projectStatesOntoBasis (S, C, valeDim, numStates, T)
+      P(:, :) = real( conjg(C(:, :numStates)) * T(:, :) )
+            ! Gamma build: P = C(:, :numStates) * T
+      do j = 1, numStates                 ! as today
+         valeDimIndex = 0
+         do k = 1, numAtomSites            ! the binning only
+            do l = 1, numAtomStates(k)
+               valeDimIndex = valeDimIndex + 1
+               electronNumber(l,k) = electronNumber(l,k)
+                     + P(valeDimIndex, j) * kPointWeight(i)
+                     * occupancyNumber
+               pdosAccum(pdosIndex(valeDimIndex)) =
+                     pdosAccum(pdosIndex(valeDimIndex))
+                     + P(valeDimIndex, j) / spin
+               localizationIndex(j) = localizationIndex(j)
+                     + P(valeDimIndex, j)**2
+                     * kPointWeight(i) / spin
+            enddo
+         enddo
+         ... broadening for state j, exactly as today ...
+      enddo
+```
+
+The inner `k`/`l` loops no longer compute anything expensive;
+they only READ `P` and place it in the right channel, so their
+cost falls from `valeDim` arithmetic per entry to one lookup.
+`computeProjections_LAT` takes the same shape: the same
+`projectStatesOntoBasis` call and `P`, then its existing
+`projArr` / `elecNum` / `locIdx` binning. The occupancy
+step-function, the spin factor, and the tetrahedron pass that
+follows are untouched.
+
+### 34.6 What stays exactly as it is
+
+- Every output file and its format: TDOS (`fort.60/61`), PDOS
+  (`fort.70/71`), localization index (`fort.80/81`).
+- The broadening, the electron-count normalization, the
+  symmetrization (PSEUDOCODE 23), the tetrahedron integration
+  of the LAT path.
+- The readers, the channel table, the k-point-and-spin loop
+  structure, the eigenvalues.
+- The memory footprint apart from the single `T` workspace,
+  which replaces the removed `waveFnSqrd` vector and is a small
+  fraction of the overlap the routine already holds.
+
+### 34.7 Exactness and the floor
+
+The recast sums each `T(mu,j) = sum_nu S(mu,nu) C(nu,j)` in the
+order the BLAS library chooses (blocked, vectorised, possibly
+fused multiply-add), whereas today's loop sums `nu` in storage
+order with a plain intrinsic `sum`. The two orders reassociate
+a floating-point sum over `valeDim` terms, so `P` differs from
+today's `oneValeRealAccum` at the rounding level -- a genuine
+floor, as PSEUDOCODE 31's rank-k recast carried, not the exact
+zero of PSEUDOCODE 32. The floor propagates into the DOS, PDOS
+and localization outputs. It is measured and recorded on its
+own, before any parallel work, so the recast's speed and its
+floor are each cited independently (the 31.8 pattern). The
+acceptance is that the electron counts and the integrated
+areas agree to print precision and the curves agree at the
+measured floor, and that the `PDOS/TDOS/LI Calculation` stamp
+falls toward the tens-of-seconds DESIGN 9.10 predicts.
+
+### 34.8 Checks
+
+1. **The floor**: the serial recast against the pre-recast
+   serial build (both from the same commit lineage) on
+   `sio2_243_med_g` and `knbo3_333_med_c`, Gaussian path,
+   detail code 2: the DOS/PDOS/localization output files agree
+   to a measured absolute tolerance recorded in
+   dev/PERFORMANCE.md, the electron counts and integrated
+   areas identical to print precision. The floor is expected at
+   the reduction level (about 1e-9 relative), not larger.
+2. **The tetrahedron path**: the same comparison on
+   `knbo3_333_med_c` with the tetrahedron method, so the
+   `computeProjections_LAT` recast is exercised, not just the
+   Gaussian one.
+3. **Spin-polarized**: the magnetic O2 deck (PSEUDOCODE 33's
+   deck), `-scfdos`, both spins: spin one and spin two outputs
+   at the floor, the up/down split preserved -- the recast must
+   not disturb the spin fix.
+4. **The stamp falls**: the `PDOS/TDOS/LI Calculation` stamp on
+   `sio2_243_med_g` and, above all, on `sio2_1296_large_g`
+   against PF9's 22.5 s and 2339 s; the large-deck stamp is the
+   headline, expected to drop from 39 minutes to the tens of
+   seconds the BLAS-3 product allows. Same protocol as PF9
+   (serial, one thread, restart from finished SCF).
+5. **Threaded speed, recorded not gated**: the large-deck
+   stamp with the BLAS threaded (8 threads) beside the
+   one-thread number, so the single-core recast and the thread
+   scaling are separate lines on the record -- the companion to
+   the deal, which comes next.
