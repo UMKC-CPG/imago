@@ -14582,8 +14582,11 @@ loop of `imago.F90`:
 "eigenpairs exist where the writer expects them", including
 any redistribution. Backends:
 
-- **Serial (one rank per problem):** exactly today's path;
-  OpenBLAS threads inside the rank are the intra-node lever.
+- **Serial (one rank per problem):** exactly today's path,
+  one thread per rank under the ranks-only ruling
+  (ARCHITECTURE 6.5); it serves the k-point deal, each rank
+  solving whole k-points. The lever for a single large solve
+  is ELPA across ranks (below), not threads within a rank.
 - **ELPA (one problem across ranks):** the block-cyclic
   layout of 9.3; the generalized problem is reduced via
   ELPA's Cholesky path and solved by its two-stage
@@ -14817,10 +14820,19 @@ specifies (ii) chooses the form on PF8's reading. (i) is
 listed first only because it is serial and smaller, not
 because it matters more.
 
-(iii) THE STATE AXIS, and only if (a) still dominates after
-(i). At that point it is the blocking of a compute-limited
-operation, and the private matrices and the reduction are being
-paid for something that scales.
+(iii) THE STATE AXIS. Under the ranks-only ruling
+(ARCHITECTURE 6.5, 2026-08-28) this is REQUIRED, not
+conditional. Threads are retired as the intra-node lever, so
+once (i) has made (a) compute-limited, blocking it across ranks
+is the ONLY remaining way to accelerate it on one node: each
+rank takes a range of the occupation-scaled columns, issues its
+partial rank-k update into a private accumulator, and the
+accumulators reduce onto root. The private matrices and the
+reduction are now paid for something that scales, which they
+were not when (a) was the bandwidth-limited level-2 loop above
+-- the recast of (i) is exactly what earns them. It is still
+taken last of the three, after (i) makes it worthwhile and (ii)
+removes the reads.
 
 **What this costs in exactness (the claim relaxed, not
 abandoned).** The bit-exactness claimed above is worth being
@@ -14856,9 +14868,10 @@ beside the others.
 Candidate (iii) is the one that would genuinely break
 parallel-equals-serial, since combining private matrices
 reorders sums the serial code adds in state order; that is a
-further reason it comes last, and its acceptance criterion has
-to be settled when it is specified rather than inherited from
-here.
+further reason it is taken last of the three, and its
+acceptance criterion has to be settled when it is specified
+rather than inherited from here (a measured tolerance, as
+(i)'s was, not the zero the bit-exact deals keep).
 
 Two serial optimizations the seam exposes, kept apart from each
 other because they pay in opposite places. The second is
@@ -17192,3 +17205,137 @@ end of one piece of work rather than a separate problem. A
 later section closing the PDOS restriction should generalize
 `xyzRealPointOps` to the D^l(R) it needs rather than
 introduce a second mechanism beside it.
+
+
+## 14. Resource Specification for a Single Parallel Run
+## (ARCHITECTURE 6.5 ranks-only ruling; VISION Goal 4)
+
+### 14.1 What this is
+
+Under the ranks-only ruling (ARCHITECTURE 6.5) a parallel run
+is described by ONE number: how many MPI ranks to spread it
+across. This section specifies how a user states that -- with
+the node placement and the scheduler housekeeping that go with
+it -- and how `makeinput.py` turns it into a ready-to-submit
+batch script, so that no one hand-writes a SLURM file.
+
+It is the SINGLE-JOB resource request only. The flight layer
+(section 6) that runs many calculations at once, and the cost
+dataspace (section 8) that will one day PREDICT the right rank
+count, are separate concerns; both consume the same one-number
+request when they arrive, and neither is a prerequisite here.
+
+### 14.2 The one knob, and where each part of it goes
+
+The user states, in `makeinputrc.py` (the site-and-defaults
+file they already edit) or overridden on the `makeinput.py`
+command line:
+
+- `ranks` -- the number of MPI ranks. One thread each, so this
+  is also the core count and the scheduler task count.
+- `nodes` -- how many nodes to place them on. Derived from
+  `ranks` and the site's `cores_per_node` when the user does
+  not give it (14.4); stated explicitly when a particular
+  spread is wanted.
+- `walltime` (the `time` field), `memory`, `partition`,
+  `account` -- the scheduler housekeeping already present today.
+
+`makeinput.py` writes these into the submission file it already
+generates (queue type 3, SLURM):
+
+```
+#SBATCH -N <nodes>
+#SBATCH -n <ranks>       ! the task count == SLURM_NTASKS
+#SBATCH -c 1             ! one core per task: the ranks-only policy
+#SBATCH -t <walltime>
+#SBATCH --mem=<memory>
+#SBATCH -p <partition>
+#SBATCH -A <account>     ! omitted when empty
+...
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export IMAGO_EXE="mpirun -np $SLURM_NTASKS"   ! only when ranks > 1
+cd <project> ; "$IMAGO_BIN/imago.py" <job flags>
+```
+
+Three points fix the design:
+
+- **The launcher rides the existing hook.** `imago.py` already
+  prefixes the binary call with `$IMAGO_EXE` (ARCHITECTURE
+  6.5). So a parallel run needs NO change to `imago.py`: the
+  generated script sets `IMAGO_EXE` to `mpirun -np
+  $SLURM_NTASKS`, and `$SLURM_NTASKS` is exactly the `-n
+  <ranks>` above -- the rank count is stated once and read
+  once. When `ranks == 1` the script leaves `IMAGO_EXE` unset
+  and the serial path is byte-for-byte unchanged.
+- **One thread per rank is emitted, not assumed.** The script
+  exports `OMP_NUM_THREADS=1` and `OPENBLAS_NUM_THREADS=1`
+  (ARCHITECTURE 6.5). The build still links a threaded BLAS;
+  the policy is set here, at the one place the run is launched.
+- **`imago.dat` is untouched.** Nothing about ranks, nodes or
+  threads enters the engine's input file. The engine learns
+  its rank count from `MPI_Comm_size` at run time (the O_MPI
+  module, PSEUDOCODE 24) and its thread count from the
+  environment above. So the submission file is the SINGLE
+  source of the resource request, and the "does imago.dat or
+  the SLURM file carry it" question resolves cleanly: neither
+  feeds the engine a number; the engine reads the world the
+  script launched.
+
+### 14.3 Seam inventory (read at c15fb05)
+
+Everything the change consumes or produces:
+
+- `makeinputrc.py`, the defaults dictionary -- carries
+  `partition`, `account`, `memory`, `cpus`, `nodes`, `time`,
+  `queue_type` today. `cpus` is renamed `ranks` (its meaning
+  under ranks-only: the MPI rank count == SLURM `-n`); a
+  `cores_per_node` site entry is added for the derivation of
+  14.4. Loaded by makeinput at start-up.
+- `makeinput.py` `Settings.__init__` -- reads the dictionary
+  into `self.ranks`, `self.nodes`, `self.cores_per_node`,
+  `self.partition`, `self.account`, `self.memory`, `self.time`.
+  To spare existing rc files a forced edit (the installed
+  `.imago/makeinputrc.py` and the many `jobs/*/makeinputrc.py`
+  copies still carry `cpus` and lack `cores_per_node`), the
+  read is by FALLBACK, not by direct subscript:
+  `ranks = rc.get("ranks", rc.get("cpus", 1))` accepts the old
+  key, and `cores_per_node = rc.get("cores_per_node", <site
+  default>)` supplies one when the key is absent. Only the
+  template `src/scripts/makeinputrc.py` is updated to the new
+  names; old copies keep working (no forced migration).
+- `makeinput.py` command-line parse -- the tokens that set
+  `cpus`/`nodes` today become `ranks`/`nodes`, so a run may
+  override the rc defaults per invocation.
+- `makeinput.py` submission-file writer (the `queue_type == 3`
+  branch) -- emits the `-N/-n/-c/-t/--mem/-p/-A` header from
+  those fields, the two thread exports, and the conditional
+  `IMAGO_EXE` launcher. This is the ONLY behavioural change:
+  today the branch hard-codes `OMP_NUM_THREADS=1` and never
+  emits a launcher, so its generated script runs serial even
+  when `-n` exceeds one.
+- `imago.py`, the `IMAGO_EXE` hook (`sub_mechanism`) --
+  UNCHANGED; it already prefixes the launcher.
+- The engine (`mpi.F90`, O_MPI) -- UNCHANGED; `MPI_Comm_size`
+  already delivers the rank count, and no `imago.dat` field is
+  added or read.
+
+### 14.4 Deriving nodes from ranks
+
+The user's real intent is usually "give me N ranks"; the node
+count is a placement detail the site fixes. So when `nodes` is
+not stated, makeinput derives it as
+`ceil(ranks / cores_per_node)` from the site's cores-per-node;
+and when it IS stated, makeinput uses it and WARNS if `ranks >
+nodes * cores_per_node` (an over-subscription the scheduler
+would reject or silently pack). `cores_per_node` is a site fact
+in `makeinputrc.py`, set once per machine -- the "describe the
+site once" of VISION Goal 4, in its smallest form.
+
+### 14.5 What this is not
+
+No flight layer, no cost prediction, no per-phase allocation
+(there is none under ranks-only). The section adds one clean
+front-end to the single-job path and nothing more; the same
+`ranks` number is what the flight layer (section 6) and the
+cost dataspace (section 8) will later generate and predict.

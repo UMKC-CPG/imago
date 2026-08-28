@@ -156,13 +156,20 @@ def parameters_and_defaults():
         "emu":              0,
         "no_core":          0,       # 0=core orbitals orthogonalized out
 
-        # ---- Slurm defaults ----
+        # ---- Slurm defaults (ranks-only; ARCHITECTURE 6.5) ----
+        #   `ranks` is the one resource knob: the number of MPI
+        #   ranks, one core and one thread each (DESIGN 14).
+        #   `nodes` = 0 means "derive it from ranks and
+        #   cores_per_node" (DESIGN 14.4); a positive value places
+        #   the ranks on exactly that many nodes.  `cores_per_node`
+        #   is a site fact set once per machine.
         "partition":        "rulisp-lab",
         "account":          "rulisp-lab",
         "time":             "00:60:00",
         "memory":           "10G",
-        "cpus":             1,
-        "nodes":            1,
+        "ranks":            1,
+        "nodes":            0,
+        "cores_per_node":   64,
     }
     return param_dict
 

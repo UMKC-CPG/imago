@@ -461,13 +461,18 @@ class ScriptSettings:
         self.emu = rc["emu"]
         self.no_core = rc["no_core"]
 
-        # Slurm.
+        # Slurm resources (ranks-only parallelism; DESIGN 14).
+        #   The rank count and cores-per-node are read by fallback so
+        #   that an existing makeinputrc.py still carrying the old
+        #   `cpus` key, or one predating `cores_per_node`, keeps
+        #   working unedited (DESIGN 14.3: no forced migration).
         self.partition = rc["partition"]
         self.account = rc["account"]
         self.time = rc["time"]
         self.memory = rc["memory"]
-        self.cpus = rc["cpus"]
-        self.nodes = rc["nodes"]
+        self.ranks = rc.get("ranks", rc.get("cpus", 1))
+        self.nodes = rc.get("nodes", 0)
+        self.cores_per_node = rc.get("cores_per_node", 64)
 
     # ------------------------------------------------------------------
     # Command-line parsing
@@ -780,7 +785,9 @@ DEFAULTS
   -basisVis:     No visualization files generated.
   -nocore:       Core orbitals are orthogonalized out (default behavior).
   -slurm:        partition=rulisp-lab, account=rulisp-lab,
-                   time=00:60:00, memory=10G, cpus=1, nodes=1.
+                   time=00:60:00, memory=10G, ranks=1, nodes=0
+                   (nodes=0 derives the node count from ranks and
+                   the site cores_per_node).
 
 Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
 """
@@ -1271,7 +1278,7 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
                             default=None,
                             help="Slurm submission parameters.  Sub-opts: "
                                  "-p partition, -a account, -t time, "
-                                 "-m memory, -n cpus, -N nodes.")
+                                 "-m memory, -n ranks, -N nodes.")
 
     # ------------------------------------------------------------------
     # Reconcile CLI with rc defaults
@@ -1718,7 +1725,7 @@ Defaults are given in ./makeinputrc.py or $IMAGO_RC/makeinputrc.py.
             elif tag == "-m":
                 i += 1; self.memory = tokens[i]
             elif tag == "-n":
-                i += 1; self.cpus = int(tokens[i])
+                i += 1; self.ranks = int(tokens[i])
             elif tag == "-N":
                 i += 1; self.nodes = int(tokens[i])
             else:
@@ -6695,6 +6702,20 @@ def _make_sub_file(settings, h, current_name, sub_dir, proj_home,
         ]
     elif settings.queue_type == 3:
         sub_path = os.path.join(sub_dir, SLURM_SUB)
+        # Resolve the node count (DESIGN 14.4): derive it from the
+        #   rank count and the site cores-per-node when the user left
+        #   nodes at 0, and warn (not fail) on an over-subscription
+        #   that the scheduler would reject or silently pack.
+        cores_per_node = max(1, settings.cores_per_node)
+        resolved_nodes = settings.nodes
+        if resolved_nodes <= 0:
+            resolved_nodes = math.ceil(settings.ranks / cores_per_node)
+        elif settings.ranks > resolved_nodes * cores_per_node:
+            sys.stderr.write(
+                f"WARNING: ranks {settings.ranks} exceed nodes "
+                f"{resolved_nodes} x cores_per_node {cores_per_node} "
+                f"(= {resolved_nodes * cores_per_node}); the "
+                f"scheduler will reject or pack them.\n")
         header = [
             "#!/bin/bash\n",
             f"#SBATCH -p {settings.partition}\n",
@@ -6705,8 +6726,9 @@ def _make_sub_file(settings, h, current_name, sub_dir, proj_home,
             f"#SBATCH -J {proj_name}\n",
             f"#SBATCH -o {proj_name}.o%J\n",
             f"#SBATCH -e {proj_name}.e%J\n",
-            f"#SBATCH -n {settings.cpus}\n",
-            f"#SBATCH -N {settings.nodes}\n",
+            f"#SBATCH -N {resolved_nodes}\n",
+            f"#SBATCH -n {settings.ranks}\n",
+            "#SBATCH -c 1\n",
             f"#SBATCH -t {settings.time}\n",
             f"#SBATCH --mem={settings.memory}\n",
             "#\n",
@@ -6716,6 +6738,23 @@ def _make_sub_file(settings, h, current_name, sub_dir, proj_home,
         bash_loc = shutil.which("bash") or "/bin/bash"
         header = [f"#!{bash_loc}\n"]
 
+    # The run-time environment shared by every job body (DESIGN
+    #   14.2): one thread per rank, and the MPI launcher through
+    #   imago.py's IMAGO_EXE hook ONLY when more than one rank is
+    #   requested.  A single-rank run leaves IMAGO_EXE unset and runs
+    #   serially, exactly as before.  Under SLURM the launcher reads
+    #   the rank count back from $SLURM_NTASKS (the -n above), so the
+    #   number is stated once; a bash run names the count directly.
+    thread_env = [
+        "export OMP_NUM_THREADS=1\n",
+        "export OPENBLAS_NUM_THREADS=1\n",
+    ]
+    if settings.ranks > 1:
+        np_expr = "$SLURM_NTASKS" if settings.queue_type == 3 \
+            else str(settings.ranks)
+        thread_env.append(
+            f'export IMAGO_EXE="mpirun -np {np_expr}"\n')
+
     with open(sub_path, "w") as f:
         f.writelines(header)
 
@@ -6723,7 +6762,7 @@ def _make_sub_file(settings, h, current_name, sub_dir, proj_home,
             # Non-XANES: simple run commands.
             f.write("# shellcheck source=/dev/null\n")
             f.write(f"source {imago_rc}/imagorc\n")
-            f.write("export OMP_NUM_THREADS=1\n")
+            f.writelines(thread_env)
             f.write(f"cd {proj_dir} || exit\n")
             f.write("\"$IMAGO_BIN/imago.py\" -bond\n")
         elif h == 0:
@@ -6731,7 +6770,7 @@ def _make_sub_file(settings, h, current_name, sub_dir, proj_home,
             f.write("# shellcheck source=/dev/null\n")
             f.write(f"source {imago_rc}/imagorc\n")
             basename = "/" + os.path.basename(proj_dir)
-            f.write("export OMP_NUM_THREADS=1\n")
+            f.writelines(thread_env)
             f.write(f"cd {proj_dir}{basename} || exit\n")
             f.write("\"$IMAGO_BIN/imago.py\" -dos\n")
             f.write("\"$IMAGO_BIN/imago.py\" -bond\n")
@@ -6741,7 +6780,7 @@ def _make_sub_file(settings, h, current_name, sub_dir, proj_home,
             # XANES target: PACS commands for each excitable core orbital.
             f.write("# shellcheck source=/dev/null\n")
             f.write(f"source {imago_rc}/imagorc\n")
-            f.write("export OMP_NUM_THREADS=1\n")
+            f.writelines(thread_env)
             f.write("cd $SLURM_SUBMIT_DIR || exit\n")
 
             l_to_char = {0: "s", 1: "p", 2: "d", 3: "f"}

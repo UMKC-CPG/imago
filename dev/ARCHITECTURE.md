@@ -850,11 +850,46 @@ unchanged serial source against it and reproduces the serial
 baselines, so the parallel work starts from a binary that is
 already known to be right at one rank. A parallel run is launched
 by `imago.py` through the existing `IMAGO_EXE` hook (`mpirun -np`
-inside a batch script is the group's precedent). Threads live
-INSIDE a rank: OpenBLAS threads for the serial-LAPACK backend and
-OpenMP over atom pairs within a potential term, both bounded by the
-cores a rank owns; they are a companion to the distribution above,
-not a stage before it (programmer's ruling, 2026-08-18).
+inside a batch script is the group's precedent).
+
+**Ranks only: one thread per rank (programmer's ruling,
+2026-08-28).** The parallelism model is pure MPI. Threads are
+NOT a parallel axis: every rank runs one thread
+(`OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1` by policy), and
+every phase that must go faster is distributed over ranks,
+never over threads within a rank. This reverses the
+companion-threads position held here since 2026-08-18, and the
+measurements are why. A monolithic MPI job holds a FIXED rank
+count for its whole life -- the world size is set at `mpirun`
+launch and the allocation cannot be reshaped mid-run -- so it
+cannot trade ranks for threads between phases. Yet the phases
+pull opposite ways under one fixed split: the setup integrals,
+the electrostatic setup and the eigensolve all want ranks (the
+solve is thread-proof -- 16 OpenBLAS threads bought ZHEGV four
+percent, PERFORMANCE.md "PA4-A"), while the one phase that
+wanted threads was the valence-density build, whose rank-k
+recast (DESIGN 9.6, PSEUDOCODE 31) speeds up under threaded
+BLAS. Serving both at once is impossible with a fixed split,
+so the ruling removes the conflict at its root: make the
+valence build want ranks too, and the whole run collapses to a
+single resource number. The payoffs are a one-axis resource
+request (DESIGN 14, the resource specification), scaling that
+crosses nodes where threads cannot, and one parallelism story
+to document and hand on rather than a per-problem
+ranks-by-threads tuning.
+
+Two consequences follow, each its own work item. First, the
+valence-density build must be DISTRIBUTED over ranks rather
+than left to threaded BLAS: the rank-k recast (PSEUDOCODE 31)
+stays as the per-rank kernel, and its state-axis deal --
+optional under the retired companion-threads position --
+becomes REQUIRED (DESIGN 9.6, amended). Second, thread-
+oriented code this ruling strands -- the OpenMP-over-atom-pairs
+companion named just above, any thread-count knob, any unused
+OpenMP directive -- is to be surveyed and REMOVED, so a dead
+option cannot sit in the source and confuse a later reader.
+The build still links a threaded BLAS; this ruling is a
+runtime policy and a design commitment, not a rebuild.
 
 ### 6.6 Eigensolver Backend Abstraction
 

@@ -8927,10 +8927,15 @@ is not carried only in conversation.
   7. PSEUDOCODE 29, the k-point deal of the build -- ONLY if
      the accumulate half still shows on a multi-k deck after 2
      and 4. Its ceiling on today's medium deck is under 1 %.
-  8. Later: the state axis (column blocking of 2's update),
-     and the 9.4 endgame of building the density from the
-     eigenvectors ELPA already holds distributed, without the
-     gather to root.
+  8. The state axis (column blocking of 2's update) -- now
+     REQUIRED under the ranks-only ruling (ARCHITECTURE 6.5,
+     2026-08-28; was optional). With threads retired it is the
+     only way to accelerate the now-compute-limited accumulate
+     half across ranks (DESIGN 9.6 candidate (iii), amended):
+     its own PSEUDOCODE section, built on PSEUDOCODE 31, with a
+     measured before/after tolerance. Then the 9.4 endgame of
+     building the density from the eigenvectors ELPA already
+     holds distributed, without the gather to root.
 
 - [ ] PA5a. Distribute the ELECTROSTATIC SETUP under DESIGN 9.2
   -- PULLED FORWARD 2026-08-22 (programmer's ruling on the
@@ -9040,6 +9045,24 @@ is not carried only in conversation.
   overlap on every rank; the destination at 10,000 atoms is the
   PBLAS product on DESIGN 9.3's layout with the eigenvectors
   left where ELPA put them.
+
+- [ ] PA7. The SINGLE-RUN RESOURCE SPECIFICATION -- ARCHITECTURE
+  6.5 (ranks-only ruling, 2026-08-28) + DESIGN 14 + PSEUDOCODE
+  35, all WRITTEN and /refine'd 2026-08-28; awaits coding.
+  `makeinput.py` turns one number (`ranks`, with `nodes` derived
+  from a site `cores_per_node`) into a ready-to-submit SLURM
+  script: the `cpus` -> `ranks` rename (fallback reads, no
+  forced rc migration), the node derivation and over-
+  subscription warning, and the submission-file writer emitting
+  the MPI launcher (`IMAGO_EXE="mpirun -np $SLURM_NTASKS"`) and
+  the one-thread-per-rank exports it does not emit today. No
+  engine change, no `imago.dat` field (DESIGN 14.2). Six checks
+  in PSEUDOCODE 35.5.
+  Companion cleanup (ARCH 6.5 consequence 2): survey and remove
+  thread-oriented code the ranks-only policy strands -- the
+  OpenMP-over-atom-pairs companion, any thread-count knob, unused
+  OpenMP directives -- so a dead option cannot sit in the source
+  and confuse a later reader.
 
 ## TOOLING (lint helpers)
 

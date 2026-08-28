@@ -18905,3 +18905,124 @@ falls toward the tens-of-seconds DESIGN 9.10 predicts.
    one-thread number, so the single-core recast and the thread
    scaling are separate lines on the record -- the companion to
    the deal, which comes next.
+
+
+## 35. The Single-Run Resource Specification
+## (DESIGN 14; ARCHITECTURE 6.5; VISION Goal 4)
+
+### 35.1 What this codes
+
+DESIGN 14 turns one number -- `ranks` -- into a ready-to-submit
+SLURM script under the ranks-only policy. This section specifies
+the `makeinput.py` and `makeinputrc.py` changes that do it: the
+`cpus` -> `ranks` rename, the `cores_per_node` site fact, the
+node derivation, and the submission-file writer that emits the
+MPI launcher and the one-thread-per-rank exports it does not
+emit today. No engine code and no `imago.dat` field (DESIGN
+14.2): the SLURM file is the single source of the request.
+
+### 35.2 Seam inventory (read at c15fb05)
+
+The `cpus` name appears in five places in `makeinput.py` and
+once in `makeinputrc.py`; all become `ranks`:
+- `makeinputrc.py` defaults dict: `cpus` -> `ranks`; a new
+  `cores_per_node` site entry; `nodes` default becomes 0,
+  meaning "derive it" (35.3).
+- `Settings.__init__`: `self.cpus = rc["cpus"]` becomes
+  `self.ranks = rc.get("ranks", rc.get("cpus", 1))` -- the
+  fallback accepts an old rc file that still has `cpus` -- and
+  `self.cores_per_node = rc.get("cores_per_node", <site
+  default>)` is added beside it, so a file lacking the new key
+  still loads. Only the template `src/scripts/makeinputrc.py`
+  gains the new names; installed and `jobs/*` copies keep
+  working (no forced migration).
+- `_parse_slurm`: the `-n` token sets `self.ranks` (was
+  `self.cpus`); `-N` sets `self.nodes` as today.
+- The two help strings that name `cpus` (the `-slurm` usage
+  line and the summary-help line).
+- The submission-file writer, `queue_type == 3` branch: the
+  `-n {settings.cpus}` header line and the run body.
+
+Nothing else reads `self.cpus`. `imago.py`'s `IMAGO_EXE` hook
+and `mpi.F90` are untouched (DESIGN 14.3), so the engine and
+the launcher need no edit.
+
+### 35.3 Node derivation and the over-subscription warning
+
+After the rc defaults and any `-slurm` overrides are in hand,
+and before the submission file is written:
+
+```
+resolveNodes (ranks, nodes, cores_per_node):
+   if nodes <= 0:                     ! not stated: derive it
+      nodes = ceil (ranks / cores_per_node)
+   else if ranks > nodes * cores_per_node:
+      warn to stderr:
+         "ranks R exceed nodes N x cores_per_node C (= NC);
+          the scheduler will reject or pack them."
+   return nodes
+```
+
+`cores_per_node` is the site fact of 35.2; `ceil` is integer
+division rounding up. The warning is NOT fatal (VISION
+Principle 16: report the judgment, let the user decide).
+
+### 35.4 The submission-file writer (queue_type == 3)
+
+The header and the run body, replacing today's hard-coded
+single-thread serial form:
+
+```
+write the SLURM header:
+   #SBATCH -p <partition>
+   #SBATCH -A <account>        only when account != ""
+   #SBATCH -J <proj_name>
+   #SBATCH -o <proj_name>.o%J
+   #SBATCH -e <proj_name>.e%J
+   #SBATCH -N <nodes>          resolved by 35.3
+   #SBATCH -n <ranks>
+   #SBATCH -c 1                one core per task (ranks-only)
+   #SBATCH -t <time>
+   #SBATCH --mem=<memory>
+
+write the run body:
+   source <imago_rc>/imagorc
+   export OMP_NUM_THREADS=1
+   export OPENBLAS_NUM_THREADS=1
+   if ranks > 1:
+      export IMAGO_EXE="mpirun -np $SLURM_NTASKS"
+   cd <project dir>
+   "$IMAGO_BIN/imago.py" <job flags, exactly as today>
+```
+
+What changes from today's writer, and nothing else: the `-c 1`
+line; the `-n <ranks>` name (was `-n <cpus>`); the second
+thread export; and the conditional launcher. The XANES bodies
+(the `h == 0` base and the per-orbital target) gain the same
+thread exports and the same conditional launcher; their
+`imago.py` invocations do not change. When `ranks == 1` no
+launcher is exported, so the run is serial exactly as today.
+
+### 35.5 Checks
+
+1. **Serial run unaffected.** `ranks = 1`: the generated file
+   has no `IMAGO_EXE` line and `-n 1`, so `imago.py` runs the
+   serial binary exactly as today; the added
+   `OPENBLAS_NUM_THREADS=1` is a no-op for a one-rank run.
+   A `bn_small` deck's run behaviour is unchanged.
+2. **Parallel launch.** `ranks = 8`, `cores_per_node = 8`, no
+   `nodes`: the header carries `-N 1 -n 8 -c 1`; the body
+   exports `IMAGO_EXE="mpirun -np $SLURM_NTASKS"` and
+   `OMP_NUM_THREADS=1`.
+3. **Node derivation.** `ranks = 16`, `cores_per_node = 8`,
+   `nodes` unset -> `-N 2`. `ranks = 20`, same -> `-N 3` (the
+   ceiling, not the floor).
+4. **Over-subscription warning.** `ranks = 16`, `nodes = 1`,
+   `cores_per_node = 8`: `-N 1` is emitted AND a stderr warning
+   is printed; the run is NOT aborted.
+5. **CLI override.** `-slurm -n 4 -N 1` overrides the rc
+   `ranks`/`nodes`; the summary and the `command` file record
+   the resolved values.
+6. **No engine change.** `imago.dat` is byte-identical to
+   today for the same physics input; no ranks/threads field
+   appears anywhere the engine reads.
