@@ -449,3 +449,52 @@ module dsyr2kInterface
       end subroutine dsyr2k
    end interface
 end module dsyr2kInterface
+
+module zhemmInterface
+   interface
+      subroutine zhemm (SIDE,UPLO,M,N,ALPHA,A,LDA,B,LDB,BETA,C,LDC)
+         use O_Kinds
+         character*1 :: SIDE
+         character*1 :: UPLO
+         integer :: M
+         integer :: N
+         integer :: LDA
+         integer :: LDB
+         integer :: LDC
+         complex (kind=double) :: ALPHA
+         ! A is the Hermitian factor: M by M when SIDE is 'L' and N by
+         !   N when SIDE is 'R', so its second extent is left assumed
+         !   (see zherk above).  Only the triangle named by UPLO is
+         !   read, and the imaginary part of the diagonal is taken to
+         !   be zero.
+         complex (kind=double), dimension(LDA,*) :: A
+         complex (kind=double), dimension(LDB,N) :: B
+         complex (kind=double) :: BETA
+         complex (kind=double), dimension(LDC,N) :: C
+      end subroutine zhemm
+   end interface
+end module zhemmInterface
+
+module dsymmInterface
+   interface
+      subroutine dsymm (SIDE,UPLO,M,N,ALPHA,A,LDA,B,LDB,BETA,C,LDC)
+         use O_Kinds
+         character*1 :: SIDE
+         character*1 :: UPLO
+         integer :: M
+         integer :: N
+         integer :: LDA
+         integer :: LDB
+         integer :: LDC
+         real (kind=double) :: ALPHA
+         ! A is the symmetric factor: M by M when SIDE is 'L' and N by
+         !   N when SIDE is 'R', so its second extent is left assumed
+         !   (see zhemm above).  Only the triangle named by UPLO is
+         !   read.
+         real (kind=double), dimension(LDA,*) :: A
+         real (kind=double), dimension(LDB,N) :: B
+         real (kind=double) :: BETA
+         real (kind=double), dimension(LDC,N) :: C
+      end subroutine dsymm
+   end interface
+end module dsymmInterface

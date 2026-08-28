@@ -1250,6 +1250,49 @@ its per-deck stamp lines did not print; the stamps were read
 from the output files after the run. The runs themselves are
 unaffected. Fix the filename before the job is reused.
 
+## The density-of-states recast, measured (PA6 step 3, 2026-08-28)
+
+The projection recast (PSEUDOCODE 34: `T = S C` as one level-3
+BLAS product in place of the per-basis-function overlap loop)
+was coded and measured against the PF9 pre-recast baseline on
+the same restart-from-SCF protocol, serial, one thread (jobs
+16837815, 16839298).
+
+The `PDOS/TDOS/LI Calculation` stamp:
+
+```
+   deck                pre-recast (PF9)   recast    speedup
+   sio2_1296_large_g   2339 s (39 min)    112.5 s   20.8x
+   knbo3_333_med_c     ~60 s              8.9 s     6.8x
+   sio2_243_med_g      22.5 s             9.8 s     2.3x
+```
+
+The win grows with the cell, as `valeDim^2 * numStates`
+predicts; the 1296-atom projection falls from thirty-nine
+minutes to under two. On that deck the recast is now 1.7 % of
+the run, behind the serial solve (96.8 %) that ELPA
+parallelizes -- the density of states is no longer a headline
+cost.
+
+**Exactness.** On the SAME node the recast is BIT-IDENTICAL to
+the pre-recast build: the O2 magnetic gamma deck (both spins)
+and `knbo3_333_med_c` (complex) agree to 0 / 1e-32 on every
+DOS, PDOS and localization output. The reassociation floor
+PSEUDOCODE 34.7 anticipated sits below print precision here.
+
+**The cross-node caution, worth keeping.** The localization
+index is gauge-dependent -- a sum of squares over states -- so
+on a complex degenerate cell it is sensitive to WHICH
+degenerate eigenvectors the eigensolver picks, and that choice
+differs between nodes. Two PRE-RECAST runs of knbo3 on
+different nodes disagree on the loci by 31 % of peak,
+identically to a recast-vs-pre-recast comparison across the
+same node pair -- so the 31 % is an SCF gauge property, not the
+recast. Within one node the SCF is deterministic and every
+comparison is bit-identical (two pre-recast runs on one node:
+0.000e+00 on all files). The lesson for the benchmark record:
+compare gauge-dependent quantities only within a node.
+
 ## The situation, as of 2026-08-09
 
 Three things are true at once, and the campaign has to be planned

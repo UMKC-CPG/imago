@@ -9007,10 +9007,17 @@ is not carried only in conversation.
      family (DESIGN 9.10 step 0). PSEUDOCODE 34 WRITTEN
      2026-08-26 (the arithmetic identity verified against the
      loop, the seam inventory, the shared `projectStatesOntoBasis`
-     routine, the two DOS callers, the floor and the five checks);
-     awaits review before coding. Floor against today's output
-     measured and recorded (the 31.8 pattern). Expected to be
-     the largest gain and single-core.
+     routine, the two DOS callers, the floor and the five checks).
+     **CODED and VERIFIED 2026-08-28** (new `stateProjection.F90`,
+     both DOS callers recast; the SCF-path eigenvector slab needed
+     an explicit `valeVale(:,1:numStates,1)` slice, beyond 34.3's
+     inventory, to avoid the BUG-031 sequence-association trap).
+     Measured serial, one thread: `PDOS/TDOS/LI` stamp
+     2339 s -> 112.5 s on sio2_1296 (20.8x), 60 s -> 8.9 s on
+     knbo3, 22.5 s -> 9.8 s on sio2_243; bit-identical to the
+     pre-recast build within a node on the O2 spin and knbo3
+     complex decks (PERFORMANCE "The density-of-states recast").
+     The largest gain and single-core, as expected.
   3. The deal on the SCF-path entry (`dos(1)`): move the solve
      shutdown to directly after `mainSCF`, every rank calls
      `dos`; k-point deal when `numKPoints * spin >= mpiSize`,

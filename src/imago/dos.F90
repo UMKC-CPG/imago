@@ -188,6 +188,10 @@ subroutine computeDOS(inSCF)
          & energyEigenValues, &
          & readDataSCF, readDataPSCF
 #endif
+   ! The shared state-projection routine forms T = S C, every state
+   !   carried through the overlap, as one matrix product per k-point
+   !   (PSEUDOCODE 34).
+   use O_StateProjection, only: projectStatesOntoBasis
 
 
    ! Make sure that no funny variables are used.
@@ -246,13 +250,23 @@ subroutine computeDOS(inSCF)
          & dimension (:,:) :: pdosComplete
    real (kind=double), allocatable, &
          & dimension (:,:) :: electronNumber
+   ! The state projection T = S C (PSEUDOCODE 34): every state carried
+   !   through the overlap, formed once per k-point as one matrix
+   !   product.  It is complex in the multi-k build and real in the
+   !   gamma build.
 #ifndef GAMMA
    complex (kind=double), allocatable, &
-         & dimension (:) :: waveFnSqrd
+         & dimension (:,:) :: statesProjected
 #else
    real (kind=double), allocatable, &
-         & dimension (:) :: waveFnSqrdGamma
+         & dimension (:,:) :: statesProjected
 #endif
+   ! The Mulliken projection P(mu,j) = Re(conjg(C(mu,j)) T(mu,j)),
+   !   real in both builds, formed once per k-point from the
+   !   eigenvectors and T.  The atom-by-orbital binning loop reads one
+   !   entry of it per basis function and state (PSEUDOCODE 34.5).
+   real (kind=double), allocatable, &
+         & dimension (:,:) :: mullikenProj
 
    ! LAT PDOS variables (used only when kPointIntgCode == 1).
    real (kind=double), allocatable, &
@@ -299,9 +313,9 @@ subroutine computeDOS(inSCF)
       allocate (cumulNumDOS (numAtomSites + 1))
    endif
 
-   ! The pdosAccum array and the waveFnSqrd/overlap arrays are only needed for
-   !   the Gaussian path. The LAT path handles its own allocations inside
-   !   computeProjections_LAT.
+   ! The pdosAccum array, the projection matrices, and the overlap are
+   !   only needed for the Gaussian path. The LAT path handles its own
+   !   allocations inside computeProjections_LAT.
    ! The eigenvector array is ONE slab on the post-SCF path: the spins
    !   are processed one at a time and the reader delivers each spin's
    !   vectors to slab 1 on request (slab = 1 at the read).  On the SCF
@@ -317,14 +331,14 @@ subroutine computeDOS(inSCF)
       elseif (detailCodePDOS == 3) then
          allocate (pdosAccum (valeDim))
       endif
+      allocate (statesProjected(valeDim, numStates))
+      allocate (mullikenProj   (valeDim, numStates))
 #ifndef GAMMA
-      allocate (waveFnSqrd(valeDim))
       allocate (valeValeOL(valeDim, valeDim))
       if (inSCF == 0) then
          allocate (valeVale(valeDim, numStates, 1))
       endif
 #else
-      allocate (waveFnSqrdGamma(valeDim))
       allocate (valeValeOLGamma(valeDim, valeDim))
       if (inSCF == 0) then
          allocate (valeValeGamma( &
@@ -668,6 +682,33 @@ subroutine computeDOS(inSCF)
             call readDataPSCF(h,i,numStates,1,slab=1) ! 1 = Overlap matrixCode
          endif
 
+         ! Project every state through the overlap in one matrix
+         !   product, T = S C, then form the Mulliken projection
+         !   P(mu,j) = Re(conjg(C(mu,j)) T(mu,j)) for all states at
+         !   once (PSEUDOCODE 34).  This replaces the per-state,
+         !   per-basis-function inner loop that walked a whole column
+         !   of the overlap for every (state, basis function) pair;
+         !   the atom-by-orbital loops below now only read P and place
+         !   each value in its channel.  In the gamma build the
+         !   eigenvectors are real, so the projection is C(mu,j) *
+         !   T(mu,j) with no conjugate.  The eigenvector columns are
+         !   sliced explicitly as 1:numStates, because on the SCF path
+         !   the solver's slab is (valeDim, valeDim, spin) and only its
+         !   first numStates columns are the states of interest; the
+         !   post-SCF slab already has exactly numStates columns.
+#ifndef GAMMA
+         call projectStatesOntoBasis(valeValeOL, &
+               & valeVale(:,1:numStates,1), valeDim, numStates, &
+               & statesProjected)
+         mullikenProj(:,:) = real(conjg(valeVale(:,1:numStates,1)) &
+               & * statesProjected(:,:), double)
+#else
+         call projectStatesOntoBasis(valeValeOLGamma, &
+               & valeValeGamma(:,1:numStates,1), valeDim, &
+               & numStates, statesProjected)
+         mullikenProj(:,:) = valeValeGamma(:,1:numStates,1) * &
+               & statesProjected(:,:)
+#endif
 
          do j = 1, numStates
 
@@ -704,37 +745,13 @@ subroutine computeDOS(inSCF)
                   ! Increment the valeDimIndex
                   valeDimIndex = valeDimIndex + 1
 
-#ifndef GAMMA
-                  ! Compute the square of the wave function for each element.
-                  waveFnSqrd(:valeDim) = &
-                        & conjg(valeVale(valeDimIndex,j,1)) * &
-                        & valeVale(:valeDim,j,1)
-
-                  ! Compute the effects of overlap for the real part only
-                  !   (real*real) + (imag*imag).
-                  oneValeRealAccum = sum( &
-                       & real(waveFnSqrd(:valeDim),double) * &
-                       & real(valeValeOL(:valeDim,valeDimIndex),double) + &
-                       & aimag(waveFnSqrd(:valeDim)) * &
-                       & aimag(valeValeOL(:valeDim,valeDimIndex)))
-!write (22, *) "h, i, j, k, l"
-!write (22, *) h, i, j, k, l
-!write (22, *) "oneValeRealAccum"
-!write (22, *) oneValeRealAccum
-!!write (22, *) "waveFnSqrd, valeValeOL"
-!!do m = 1, valeDim
-!!write (22, *) waveFnSqrd(m), valeValeOL
-!!enddo
-#else
-                  ! Compute the square of the wave function for each element.
-                  waveFnSqrdGamma(:valeDim) = &
-                        & valeValeGamma(valeDimIndex,j,1) * &
-                        & valeValeGamma(:valeDim,j,1)
-
-                  ! Compute the effects of overlap.
-                  oneValeRealAccum = sum(waveFnSqrdGamma(:valeDim) * &
-                        & valeValeOLGamma(:valeDim,valeDimIndex))
-#endif
+                  ! Read the Mulliken projection for this basis
+                  !   function and state, formed above by the single
+                  !   matrix product (PSEUDOCODE 34.5).  This value
+                  !   equals the direct per-column overlap sum to the
+                  !   reassociation floor (PSEUDOCODE 34.2, 34.7), so
+                  !   the three accumulations that follow are unchanged.
+                  oneValeRealAccum = mullikenProj(valeDimIndex, j)
 
                   ! Store the current electron number assignment.
                   electronNumber(l,k) = electronNumber(l,k) + &
@@ -1284,8 +1301,8 @@ subroutine computeDOS(inSCF)
    enddo ! (h spin)
 
    ! Deallocate all the unnecessary matrices and arrays. The Gaussian-only
-   !   arrays (pdosAccum, waveFnSqrd, overlap) are guarded because the LAT path
-   !   handles its own allocations.
+   !   arrays (pdosAccum, the projection matrices, overlap) are guarded because
+   !   the LAT path handles its own allocations.
    deallocate (cumulNumDOS)
    deallocate (pdosIndex)
    deallocate (numAtomStates)
@@ -1298,13 +1315,13 @@ subroutine computeDOS(inSCF)
    ! Gaussian-path-only deallocations.
    if (kPointIntgCode /= 1) then
       deallocate (pdosAccum)
+      deallocate (statesProjected)
+      deallocate (mullikenProj)
 #ifndef GAMMA
-      deallocate (waveFnSqrd)
       if (inSCF == 0) then
          deallocate (valeValeOL)
       endif
 #else
-      deallocate (waveFnSqrdGamma)
       if (inSCF == 0) then
          deallocate (valeValeOLGamma)
       endif
@@ -1617,10 +1634,11 @@ end subroutine buildChannelPermTable
 !   k-points, read eigenvectors and overlap from HDF5, compute Mulliken
 !   projections for all bands and channels, and store into projArray.
 !
-!   The Mulliken decomposition is identical to the existing Gaussian path: for
-!   each basis function, waveFnSqrd * valeValeOL gives the Mulliken weight of
-!   that function in a given band. These are summed by channel according to
-!   pdosIndex.
+!   The Mulliken decomposition is identical to the Gaussian path: the states
+!   are carried through the overlap in one matrix product, T = S C, and the
+!   projection P(mu,j) = Re(conjg(C(mu,j)) T(mu,j)) gives the weight of basis
+!   function mu in band j (PSEUDOCODE 34). These are summed by channel
+!   according to pdosIndex.
 !
 !   In addition, electronNumber and localizationIndex are accumulated using the
 !   same formulas as the Gaussian path (kPointWeight * step-function occupancy)
@@ -1643,6 +1661,9 @@ subroutine computeProjections_LAT(inSCF, spinIdx, &
    use O_SecularEquation, only: valeValeOLGamma, &
          & valeValeGamma
 #endif
+   ! The shared state-projection routine (PSEUDOCODE 34), the same
+   !   T = S C used on the Gaussian path in computeDOS.
+   use O_StateProjection, only: projectStatesOntoBasis
 
    implicit none
 
@@ -1670,13 +1691,20 @@ subroutine computeProjections_LAT(inSCF, spinIdx, &
    real (kind=double) :: occupNum  ! Step-function occupancy for normalization
          !   diagnostic.
    real (kind=double) :: oneValeRA ! Mulliken projection for one basis function.
+   ! The state projection T = S C and the Mulliken projection
+   !   P(mu,j) = Re(conjg(C(mu,j)) T(mu,j)), formed once per k-point by
+   !   one matrix product (PSEUDOCODE 34), exactly as on the Gaussian
+   !   path in computeDOS.  T is complex in the multi-k build and real
+   !   in the gamma build; P is real in both.
 #ifndef GAMMA
    complex (kind=double), allocatable, &
-         & dimension (:) :: waveFnSqrd
+         & dimension (:,:) :: statesProjected
 #else
    real (kind=double), allocatable, &
-         & dimension (:) :: waveFnSqrdGamma
+         & dimension (:,:) :: statesProjected
 #endif
+   real (kind=double), allocatable, &
+         & dimension (:,:) :: mullikenProj
 
    ! Allocate the projection array: (channel, band, IBZ kpoint). This is the
    !   main memory cost of the LAT PDOS computation.
@@ -1686,14 +1714,14 @@ subroutine computeProjections_LAT(inSCF, spinIdx, &
    ! Allocate work arrays for the Mulliken product.  The eigenvector
    !   array is one slab: this pass runs for one spin and the reader
    !   delivers that spin's vectors to slab 1 on request (DESIGN 2.8).
+   allocate (statesProjected(vDim, numSt))
+   allocate (mullikenProj   (vDim, numSt))
 #ifndef GAMMA
-   allocate (waveFnSqrd(vDim))
    allocate (valeValeOL(vDim, vDim))
    if (inSCF == 0) then
       allocate (valeVale(vDim, numSt, 1))
    endif
 #else
-   allocate (waveFnSqrdGamma(vDim))
    allocate (valeValeOLGamma(vDim, vDim))
    if (inSCF == 0) then
       allocate (valeValeGamma(vDim, numSt, 1))
@@ -1713,6 +1741,28 @@ subroutine computeProjections_LAT(inSCF, spinIdx, &
       else
          call readDataPSCF(spinIdx, i, numSt, 1, slab=1)
       endif
+
+      ! Project every state through the overlap in one matrix product,
+      !   T = S C, then form the Mulliken projection P(mu,j) for all
+      !   states at once (PSEUDOCODE 34), the same recast used on the
+      !   Gaussian path.  In the gamma build the eigenvectors are real,
+      !   so the projection is C(mu,j) * T(mu,j) with no conjugate.
+      !   The eigenvector columns are sliced explicitly as 1:numSt (see
+      !   the note on the Gaussian path in computeDOS): the SCF slab is
+      !   (vDim, vDim, spin) and only its first numSt columns are the
+      !   states of interest.
+#ifndef GAMMA
+      call projectStatesOntoBasis(valeValeOL, &
+            & valeVale(:,1:numSt,1), vDim, numSt, statesProjected)
+      mullikenProj(:,:) = real(conjg(valeVale(:,1:numSt,1)) * &
+            & statesProjected(:,:), double)
+#else
+      call projectStatesOntoBasis(valeValeOLGamma, &
+            & valeValeGamma(:,1:numSt,1), vDim, numSt, &
+            & statesProjected)
+      mullikenProj(:,:) = valeValeGamma(:,1:numSt,1) * &
+            & statesProjected(:,:)
+#endif
 
       do j = 1, numSt
 
@@ -1736,36 +1786,13 @@ subroutine computeProjections_LAT(inSCF, spinIdx, &
 
                valeDimIdx = valeDimIdx + 1
 
-#ifndef GAMMA
-               ! Complex case: compute waveFnSqrd = conjg(C_mu) * C_nu for all
-               !   nu, then dot with overlap.
-               waveFnSqrd(:vDim) = &
-                     & conjg(valeVale( &
-                     & valeDimIdx, j, 1)) &
-                     & * valeVale(:vDim, j, 1)
-
-               oneValeRA = sum( &
-                     & real(waveFnSqrd(:vDim), &
-                     & double) &
-                     & * real(valeValeOL(:vDim, &
-                     & valeDimIdx), double) &
-                     & + aimag(waveFnSqrd( &
-                     & :vDim)) &
-                     & * aimag(valeValeOL(:vDim,&
-                     & valeDimIdx)))
-#else
-               ! Gamma case: real eigenvectors.
-               waveFnSqrdGamma(:vDim) = &
-                     & valeValeGamma( &
-                     & valeDimIdx, j, 1) &
-                     & * valeValeGamma( &
-                     & :vDim, j, 1)
-
-               oneValeRA = sum( &
-                     & waveFnSqrdGamma(:vDim) &
-                     & * valeValeOLGamma(:vDim,&
-                     & valeDimIdx))
-#endif
+               ! Read the Mulliken projection for this basis function
+               !   and state, formed above by the single matrix product
+               !   (PSEUDOCODE 34.5).  This value equals the direct
+               !   per-column overlap sum to the reassociation floor
+               !   (PSEUDOCODE 34.2, 34.7), so the three accumulations
+               !   that follow are unchanged.
+               oneValeRA = mullikenProj(valeDimIdx, j)
 
                ! Accumulate into the channel determined by pdosIndex. The 1/spin
                !   factor ensures that the projection sums correctly for
@@ -1814,13 +1841,13 @@ subroutine computeProjections_LAT(inSCF, spinIdx, &
 
    ! Clean up work arrays. projArray is kept alive for the caller to use in Pass
    !   2.
+   deallocate (statesProjected)
+   deallocate (mullikenProj)
 #ifndef GAMMA
-   deallocate (waveFnSqrd)
    if (inSCF == 0) then
       deallocate (valeValeOL)
    endif
 #else
-   deallocate (waveFnSqrdGamma)
    if (inSCF == 0) then
       deallocate (valeValeOLGamma)
    endif
