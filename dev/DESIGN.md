@@ -2083,6 +2083,57 @@ unchanged in every output. PSEUDOCODE 33 carries the fix and
 those checks. DESIGN 9.10's recast of the projection sits on
 the corrected reader.
 
+### 2.9 The Localization Index Is Gauge-Dependent for
+### Degenerate States
+
+The localization index is eigenvector-dependent in a second,
+subtler way than the IBZ concern above, and it is worth
+stating so a reader is not alarmed by it. `L_j = sum over mu
+of P(mu,j)^2` is a sum of SQUARES of the Mulliken projection.
+For a non-degenerate state the eigenvector is fixed up to an
+overall phase, which cancels in the square, so `L_j` is
+well-defined. For a DEGENERATE state -- several states at one
+energy -- any unitary mixing of the degenerate eigenvectors
+is an equally valid eigenbasis, and it redistributes `P(mu,j)`
+among those states while leaving their SUM unchanged. So a sum
+over the degenerate set (and the total DOS) is
+gauge-invariant, but the PER-STATE `L_j` is gauge-DEPENDENT:
+it depends on which degenerate eigenbasis the solver happened
+to return.
+
+This is not a defect and not specific to any build. It
+surfaced as a measurement caution during the DOS recast
+(dev/PERFORMANCE.md, "The density-of-states recast"): on cubic
+KNbO3 the per-state localization index differed by 31 % of
+peak between two runs on DIFFERENT NODES, while the total DOS
+and the SCF energy were bit-identical. The gauge control (job
+16839298) proved the cause: two nodes' eigensolvers pick
+different degenerate eigenbases in KNbO3's cubic subspaces --
+same eigenvalues, a different gauge -- and the gauge-dependent
+index differs accordingly. Within one node the SCF is
+deterministic and every comparison, including the recast
+against the pre-recast build, is bit-identical. So the recast
+is exact; the 31 % is a property of the observable, shared by
+every version of the code and by the serial and parallel paths
+alike -- it is the same eigenvector gauge freedom DESIGN 9.6
+names for the solve.
+
+**The refinement, when it is wanted.** A localization index
+AVERAGED over each degenerate set would be gauge-invariant, and
+so reproducible across machines, at the cost of grouping states
+by energy within a tolerance (the same near-degeneracy grouping
+the tetrahedron and k-point-climb code already face). It is a
+genuine improvement only for someone comparing PER-STATE
+localization across machines on a symmetric system; for the
+common reading -- how localized are the states at a given
+energy -- the degenerate-set sum is already the right quantity
+and is already reproducible. So this is recorded as future work
+(TODO), not a fix: nothing is wrong, and the per-state index is
+exactly correct wherever the state is non-degenerate. Until
+then the caveat is the one in PERFORMANCE.md: compare
+gauge-dependent outputs within a node, and read localization
+per energy level rather than per individual degenerate state.
+
 ---
 
 ## 3. K-Point Mesh: Density Input, Selection, and Reduction

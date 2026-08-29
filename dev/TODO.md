@@ -1475,6 +1475,23 @@
 
 ### Phase C -- LAT PDOS (energy-resolved)
 
+- [ ] LOCI-GAUGE. Degenerate-averaged localization index
+  (DESIGN 2.9). The per-state localization index is
+  gauge-dependent for degenerate states -- a sum of squares of
+  the Mulliken projection, redistributed by any unitary mixing
+  of a degenerate eigenbasis -- so it is not reproducible across
+  machines on symmetric systems (the cross-node KNbO3 31 % of
+  PERFORMANCE.md's "density-of-states recast"; the recast itself
+  is exact, proven bit-identical within a node). Averaging L_j
+  over each degenerate set (states within an energy tolerance --
+  the same near-degeneracy grouping the tetrahedron and k-point
+  climb code already do) would make it gauge-invariant and so
+  cross-machine reproducible. FUTURE WORK, NOT A FIX: the
+  per-state index is exactly correct wherever the state is
+  non-degenerate, and the degenerate-set sum is already the
+  reproducible quantity for the common reading (how localized
+  the states at an energy are). Recorded so the idea is not lost.
+
 - [x] C8. Implement bloechlCornerDOSWt subroutine:
   per-corner DOS density weights, used by both TDOS
   and PDOS (DESIGN 1.3, PSEUDOCODE 2a)
