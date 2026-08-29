@@ -68,8 +68,15 @@ module O_MPI
    !   width one.
    interface reduceSumMPI
       module procedure reduceSumVector, reduceSumMatrix, &
-            & reduceSumComplexCube
+            & reduceSumComplexMatrix, reduceSumComplexCube
    end interface reduceSumMPI
+
+   ! One generic name for scattering the columns of a matrix from
+   !   root: rank r receives its columnRange block (PSEUDOCODE 36).
+   !   Real for the gamma build, complex for the multi-k build.
+   interface scattervColumnsMPI
+      module procedure scattervRealMatrix, scattervComplexMatrix
+   end interface scattervColumnsMPI
 
    ! The identity of this process within the parallel run. The values
    !   below are the SERIAL truths and double as the defaults: the
@@ -89,6 +96,9 @@ module O_MPI
    integer, parameter :: elecStatTask = 3 ! Join a dealt electrostatic
          ! setup sub-stage (PSEUDOCODE 28); the message's second
          ! integer names which sub-stage.
+   integer, parameter :: valenceTask = 4 ! Join a dealt valence
+         ! density rank-k update (PSEUDOCODE 36); the message's second
+         ! integer carries the k-point index for the worker's log.
    integer, parameter :: mpiTagCtrl  = 100 ! (code, k-point) pair.
    integer, parameter :: mpiTagHam   = 101 ! Packed Hamiltonian.
    integer, parameter :: mpiTagOvlp  = 102 ! Packed overlap.
@@ -201,13 +211,58 @@ subroutine stopMPI (message)
 end subroutine stopMPI
 
 
+subroutine columnRange (total, rank, size, firstIdx, lastIdx)
+
+   ! The contiguous even-division of `total` items over `size` ranks,
+   !   evaluated for an ARBITRARY rank (DESIGN 9.2, the same deal
+   !   loadBalMPI applies to this rank). Every rank receives
+   !   total/size items and the highest mod(total,size) ranks each
+   !   take one more, so no item is dropped when the division is
+   !   uneven. It exists so a scatter can price EVERY rank's block by
+   !   the identical formula loadBalMPI hands one rank: one division,
+   !   two callers, and the scattered block can never disagree with
+   !   the range a rank walks (PSEUDOCODE 36.2).
+
+   implicit none
+
+   ! Define passed parameters.
+   integer, intent (in)  :: total    ! Number of items to divide.
+   integer, intent (in)  :: rank     ! The 0-based rank in question.
+   integer, intent (in)  :: size     ! Number of ranks dividing them.
+   integer, intent (out) :: firstIdx ! First item owned by `rank`.
+   integer, intent (out) :: lastIdx  ! Last item owned by `rank`.
+
+   ! Define local variables.
+   integer :: jobsPer   ! Items every rank gets before the remainder.
+   integer :: remainder ! Items left over after the even division.
+   integer :: shift     ! How many extra items sit below this rank.
+
+   jobsPer   = total / size
+   remainder = mod (total, size)
+
+   ! The even deal: rank r takes items [jobsPer*r + 1, jobsPer*(r+1)].
+   firstIdx = jobsPer * rank + 1
+   lastIdx  = jobsPer * (rank + 1)
+
+   ! The highest `remainder` ranks take one extra item each. A rank in
+   !   that group is shifted up by the number of extras dealt to the
+   !   ranks below it, and its own range grows by one.
+   if (rank >= size - remainder) then
+      shift = remainder - (size - rank)
+      firstIdx = firstIdx + shift
+      lastIdx  = lastIdx + shift + 1
+   endif
+
+end subroutine columnRange
+
+
 subroutine loadBalMPI (toBalance, initialIdx, finalIdx)
 
    ! Deal `toBalance` items out over mpiSize ranks in contiguous
-   !   ranges (DESIGN 9.2). Every rank receives jobsPer items, and the
-   !   highest `remainder` ranks each take one additional item so that
-   !   no work is dropped when the division is uneven. The caller then
-   !   loops over its [initialIdx, finalIdx] range.
+   !   ranges (DESIGN 9.2), returning THIS rank's [initialIdx,
+   !   finalIdx] for the caller to loop over. The division itself
+   !   lives in columnRange so that a scatter can price every rank's
+   !   block by the same rule (PSEUDOCODE 36.2).
    !
    ! At mpiSize 1 this returns (1, toBalance): the serial build and the
    !   one-rank parallel build both walk the full range, which is what
@@ -220,26 +275,7 @@ subroutine loadBalMPI (toBalance, initialIdx, finalIdx)
    integer, intent (out) :: initialIdx ! First item owned by this rank.
    integer, intent (out) :: finalIdx   ! Last item owned by this rank.
 
-   ! Define local variables.
-   integer :: jobsPer   ! Items every rank gets before the remainder.
-   integer :: remainder ! Items left over after the even division.
-   integer :: shift     ! How many extra items sit below this rank.
-
-   jobsPer   = toBalance / mpiSize
-   remainder = mod (toBalance, mpiSize)
-
-   ! The even deal: rank r takes items [jobsPer*r + 1, jobsPer*(r+1)].
-   initialIdx = jobsPer * mpiRank + 1
-   finalIdx   = jobsPer * (mpiRank + 1)
-
-   ! The highest `remainder` ranks take one extra item each. A rank in
-   !   that group is shifted up by the number of extras dealt to the
-   !   ranks below it, and its own range grows by one.
-   if (mpiRank >= mpiSize - remainder) then
-      shift = remainder - (mpiSize - mpiRank)
-      initialIdx = initialIdx + shift
-      finalIdx   = finalIdx + shift + 1
-   endif
+   call columnRange (toBalance, mpiRank, mpiSize, initialIdx, finalIdx)
 
 end subroutine loadBalMPI
 
@@ -615,6 +651,136 @@ subroutine reduceSumComplexCube (buffer)
 #endif
 
 end subroutine reduceSumComplexCube
+
+
+subroutine reduceSumComplexMatrix (buffer)
+
+   ! The complex rank-2 form of reduceSumMatrix; same contract. It
+   !   serves the valence density's per-rank accumulator (PSEUDOCODE
+   !   36): a valeDim x valeDim matrix each rank fills for its own
+   !   column block and root needs summed, in place, before it
+   !   contracts.
+
+   implicit none
+
+   ! Define passed parameters.
+   complex (kind=double), dimension (:,:), intent (inout) :: buffer
+
+#ifdef IMAGO_MPI
+   complex (kind=double), dimension (1) :: unusedSink
+   if (mpiRank == 0) then
+      call MPI_Reduce (MPI_IN_PLACE, buffer, size (buffer),&
+            & MPI_DOUBLE_COMPLEX, MPI_SUM, 0, MPI_COMM_WORLD)
+   else
+      call MPI_Reduce (buffer, unusedSink, size (buffer),&
+            & MPI_DOUBLE_COMPLEX, MPI_SUM, 0, MPI_COMM_WORLD)
+   endif
+#else
+   ! Serial no-op; see bcastIntVecMPI.
+   associate (unused => buffer)
+   end associate
+#endif
+
+end subroutine reduceSumComplexMatrix
+
+
+subroutine scattervRealMatrix (myColumns, totalColumns, fullMatrix)
+
+   ! Root scatters the columns of a real rank-2 matrix over the
+   !   ranks: rank r receives its columnRange(totalColumns, r,
+   !   mpiSize) block into myColumns (PSEUDOCODE 36). The row count is
+   !   the leading dimension of myColumns, so every rank agrees on it.
+   !   The send buffer is OPTIONAL because MPI_Scatterv reads it only
+   !   on root; a worker, which holds no columns, passes none.
+
+   implicit none
+
+   ! Define passed parameters.
+   real (kind=double), dimension (:,:), intent (out) :: myColumns
+   integer, intent (in) :: totalColumns
+   real (kind=double), dimension (:,:), intent (in), &
+         & optional :: fullMatrix
+
+#ifdef IMAGO_MPI
+   integer :: numRows, r, firstCol, lastCol
+   integer, dimension (mpiSize) :: sendCounts, displs
+   real (kind=double), dimension (1,1) :: dummySend
+
+   ! The row count is the leading dimension of every rank's block.
+   numRows = size (myColumns, 1)
+
+   ! Root prices every rank's block by the same rule loadBalMPI hands
+   !   that one rank; workers fill these too, but MPI ignores them
+   !   off root.
+   do r = 0, mpiSize - 1
+      call columnRange (totalColumns, r, mpiSize, firstCol, lastCol)
+      sendCounts(r+1) = numRows * (lastCol - firstCol + 1)
+      displs(r+1)     = numRows * (firstCol - 1)
+   enddo
+
+   if (present (fullMatrix)) then
+      call MPI_Scatterv (fullMatrix, sendCounts, displs,&
+            & MPI_DOUBLE_PRECISION, myColumns, size (myColumns),&
+            & MPI_DOUBLE_PRECISION, 0, MPI_COMM_WORLD)
+   else
+      call MPI_Scatterv (dummySend, sendCounts, displs,&
+            & MPI_DOUBLE_PRECISION, myColumns, size (myColumns),&
+            & MPI_DOUBLE_PRECISION, 0, MPI_COMM_WORLD)
+   endif
+#else
+   ! Serial: at one rank the whole matrix IS this rank's block.
+   if (present (fullMatrix)) then
+      myColumns(:,:) = fullMatrix(:, 1:totalColumns)
+   endif
+#endif
+
+end subroutine scattervRealMatrix
+
+
+subroutine scattervComplexMatrix (myColumns, totalColumns, fullMatrix)
+
+   ! The complex rank-2 form of scattervRealMatrix; same contract.
+   !   The multi-k valence deal scatters the complex scaled columns
+   !   with it (PSEUDOCODE 36); bcastComplexCube could not carry them,
+   !   being rank-3.
+
+   implicit none
+
+   ! Define passed parameters.
+   complex (kind=double), dimension (:,:), intent (out) :: myColumns
+   integer, intent (in) :: totalColumns
+   complex (kind=double), dimension (:,:), intent (in), &
+         & optional :: fullMatrix
+
+#ifdef IMAGO_MPI
+   integer :: numRows, r, firstCol, lastCol
+   integer, dimension (mpiSize) :: sendCounts, displs
+   complex (kind=double), dimension (1,1) :: dummySend
+
+   numRows = size (myColumns, 1)
+
+   do r = 0, mpiSize - 1
+      call columnRange (totalColumns, r, mpiSize, firstCol, lastCol)
+      sendCounts(r+1) = numRows * (lastCol - firstCol + 1)
+      displs(r+1)     = numRows * (firstCol - 1)
+   enddo
+
+   if (present (fullMatrix)) then
+      call MPI_Scatterv (fullMatrix, sendCounts, displs,&
+            & MPI_DOUBLE_COMPLEX, myColumns, size (myColumns),&
+            & MPI_DOUBLE_COMPLEX, 0, MPI_COMM_WORLD)
+   else
+      call MPI_Scatterv (dummySend, sendCounts, displs,&
+            & MPI_DOUBLE_COMPLEX, myColumns, size (myColumns),&
+            & MPI_DOUBLE_COMPLEX, 0, MPI_COMM_WORLD)
+   endif
+#else
+   if (present (fullMatrix)) then
+      myColumns(:,:) = fullMatrix(:, 1:totalColumns)
+   endif
+#endif
+
+end subroutine scattervComplexMatrix
 
 
 subroutine gatherTimesMPI (myTimes, allTimes)

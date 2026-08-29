@@ -624,9 +624,11 @@ subroutine solveServerLoop
    use O_LAPACKParameters, only: setBlockSize
    use O_MPI, only: recvCtrlMPI, recvPackedMPI, sendDblVecMPI, &
          & solveShutdown, solveTask, solveCollective, elecStatTask, &
+         & valenceTask, &
          & stopMPI, mpiTagHam, mpiTagOvlp, mpiTagVals, mpiTagVecs
    use O_ELPASolve, only: workerCollectiveSolve
    use O_ElectroStatics, only: neutralAndNuclearQPot, residualQ
+   use O_ValenceDeal, only: dealtValenceRankUpdate
 #ifndef GAMMA
    use O_MPI, only: sendCmplxBlockMPI
    use O_LAPACKZHEGV
@@ -651,9 +653,14 @@ subroutine solveServerLoop
 #ifndef GAMMA
    complex (kind=double), allocatable, dimension (:,:) :: hamiltonian
    complex (kind=double), allocatable, dimension (:,:) :: overlap
+   ! The worker's scratch density accumulator for the valence deal
+   !   (PSEUDOCODE 36); it exists only to carry this rank's partial
+   !   into the in-place reduce.
+   complex (kind=double), allocatable, dimension (:,:) :: workerRho
 #else
    real (kind=double), allocatable, dimension (:,:) :: hamiltonian
    real (kind=double), allocatable, dimension (:,:) :: overlap
+   real (kind=double), allocatable, dimension (:,:) :: workerRho
 #endif
 
 #ifndef GAMMA
@@ -695,6 +702,18 @@ subroutine solveServerLoop
             call residualQ
          endif
          write (20,*) 'Joined electrostatics sub-stage ', kPointIndex
+         cycle
+      endif
+      if (code == valenceTask) then
+         ! Join a dealt valence density rank-k update (PSEUDOCODE 36):
+         !   receive the counts and this rank's column block, build the
+         !   partial density into a scratch accumulator, and contribute
+         !   it to the in-place reduce onto root.  The optional columns
+         !   and counts are omitted -- only root holds them.
+         allocate (workerRho (valeDim, valeDim))
+         call dealtValenceRankUpdate (workerRho)
+         deallocate (workerRho)
+         write (20,*) 'Joined valence update for k-point ', kPointIndex
          cycle
       endif
       if (code /= solveTask) then

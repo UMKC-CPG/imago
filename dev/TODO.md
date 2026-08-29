@@ -8931,11 +8931,17 @@ is not carried only in conversation.
      REQUIRED under the ranks-only ruling (ARCHITECTURE 6.5,
      2026-08-28; was optional). With threads retired it is the
      only way to accelerate the now-compute-limited accumulate
-     half across ranks (DESIGN 9.6 candidate (iii), amended):
-     its own PSEUDOCODE section, built on PSEUDOCODE 31, with a
-     measured before/after tolerance. Then the 9.4 endgame of
-     building the density from the eigenvectors ELPA already
-     holds distributed, without the gather to root.
+     half across ranks (DESIGN 9.6 candidate (iii), amended).
+     PSEUDOCODE 36 WRITTEN and /refine'd 2026-08-28 (root
+     SCATTERS each rank its column block, per-rank rank-k into a
+     private accumulator, in-place reduceSumMPI onto root; new
+     `valenceTask=4` and a `scattervRealMatrix`/
+     `scattervComplexMatrix` pair; a measured floor, not
+     bit-exact; the reduce caps the speedup and the full
+     per-rank accumulator caps the reach -- a stepping stone);
+     awaits coding. Then the 9.4 endgame of building the density
+     from the eigenvectors ELPA already holds distributed,
+     without the gather to root.
 
 - [ ] PA5a. Distribute the ELECTROSTATIC SETUP under DESIGN 9.2
   -- PULLED FORWARD 2026-08-22 (programmer's ruling on the

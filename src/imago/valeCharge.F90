@@ -174,6 +174,11 @@ subroutine makeValenceRho(inSCF)
          & matrixElementMultGamma,packMatrixGamma
    use O_Force, only: computeForceGamma
 #endif
+   ! The distributed rank-k build and the control code that wakes the
+   !   workers into it (PSEUDOCODE 36).  On the serial build these are
+   !   a no-op control code, mpiSize = 1, and the deal is never taken.
+   use O_MPI, only: mpiSize, sendCtrlMPI, valenceTask
+   use O_ValenceDeal, only: dealtValenceRankUpdate
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
@@ -183,6 +188,11 @@ subroutine makeValenceRho(inSCF)
 
    ! Define the local variables used in this subroutine.
    integer :: i,j,k ! Loop index variables
+   integer :: dest        ! Worker rank a valenceTask is sent to.
+   logical :: dealValence ! Whether the rank-k build is distributed
+         !   this run (PSEUDOCODE 36): only with workers to deal to,
+         !   and never on a Hubbard-U or force-computing iteration,
+         !   which DESIGN 9.6 keeps whole on root.
 ! The l index belongs to the commented-out force-matrix symmetrization
 !   code in the force block near the end of this subroutine; restore
 !   this declaration together with that code.
@@ -363,6 +373,15 @@ subroutine makeValenceRho(inSCF)
       enddo
    endif
 
+   ! Decide once whether to distribute the rank-k density build over
+   !   the ranks (PSEUDOCODE 36).  It needs workers to deal to, and
+   !   DESIGN 9.6 keeps the Hubbard-U path and the force-computing
+   !   iteration (the same test the force block below uses) whole on
+   !   root, so those take the serial two-zherk build.
+   dealValence = (mpiSize > 1) .and. (numPlusUJAtoms == 0) .and. &
+         & .not. (((doForce_SCF == 1) .and. (converged == 1)) .or. &
+         &        ((doForce_PSCF == 1) .and. (inSCF == 0)))
+
    do i = 1, numKPoints
 
       ! Initialize space to read the wave functions.  Note that this matrix is
@@ -514,20 +533,39 @@ subroutine makeValenceRho(inSCF)
          valeRhoNegativeColumnCount = valeRhoNegativeColumnCount &
                & + numNegativeColumns(k)
 
-         ! In zherk the scalars alpha and beta are real by definition,
-         !   which the occupations are; the routine sets the imaginary
-         !   parts of the diagonal to zero, as zher did.  The first
-         !   element of each group's block is passed, and the leading
-         !   dimension tells the routine how the columns are laid out.
-         if (numPositiveColumns(k) > 0) then
-            call zherk('U','N',valeDim,numPositiveColumns(k),1.0_double, &
-                  & scaledEigenvectors(1,1),valeDim,1.0_double, &
-                  & valeValeRho(:,:,k),valeDim)
-         endif
-         if (numNegativeColumns(k) > 0) then
-            call zherk('U','N',valeDim,numNegativeColumns(k),-1.0_double, &
-                  & scaledEigenvectors(1,numPositiveColumns(k)+1),valeDim, &
-                  & 1.0_double,valeValeRho(:,:,k),valeDim)
+         ! Build the density from the scaled columns.  With workers to
+         !   deal to, distribute the rank-k update over the ranks
+         !   (PSEUDOCODE 36): wake every worker into the collective
+         !   FIRST -- the deal's broadcast, scatter and reduce are
+         !   collective, so a worker must be inside dealtValenceRankUpdate
+         !   before root enters it -- then root builds its own block and
+         !   the partials sum in place onto valeValeRho(:,:,k).
+         if (dealValence) then
+            do dest = 1, mpiSize - 1
+               call sendCtrlMPI (valenceTask, i, dest)
+            enddo
+            call dealtValenceRankUpdate (valeValeRho(:,:,k), &
+                  & scaledEigenvectors, numPositiveColumns(k), &
+                  & numNegativeColumns(k))
+         else
+            ! The serial rank-k build (PSEUDOCODE 31), untouched.  In
+            !   zherk the scalars alpha and beta are real by definition,
+            !   which the occupations are; the routine sets the
+            !   imaginary parts of the diagonal to zero, as zher did.
+            !   The first element of each group's block is passed, and
+            !   the leading dimension tells the routine how the columns
+            !   are laid out.
+            if (numPositiveColumns(k) > 0) then
+               call zherk('U','N',valeDim,numPositiveColumns(k),&
+                     & 1.0_double,scaledEigenvectors(1,1),valeDim,&
+                     & 1.0_double,valeValeRho(:,:,k),valeDim)
+            endif
+            if (numNegativeColumns(k) > 0) then
+               call zherk('U','N',valeDim,numNegativeColumns(k),&
+                     & -1.0_double,&
+                     & scaledEigenvectors(1,numPositiveColumns(k)+1),&
+                     & valeDim,1.0_double,valeValeRho(:,:,k),valeDim)
+            endif
          endif
       enddo
 
@@ -613,15 +651,30 @@ subroutine makeValenceRho(inSCF)
          valeRhoNegativeColumnCount = valeRhoNegativeColumnCount &
                & + numNegativeColumns(k)
 
-         if (numPositiveColumns(k) > 0) then
-            call dsyrk('U','N',valeDim,numPositiveColumns(k),1.0_double, &
-                  & scaledEigenvectors(1,1),valeDim,1.0_double, &
-                  & valeValeRhoGamma(:,:,k),valeDim)
-         endif
-         if (numNegativeColumns(k) > 0) then
-            call dsyrk('U','N',valeDim,numNegativeColumns(k),-1.0_double, &
-                  & scaledEigenvectors(1,numPositiveColumns(k)+1),valeDim, &
-                  & 1.0_double,valeValeRhoGamma(:,:,k),valeDim)
+         ! Build the density from the scaled columns: the distributed
+         !   rank-k update when there are workers to deal to
+         !   (PSEUDOCODE 36; see the complex arm for why the workers
+         !   are woken first), otherwise the serial dsyrk build.
+         if (dealValence) then
+            do dest = 1, mpiSize - 1
+               call sendCtrlMPI (valenceTask, i, dest)
+            enddo
+            call dealtValenceRankUpdate (valeValeRhoGamma(:,:,k), &
+                  & scaledEigenvectors, numPositiveColumns(k), &
+                  & numNegativeColumns(k))
+         else
+            if (numPositiveColumns(k) > 0) then
+               call dsyrk('U','N',valeDim,numPositiveColumns(k),&
+                     & 1.0_double,scaledEigenvectors(1,1),valeDim,&
+                     & 1.0_double,valeValeRhoGamma(:,:,k),valeDim)
+            endif
+            if (numNegativeColumns(k) > 0) then
+               call dsyrk('U','N',valeDim,numNegativeColumns(k),&
+                     & -1.0_double,&
+                     & scaledEigenvectors(1,numPositiveColumns(k)+1),&
+                     & valeDim,1.0_double,valeValeRhoGamma(:,:,k),&
+                     & valeDim)
+            endif
          endif
       enddo
 

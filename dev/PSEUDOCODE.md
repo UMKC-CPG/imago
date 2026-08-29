@@ -19026,3 +19026,277 @@ launcher is exported, so the run is serial exactly as today.
 6. **No engine change.** `imago.dat` is byte-identical to
    today for the same physics input; no ranks/threads field
    appears anywhere the engine reads.
+
+
+## 36. The Distributed Valence Density Build
+## (DESIGN 9.6 candidate (iii); ARCHITECTURE 6.5; TODO PA4
+## step 8; built on PSEUDOCODE 31)
+
+### 36.1 What this codes
+
+The rank-k recast (PSEUDOCODE 31) turned the density-matrix
+build from `numStates` streaming rank-1 updates into two
+level-3 BLAS `zherk`/`dsyrk` calls, a serial win of 10.6x at
+one thread. Under the companion-threads position its further
+acceleration was threaded BLAS; the ranks-only ruling
+(ARCHITECTURE 6.5) retires that lever, so the only remaining
+way to make the build faster is to DEAL it across ranks. This
+section specifies that deal -- DESIGN 9.6 candidate (iii), the
+state axis, now required. Each rank takes a contiguous block of
+the occupation-scaled eigenvector columns, does its own rank-k
+update into a PRIVATE accumulator, and the accumulators reduce
+onto root.
+
+Its target is the one-k-point large cell, where the k-point
+deal has width one and this is the valence build's only axis
+(DESIGN 9.6). On multi-k cells the build is under one percent
+of the run (PSEUDOCODE 30), so the deal runs there too but
+earns little; whether to guard it off for multi-k is a measured
+question the acceptance answers, exactly as the k-point deal of
+PSEUDOCODE 29 was deferred by its measurement.
+
+The gains are BOUNDED, by design, on both axes. In TIME the
+per-rank compute divides by the rank count but the reduce of
+the whole `valeDim x valeDim` density onto root does not, so
+the speedup flattens once the reduce matches the compute --
+near ten to sixteen ranks on the large cell, where the recast
+of PSEUDOCODE 31 has already cut the serial accumulate to about
+twelve seconds. In MEMORY the scatter shrinks each rank's
+eigenvector block with the rank count, but every rank still
+holds a full `valeDim x valeDim` accumulator, which is the
+stepping-stone limit DESIGN 9.6 retires to the block-cyclic
+form of 9.4 at the ten-thousand-atom scale. This deal earns its
+place by removing the accumulate half's last serial-on-root
+stretch under the ranks-only ruling, not by a large headline
+number; the larger valence cost, the contract half's reads, is
+candidate (ii)'s.
+
+Unlike the deals before it, this one is NOT bit-exact:
+combining the per-rank partials reorders sums the serial
+`zherk` adds in one internal pass (DESIGN 9.6, the exactness
+paragraph), so it carries a MEASURED floor, reported the way
+candidate (i)'s before/after floor was.
+
+### 36.2 Seam inventory (read at 261a846)
+
+The build lives in `makeValenceRho` (`valeCharge.F90`), inside
+the k-point loop (`do i = 1, numKPoints`) and the spin loop
+(`do k = 1, spin`). Today it runs ROOT-ONLY: the routine has no
+MPI awareness, and while it runs the workers are parked in
+`solveServerLoop` (they are not shut down until the certificate
+barrier). So the deal wakes them through that loop's control
+protocol, exactly as PA4-B's collective solve and PA5a's
+electrostatic setup do.
+
+- The scaled columns: `scaledEigenvectors(valeDim, numStates)`,
+  filled per (k-point, spin) on root from `valeVale` (the
+  eigenvectors root holds after the solve, re-read per k-point
+  on the complex path) scaled by the square root of each
+  occupation, positive-weight columns first and negative after
+  (PSEUDOCODE 31.2). Root scales as today; the deal SCATTERS to
+  each rank ONLY that rank's contiguous column block (about
+  `valeDim x numStates/mpiSize`), not the whole matrix -- the
+  workers hold no eigenvectors and no HDF5 handles to read them
+  (PA3's design). Scattering blocks rather than broadcasting the
+  whole is what DESIGN 9.6 (iii) means by "takes a range", and
+  it keeps each rank's eigenvector memory shrinking with the
+  rank count instead of holding a full copy.
+- The counts `numPositiveColumns(spin)` and
+  `numNegativeColumns(spin)` -- small integers, BROADCAST to
+  every rank, which each combines with its own column range
+  (below) to split its block into a positive and a negative
+  part (36.4).
+- The per-rank private accumulator: a `valeDim x valeDim`
+  matrix (complex or real), allocated on every rank, holding
+  that rank's column block's contribution. On the large cell it
+  is 1.26 GB real / 2.5 GB complex -- the size of the density
+  matrix, one per rank (DESIGN 9.6 named this cost).
+- The result: root's `valeValeRho(:,:,k)` /
+  `valeValeRhoGamma(:,:,k)`, ZEROED before the deal and filled
+  by `reduceSumMPI` of every rank's private accumulator. The
+  contract half that follows (the traces and `potRho`) reads it
+  unchanged.
+- `mpi.F90`: a new control code `valenceTask = 4` beside
+  `solveShutdown/solveTask/solveCollective/elecStatTask`, and a
+  NEW column-scatter pair `scattervRealMatrix` /
+  `scattervComplexMatrix` (root sends each rank its block; the
+  existing wrappers have no scatter, and the complex columns are
+  a 2D matrix that `bcastComplexCube`, being rank-3, could not
+  carry anyway). The scatter's per-rank counts and displacements
+  MUST match the ranges `loadBalMPI` hands each rank, so
+  `loadBalMPI`'s even-division is extracted into a shared helper
+  `columnRange(total, rank, size) -> (first, last)` that both
+  `loadBalMPI` and the scatter-count logic call, and the two
+  cannot drift. The reduce reuses the `reduceSumMPI` family,
+  which sums IN PLACE on root (`MPI_IN_PLACE`): every rank
+  passes its own accumulator and the sum lands on root's, so
+  root's accumulator IS the density matrix, with no separate
+  copy. The real `valeDim x valeDim` accumulator reduces with
+  the existing `reduceSumMatrix`; the complex one takes a NEW
+  `reduceSumComplexMatrix` (2D complex, mirroring
+  `reduceSumMatrix`) added to the interface, so both builds
+  keep a plain 2D accumulator. All transport is over
+  `MPI_COMM_WORLD`, as every intra-problem deal is
+  today; the future k-point-subgrid composition lifts them all
+  onto sub-communicators together.
+- `secularEqn.F90` `solveServerLoop`: one new case, `if (code
+  == valenceTask)`, calling the collective routine below and
+  cycling -- the same shape as the `elecStatTask` case.
+- The shared routine `dealtValenceRankUpdate` lives in a NEW
+  module `O_ValenceDeal` (`valenceDeal.F90`, both variant
+  CMakeLists), the `O_ELPASolve` pattern -- NOT in
+  `O_ValeCharge`. `O_ValeCharge` already `use`s
+  `O_SecularEquation`, so a routine placed in `O_ValeCharge`
+  and called by `solveServerLoop` (which is IN
+  `O_SecularEquation`) would close a circular module
+  dependency; `workerCollectiveSolve` sits in `O_ELPASolve` for
+  exactly this reason. The new module depends only on
+  `O_Kinds`, `O_MPI` and the `zherk`/`dsyrk` interfaces --
+  everything else it needs (the columns, the counts, the
+  accumulator) arrives as arguments -- so it closes no cycle.
+  Root reaches it from `makeValenceRho`, the worker from
+  `solveServerLoop`.
+- Root holds the scaled columns and the counts; the workers do
+  not. So they pass to `dealtValenceRankUpdate` as OPTIONAL
+  arguments -- present on root, absent on the workers, which
+  receive the counts by broadcast and their column block by
+  scatter. `scattervRealMatrix`/`scattervComplexMatrix` take
+  the send buffer as an OPTIONAL argument for the same reason:
+  `MPI_Scatterv` reads it only on root, so a worker passes none
+  (a size-one dummy stands in). `scaledEigenvectors` stays a
+  local of `makeValenceRho`; it is not promoted to module
+  scope.
+
+### 36.3 The collective routine
+
+One routine both sides call -- `dealtValenceRankUpdate`, a
+root-only prelude (the scaling, already in `makeValenceRho`)
+followed by a collective body, exactly as PA5a's electrostatic
+routine has a root-only entry that a worker skips:
+
+```
+dealtValenceRankUpdate (rho, scaledCols, numPos, numNeg):
+   !   In module O_ValenceDeal.  rho is THIS rank's valeDim x
+   !   valeDim accumulator: on ROOT it IS valeValeRho(:,:,spin);
+   !   on a WORKER a scratch buffer whose only purpose is the
+   !   in-place reduce.  scaledCols (the scaled column set on
+   !   root), numPos and numNeg are OPTIONAL -- present on ROOT
+   !   (which scaled and counted them in makeValenceRho), absent
+   !   on WORKERS, which learn them below.  valeDim is
+   !   size(rho, 1).
+   counts = [numPos, numNeg]              ! on root only
+   broadcast counts from root             ! bcastIntVecMPI
+   totalColumns = counts(1) + counts(2)
+
+   ! Every rank learns its own column range from the SAME
+   !   division the scatter uses (the columnRange helper, 36.2).
+   call loadBalMPI (totalColumns, firstCol, lastCol)
+   myWidth = lastCol - firstCol + 1
+
+   ! Root sends each rank ONLY its block; each receives it into
+   !   a local buffer myColumns(valeDim, myWidth).  Widths and
+   !   displacements come from columnRange, so a rank's block is
+   !   exactly the [firstCol, lastCol] it computed above.
+   scatterv scaledCols(:, 1:totalColumns) from root into
+            myColumns              ! scaledCols on root only
+
+   rho(:,:) = 0
+   split [firstCol, lastCol] at counts(1) (36.4) into a
+        positive and a negative part, as LOCAL offsets into
+        myColumns
+   if the positive part is non-empty:
+      zherk/dsyrk ('U','N', valeDim, its width, +1,
+         myColumns(1, its first local col), valeDim,
+         1, rho, valeDim)
+   if the negative part is non-empty:
+      zherk/dsyrk ('U','N', valeDim, its width, -1,
+         myColumns(1, its first local col), valeDim,
+         1, rho, valeDim)
+
+   ! In-place sum onto root (MPI_IN_PLACE); on root, rho is
+   !   valeValeRho(:,:,spinIndex), so it ends holding the full
+   !   density -- no separate destination.
+   reduceSumMPI (rho)
+```
+
+Root, in `makeValenceRho`, when `mpiSize > 1` AND this is not a
+Hubbard-U or force-computing iteration (DESIGN 9.6 keeps those
+serial: `numPlusUJAtoms == 0`, not `doForce`): send
+`valenceTask` to every worker (the second control integer
+carries the k-point index, for the worker's log), then call
+`dealtValenceRankUpdate(valeValeRho(:,:,spin),
+scaledEigenvectors, numPositiveColumns(spin),
+numNegativeColumns(spin))`. When `mpiSize == 1` or a guard
+fires: the existing serial two-`zherk` path, untouched.
+Workers, in `solveServerLoop` on `valenceTask`: allocate a
+scratch `rho`, call `dealtValenceRankUpdate(rho)` (the optional
+columns and counts omitted), free it, and cycle.
+
+### 36.4 The positive and negative column split
+
+The scaled columns are stored positive group first
+(`1..numPositiveColumns`), negative group after
+(`numPositiveColumns+1 .. totalColumns`), because the negative
+group -- possible only under the linear tetrahedron method --
+is subtracted (PSEUDOCODE 31.2). A rank's GLOBAL range
+`[firstCol, lastCol]` may lie wholly in one group or straddle
+the boundary. The rank knows `numPositiveColumns` (broadcast)
+and its own `firstCol`, so it splits its LOCAL block
+`myColumns(:, 1..myWidth)` -- whose column `c` is global column
+`firstCol + c - 1` -- into the local columns whose global index
+is `<= numPositiveColumns` (the positive part, a `+1` `zherk`)
+and those above it (the negative part, a `-1` `zherk`). A rank
+whose whole block is positive issues one update; an empty part
+issues none.
+
+### 36.5 What stays exactly as it is
+
+- The k-point and spin loop structure, the eigenvector read,
+  the scaling into `scaledEigenvectors`, and the contract half
+  (the traces, `potRho`, the pack) -- all unchanged.
+- The Hubbard-U and force-computing iterations, which DESIGN
+  9.6 keeps on the serial path whole: the deal is guarded off
+  for them and they take the `mpiSize == 1` build.
+- The serial path at one rank: byte-for-byte the two-`zherk`
+  build of PSEUDOCODE 31.
+
+### 36.6 Exactness and the floor
+
+The reduce sums the per-rank partials in MPI's reduction order,
+which regroups the column sum the serial `zherk` performs in
+one pass, so the result differs at the rounding level. This is
+a genuine floor, as candidate (i)'s recast carried, not the
+exact zero the pair and electrostatic deals keep (DESIGN 9.6).
+It is measured against the serial build on the accepted decks
+and reported (the 31.8 pattern): the density matrix's own
+before/after difference, and the energies and traces to the
+tolerance that difference implies. The floor propagates no
+further than the density; everything downstream returns to
+zero tolerance.
+
+### 36.7 Checks
+
+1. **Serial unchanged.** `mpiSize == 1`: bit-identical to the
+   PSEUDOCODE 31 build on `bn_small_{c,g}` and
+   `sio2_243_med_g`.
+2. **np1 == serial.** A one-rank parallel run (`mpirun -np 1`)
+   is bit-identical to the bare serial run: the deal degenerates
+   to root's whole-column update and its reduce is a no-op.
+3. **The deal is correct.** np 2/4/8 on the large one-k-point
+   glass, and np 4 with two spins: the density matrix, the
+   energies and the traces agree with the serial build to the
+   measured floor (36.6), and the SCF converges to the same
+   iteration count and energy.
+4. **The negative group.** An aluminium tetrahedron run (the
+   deck PSEUDOCODE 31 used to exercise the negative columns)
+   dealt at np 4: the subtracted contribution is placed
+   correctly, the density agreeing to the floor.
+5. **The stamp falls.** The `Valence Charge Density` stamp on
+   the large one-k-point cell against its serial value, at np
+   2/4/8; the accumulate region alone (PSEUDOCODE 30's region A)
+   is expected to fall with the rank count, bounded by the
+   reduce of the `valeDim x valeDim` accumulator.
+6. **Multi-k value, measured not assumed.** The same stamp on
+   `knbo3_333_med_c` (four k-points): recorded so the decision
+   to keep or guard the deal for multi-k rests on a number, as
+   PSEUDOCODE 29's did.

@@ -1293,6 +1293,93 @@ comparison is bit-identical (two pre-recast runs on one node:
 0.000e+00 on all files). The lesson for the benchmark record:
 compare gauge-dependent quantities only within a node.
 
+## The distributed valence build, measured (PA7, 2026-08-28)
+
+PSEUDOCODE 36's deal of the density accumulate -- root
+scatters each rank a block of the occupied columns, each rank
+folds its block into a private `valeDim^2` partial with one
+`zherk`/`dsyrk`, and the partials are summed onto root with an
+in-place `reduceSumMPI` -- was coded and measured on the
+1296-atom glass, restarted from its finished benchmark SCF so
+each run is a two-iteration re-solve that times the per-call
+build (job 16845126, c151 shared, np 2/4/8). Serial and np1
+are skipped: this deck's one-rank eigensolve is two hours a
+run, and at one rank the deal is never taken anyway.
+`valeDim = 12528`, `numStates = 12528`, and the occupied
+column count the deal scatters is 3456.
+
+Correctness first. The converged total energy is
+-15614.45887553 at np2, np4 AND np8 -- identical to eight
+figures at the same iteration count. The reduce reorders the
+column sum, but its floor sits far below print precision, as
+on the small decks: the same-build h5diff np1-vs-np2 check
+cleared 1e-6 on bn_small_g, bn_small_c and sio2_243_med_g
+(job 16845021), the complex path included.
+
+The region-A accumulate half, the only half the deal touches,
+against the ~12 s one-thread serial of PSEUDOCODE 31:
+
+    ranks   region A (accumulate)   whole valence stamp
+    serial      ~12 s                    --
+    np2          6.04 s                  53.98 s
+    np4          5.36 s                  54.52 s
+    np8          3.96 s                  53.20 s
+
+Two facts fall out, both expected from DESIGN 9.6 and both now
+measured rather than projected.
+
+First, region A is a minority of the stage. The
+`VALEDENSITY SPLIT` line reads the three halves directly:
+accumulate 6.0 s, the integral READS 42.9 s, contraction
+5.0 s. The reads are region I, the integral inflation PF8
+named, still NOT dealt (candidate (ii)), so dealing the
+accumulate moves the whole stamp only by region A's share and
+it stays at ~54 s. This is the measurement that decides where
+to go next: the time is in the 42.9 s of reads, not the 6 s of
+arithmetic.
+
+Second, region A itself hits a reduce floor. It falls 2.0x at
+np2 but only 3.0x at np8, for four times the ranks -- the
+accumulate stopped scaling around 4 s. The cause is worth
+stating as a ratio to target, because it recurs wherever a
+deal ends in a reduce of a full matrix: the useful work
+scales with the rank count but the data the reduce moves does
+not. Write the two out as work (flops) against bytes moved,
+in the BLAS mul-add convention (each multiply-add is one
+operation, and `syrk` fills only a triangle):
+
+    work   ~ (1/2) * valeDim^2 * numOccupied  mul-adds
+    scatter ~ valeDim * numOccupied numbers, once (0.35 GB)
+    reduce  ~ valeDim^2 * 8 bytes = 1.26 GB, every call
+
+The scatter is paid once and is small. The reduce moves the
+full `valeDim^2` accumulator, 1.26 GB, and its size does NOT
+fall with the rank count: each added rank shrinks its share of
+the work but not the matrix it must contribute to the sum. So
+the arithmetic intensity of the dealt step -- the useful work
+a rank does per byte it moves into the reduce -- is
+
+    per-rank intensity = ((1/2) valeDim^2 numOccupied / P)
+                         / (valeDim^2 * 8)
+                       = numOccupied / (16 P)  mul-adds/byte
+
+It HALVES with every doubling of P. At `numOccupied = 3456`
+that is 108 mul-adds/byte at np2, 54 at np4, 27 at np8: the
+compute a rank does between two fixed-size reduces collapses,
+and once it falls below the node's flop-per-byte balance the
+reduce dominates. The measured floor is a ~2.5 s reduce of the
+1.26 GB matrix on one node -- what np4 and np8 pay on top of
+their shrinking compute (np8: ~1.5 s of `dsyrk` under a ~2.5 s
+reduce gives the observed 3.96 s).
+
+This is the stepping stone PSEUDOCODE 36 said it was: correct,
+a genuine 3x on the accumulate at np8, bounded on both sides --
+the reduce caps the speedup, the full per-rank `valeDim^2`
+accumulator caps the reach (the 9.4 block-cyclic endgame is
+what removes both). The next lever is not more ranks on region
+A but region I: the 42.9 s of integral reads, dealt or cached
+read-once (candidate (ii)).
+
 ## The situation, as of 2026-08-09
 
 Three things are true at once, and the campaign has to be planned
