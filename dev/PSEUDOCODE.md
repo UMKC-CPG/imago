@@ -19300,3 +19300,233 @@ zero tolerance.
    `knbo3_333_med_c` (four k-points): recorded so the decision
    to keep or guard the deal for multi-k rests on a number, as
    PSEUDOCODE 29's did.
+
+## 37. The Read-Once Integral Cache (Serial, Valence Consumer)
+## (DESIGN 9.6 candidate (ii), serial form; DESIGN 9.7; built
+## on PSEUDOCODE 30's region I)
+
+### 37.1 What this codes
+
+The valence density build `makeValenceRho` reads `potDim + 3`
+stored integral matrices per k-point on EVERY SCF iteration
+(the overlap, the nuclear-potential, the kinetic-energy, and
+one per potential term), plus a fourth, the mass-velocity term,
+when the relativistic switch `rel` is set. Each read inflates a
+DEFLATE-compressed dataset, and inflation -- not storage -- is
+the cost (DESIGN 9.7; PERFORMANCE "The integral-read cost is
+inflation, not storage"). Those matrices are FIXED for the
+whole run: the integral stage writes them before the first
+iteration, and only the potential coefficients `potCoeffs`
+change between iterations. So every read after the first re-
+derives bytes already in hand -- about 30 s per iteration on
+the 1296-atom cell, repeated for every iteration of the SCF.
+
+This section holds them in memory instead: on the first
+iteration each dataset is read once and kept; on every
+iteration after, the build copies it from the cache and the
+inflation is not paid again. Region I falls from a re-inflate
+to a memory copy. This is the SERIAL, root-only form of DESIGN
+9.6's candidate (ii); the dealt parallel fill, which would
+spread the one-time inflation and the resident copy across
+ranks, is DESIGN 9.7's separate increment and is not built here
+(the worker ranks do not hold the integral HDF5 handles -- see
+the seam below).
+
+### 37.2 Seam inventory (read 2026-08-29)
+
+`makeValenceRho` lives in `O_ValeCharge` (valeCharge.F90) and
+runs ONLY on root: the SCF driver calls it at imago.F90's
+`call makeValenceRho(1)`, inside the `do while (.true.)` SCF
+loop, and that whole loop is root's alone (workers are in
+`solveServerLoop`). So the cache is one copy on one rank; no
+worker allocates it and nothing is replicated across ranks.
+This is why the serial cache is available while the dealt fill
+is not: the dataset handles it reads through --
+`atomOverlap_did(i)`, `atomNPOverlap_did(i)`,
+`atomKEOverlap_did(i)`, `atomMVOverlap_did(i)` and
+`atomPotOverlap_did(i,j)`, all in `O_SCFIntegralsHDF5` -- are
+opened by `initHDF5_SCF`, which runs under `if (mpiRank == 0)`.
+Root holds every handle already; a worker's handle arrays are
+unallocated.
+
+For every quantity the new code consumes or produces:
+
+- **The cache, `valenceIntegralCache`** -- NEW module state in
+  `O_ValeCharge`, a real array shaped
+  `(dim1, valeDim*(valeDim+1)/2, numCacheSlots, numKPoints)`,
+  where `dim1` is 1 for the real and gamma builds and 2 for the
+  complex build (the leading extent of the existing
+  `packedValeVale` buffer), and `numCacheSlots = potDim + 4`.
+  ALLOCATED by root inside `makeValenceRho`, on the first
+  `inSCF == 1` call for which the cache is enabled (37.4);
+  FILLED dataset by dataset as that first call reads them;
+  FREED by `cleanUpValenceIntegralCache` (below). It is never
+  touched on a worker.
+
+- **`cacheSlotFilled`** -- NEW module state, a logical array
+  `(numCacheSlots, numKPoints)`, all false at allocation, set
+  true for a slot when that slot is first read. Per-slot, per-
+  k-point, NOT one global flag, because the k-point loop may
+  `cycle` (skip) a k-point whose occupied weight is negligible
+  on one iteration and include it on a later one, so a slot can
+  first fill on an iteration after the first.
+
+- **`valenceCacheEnabled`** -- NEW module state, a logical
+  decided once (37.4) and read by every cached read; false
+  restores today's behavior exactly.
+
+- **`numCacheSlots`, the slot numbering** -- a fixed map from a
+  term to a slot: 1 = overlap, 2 = nuclear potential, 3 =
+  kinetic energy, 4 = mass velocity (used only when `rel == 1`;
+  the slot is allocated regardless and left unfilled otherwise,
+  costing one packed matrix of space), and `4 + j` = potential
+  term `j` for `j = 1..potDim`. `potDim` comes from
+  `O_Potential`, already in scope.
+
+- **`packedValeVale`** -- the EXISTING per-call read buffer
+  (allocated `(dim1, valeDim*(valeDim+1)/2)` at the top of the
+  k-point body). Unchanged, and still the destination the
+  contract reads from: a cached read copies the cache slot INTO
+  it, so no contract call site changes.
+
+- **The dataset handles** -- existing, root-only, unchanged. A
+  cached read calls `readPackedMatrix` through the same handle
+  it does today, but only on the slot's first fill.
+
+- **The cleanup call site** -- `cleanUpValenceIntegralCache`,
+  NEW in `O_ValeCharge`, called once by root in imago.F90 AFTER
+  the SCF `do while` loop ends and BEFORE any post-SCF work, so
+  the 13-22 GB is released before the density of states and the
+  other post-SCF consumers run. It is a no-op when the cache
+  was never enabled.
+
+Nothing outside `makeValenceRho`, the new cleanup routine, and
+the one new call site in imago.F90 is touched. The inSCF == 0
+(post-SCF) overlap read stays a plain `readPackedMatrix`: it
+reads the separate `atomOverlapPSCF_did` datasets, runs once,
+and gains nothing from a cache.
+
+### 37.3 The cached read
+
+A single helper replaces the `readPackedMatrix` calls on the
+`inSCF == 1` path, taking the slot and k-point indices as well
+as the arguments `readPackedMatrix` already takes:
+
+```
+subroutine cachedReadPackedMatrix (slot, kPoint, datasetID,
+      packedValeVale, packedVVDims, dim1, valeDim)
+
+   if (.not. valenceCacheEnabled) then
+      ! The cache is off: behave exactly as today.
+      call readPackedMatrix (datasetID, packedValeVale,
+            packedVVDims, dim1, valeDim)
+      return
+   endif
+
+   if (cacheSlotFilled(slot, kPoint)) then
+      ! Hit: copy the resident matrix, pay no inflation.
+      packedValeVale(:,:) = valenceIntegralCache(:,:,slot,kPoint)
+   else
+      ! Miss (first time this slot is seen): read once, keep it.
+      call readPackedMatrix (datasetID, packedValeVale,
+            packedVVDims, dim1, valeDim)
+      valenceIntegralCache(:,:,slot,kPoint) = packedValeVale(:,:)
+      cacheSlotFilled(slot, kPoint) = .true.
+   endif
+end subroutine
+```
+
+The five `inSCF == 1` read sites become cached reads with their
+slots: the overlap read (slot 1), the nuclear-potential read
+(slot 2), the kinetic-energy read (slot 3), the mass-velocity
+read (slot 4, inside the existing `if (rel == 1)`), and the
+potential-term read inside `do j = 1, potDim` (slot `4 + j`).
+Each contract that follows is UNCHANGED: it reads
+`packedValeVale`, which the helper has just filled from the
+cache or from disk.
+
+### 37.4 The guard and the lifecycle
+
+**Enable decision, once.** On the first `inSCF == 1` call, with
+the cache not yet allocated, root estimates the resident bytes
+the cache would take,
+`dim1 * (valeDim*(valeDim+1)/2) * (potDim+4) * numKPoints * 8`,
+and enables the cache only if that is below a byte cap the code
+sets. The cap is a SAFETY LIMIT, not physics: it is sized to
+admit the benchmark set and thousand-atom targets (tens of GB)
+and to fall back, silently and correctly, to per-iteration
+reads on a cell -- large, or many-k -- whose integrals would
+not fit. When the cache is not enabled, `valenceCacheEnabled`
+stays false and every read is today's `readPackedMatrix`.
+
+**Allocation.** When enabled, root allocates
+`valenceIntegralCache` and `cacheSlotFilled` (all false) on that
+first call. The allocation is guarded so it happens once, not
+every iteration.
+
+**Fill and reuse.** The first call fills each slot on its miss;
+subsequent calls hit. A k-point skipped on early iterations
+simply fills its slots the first iteration it is not skipped.
+
+**Free.** `cleanUpValenceIntegralCache` deallocates both arrays
+and sets `valenceCacheEnabled` false, called once after the SCF
+loop. The cache does not survive into the post-SCF stages.
+
+### 37.5 What stays exactly as it is
+
+The contract arithmetic (region M), the per-k-point contraction
+order that keeps the stage bit-exact, the handle setup, the
+region A density build (dealt or serial, PSEUDOCODE 36), the
+spin rewrite, the force path, and the post-SCF path are all
+untouched. The cache changes only WHERE the bytes of an
+integral matrix come from on a given iteration, never their
+values and never what is done with them.
+
+### 37.6 Exactness
+
+A cached read is BIT-IDENTICAL to the read it replaces.
+`readPackedMatrix` inflating a DEFLATE dataset is deterministic
+and returns the same bytes every iteration; copying those bytes
+from a resident array returns the same bytes again. There is no
+reordering and no arithmetic, so unlike candidate (i)'s recast
+or the region A deal this introduces NO floor: a run with the
+cache on must match a run with it off to the last bit, on every
+output, at every iteration. That equality is the acceptance
+test (37.7 check 1), not a tolerance.
+
+### 37.7 Checks
+
+1. **Bit-identical to the uncached run.** The same deck run
+   with the cache enabled and with it forced off (cap set to
+   zero) produces bit-identical scratch HDF5 -- every energy,
+   every iteration line, every dataset -- because 37.6 leaves
+   no room for a difference. This is the correctness gate.
+
+2. **The stamp falls after the first iteration.** PSEUDOCODE
+   30's `VALEDENSITY SPLIT` region I is ~30 s on the first
+   iteration of the 1296-atom cell and near zero on every
+   iteration after; the whole `Valence Charge Density` stage
+   stamp falls by region I's share from iteration two onward.
+   Read across a multi-iteration run, not a one-iteration
+   restart, since the win is entirely in the iterations after
+   the first.
+
+3. **Memory rises by the cache size, once.** Peak resident set
+   grows by about the estimated bytes (13 GB at a thousand
+   atoms, ~22 GB on the 1296-atom cell) and does not grow
+   further across iterations (the cache is filled once), and it
+   returns after `cleanUpValenceIntegralCache` before the post-
+   SCF stages.
+
+4. **The guard falls back cleanly.** With the cap set below the
+   estimate the cache never allocates, `valenceCacheEnabled`
+   stays false, and the run is bit-identical to today at
+   today's memory and today's per-iteration read time -- the
+   safe path for a cell too large to cache.
+
+5. **Multi-k correctness.** On `knbo3_333_med_c` (four
+   k-points, complex, `dim1 = 2`), where k-points can be
+   skipped by occupation, the per-slot fill tracking is
+   exercised: the run is bit-identical to the uncached run and
+   the stamp falls, confirming a slot first filled on a later
+   iteration is handled.

@@ -30,6 +30,49 @@ module O_ValeCharge
    real (kind=double), allocatable, dimension (:,:,:) :: packedValeValeRho
 
 
+   ! Read-once integral cache (PSEUDOCODE 37; DESIGN 9.6 candidate (ii)
+   !   in its serial form).  The stored integral matrices the valence
+   !   density contracts against -- the overlap, the nuclear-potential,
+   !   the kinetic-energy, the optional mass-velocity, and one per
+   !   potential term -- are fixed for the whole run: the integral stage
+   !   writes them before the first SCF iteration and only the potential
+   !   coefficients change afterward.  Re-reading them every iteration
+   !   re-inflates DEFLATE-compressed data that never changed, and that
+   !   read (region I of PSEUDOCODE 30) is the largest cost left in the
+   !   stage once the density-matrix build is recast.  This array holds
+   !   each matrix in memory after its first read, so every later
+   !   iteration copies it instead of inflating it.  makeValenceRho runs
+   !   only on root, so this is ONE resident copy, never replicated
+   !   across ranks -- a node-scale interim, not the distributed layout
+   !   the >10,000-atom cells will need (DESIGN 9.4).  The four indices
+   !   are (packed real/imag extent, packed matrix element, cache slot,
+   !   k-point).
+   real (kind=double), allocatable, dimension (:,:,:,:) :: &
+         & valenceIntegralCache
+
+   ! Which (slot, k-point) matrices have been read into the cache.  Not
+   !   one global flag: the k-point loop skips k-points whose occupied
+   !   weight is negligible, and the skip depends on the occupations,
+   !   which change between iterations, so a slot can first fill on an
+   !   iteration later than the first.
+   logical, allocatable, dimension (:,:) :: cacheSlotFilled
+
+   ! Whether the cache is in use this run, decided once on the first
+   !   in-SCF call to makeValenceRho by the size guard.  False restores
+   !   the exact per-iteration read behavior the uncached code had.
+   logical :: valenceCacheEnabled = .false.
+
+   ! Safety cap on the resident bytes the cache may occupy.  This is a
+   !   policy limit, not physics: it is sized to admit the benchmark set
+   !   and thousand-atom targets (tens of GB) while falling back to
+   !   per-iteration reads on a cell -- very large, or with many
+   !   k-points -- whose integrals would not fit in memory.  A run that
+   !   exceeds the cap is bit-identical to today at today's memory and
+   !   today's read cost.
+   real (kind=double), parameter :: valenceCacheByteCap = &
+         & 48.0_double * 1024.0_double**3  ! 48 GiB.
+
+
    ! Split measurement of the valence charge density stage (PSEUDOCODE
    !   30).  Building the density matrix from the eigenvectors and
    !   contracting it against the stored integral matrices are two kinds
@@ -142,6 +185,84 @@ subroutine endTimedRegion (regionStartTicks,accumulatedSeconds)
 
 end subroutine endTimedRegion
 
+
+! Read a stored integral matrix through the read-once cache
+!   (PSEUDOCODE 37).  The first time a given (slot, k-point) matrix is
+!   asked for, it is inflated from the HDF5 file exactly as a bare
+!   readPackedMatrix would inflate it, and the result is kept in the
+!   cache; every later request for the same matrix copies it from
+!   memory and pays no inflation.  When the cache is not enabled this
+!   is a direct readPackedMatrix and is indistinguishable, bit for bit,
+!   from the uncached code.  The extra arguments over readPackedMatrix
+!   are the slot (which term) and k-point (which mesh point) that
+!   locate the matrix in the cache.
+subroutine cachedReadPackedMatrix (slot, kPoint, datasetID, &
+      & packedMatrix, matrixDims, dim1, dim2)
+
+   ! Import the precision variables, the HDF5 handle type, and the
+   !   underlying read that fills a slot on its first use.
+   use O_Kinds
+   use HDF5
+   use O_MatrixSubs, only: readPackedMatrix
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   ! Define the passed parameters: readPackedMatrix's, plus the two
+   !   indices that place this matrix in the cache.
+   integer, intent(in) :: slot, kPoint, dim1, dim2
+   integer (hid_t), intent(in) :: datasetID
+   real (kind=double), dimension (dim1,dim2*(dim2+1)/2) :: packedMatrix
+   integer (hsize_t), dimension (2) :: matrixDims
+
+   if (.not. valenceCacheEnabled) then
+      ! The cache is off: behave exactly as the uncached code did.
+      call readPackedMatrix (datasetID,packedMatrix,matrixDims,&
+            & dim1,dim2)
+      return
+   endif
+
+   if (cacheSlotFilled(slot,kPoint)) then
+      ! Hit: copy the resident matrix.  readPackedMatrix overwrites
+      !   its destination (a direct h5dread), so this assignment
+      !   reproduces its result exactly.
+      packedMatrix(:,:) = valenceIntegralCache(:,:,slot,kPoint)
+   else
+      ! Miss (first time this matrix is seen): inflate it once, then
+      !   keep it for every later iteration.
+      call readPackedMatrix (datasetID,packedMatrix,matrixDims,&
+            & dim1,dim2)
+      valenceIntegralCache(:,:,slot,kPoint) = packedMatrix(:,:)
+      cacheSlotFilled(slot,kPoint) = .true.
+   endif
+
+end subroutine cachedReadPackedMatrix
+
+
+! Release the read-once integral cache (PSEUDOCODE 37).  Called once by
+!   the SCF driver after the self-consistency loop ends and before any
+!   post-SCF stage runs, so the tens of gigabytes the cache holds are
+!   returned before the density of states and the other post-SCF
+!   consumers allocate their own working memory.  It is a no-op when the
+!   cache was never enabled (a cell too large for the size guard, or a
+!   serial build that took the uncached path), so the driver may call it
+!   unconditionally.
+subroutine cleanUpValenceIntegralCache
+
+   ! Make sure that there are not accidental variable declarations.
+   implicit none
+
+   if (allocated(valenceIntegralCache)) then
+      deallocate (valenceIntegralCache)
+   endif
+   if (allocated(cacheSlotFilled)) then
+      deallocate (cacheSlotFilled)
+   endif
+   valenceCacheEnabled = .false.
+
+end subroutine cleanUpValenceIntegralCache
+
+
 subroutine makeValenceRho(inSCF)
 
    ! Import the necessary modules.
@@ -210,6 +331,12 @@ subroutine makeValenceRho(inSCF)
 #endif
    integer :: dim1
    integer :: energyLevelCounter
+   ! Number of cache slots (PSEUDOCODE 37: the overlap, nuclear-
+   !   potential, kinetic-energy, and mass-velocity terms, plus one
+   !   per potential term) and the resident bytes the cache would take,
+   !   computed in double so the size guard does not overflow.
+   integer :: numCacheSlots
+   real (kind=double) :: estimatedCacheBytes
    real (kind=double) :: sumElecEnergy
    real (kind=double), allocatable, dimension (:)     :: tempDensity
    real (kind=double), allocatable, dimension (:)     :: electronEnergy
@@ -381,6 +508,34 @@ subroutine makeValenceRho(inSCF)
    dealValence = (mpiSize > 1) .and. (numPlusUJAtoms == 0) .and. &
          & .not. (((doForce_SCF == 1) .and. (converged == 1)) .or. &
          &        ((doForce_PSCF == 1) .and. (inSCF == 0)))
+
+   ! Decide once, on the first SCF iteration, whether to hold the
+   !   stored integral matrices in memory across iterations rather
+   !   than re-inflating them every time (PSEUDOCODE 37: the read-once
+   !   cache, the serial form of DESIGN 9.6 candidate (ii)).  The
+   !   datasets are fixed for the whole run, so a resident copy turns
+   !   region I's re-inflation into a memory copy on every iteration
+   !   after the first.  It is taken only on the SCF path (inSCF == 1)
+   !   and only when that resident copy fits the size guard; otherwise
+   !   valenceCacheEnabled stays false and the reads below behave
+   !   exactly as the uncached code did.  This runs only on root (all
+   !   of makeValenceRho does), so the cache is one copy, not one per
+   !   rank.
+   if ((inSCF == 1) .and. (.not. allocated(valenceIntegralCache))) then
+      numCacheSlots = potDim + 4  ! overlap, NP, KE, MV, + potDim terms
+      estimatedCacheBytes = real(dim1,double) &
+            & * (real(valeDim,double) * real(valeDim+1,double) &
+            &    / 2.0_double) &
+            & * real(numCacheSlots,double) * real(numKPoints,double) &
+            & * 8.0_double
+      if (estimatedCacheBytes <= valenceCacheByteCap) then
+         allocate (valenceIntegralCache(dim1, &
+               & valeDim*(valeDim+1)/2, numCacheSlots, numKPoints))
+         allocate (cacheSlotFilled(numCacheSlots, numKPoints))
+         cacheSlotFilled(:,:) = .false.
+         valenceCacheEnabled = .true.
+      endif
+   endif
 
    do i = 1, numKPoints
 
@@ -716,9 +871,11 @@ subroutine makeValenceRho(inSCF)
       !   single combined total could not distinguish.
       call beginTimedRegion (clockAtRegionStart)
       if (inSCF == 1) then
-         call readPackedMatrix (atomOverlap_did(i),packedValeVale,&
-               & packedVVDims,dim1,valeDim)
+         ! Slot 1 of the read-once cache (PSEUDOCODE 37).
+         call cachedReadPackedMatrix (1,i,atomOverlap_did(i),&
+               & packedValeVale,packedVVDims,dim1,valeDim)
       else
+         ! Post-SCF overlap: a different dataset, read once, not cached.
          call readPackedMatrix (atomOverlapPSCF_did(i),packedValeVale,&
                & packedVVDimsPSCF,dim1,valeDim)
       endif
@@ -772,8 +929,9 @@ subroutine makeValenceRho(inSCF)
 
          ! Compute the nuclear contribution to the fitted potential first.
          call beginTimedRegion (clockAtRegionStart)
-         call readPackedMatrix (atomNPOverlap_did(i),packedValeVale,&
-               & packedVVDims,dim1,valeDim)
+         ! Slot 2 of the read-once cache (PSEUDOCODE 37).
+         call cachedReadPackedMatrix (2,i,atomNPOverlap_did(i),&
+               & packedValeVale,packedVVDims,dim1,valeDim)
          call endTimedRegion (clockAtRegionStart,valeRhoReadIntegralSeconds)
          call beginTimedRegion (clockAtRegionStart)
          do j = 1, spin ! j=1 -> Total; j=2 -> Difference
@@ -789,8 +947,9 @@ subroutine makeValenceRho(inSCF)
 
          ! Now compute the kinetic energy.
          call beginTimedRegion (clockAtRegionStart)
-         call readPackedMatrix (atomKEOverlap_did(i),packedValeVale,&
-               & packedVVDims,dim1,valeDim)
+         ! Slot 3 of the read-once cache (PSEUDOCODE 37).
+         call cachedReadPackedMatrix (3,i,atomKEOverlap_did(i),&
+               & packedValeVale,packedVVDims,dim1,valeDim)
          call endTimedRegion (clockAtRegionStart,valeRhoReadIntegralSeconds)
          call beginTimedRegion (clockAtRegionStart)
          do j = 1, spin ! j=1 -> Total; j=2 -> Difference
@@ -807,8 +966,9 @@ subroutine makeValenceRho(inSCF)
          ! If needed, compute the mass velocity.
          if (rel == 1) then
             call beginTimedRegion (clockAtRegionStart)
-            call readPackedMatrix (atomMVOverlap_did(i),packedValeVale,&
-                  & packedVVDims,dim1,valeDim)
+            ! Slot 4 of the read-once cache (PSEUDOCODE 37).
+            call cachedReadPackedMatrix (4,i,atomMVOverlap_did(i),&
+                  & packedValeVale,packedVVDims,dim1,valeDim)
             call endTimedRegion (clockAtRegionStart,&
                   & valeRhoReadIntegralSeconds)
             call beginTimedRegion (clockAtRegionStart)
@@ -830,8 +990,10 @@ subroutine makeValenceRho(inSCF)
          !   regions below are opened and closed potDim times each.
          do j = 1, potDim
             call beginTimedRegion (clockAtRegionStart)
-            call readPackedMatrix (atomPotOverlap_did(i,j),packedValeVale,&
-                  & packedVVDims,dim1,valeDim)
+            ! Slot 4+j of the read-once cache (PSEUDOCODE 37): one per
+            !   potential term, after the four fixed terms above.
+            call cachedReadPackedMatrix (4+j,i,atomPotOverlap_did(i,j),&
+                  & packedValeVale,packedVVDims,dim1,valeDim)
             call endTimedRegion (clockAtRegionStart,&
                   & valeRhoReadIntegralSeconds)
             call beginTimedRegion (clockAtRegionStart)

@@ -638,7 +638,7 @@ subroutine mainSCF
    use O_PotTypes, only: cleanUpPotTypes
    use O_SecularEquation, only: secularEqnSCF, cleanUpSecularEqn, &
          & shiftEnergyEigenValues
-   use O_ValeCharge, only: makeValenceRho
+   use O_ValeCharge, only: makeValenceRho, cleanUpValenceIntegralCache
    use O_Populate, only: populateStates
    use O_LAPACKParameters, only: setBlockSize
    use O_ExchangeCorrelation, only: cleanUpExchCorr
@@ -725,6 +725,12 @@ subroutine mainSCF
          exit
       endif
    enddo
+
+   ! Release the read-once integral cache (PSEUDOCODE 37) now that the
+   !   SCF loop has ended, so its tens of gigabytes are returned before
+   !   the post-SCF stages allocate their own working memory.  A no-op
+   !   when the cache was never enabled.
+   call cleanUpValenceIntegralCache
 
    ! Print the accumulated TDOS in a useful format if requested in the input.
    if (iterFlagTDOS == 1) then

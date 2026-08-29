@@ -15104,6 +15104,33 @@ paragraph), and the only question still open here is PF8's:
 whether the cache's dealt form divides decompression work or
 disk time.
 
+**Built 2026-08-29: the serial cache, valence consumer only.**
+Under a time constraint the cheap, low-risk half of the two
+directions above is taken first -- the read-once cache in its
+SERIAL, root-only form, serving the ONE consumer in
+`makeValenceRho` (region I of PSEUDOCODE 30), not yet the shared
+cache that would also serve 9.6's H assembly. The dealt fill is
+deferred for a concrete seam reason read from the code today:
+the worker ranks do not hold the integral HDF5 handles at all.
+`initHDF5_SCF` -- which opens the SCF file and resolves
+`atomPotOverlap_did` and its siblings -- runs under
+`if (mpiRank == 0)`, and a worker's handle arrays are left
+unallocated by design (imago.F90 notes the worker "passes its
+unallocated handle"). So a worker cannot read a dataset today;
+the dealt fill first needs the suspend / all-ranks-open-READ-
+ONLY / resume protocol this section already names, which is its
+own increment with its own file-lock risk. The serial cache
+needs none of that: root already holds every handle, so it
+reads each dataset once on the first iteration and copies it
+from memory on every iteration after, and region I falls to a
+memory copy. It is a NODE-SCALE interim -- one full copy of the
+integrals resident on root, about 13 GB at a thousand atoms and
+22 GB on the 1296-atom cell -- and it does NOT address the
+>10,000-atom memory wall, where the integrals, like every other
+`valeDim^2` matrix, must instead live distributed (9.4). A size
+guard keeps it from being taken when that copy would not fit.
+PSEUDOCODE 37 carries the mechanics and the seam inventory.
+
 ### 9.8 Open Design Questions
 
 - ~~**Distributed eigensolver backend.**~~ **DECIDED
