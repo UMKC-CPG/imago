@@ -498,3 +498,52 @@ module dsymmInterface
       end subroutine dsymm
    end interface
 end module dsymmInterface
+
+module zgemmInterface
+   interface
+      subroutine zgemm (TRANSA,TRANSB,M,N,K,ALPHA,A,LDA,B,LDB, &
+            & BETA,C,LDC)
+         use O_Kinds
+         character*1 :: TRANSA
+         character*1 :: TRANSB
+         integer :: M
+         integer :: N
+         integer :: K
+         integer :: LDA
+         integer :: LDB
+         integer :: LDC
+         complex (kind=double) :: ALPHA
+         ! A is LDA by K when TRANSA is 'N' and LDA by M otherwise;
+         !   B is LDB by N when TRANSB is 'N' and LDB by K otherwise.
+         !   Both second extents are left assumed so a caller may pass
+         !   the first element of a column block (sequence association).
+         complex (kind=double), dimension(LDA,*) :: A
+         complex (kind=double), dimension(LDB,*) :: B
+         complex (kind=double) :: BETA
+         complex (kind=double), dimension(LDC,N) :: C
+      end subroutine zgemm
+   end interface
+end module zgemmInterface
+
+module dgemmInterface
+   interface
+      subroutine dgemm (TRANSA,TRANSB,M,N,K,ALPHA,A,LDA,B,LDB, &
+            & BETA,C,LDC)
+         use O_Kinds
+         character*1 :: TRANSA
+         character*1 :: TRANSB
+         integer :: M
+         integer :: N
+         integer :: K
+         integer :: LDA
+         integer :: LDB
+         integer :: LDC
+         real (kind=double) :: ALPHA
+         ! A and B second extents assumed, as in zgemm above.
+         real (kind=double), dimension(LDA,*) :: A
+         real (kind=double), dimension(LDB,*) :: B
+         real (kind=double) :: BETA
+         real (kind=double), dimension(LDC,N) :: C
+      end subroutine dgemm
+   end interface
+end module dgemmInterface

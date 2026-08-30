@@ -19719,3 +19719,183 @@ floor to separate from it.
    reproduces the serial result within the floor, exercising the
    subtracting `zherk` (the 31.6 group).
 
+## 39. The Optical Momentum Sum as a Matrix Product
+## (DESIGN 9.10 order-of-work (e), optical member; DESIGN 12.2,
+## 13.3; modelled on PSEUDOCODE 38)
+
+### 39.1 What this codes
+
+The optical stage's dominant cost is building the "conjugate
+wave momentum sum" -- for each Cartesian component `c`, each
+final (unoccupied) state, and each basis function, the
+contraction of a conjugate final-state eigenvector with the
+momentum matrix (the code says as much in a comment at the
+producer). TWO routines build it, and both are the strided
+`numFinal * valeDim^2` shape PDOS and bond had before their
+recasts:
+
+- `buildConjWaveMomSum` builds the TOTAL sum,
+  `conjWaveMomSum(nu, fin', c)`.
+- `buildConjWaveMomSumPOPTC` builds the PARTIAL (decomposed)
+  sum, `conjWaveMomSum(nu, n, fin', c)`, where the contraction
+  is split by the partial group `pOptcIndex(mu)` of the
+  final-state basis function `mu`.
+
+This recasts BOTH as level-3 BLAS, keeping their interfaces and
+their outputs, so the partial optical decomposition is carried
+through unchanged -- the point this section exists for. A
+partial optical run calls both producers (the total for the
+undecomposed spectrum, the partial for the decomposed one), so
+recasting only the total would leave the partial run bottleneck-
+ed on the strided partial producer; both must be recast.
+
+### 39.2 The two kernels
+
+Write `C` for the eigenvectors (`valeVale`), `P_c` for the
+momentum matrix of component `c` (`valeValeMM(:,:,c)`), and
+`CF(mu, fin')` for the conjugate of the final-state block,
+`conjg(C(mu, firstFin-1+fin'))`.
+
+**Total.** `conjWaveMomSum(nu, fin', c) = sum_mu C*(mu,fin)
+P_c(mu,nu)`, which is `P_c^T CF` -- one GEMM per component:
+
+    conjWaveMomSum(:,:,c) = zgemm('T','N', valeDim, numFinal,
+        valeDim, 1, P_c, valeDim, CF, valeDim, 0, out(:,:,c),
+        valeDim)
+
+so `out(nu,fin') = sum_mu P_c(mu,nu) CF(mu,fin')`.
+
+**Partial.** `conjWaveMomSum(nu, n, fin', c) =
+sum_{mu: pOptcIndex(mu)==n} C*(mu,fin) P_c(mu,nu)` -- the same
+contraction with the mu-sum split by partial group. The basis
+functions are laid out site by site, and `pOptcIndex` is
+constant along each site's (and, at nl resolution, each radial
+function's) contiguous block, so the mu-axis is a sequence of
+CONTIGUOUS RUNS of one partial. Zero the store, then walk the
+runs; each run `[s,e]` owned by partial `p` is one accumulating
+GEMM into that partial's slot:
+
+    conjWaveMomSum(:,p,:,c) += P_c(s:e,:)^T CF(s:e,:)
+
+A site-grouped code (partial = one atom) gives each partial one
+run; a type-grouped code (partial = one atomic type) gives a
+partial several runs, one per atom of the type, which accumulate
+into the same slot. So all four POPTC codes -- type or site,
+total or nl resolution -- fall out of the same walk with no
+gather and no assumption of a monotonic index.
+
+**Writing the partial slot.** `conjWaveMomSum(:,p,:,c)` is not
+contiguous: for fixed `p` and `c` the `nu` extent (first index)
+is contiguous but successive `fin'` columns are `valeDim *
+numPartials` apart. A GEMM writes exactly `M = valeDim` rows per
+column, so passing the slot's first element
+`conjWaveMomSum(1,p,1,c)` with `LDC = valeDim * numPartials`
+addresses each `(nu, fin')` correctly and never touches the rows
+of the other partials in the same column. `beta = 1` on every
+run (the store was zeroed once up front).
+
+Passing the first element rather than the section is what avoids
+a copy, but only if the producer can hand that element to the
+GEMM BY REFERENCE. The GEMM interface takes `C` as an
+explicit-shape `(LDC, N)` array, and Fortran forbids
+sequence-associating an element of an ASSUMED-SHAPE array with
+such a dummy -- the compiler would copy the whole store in and
+out on every run to satisfy the rule, the very cost this form
+exists to remove. So the producer's `conjWaveMomSum` dummy is
+declared EXPLICIT-SHAPE instead: its four extents are all known
+where the routine starts -- `valeDim` and `sumNumPartials` from
+module state, the final-state count from the passed
+`firstFin`/`lastFin` range, and `finComponent` from the argument
+-- so an element of it may be passed by reference. Every caller
+passes a whole contiguous allocatable store, so no copy is made
+at the call boundary either.
+
+### 39.3 Seam inventory (read 2026-08-29)
+
+Both producers run on ROOT only (the optical stage sits under
+the analysis block's `mpiRank == 0` guard): a serial recast, no
+ranks.
+
+- `valeVale`/`valeValeGamma` (`C`) and
+  `valeValeMM`/`valeValeMMGamma` (`P_c`): module state of
+  `O_SecularEquation`, populated in `computeTransitions` before
+  either producer is called (`valeValeMM` allocated
+  `valeDim x valeDim x 3` and read there). The recast consumes
+  them where they are; unchanged.
+- `pOptcIndex(valeDim)`: `O_Optc` module state, built once from
+  the segment/site layout; maps each basis function to its
+  partial. The recast reads it to find the contiguous runs.
+  Unchanged.
+- `conjWaveMomSum`: the OUTPUT, allocated by the CALLER with the
+  same shape as today -- `(valeDim, numFinal, finComponent)` for
+  the total, `(valeDim, sumNumPartials, numFinal, finComponent)`
+  for the partial (all three partial call sites pass a whole
+  allocatable store). The partial producer declares its dummy
+  EXPLICIT-SHAPE so its per-run first-element GEMM writes are by
+  reference (see 39.2). The recast fills the same array with the
+  same values (to a floor). Every downstream consumer is untouched:
+  the second contraction against the initial states, the initial-
+  side partial split `pOptcIndex(l)`, the `|element|^2`, the
+  occupancy weighting, the direction codes and star unfolding,
+  and the spectra.
+- The GAMMA Hermiticity fix -- negating the upper triangle of
+  `valeValeMMGamma(:,:,c)` once per component, because the gamma
+  momentum matrix is stored as the real part of a `-i` times an
+  imaginary matrix -- is KEPT, before the GEMM, exactly as the
+  strided form did it. It modifies `valeValeMMGamma` in place and
+  so must still run once per call per component.
+- NEW, allocated in the producer: `CF`, the conjugate final-
+  state eigenvector block (`valeDim x numFinal`), so the GEMM's
+  second operand is `conjg(C_fin)` directly (the gamma build
+  needs no conjugate and uses the block itself); and the
+  `zgemm`/`dgemm` BLAS interface, added to `interfaces.F90`
+  beside the existing `zherk`/`zhemm` ones.
+
+### 39.4 What stays exactly as it is
+
+Everything downstream of `conjWaveMomSum`: the second
+contraction against the initial states and its partial split,
+the occupancy weighting, the direction-code handling, the star
+unfolding, the spectra, and the PACS and sige variants. The
+recast changes only how the momentum sum is formed, not its
+shape, meaning, or any use of it.
+
+### 39.5 Exactness and the floor
+
+The GEMM could in principle reassociate the mu-sum and leave the
+output only floor-close to the strided form. In practice, built
+against the single-threaded reference BLAS this project uses, the
+recast was measured BIT-IDENTICAL to the pre-recast build on
+every path: the total on the gamma (sio2_243) and complex
+(bn_small_c) branches, and the partial on both branches
+(bn_small_c complex and bn_small_g gamma, detail = 1). At one
+thread the GEMM forms each output element as a dot product over
+mu in the same order the strided per-element loop did, so nothing
+is reassociated and the results agree to the last bit.
+
+This bit-identity is a property of that BLAS, not of the
+algorithm: a threaded or differently blocked GEMM could sum in
+another order and reintroduce a floating-point floor. The recast
+is correct either way -- it reproduces the strided value to the
+floor -- so any downstream comparison should test to a tolerance
+rather than assume bit-identity. There is no parallel dimension,
+so no second floor is ever introduced.
+
+### 39.6 Checks
+
+1. **Floor, total.** A non-partial optical run agrees with the
+   pre-recast build on the dielectric spectrum to a measured
+   tolerance and on the f-sum to print precision, on bn_small_g,
+   sio2_243_med_g and knbo3_333_med_c (complex).
+2. **Floor, PARTIAL -- the check this section exists for.** A
+   POPTC run agrees with the pre-recast build on every partial
+   spectrum, AND the partials sum to the total spectrum -- the
+   test that the run-based walk deposits each contribution into
+   the right partial slot.
+3. **Both grouping modes.** groupByType (codes 1, 2) and
+   groupBySite (codes 3, 4), each at total and nl resolution,
+   reproduce their serial partials -- exercising the one-run and
+   the several-runs-accumulate branches of the walk.
+4. **The stamp falls.** The optical stage stamp on the large
+   cell falls by the BLAS-3 factor, on the total and the partial
+   paths both.

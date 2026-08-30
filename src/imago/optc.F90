@@ -1405,8 +1405,10 @@ subroutine buildConjWaveMomSum (firstFin,lastFin,initComponent, &
    use O_AtomicSites, only: valeDim
 #ifndef GAMMA
    use O_SecularEquation, only: valeVale, valeValeMM
+   use zgemmInterface
 #else
    use O_SecularEquation, only: valeValeGamma, valeValeMMGamma
+   use dgemmInterface
 #endif
 
    ! Make sure that there are not accidental variable declarations.
@@ -1424,52 +1426,55 @@ subroutine buildConjWaveMomSum (firstFin,lastFin,initComponent, &
 #endif
 
    ! Define local variables.
-   integer :: i,j,k ! Loop index variables.
-   integer :: finalStateIndex
+   integer :: i,j ! Loop index variables (component; gamma fix row).
+   integer :: numFinal ! Number of final states in this block.
+#ifndef GAMMA
+   ! The conjugate of the final-state eigenvector block, so the GEMM's
+   !   second operand is conjg(C_fin) directly (PSEUDOCODE 39.2).
+   complex (kind=double), allocatable, dimension (:,:) :: conjFinalBlock
+#endif
+
+   numFinal = lastFin - firstFin + 1
 
 #ifndef GAMMA
 
-   ! Compute the sum over the final states. The 1 for the valeVale is for
-   !   the 1 kpoint. The finComponent is 3 for all three components at
-   !   once, and 1 for when X, Y, Z are done separately.
+   ! conjWaveMomSum(nu,fin',c) = sum_mu conjg(C(mu,fin)) P_c(mu,nu),
+   !   which is (P_c^T conjg(C_fin))(nu,fin') -- one GEMM per Cartesian
+   !   component c in place of the strided per-(final,basis) sum
+   !   (PSEUDOCODE 39.2).  The finComponent is 3 for all three
+   !   components at once and 1 when X, Y, Z are done separately.
+   allocate (conjFinalBlock (valeDim, numFinal))
+   conjFinalBlock(:,:) = conjg(valeVale(:, firstFin:lastFin, 1))
    do i = initComponent, finComponent
-      finalStateIndex = 0
-      do j = firstFin, lastFin
-         ! Define the final index for conjWaveMomSum
-         finalStateIndex = finalStateIndex + 1
-         do k = 1, valeDim
-            conjWaveMomSum(k,finalStateIndex,i) = &
-                  & sum(conjg(valeVale(:,j,1)) * valeValeMM(:,k,i))
-         enddo
-      enddo
+      call zgemm ('T','N', valeDim, numFinal, valeDim, &
+            & (1.0_double,0.0_double), valeValeMM(:,:,i), valeDim, &
+            & conjFinalBlock, valeDim, (0.0_double,0.0_double), &
+            & conjWaveMomSum(:,:,i), valeDim)
    enddo
+   deallocate (conjFinalBlock)
 
 #else
 
-   ! Documentation similar to the above non-gamma case.
+   ! Documentation similar to the above non-gamma case; the gamma
+   !   momentum matrix is real, so the second operand is the
+   !   final-state block itself with no conjugate.
    do i = initComponent, finComponent
 
       ! Make the upper triangle correct for Hermiticity.  Recall that for
       !   the Gamma K Point all the matrices are real (except the momentum
       !   matrix which was multiplied by a -i and is hence imaginary).
       !   Since it must be Hermitian we need to apply that now. See the
-      !   note above this routine: this write is why it may be called only
-      !   once per k-point per component set.
+      !   note above this routine: this write modifies valeValeMMGamma in
+      !   place, so it may be called only once per k-point per component
+      !   set -- kept exactly as the strided form had it, before the GEMM.
       do j = 1, valeDim
          valeValeMMGamma(1:j,j,i) = -valeValeMMGamma(1:j,j,i)
       enddo
 
-      finalStateIndex = 0
-      do j = firstFin, lastFin
-
-         ! Increment the finalStateIndex for conjWaveMomSum
-         finalStateIndex = finalStateIndex + 1
-
-         do k = 1, valeDim
-            conjWaveMomSum(k,finalStateIndex,i) = &
-                  & sum(valeValeGamma(:,j,1) * valeValeMMGamma(:,k,i))
-         enddo
-      enddo
+      call dgemm ('T','N', valeDim, numFinal, valeDim, 1.0_double, &
+            & valeValeMMGamma(:,:,i), valeDim, &
+            & valeValeGamma(1, firstFin, 1), valeDim, 0.0_double, &
+            & conjWaveMomSum(:,:,i), valeDim)
    enddo
 
 #endif
@@ -2258,8 +2263,10 @@ subroutine buildConjWaveMomSumPOPTC (firstFin,lastFin,initComponent, &
    use O_AtomicSites, only: valeDim
 #ifndef GAMMA
    use O_SecularEquation, only: valeVale, valeValeMM
+   use zgemmInterface
 #else
    use O_SecularEquation, only: valeValeGamma, valeValeMMGamma
+   use dgemmInterface
 #endif
 
    ! Make sure that there are not accidental variable declarations.
@@ -2270,81 +2277,125 @@ subroutine buildConjWaveMomSumPOPTC (firstFin,lastFin,initComponent, &
    integer, intent(in) :: lastFin
    integer, intent(in) :: initComponent
    integer, intent(in) :: finComponent
+   ! The store is declared EXPLICIT-SHAPE (all four extents are known
+   !   from module state and the passed final-state range), not assumed
+   !   shape.  This is what lets each run's GEMM be handed the first
+   !   element of a partial's (non-contiguous) slot by reference: Fortran
+   !   forbids sequence-associating an element of an ASSUMED-SHAPE array
+   !   with an explicit-shape dummy, so an assumed-shape store would force
+   !   a copy of the whole store on every run (PSEUDOCODE 39.2).
 #ifndef GAMMA
-   complex (kind=double), dimension (:,:,:,:), intent(out) :: conjWaveMomSum
+   complex (kind=double), &
+         & dimension (valeDim,sumNumPartials,lastFin-firstFin+1, &
+         & finComponent), intent(out) :: conjWaveMomSum
 #else
-   real    (kind=double), dimension (:,:,:,:), intent(out) :: conjWaveMomSum
+   real    (kind=double), &
+         & dimension (valeDim,sumNumPartials,lastFin-firstFin+1, &
+         & finComponent), intent(out) :: conjWaveMomSum
 #endif
 
    ! Define local variables.
-   integer :: i,j,k ! Loop index variables.
-   integer :: basisFn ! The basis function currently being deposited.
-   integer :: finalStateIndex
+   integer :: i,j ! Loop index variables (component; gamma fix row).
+   integer :: basisFn      ! Walk position over the basis functions.
+   integer :: runStart     ! First basis function of the current run.
+   integer :: currentPartial ! Partial the current run deposits into.
+   integer :: numFinal     ! Number of final states in this block.
+   integer :: numPartials  ! Count of partial slots (store's 2nd extent).
+   integer :: partialLeadDim ! GEMM leading dim = valeDim * numPartials.
+#ifndef GAMMA
+   ! The conjugate final-state block, so each run's GEMM multiplies by
+   !   conjg(C_fin) directly (PSEUDOCODE 39.2).
+   complex (kind=double), allocatable, dimension (:,:) :: conjFinalBlock
+#endif
 
-   ! Every basis function adds into the slot its partial owns, so the
-   !   destination must start empty.
+   numFinal = lastFin - firstFin + 1
+
+   ! The store's second extent is the number of partial slots.  A GEMM
+   !   writing into one slot steps from one final-state column to the
+   !   next by valeDim * numPartials elements, so that product is the
+   !   leading dimension handed to every GEMM below (PSEUDOCODE 39.2).
+   numPartials    = size(conjWaveMomSum, 2)
+   partialLeadDim = valeDim * numPartials
+
+   ! Every run adds into the slot its partial owns, so the store starts
+   !   empty and every GEMM below accumulates (beta = 1).
 #ifndef GAMMA
    conjWaveMomSum = cmplx(0.0_double,0.0_double,double)
 #else
    conjWaveMomSum = 0.0_double
 #endif
 
+   ! conjWaveMomSum(nu, n, fin', c) = sum over mu in partial n of
+   !   conjg(C(mu,fin)) P_c(mu,nu) (PSEUDOCODE 39.2).  The basis
+   !   functions are laid out site by site and pOptcIndex is constant
+   !   along each contiguous block, so the mu-axis is a sequence of
+   !   runs of one partial; each run is one accumulating GEMM into that
+   !   partial's slot, conjWaveMomSum(:,p,:,c).  That slot is NOT
+   !   contiguous -- for a fixed partial the nu rows are adjacent but
+   !   successive final-state columns lie numPartials apart -- so rather
+   !   than pass it as an array section (which the compiler would copy
+   !   in and out on every run) the GEMM is handed the slot's first
+   !   element, conjWaveMomSum(1,p,1,c), with leading dimension
+   !   partialLeadDim.  It writes exactly valeDim rows per column and so
+   !   addresses each (nu, fin') in place, never touching the rows the
+   !   other partials own in that column.  Because the dummy is
+   !   explicit-shape (hence contiguous), this first-element hand-off is
+   !   by reference with no copy.  beta = 1 accumulates across the runs
+   !   that share a partial under type grouping.
+
 #ifndef GAMMA
 
-   ! Compute the sum over the final states.
+   allocate (conjFinalBlock (valeDim, numFinal))
+   conjFinalBlock(:,:) = conjg(valeVale(:, firstFin:lastFin, 1))
    do i = initComponent, finComponent
-      finalStateIndex = 0
-
-      do j = firstFin, lastFin
-         ! Define the final index for conjWaveMomSum
-         finalStateIndex = finalStateIndex + 1
-
-         do k = 1, valeDim
-
-            ! Walk every basis function and send its contribution to the
-            !   partial that pOptcIndex assigns it. The basis functions
-            !   are laid out site by site and, within a site, state by
-            !   state, so walking valeDim directly visits them in exactly
-            !   that order.
-            do basisFn = 1, valeDim
-               conjWaveMomSum(k,pOptcIndex(basisFn),finalStateIndex,i) = &
-                     & conjWaveMomSum(k,pOptcIndex(basisFn), &
-                     & finalStateIndex,i) &
-                     & + (conjg(valeVale(basisFn,j,1)) &
-                     & * valeValeMM(basisFn,k,i))
-            enddo
+      basisFn = 1
+      do while (basisFn <= valeDim)
+         runStart = basisFn
+         currentPartial = pOptcIndex(basisFn)
+         basisFn = basisFn + 1
+         do while (basisFn <= valeDim)
+            if (pOptcIndex(basisFn) /= currentPartial) exit
+            basisFn = basisFn + 1
          enddo
+         call zgemm ('T','N', valeDim, numFinal, basisFn-runStart, &
+               & (1.0_double,0.0_double), valeValeMM(runStart,1,i), &
+               & valeDim, conjFinalBlock(runStart,1), valeDim, &
+               & (1.0_double,0.0_double), &
+               & conjWaveMomSum(1,currentPartial,1,i), partialLeadDim)
       enddo
    enddo
+   deallocate (conjFinalBlock)
 
 #else
 
-   ! Documentation similar to the above non-gamma case.
+   ! Documentation similar to the above non-gamma case; the gamma
+   !   momentum matrix is real, so each run multiplies the final-state
+   !   block itself with no conjugate.
    do i = initComponent, finComponent
 
       ! Make the upper triangle correct for Hermiticity.  Recall that for
       !   the Gamma K Point all the matrices are real (except the momentum
       !   matrix which was multiplied by a -i and is hence imaginary).
-      !   Since it must be Hermitian we need to apply that now.
+      !   Since it must be Hermitian we need to apply that now, in place,
+      !   once per component -- kept exactly as the strided form had it.
       do j = 1, valeDim
          valeValeMMGamma(1:j,j,i) = -valeValeMMGamma(1:j,j,i)
       enddo
 
-      finalStateIndex = 0
-      do j = firstFin, lastFin
-
-         ! Increment the finalStateIndex for conjWaveMomSum
-         finalStateIndex = finalStateIndex + 1
-
-         do k = 1, valeDim
-            do basisFn = 1, valeDim
-               conjWaveMomSum(k,pOptcIndex(basisFn),finalStateIndex,i) = &
-                     & conjWaveMomSum(k,pOptcIndex(basisFn), &
-                     & finalStateIndex,i) &
-                     & + (valeValeGamma(basisFn,j,1) &
-                     & * valeValeMMGamma(basisFn,k,i))
-            enddo
+      basisFn = 1
+      do while (basisFn <= valeDim)
+         runStart = basisFn
+         currentPartial = pOptcIndex(basisFn)
+         basisFn = basisFn + 1
+         do while (basisFn <= valeDim)
+            if (pOptcIndex(basisFn) /= currentPartial) exit
+            basisFn = basisFn + 1
          enddo
+         call dgemm ('T','N', valeDim, numFinal, basisFn-runStart, &
+               & 1.0_double, valeValeMMGamma(runStart,1,i), valeDim, &
+               & valeValeGamma(runStart, firstFin, 1), valeDim, &
+               & 1.0_double, conjWaveMomSum(1,currentPartial,1,i), &
+               & partialLeadDim)
       enddo
    enddo
 
