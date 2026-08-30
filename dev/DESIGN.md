@@ -15563,12 +15563,22 @@ per k-point (`valeDim x valeDim` times `valeDim x numStates`;
 the large deck), and the weight is then element-wise,
 `P(mu, j) = Re( conj(C(mu, j)) T(mu, j) )`: the same flop
 count at BLAS-3 speed -- tens of seconds on one core, seconds
-on eight threads. The same product is the core of the bond
-order (Mulliken pair populations from `C`, `S` and `C`) and
-of the optical transitions (`C^H M C` on the momentum
-matrices), so it is written ONCE as a shared
-"project the states onto the basis" routine that the family
-calls. The recast changes the arithmetic, so it carries a
+on eight threads. The same MATRIX-PRODUCT SHAPE is the core
+of every family member, but their contractions differ, so
+each is written in the form its own contraction needs rather
+than as one literal routine. The `T = S C` form here is
+written ONCE as a shared "project the states onto the basis"
+routine (`projectStatesOntoBasis`) that PDOS calls, and that
+any later member whose product is `S C` may reuse. Bond order
+and the effective charge instead form the occupation-weighted
+density matrix `D_w = C C^H` with one `zherk` / `dsyrk` per
+Bloechl sign group and read the Mulliken populations off
+`Re[D_w o conj(S)]` (PSEUDOCODE 38); the optical transitions
+form `conjWaveMomSum = P_c^T conj(C_fin)`, the momentum matrix
+against the final-state block, in their own producer
+(PSEUDOCODE 39). Each is a BLAS-3 recast of the same
+memory-bound loop, but only PDOS routes through the shared
+routine. The recast changes the arithmetic, so it carries a
 floating-point floor against today's output; that floor is
 measured and recorded on its own (the 31.8 pattern) before
 the deal is layered on top, so that each effect is cited

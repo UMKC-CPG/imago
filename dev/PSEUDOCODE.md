@@ -18670,11 +18670,13 @@ parallel deal (PA6 step 3) is measured against.
 Two things it is NOT. It is not the parallel deal: every
 quantity here stays on one rank, and the state/k-point
 partition of 9.10 sits on top of this later, unchanged. And it
-is not only for the density of states: the same matrix product
-is the core of the bond-order and optical calculations
-(DESIGN 9.10), so it is written ONCE as a shared routine that
-those two will call when their own recasts are taken (PA6 step
-5). This section codes the shared routine and the two
+is not only for the density of states: it is written
+generically in the matrix `G`, so any analysis member whose
+projection is `G C` can reuse it. Bond order and optics, the
+two members recast since, each need a DIFFERENT matrix product
+(a density matrix and a momentum product) and so do not call
+this routine; see DESIGN 9.10 step 0 and PSEUDOCODE 38 and 39.
+This section codes the shared routine and the two
 density-of-states callers; it does not touch bond order or
 optics.
 

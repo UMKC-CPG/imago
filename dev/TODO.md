@@ -9056,8 +9056,15 @@ is not carried only in conversation.
   4. The post-SCF entry (`dos(0)`), AFTER DESIGN 9.9's run-shape
      step gives the workers the post-SCF input (`parseInput(0)`
      is inside `intgPSCF`, root-only today).
-  5. Bond order and optical on the shared projection routine and
-     the same deal.
+  5. Bond order and optical: the serial recasts are DONE, each
+     in the form its own contraction needs, not the shared
+     routine (DESIGN 9.10 step 0, amended). Bond order and the
+     effective charge recast as the density matrix D_w = C C^H
+     (519eebb, PSEUDOCODE 38, floor-verified); optical as
+     conjWaveMomSum = P^T conj(C_fin) in its own producer
+     (PSEUDOCODE 39, bit-identical on the gamma and complex,
+     total and partial paths, 2026-08-30). REMAINING: the MPI
+     deal on both, the same axes as step 3.
   Before step 2 touches `dos.F90`: BUG-028 (DEBUG.md), the
   spin-two slab defect DESIGN 9.10 found -- CONFIRMED by reading
   2026-08-26 on both paths and both builds (post-SCF: an

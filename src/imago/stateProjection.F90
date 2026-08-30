@@ -23,14 +23,22 @@
 !   proportion to its operation count (PF9 measured it at thirty-nine
 !   minutes on the 1296-atom cell, second only to the secular solve).
 !
-! Each caller finishes the projection its own way once T is in hand.
-!   The density of states and bond order form the Mulliken product
-!   Re(conjg(C) .* T) element by element; the optical properties form
-!   a different combination of C and T.  So this routine returns T and
-!   stops: the finishing step is one line at each caller and is not
-!   worth a second shared routine (PSEUDOCODE 34.4).  The routine is
-!   written ONCE, here, so that bond order and optics call the same
-!   product when their own recasts are taken (TODO PA6, step 5).
+! The caller finishes the projection its own way once T is in hand:
+!   the density of states forms the Mulliken product
+!   Re(conjg(C) .* T) element by element.  So this routine returns T
+!   and stops -- the finishing step is one line at the caller and is
+!   not worth a second shared routine (PSEUDOCODE 34.4).
+!
+! The routine is written generically in G, so any analysis member
+!   whose projection is G C can reuse it.  The two members recast
+!   since -- bond order and the optical properties -- turned out to
+!   need a DIFFERENT matrix product and so do not call it: bond order
+!   and the effective charge form the occupation-weighted density
+!   matrix D_w = C C^H (one zherk/dsyrk per sign group) and read the
+!   Mulliken populations off Re(D_w .* conj(S)) (PSEUDOCODE 38); the
+!   optical properties carry the momentum matrix against the final-
+!   state block, conjWaveMomSum = P^T conj(C_fin), in their own
+!   producer (PSEUDOCODE 39).  See DESIGN 9.10 step 0.
 !
 ! This is the serial, single-core recast of DESIGN 9.10's Step 0,
 !   taken before any of the work is spread across processors, exactly
