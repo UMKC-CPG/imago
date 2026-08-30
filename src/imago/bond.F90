@@ -37,9 +37,14 @@ subroutine computeBond (inSCF)
 #ifndef GAMMA
    use O_SecularEquation, only: valeVale, valeValeOL, energyEigenValues, &
          & readDataSCF, readDataPSCF
+   ! The occupation-weighted density matrix is built as a rank-k
+   !   update, the same level-3 BLAS the valence density uses
+   !   (PSEUDOCODE 38, 31).
+   use zherkInterface
 #else
    use O_SecularEquation, only: valeValeGamma, valeValeOLGamma, &
          & energyEigenValues, readDataSCF, readDataPSCF
+   use dsyrkInterface
 #endif
 
    ! Make sure that there are not accidental variable declarations.
@@ -135,6 +140,38 @@ subroutine computeBond (inSCF)
    integer :: permAtom   ! Permuted atom index: atomPerm(opIdx, k)
    integer :: permAtom2  ! Permuted second atom for bond order pairs
    integer :: numOrbs    ! Number of QN_l orbitals for current atom
+
+   ! Recast workspaces (PSEUDOCODE 38).  The effective charge and the
+   !   pair bond order are the same Mulliken overlap population summed
+   !   two ways, so both are formed once per k-point from the
+   !   occupation-weighted density matrix rather than state by state.
+   !   `densityMatrix` is D_w = sum_j w_j C(:,j) C(:,j)^H; the occupied
+   !   eigenvectors scaled by sqrt(|w_j|) are gathered into
+   !   `scaledVectorsPos`/`Neg` by the sign of the weight (the Bloechl
+   !   case, as in the valence density build 31.6);
+   !   `mullikenOverlap(nu,l)` is M = Re[D_w o conj(S)]; `columnSumM(l)`
+   !   is its column sums, from which the atom and orbital charges and
+   !   the pair bond orders are simple block sums.
+#ifndef GAMMA
+   complex (kind=double), allocatable, dimension (:,:) :: densityMatrix
+   complex (kind=double), allocatable, dimension (:,:) :: scaledVectorsPos
+   complex (kind=double), allocatable, dimension (:,:) :: scaledVectorsNeg
+#else
+   real (kind=double), allocatable, dimension (:,:) :: densityMatrix
+   real (kind=double), allocatable, dimension (:,:) :: scaledVectorsPos
+   real (kind=double), allocatable, dimension (:,:) :: scaledVectorsNeg
+#endif
+   real (kind=double), allocatable, dimension (:,:) :: mullikenOverlap
+   real (kind=double), allocatable, dimension (:)   :: columnSumM
+   ! The contiguous valeDim range each atom's basis functions occupy,
+   !   and which atom pairs are close enough to carry a bond order.
+   integer, allocatable, dimension (:) :: atomBlockStart
+   integer, allocatable, dimension (:) :: atomBlockEnd
+   logical, allocatable, dimension (:,:) :: bondedPair
+   integer :: numPosCol   ! Occupied columns with w_j >= 0.
+   integer :: numNegCol   ! Occupied columns with w_j <  0 (Bloechl).
+   integer :: nu          ! Row index over basis functions of M / D_w.
+   real (kind=double) :: stateWeight
 
    ! Log the date and time we start.
    call timeStampStart (22)
@@ -269,11 +306,74 @@ subroutine computeBond (inSCF)
       enddo
    endif
 
+   ! Recast setup (PSEUDOCODE 38), done once for the whole routine.
+   ! Allocate the density-matrix, Mulliken-overlap and scaled-vector
+   !   workspaces.  On the largest cells these are the full valeDim by
+   !   valeDim matrices the node-scale form carries (DESIGN 9.10), the
+   !   same footprint the routine already holds for the overlap.
+   allocate (densityMatrix    (valeDim, valeDim))
+   allocate (mullikenOverlap  (valeDim, valeDim))
+   allocate (scaledVectorsPos (valeDim, numStates))
+   allocate (scaledVectorsNeg (valeDim, numStates))
+   allocate (columnSumM       (valeDim))
+   allocate (atomBlockStart   (numAtomSites))
+   allocate (atomBlockEnd     (numAtomSites))
+   allocate (bondedPair       (numAtomSites, numAtomSites))
+
+   ! The contiguous valeDim range of each atom's basis functions: the
+   !   same running index the removed per-state loops rebuilt each
+   !   time, computed once here.
+   valeDimIndex = 0
+   do k = 1, numAtomSites
+      atomBlockStart(k) = valeDimIndex + 1
+      valeDimIndex      = valeDimIndex + numAtomBasisFns(k)
+      atomBlockEnd(k)   = valeDimIndex
+   enddo
+
+   ! The neighbour mask and the bond lengths depend only on the
+   !   geometry, not on the spin, k-point or state, so the 125-cell
+   !   minimum-image search runs ONCE here rather than inside the old
+   !   state loop.  A pair is bonded if any image lies within `maxBL`;
+   !   `bondLength` holds that minimum image distance.
+   bondedPair(:,:) = .false.
+   bondLength(:,:) = 0.0_double
+   do k = 1, numAtomSites
+      do l = 1, numAtomSites
+         minDistMag = bigThresh
+         minDistCount = 0
+         do m = -2, 2
+         do n = -2, 2
+         do o = -2, 2
+            currentDistance(:) = atomSites(k)%cartPos(:) - &
+                  & atomSites(l)%cartPos(:) - &
+                  & m * realVectors(:,1) - &
+                  & n * realVectors(:,2) - &
+                  & o * realVectors(:,3)
+            currentDistMag = sqrt(sum(currentDistance(:)**2))
+            if (currentDistMag < minDistMag .and. &
+                  & abs(currentDistMag) > smallThresh) then
+               minDistMag = currentDistMag
+            endif
+            if (currentDistMag < maxBL .and. &
+                  & abs(currentDistMag) > smallThresh) then
+               minDistCount = minDistCount + 1
+            endif
+         enddo
+         enddo
+         enddo
+         if (minDistCount > 0) then
+            bondedPair(k,l) = .true.
+            bondLength(k,l) = minDistMag
+         endif
+      enddo
+   enddo
+
    do h = 1, spin
 
-      ! Initialize various arrays and matrices.
+      ! Initialize various arrays and matrices.  bondLength is the
+      !   geometry and was filled once above, so it is NOT re-zeroed
+      !   here.
       bondOrder          (:,:) = 0.0_double
-      bondLength         (:,:) = 0.0_double
       atomCharge         (:,h) = 0.0_double
       atomOrbitalCharge  (:,:) = 0.0_double
       if (excitedAtomPACS .ne. 0) then
@@ -526,175 +626,124 @@ subroutine computeBond (inSCF)
             ! Skip energy states that are not occupied.
             if (energyEigenValues(j,i,h) > 0.0_double) exit
 
-            ! Initialize the indices of the first atom. (1) = init, (2) = fin
-            atom1Index(1) = 0
-            atom1Index(2) = 0
-
-            ! Begin the first loop over all atoms
-            do k = 1, numAtomSites
-
-               ! Identify the indices of the current atom from loop (k).
-               atom1Index(1) = atom1Index(2) + 1
-               atom1Index(2) = atom1Index(1) + numAtomBasisFns(k) - 1
-
-               ! Loop over the atom 1 indexed basis functions against all
-               !   other basis functions in this band (j).
-               do l = atom1Index(1), atom1Index(2)
-
-#ifndef GAMMA
-                  ! Compute the square of the wave function for each element.
-                  waveFnSqrd(:valeDim) = conjg(valeVale(l,j,1)) * &
-                        & valeVale(:valeDim,j,1)
-
-                  ! Compute the effects of overlap for the real part only
-                  !   (real*real) + (imag*imag).
-                  oneValeRealAccum = sum( &
-                        & real(waveFnSqrd(:valeDim),double) * &
-                        & real (valeValeOL(:valeDim,l),double) + &
-                        & aimag(waveFnSqrd(:valeDim)) * &
-                        & aimag(valeValeOL(:valeDim,l)))
-#else
-                  ! Compute the square of the wave function for each element.
-                  waveFnSqrdGamma(:valeDim) = valeValeGamma(l,j,1) * &
-                        & valeValeGamma(:valeDim,j,1)
-
-                  ! Compute the effects of overlap for the real part only
-                  !   (real*real) + (imag*imag).
-                  oneValeRealAccum = sum(waveFnSqrdGamma(:valeDim) * &
-                        & valeValeOLGamma(:valeDim,l))
-#endif
-
-                  ! Buffer the per-atom charge projection for this band
-                  !   and kpoint. The buffer will be distributed across
-                  !   the star of this IBZ k-point after all bands are
-                  !   processed.
-                  ibzAtomProj(k) = ibzAtomProj(k) &
-                        & + oneValeRealAccum &
-                        & * statePopulation
-
-                  ! Buffer the per-atom orbital charge projection (same
-                  !   star distribution, extra QN_l orbital dimension).
-                  ibzOrbProj(k, chargeIndex(l)) = &
-                        & ibzOrbProj(k, chargeIndex(l)) &
-                        & + oneValeRealAccum &
-                        & * statePopulation
-               enddo ! basis index l
-
-               ! Initialize the indices of the second atom. (1)=init, (2)=fin
-               atom2Index(1) = 0
-               atom2Index(2) = 0
-
-               ! Begin the second loop over all atoms
-               do l = 1, numAtomSites
-
-                  ! Identify the indices of the current atom from loop (l).
-                  atom2Index(1) = atom2Index(2) + 1
-                  atom2Index(2) = atom2Index(1) + numAtomBasisFns(l) - 1
-
-
-                  ! Determine the smallest distance between the atoms of the
-                  !   two loops (k) and (l).
-
-                  ! Initialize the min distance to an impossibly large number.
-                  minDistMag = bigThresh
-
-                  ! Initialize a counter for the number of atoms that are
-                  !   within the max bond length parameter.
-                  minDistCount = 0
-
-                  ! Search the original cell and the neighboring 124 cells to
-                  !   find the minimum distance between atom (k) and atom (l).
-                  do m = -2,2
-                  do n = -2,2
-                  do o = -2,2
-
-                     ! Compute the seperation vector for the atoms in this
-                     !   combo.
-                     currentDistance(:) = atomSites(k)%cartPos(:) - &
-                           & atomSites(l)%cartPos(:) - &
-                           & m * realVectors(:,1) - &
-                           & n * realVectors(:,2) - &
-                           & o * realVectors(:,3)
-
-                     ! Compute the distance for the atoms of this cell combo.
-                     currentDistMag = sqrt(sum(currentDistance(:)**2))
-
-                     ! Compare the current magnitude to the current minimum.
-                     if (currentDistMag < minDistMag .and. &
-                           & abs(currentDistMag) > smallThresh) then
-                        minDistMag = currentDistMag
-                     endif
-
-                     ! Check if this minDistMag is less than the cut-off radius.
-                     !   radius.  If so, then increment the counter for this
-                     !   atom pair.  This is done in case a replicant atom has
-                     !   more than one configuration where it is sufficiently
-                     !   close to the current target atom that it regesters an
-                     !   overlap.  This effect is not really implemented yet
-                     !   since the minDistMag will have to track all the
-                     !   nearest atoms, not just the closest one.
-                     if (currentDistMag < maxBL .and. &
-                           & abs(currentDistMag) > smallThresh) then
-                        minDistCount = minDistCount + 1
-                     endif
-                  enddo
-                  enddo
-                  enddo
-
-                  ! Determine if any image atoms are within the cut-off radius.
-                  if (minDistCount > 0) then
-
-                     ! Store the determined minimum bond length for this pair.
-                     bondLength(k,l) = minDistMag
-
-                     ! Loop over the atom 1 basis fns against the atom 2
-                     !   basis fns for this band.
-                     do m = atom1Index(1),atom1Index(2)
-
-#ifndef GAMMA
-                        ! Compute ^2 of the wave function for each element.
-                        waveFnSqrd(atom2Index(1):atom2Index(2)) = &
-                              & conjg(valeVale(m,j,1)) * &
-                              & valeVale(atom2Index(1):atom2Index(2),j,1)
-
-                        ! Compute the effects of overlap for the real part
-                        !   only (real*real) + (imag*imag).
-                        oneValeRealAccum = sum(&
-                              & real (waveFnSqrd(atom2Index(1):&
-                              &   atom2Index(2)),double)*&
-                              & real (valeValeOL(atom2Index(1):&
-                              &   atom2Index(2),m),double) +&
-                              & aimag(waveFnSqrd(atom2Index(1):&
-                              &   atom2Index(2)))*&
-                              & aimag(valeValeOL(atom2Index(1):&
-                              &   atom2Index(2),m)))
-#else
-                        ! Compute ^2 of the wave function for each element.
-                        waveFnSqrdGamma(atom2Index(1):atom2Index(2)) = &
-                              & valeValeGamma(m,j,1) * &
-                              & valeValeGamma(atom2Index(1):atom2Index(2),j,1)
-
-                        ! Compute the effects of overlap.
-                        oneValeRealAccum = sum(&
-                              & waveFnSqrdGamma(atom2Index(1):&
-                              & atom2Index(2)) * &
-                              & valeValeOLGamma(atom2Index(1):&
-                              & atom2Index(2),m))
-#endif
-
-                        ! Buffer the atom pair bond order projection
-                        !   for this band and kpoint. Distributed across
-                        !   the star after all bands are processed
-                        !   after all bands are processed.
-                        ibzBondProj(k,l) = ibzBondProj(k,l) &
-                              & + oneValeRealAccum &
-                              & * statePopulation
-
-                     enddo
-                  endif
-               enddo ! (l atom2)
-            enddo ! (k atom1)
+            ! The per-state effective-charge and pair bond-order
+            !   contraction that used to run here, atom by atom and
+            !   basis function by basis function, is now formed once
+            !   for this k-point after the state loop, from the
+            !   occupation-weighted density matrix (PSEUDOCODE 38).
          enddo ! (j states)
+
+         ! === Effective charge and pair bond order (PSEUDOCODE 38) ===
+         ! Gather the occupied eigenvectors, each scaled by the square
+         !   root of its occupation weight, splitting them by the sign
+         !   of the weight so the Bloechl negative-weight case becomes
+         !   a subtracting rank-k update (as in the valence density
+         !   build 31.6).  The occupied states lead, so the loop stops
+         !   at the first empty state, matching the `exit` above.
+         numPosCol = 0
+         numNegCol = 0
+         do j = 1, numStates
+            if (energyEigenValues(j,i,h) > 0.0_double) exit
+            stateSpinKPointIndex = (i-1)*spin*numStates &
+                  & + (h-1)*numStates + j
+            if (kPointIntgCode == 1) then
+               stateWeight = electronPopulation_LAT(j,i,h) &
+                     & * 2.0_double / real(spin, double)
+            else
+               stateWeight = electronPopulation(stateSpinKPointIndex)
+            endif
+            if (stateWeight >= 0.0_double) then
+               numPosCol = numPosCol + 1
+#ifndef GAMMA
+               scaledVectorsPos(:,numPosCol) = &
+                     & sqrt(stateWeight) * valeVale(:,j,1)
+#else
+               scaledVectorsPos(:,numPosCol) = &
+                     & sqrt(stateWeight) * valeValeGamma(:,j,1)
+#endif
+            else
+               numNegCol = numNegCol + 1
+#ifndef GAMMA
+               scaledVectorsNeg(:,numNegCol) = &
+                     & sqrt(-stateWeight) * valeVale(:,j,1)
+#else
+               scaledVectorsNeg(:,numNegCol) = &
+                     & sqrt(-stateWeight) * valeValeGamma(:,j,1)
+#endif
+            endif
+         enddo
+
+         ! Build the occupation-weighted density matrix
+         !   D_w = sum_j w_j C(:,j) C(:,j)^H as one rank-k update per
+         !   sign group (Hermitian, upper triangle), then mirror it to
+         !   the full matrix for the element-wise product below.
+#ifndef GAMMA
+         call zherk ('U','N', valeDim, numPosCol, 1.0_double, &
+               & scaledVectorsPos, valeDim, 0.0_double, &
+               & densityMatrix, valeDim)
+         if (numNegCol > 0) then
+            call zherk ('U','N', valeDim, numNegCol, -1.0_double, &
+                  & scaledVectorsNeg, valeDim, 1.0_double, &
+                  & densityMatrix, valeDim)
+         endif
+         do l = 1, valeDim
+            do nu = l+1, valeDim
+               densityMatrix(nu,l) = conjg(densityMatrix(l,nu))
+            enddo
+         enddo
+#else
+         call dsyrk ('U','N', valeDim, numPosCol, 1.0_double, &
+               & scaledVectorsPos, valeDim, 0.0_double, &
+               & densityMatrix, valeDim)
+         if (numNegCol > 0) then
+            call dsyrk ('U','N', valeDim, numNegCol, -1.0_double, &
+                  & scaledVectorsNeg, valeDim, 1.0_double, &
+                  & densityMatrix, valeDim)
+         endif
+         do l = 1, valeDim
+            do nu = l+1, valeDim
+               densityMatrix(nu,l) = densityMatrix(l,nu)
+            enddo
+         enddo
+#endif
+
+         ! Form the Mulliken overlap-population matrix
+         !   M(nu,l) = Re[ D_w(nu,l) conj(S(nu,l)) ] -- the same real
+         !   combination the per-state loop summed -- and its column
+         !   sums.
+#ifndef GAMMA
+         mullikenOverlap(:,:) = &
+               & real(densityMatrix(:,:),double) &
+               &   * real(valeValeOL(:,:),double) &
+               & + aimag(densityMatrix(:,:)) * aimag(valeValeOL(:,:))
+#else
+         mullikenOverlap(:,:) = densityMatrix(:,:) * valeValeOLGamma(:,:)
+#endif
+         do l = 1, valeDim
+            columnSumM(l) = sum(mullikenOverlap(:,l))
+         enddo
+
+         ! Effective charge: each atom's columns of M summed whole,
+         !   and the same sum split by the orbital index of the column.
+         do k = 1, numAtomSites
+            do l = atomBlockStart(k), atomBlockEnd(k)
+               ibzAtomProj(k) = ibzAtomProj(k) + columnSumM(l)
+               ibzOrbProj(k, chargeIndex(l)) = &
+                     & ibzOrbProj(k, chargeIndex(l)) + columnSumM(l)
+            enddo
+         enddo
+
+         ! Pair bond order: for each bonded pair, the block of M over
+         !   atom k's columns and the partner atom's rows.
+         do k = 1, numAtomSites
+            do l = 1, numAtomSites
+               if (.not. bondedPair(k,l)) cycle
+               ibzBondProj(k,l) = ibzBondProj(k,l) + &
+                     & sum(mullikenOverlap( &
+                     &        atomBlockStart(l):atomBlockEnd(l), &
+                     &        atomBlockStart(k):atomBlockEnd(k)))
+            enddo
+         enddo
 
          ! -------------------------------------------------------
          ! Distribute the buffered per-atom charge projections
@@ -1207,6 +1256,16 @@ subroutine computeBond (inSCF)
    deallocate (ibzAtomProj)
    deallocate (ibzOrbProj)
    deallocate (ibzBondProj)
+
+   ! Release the recast workspaces (PSEUDOCODE 38).
+   deallocate (densityMatrix)
+   deallocate (mullikenOverlap)
+   deallocate (scaledVectorsPos)
+   deallocate (scaledVectorsNeg)
+   deallocate (columnSumM)
+   deallocate (atomBlockStart)
+   deallocate (atomBlockEnd)
+   deallocate (bondedPair)
 #ifndef GAMMA
    deallocate (waveFnSqrd)
    if (inSCF == 0) then

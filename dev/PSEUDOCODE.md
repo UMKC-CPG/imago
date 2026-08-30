@@ -19530,3 +19530,192 @@ test (37.7 check 1), not a tolerance.
    exercised: the run is bit-identical to the uncached run and
    the stamp falls, confirming a slot first filled on a later
    iteration is handled.
+
+## 38. The Bond Order and Effective Charge as a Matrix Product
+## (DESIGN 9.10 order-of-work (e), bond member; modelled on
+## PSEUDOCODE 34 and the density build of 31)
+
+### 38.1 What this codes
+
+The bond stage `computeBond` (operation 22) produces three
+things per spin `h` and k-point `i`, all summed over the
+occupied states: the EFFECTIVE CHARGE on each atom
+(`ibzAtomProj`) and on each atom's `QN_l` orbital
+(`ibzOrbProj`), and the PAIR BOND ORDER between neighbouring
+atoms (`ibzBondProj`). Today it forms them in a loop over every
+occupied state `j`, and inside that over every atom and every
+basis function, as an explicit `valeDim`-long strided sum --
+the same `numStates * valeDim^2` memory-bound shape PDOS had
+before PSEUDOCODE 34, and for the same reason the largest cost
+in the stage. It also, inside that same state loop, RE-RUNS the
+125-cell neighbour-distance search for every atom pair on every
+state, though the geometry does not depend on the state.
+
+This section recasts the occupied-state contraction as a matrix
+product, exactly as 34 did for PDOS, and lifts the geometry
+search out of the state loop. The energy-resolved PACS path
+(the `excitedAtomPACS /= 0` branch) is left as it is: it is
+conditional, runs for one atom, and is per-state by nature.
+
+### 38.2 The kernel and why it is the same numbers
+
+For one spin and k-point, write `C` for the eigenvectors
+(`valeVale`, `valeDim x numStates`), `S` for the overlap
+(`valeValeOL`, `valeDim x valeDim`, Hermitian), and `w_j` for
+the state's occupation weight (`statePopulation`, from the
+tetrahedron or the Gaussian path). Today's inner accumulation,
+for a basis function `l` and summed over the occupied states,
+is `sum_nu [ Re(conj(C(l,j)) C(nu,j)) Re(S(nu,l)) +
+Im(conj(C(l,j)) C(nu,j)) Im(S(nu,l)) ]`, weighted by `w_j`.
+Because `Re(a)Re(b) + Im(a)Im(b) = Re(a conj(b))`, and summing
+the state weight inside, this is
+
+    M(nu, l) = Re[ D_w(nu, l) * conj(S(nu, l)) ],
+    D_w(nu, l) = sum_j w_j C(nu, j) conj(C(l, j)),
+
+where `D_w` is the OCCUPATION-WEIGHTED DENSITY MATRIX -- the
+same object the valence density build forms in PSEUDOCODE 31,
+here from the bond routine's own eigenvectors. Every quantity
+the stage reports is a sum of `M`:
+
+- `ibzAtomProj(k)` = sum over `l` in atom `k`, over all `nu`,
+  of `M(nu, l)` -- the atom's columns of `M`, summed whole.
+- `ibzOrbProj(k, chargeIndex(l))` = the same column sum split
+  by the orbital index `chargeIndex(l)`.
+- `ibzBondProj(k, kk)` = sum over `l` in atom `k` and `nu` in
+  atom `kk` of `M(nu, l)` -- the `(kk, k)` atom BLOCK of `M`,
+  summed -- and formed only for neighbour pairs (atoms within
+  `maxBL`).
+
+So the whole occupied-state contraction is: build `D_w` once,
+form `M = Re[D_w o conj(S)]` element-wise, and take column sums
+(charge) and atom-block sums (bond order). The arithmetic is
+identical to today's up to summation order.
+
+### 38.3 Seam inventory (read 2026-08-29)
+
+`computeBond` runs on ROOT only (the analysis block of
+imago.F90 is under `if (mpiRank == 0)`), so this is a serial
+recast: no ranks, no deal. For every quantity:
+
+- `valeVale` / `valeValeGamma` (`C`) and `valeValeOL` /
+  `valeValeOLGamma` (`S`): read per `(i, h)` by
+  `readDataSCF`/`readDataPSCF` into the single slab the routine
+  holds (DESIGN 2.8, one spin at a time). Root's handles, root's
+  memory. Unchanged -- the recast consumes them where they are.
+- `statePopulation` (`w_j`): set per `(j, i, h)` from
+  `electronPopulation_LAT` (tetrahedron) or `electronPopulation`
+  (Gaussian) exactly as today, with the same `2/spin`
+  convention factor. The recast reads the same values to scale
+  the columns of `C`.
+- `numAtomBasisFns(k)`, `chargeIndex(l)`, `numOrbIndex`: the
+  atom-block sizes and the basis-to-orbital map, already built
+  at the top of the routine; they drive the column and block
+  sums. Unchanged.
+- The neighbour mask and `bondLength(k, kk)`: today computed
+  inside the state loop from `atomSites`, `realVectors` and
+  `maxBL`. The recast computes them ONCE per k-point (they do
+  not depend on the state) into a logical mask and the existing
+  `bondLength`, before the contraction. Same inputs, same
+  values, computed `numStates` times fewer.
+- `ibzAtomProj`, `ibzOrbProj`, `ibzBondProj`: the per-IBZ-
+  k-point accumulators, zeroed per k-point as today and consumed
+  UNCHANGED by the star-distribution block (`atomPerm`) and the
+  output. The recast writes the same arrays with the same
+  values; nothing downstream of them changes.
+- NEW workspaces, allocated in the routine: `D_w` and `M`, each
+  `valeDim x valeDim` (real for the gamma build, complex for
+  `D_w` in the complex build, real for `M`), and a copy of `C`
+  with its columns scaled by `sqrt(w_j)`. On the 1296-atom cell
+  that is about 2.5 GB on top of the `valeValeOL` the routine
+  already holds -- the same node-scale full-matrix footprint the
+  family's other recasts carry, expiring at the >10,000-atom
+  scale where `S` itself cannot be held whole (DESIGN 9.10,
+  9.4). Deallocated at the end of the routine.
+
+### 38.4 The recast, per spin and k-point
+
+Replacing the state loop (the charge and bond-order sites, NOT
+the PACS branch):
+
+```
+1. NEIGHBOUR MASK, once for this k-point (was per state):
+   for each atom pair (k, kk):
+      search the 125 cells for the min image distance;
+      bondLength(k, kk) = that distance;
+      bonded(k, kk) = (min distance < maxBL);
+
+2. SCALE the occupied columns (the density build of 31):
+   for each state j:
+      if w_j >= 0: Cpos(:, j) = sqrt(w_j)      * C(:, j)
+      else:        Cneg(:, j) = sqrt(-w_j)     * C(:, j)
+   (the positive/negative split is the Bloechl case of 31.6;
+    with Gaussian or Fermi filling every w_j >= 0 and Cneg is
+    empty.)
+
+3. BUILD the weighted density matrix (BLAS-3, in place of the
+   strided per-state sums):
+   D_w = Cpos Cpos^H  -  Cneg Cneg^H
+   (zherk/dsyrk, the 31 kernel; real symmetric at gamma).
+
+4. FORM the Mulliken overlap-population matrix:
+   M(nu, l) = Re[ D_w(nu, l) * conj(S(nu, l)) ]      (element-wise;
+   at gamma S is real and this is D_w o S).
+
+5. SUM into the accumulators:
+   ibzAtomProj(k)               = sum_{l in k} sum_nu M(nu, l)
+   ibzOrbProj(k, chargeIndex(l)) += sum_nu M(nu, l)   per l in k
+   for each bonded pair (k, kk):
+      ibzBondProj(k, kk) = sum_{l in k, nu in kk} M(nu, l)
+```
+
+Then the star distribution and the output run exactly as today,
+on the same three arrays.
+
+### 38.5 What stays exactly as it is
+
+The PACS energy-resolved branch (`excitedAtomPACS /= 0`), the
+star distribution over `atomPerm`, the electron-count and
+charge normalisation, all writes, the single-slab per-spin read,
+and `computeBond3C` (operation 26, its own future section). The
+recast touches only how the occupied-state charge and bond-order
+sums are formed.
+
+### 38.6 Exactness and the floor
+
+Like PSEUDOCODE 34, the recast changes the SERIAL arithmetic:
+`zherk` and the element-wise `M` reassociate sums the strided
+loop added in a fixed order, so the result carries a floating-
+point floor against today's output, NOT bit-identity. The floor
+is measured against the pre-recast build on the accepted decks
+and recorded on its own (the 31.8 / 34.7 pattern) -- electron
+counts and charge totals expected to print precision, the raw
+bond-order and charge files at a measured tolerance. There is no
+parallel dimension here, so there is no second, rank-count
+floor to separate from it.
+
+### 38.7 Checks
+
+1. **Floor against the uncached, un-recast build.** The same
+   deck run with a HEAD binary and the recast binary (both cpg,
+   same node) agree on every printed effective charge and bond
+   order to a measured tolerance, and on the integrated electron
+   count to print precision. bn_small_g, sio2_243_med_g and
+   knbo3_333_med_c (complex, `dim1 = 2`).
+2. **The stamp falls.** Operation 22 ("Bond Order and Effective
+   Charge") falls on the large cell by the factor the BLAS-3
+   recast buys, read against the baseline (DESIGN 9.10 (a)); the
+   PDOS recast's 20x on the 1296 cell is the expectation to
+   compare against, since the contraction has the same shape.
+3. **The neighbour geometry is unchanged.** `bondLength` and the
+   set of bonded pairs are identical to the pre-recast run --
+   the search moved out of the state loop but reads the same
+   `atomSites`, `realVectors` and `maxBL`.
+4. **The PACS branch is untouched.** A deck with
+   `excitedAtomPACS /= 0` produces the same energy-resolved bond
+   order as today (that path is not recast).
+5. **The Bloechl case.** On a tetrahedron-method deck where some
+   `w_j` are negative, the positive/negative column split
+   reproduces the serial result within the floor, exercising the
+   subtracting `zherk` (the 31.6 group).
+
