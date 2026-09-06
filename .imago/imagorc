@@ -16,7 +16,10 @@ fi
 export GRASP_DIR="$CPG_SHARE/programs/grasp2k/grasp2Kdev"
 #export GRASP_DIR="$HOME/programs/grasp2018/GRASP2018"
 
-#Default location of all script resource control files.
+# Home of the shell files you source in place (this imagorc and the
+#   envs.sh toolchain switcher) together with every per-script
+#   resource-control file. All are tracked from the clone or written
+#   here at install time; nothing here is a program on your path.
 export IMAGO_RC="$IMAGO_DIR/.imago"
 
 #Location of binary executables.
@@ -73,3 +76,11 @@ export VASPPOT_PAW_PBE5x="$VASPPOT_DIR/potpaw_PBE.52"
 ###########################################################
 #END SCRIPT VARIABLES
 ###########################################################
+
+# Load the toolchain switcher so the imago_env function is ready in
+#   this shell. It lives beside this file and is sourced (never run),
+#   so it needs no place on the path. Guarded so a clone that lacks
+#   the file still starts a usable shell.
+if [ -f "$IMAGO_DIR/.imago/envs.sh" ]; then
+   source "$IMAGO_DIR/.imago/envs.sh"
+fi

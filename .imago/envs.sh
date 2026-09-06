@@ -8,7 +8,7 @@
 # shell startup right after sourcing the Imago rc file, e.g.:
 #
 #     source "$IMAGO_DIR/.imago/imagorc"
-#     source "$IMAGO_BIN/envs.sh"
+#     source "$IMAGO_DIR/.imago/envs.sh"
 #
 # WHAT A FLAVOR IS
 # ---------------
@@ -70,7 +70,7 @@ imago_env() {
         --help|-h)
             # Print the usage block from the header of this file.
             sed -n '/^# USAGE/,/^$/p' \
-                "${BASH_SOURCE[0]:-$IMAGO_BIN/envs.sh}" \
+                "${BASH_SOURCE[0]:-$IMAGO_DIR/.imago/envs.sh}" \
                 | sed 's/^# \{0,1\}//'
             return 0
             ;;

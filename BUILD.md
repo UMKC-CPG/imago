@@ -218,12 +218,14 @@ the production `bin/` with the engine executables (`imago`,
 script and the `share/` database are reused unchanged, nothing is
 duplicated, and the production install is never touched.
 
-The switcher is `envs.sh`, installed to `bin/`. Source it once in
-your shell startup, right after the Imago rc file:
+The switcher is `envs.sh`. Like the `imagorc` file, it is tracked
+in `.imago/` from the clone and sourced in place -- it is never
+installed as a program. In fact `imagorc` sources it for you at the
+end, so the single rc line you already have is enough to make the
+`imago_env` function available:
 
 ```
 source "$IMAGO_DIR/.imago/imagorc"
-source "$IMAGO_BIN/envs.sh"
 ```
 
 Then:

@@ -425,8 +425,9 @@ parallel-debug builds.  Because only the compiled Fortran
 executables differ between flavors (the Python helper scripts and
 the `share/` database are compiler-agnostic and identical), a
 flavor bin is just symlinks to the production bin with the engine
-executables overlaid.  The `envs.sh` switcher (installed to `bin/`,
-sourced into the shell) provides `imago_env <flavor>`, which
+executables overlaid.  The `envs.sh` switcher (tracked in `.imago/`
+from the clone and sourced into the shell, alongside `imagorc`,
+never installed as a program) provides `imago_env <flavor>`, which
 activates a flavor by repointing only `IMAGO_BIN` (and
 `PATH` / `PYTHONPATH`) at it -- `share/` and `.imago/` are reused,
 so no data is duplicated and the production install is untouched.

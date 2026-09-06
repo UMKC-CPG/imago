@@ -6,8 +6,12 @@
 # Document the current location
 message("At the set of scripts.")
 
+# The toolchain switcher envs.sh is deliberately NOT in this list.
+# It is a shell file you *source* (never run), so it lives tracked in
+# .imago/ from the clone -- exactly like the sourced imagorc file --
+# rather than being installed into bin/ as a program.
+
 set (SCRIPTS
-   envs.sh
    ab2pf.py angle_utils.py
    bond_analysis.py build_initial_potentials.py
    cif2skl.py cluster_probe.py cod_fish.py
