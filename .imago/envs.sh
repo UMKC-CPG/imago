@@ -34,8 +34,8 @@
 #     imago_env [flavor]      activate a flavor; no arg (or "prod" /
 #                             "production") restores the production build
 #     imago_env --list        list the flavors that are built
-#     imago_env --build NAME   build flavor NAME from preset gfortran-NAME
-#                              and (re)assemble its bin
+#     imago_env --add NAME    build preset gfortran-NAME and assemble
+#                             the flavor bin, so `imago_env NAME` works
 #     imago_env --help        show this usage
 #
 # Examples:
@@ -86,8 +86,8 @@ imago_env() {
             fi
             return 0
             ;;
-        --build|-b)
-            _imago_env_build "$2"
+        --add|-a)
+            _imago_env_add "$2"
             return $?
             ;;
     esac
@@ -114,7 +114,7 @@ imago_env() {
 
     if [ ! -d "$target_bin" ]; then
         echo "imago_env: flavor '$flavor' is not built ($target_bin)." >&2
-        echo "           build it with:  imago_env --build $flavor" >&2
+        echo "           add it with:  imago_env --add $flavor" >&2
         return 1
     fi
 
@@ -142,15 +142,15 @@ imago_env() {
 }
 
 
-# Build flavor $1 from the matching CMake preset (gfortran-$1) and
-#   (re)assemble its bin as symlinks to the production toolchain with
-#   the freshly built engine executables overlaid.  A full preset build
-#   is run so every engine executable (not just imago/imagoG) is the
-#   instrumented one.
-_imago_env_build() {
+# Add flavor $1: build it from the matching CMake preset (gfortran-$1)
+#   and (re)assemble its bin as symlinks to the production toolchain
+#   with the freshly built engine executables overlaid.  A full preset
+#   build is run so every engine executable (not just imago/imagoG) is
+#   the instrumented one.
+_imago_env_add() {
     local flavor="$1"
     if [ -z "$flavor" ]; then
-        echo "imago_env --build: a flavor name is required" \
+        echo "imago_env --add: a flavor name is required" \
              "(e.g. asan, audit)." >&2
         return 1
     fi

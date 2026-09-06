@@ -231,7 +231,7 @@ source "$IMAGO_DIR/.imago/imagorc"
 Then:
 
 ```
-imago_env --build asan    # build the gfortran-asan preset and
+imago_env --add asan      # build the gfortran-asan preset and
                           #   assemble envs/asan/bin (one-time / on
                           #   rebuild)
 imago_env asan            # activate it: repoints IMAGO_BIN at the
