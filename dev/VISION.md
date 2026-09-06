@@ -238,6 +238,18 @@ flight instead of an exhaustive grid search.
    OLCAO code; its design is mined as reference (ARCHITECTURE
    6.7), not merged, because the two codebases diverged from
    that shared ancestor and have drifted file by file.
+   The parallel path is the default, not an option bolted on:
+   the standard build links MPI and the ELPA eigensolver, and a
+   serial build is kept only as an explicit fallback for a host
+   that lacks the parallel libraries. This is affordable because
+   the environments Imago targets for teaching and research -- a
+   provisioned Ubuntu virtual machine or a teaching cluster --
+   already carry the parallel stack, so a student never has to
+   assemble it by hand and serial is the exception rather than
+   the common case. The nanoHUB deployment is a separate,
+   deferred question: its own parallelization must be
+   investigated before its packaging is settled, and it does not
+   constrain this default.
 
 ## Design Principles
 

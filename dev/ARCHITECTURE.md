@@ -437,6 +437,74 @@ flavors at once without interference.  Operational details live in
 `BUILD.md`; the bug-squashing campaign that motivates the
 instrumented flavors is in `dev/DEBUG.md`.
 
+### 4.2 Default toolchain: parallel by default (direction)
+
+This section records a decision, not its execution -- none of the
+changes below are in the code yet. The intended default build is
+the parallel one: MPI with the ELPA eigensolver (the `gfortran-mpi`
+preset -- `FC=h5pfc`, `IMAGO_MPI` and `IMAGO_ELPA` on), rather than
+the serial build. This follows VISION Goal 7: intra-problem
+parallelism is the path a large secular problem needs, and the
+teaching and research environments Imago targets (a provisioned
+Ubuntu VM or a teaching cluster) carry the parallel stack, so the
+parallel toolchain is the common case. A serial build is kept as an
+explicit, named fallback for a host that lacks the parallel
+libraries; the nanoHUB path is deferred until its own
+parallelization is investigated and does not constrain this.
+
+Naming follows from that. The serial preset is renamed from the
+vague `gfortran-release` to `gfortran-serial` -- "release" named an
+optimization level, not the axis that now matters, which is serial
+versus parallel. Both `gfortran-serial` and `gfortran-mpi` are
+optimized builds and differ only in whether the MPI/ELPA paths are
+compiled in. The production install (`$IMAGO_DIR/bin`) is then built
+with the parallel settings -- the `gfortran-mpi` configuration
+installed to `$IMAGO_DIR` rather than to a per-preset sandbox -- and
+`gfortran-serial` is reached as a flavor (`imago_env serial`).
+
+Two consequences a reader must not miss. First, the default
+eigensolver changes. The serial build calls LAPACK's `ZHEGV`, while
+the MPI build uses ELPA even at a single rank, so making MPI the
+default changes the default solver from `ZHEGV` to ELPA. These are
+different algorithms, so the acceptance gate for the change is
+physical agreement within the convergence noise floor across the
+reference cells -- not bit-for-bit identity. (The electrostatic
+setup is already known bit-identical from the performance campaign;
+it is the solve that differs.) A one-rank MPI run needs no `mpirun`
+and reproduces the serial user experience -- the launcher appears
+only when a job asks for ranks -- but "one rank" is one ELPA rank,
+not the serial `ZHEGV` path.
+
+Second, the switcher's reserved names must be revisited when the
+rename lands. `envs.sh` currently maps no-argument / `release` /
+`prod` / `production` to the installed default bin; with the
+installed default now parallel, `release` is ambiguous and `serial`
+must resolve to the serial flavor rather than to production.
+
+Retiring `gfortran-debug`. Its flags come entirely from
+`CMAKE_BUILD_TYPE=Debug` (`-Og -g -fcheck=all -fimplicit-none
+-Wall -fbacktrace -DDEBUG`), and both `gfortran-audit` and
+`gfortran-asan` build with that same Debug type and then add
+instrumentation on top -- so every check `gfortran-debug` provides
+is already contained in them. Its checks are fully superseded. The
+only property it uniquely offers is mildness: audit adds
+floating-point traps, signaling-NaN initialization, and an extra
+warning set that can halt or add noise on benign conditions, and
+asan is heavyweight. The direction is to retire the generic
+`gfortran-debug` in favor of the explicit builds -- `gfortran-audit`
+for checks and traps, `gfortran-asan` for memory errors -- with
+audit as the everyday interactive-debug build. The one thing a
+clean deletion loses is a plain gdb build with no traps; a reader
+who wants that can instead keep a minimal build under a name that
+says so.
+
+Implementation order, when this is taken up: (1) rename the serial
+preset and build the production install from the `gfortran-mpi`
+configuration; (2) prove the noise-floor agreement gate above;
+(3) update the `envs.sh` reserved-name mapping; (4) update
+`BUILD.md` and the preset list in 4.1; (5) retire or rename
+`gfortran-debug`.
+
 ---
 
 ## 5. Key Existing Infrastructure

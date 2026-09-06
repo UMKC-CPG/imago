@@ -31,17 +31,19 @@
 #
 # USAGE
 # -----
-#     imago_env [flavor]      activate a flavor; no arg (or "release"/
-#                             "prod") restores the production install
+#     imago_env [flavor]      activate a flavor; no arg (or "prod" /
+#                             "production") restores the production build
 #     imago_env --list        list the flavors that are built
 #     imago_env --build NAME   build flavor NAME from preset gfortran-NAME
 #                              and (re)assemble its bin
 #     imago_env --help        show this usage
 #
 # Examples:
+#     imago_env mpi           # the parallel build (MPI + ELPA)
+#     imago_env serial        # the serial fallback build
 #     imago_env asan          # run the engine under AddressSanitizer
 #     imago_env audit         # run with checks + FP traps + warnings
-#     imago_env               # back to the optimized production build
+#     imago_env               # back to the installed production build
 
 
 # Internal helper: echo $1 (a colon-separated PATH-like list) with every
@@ -90,13 +92,19 @@ imago_env() {
             ;;
     esac
 
-    # Resolve the requested flavor to a bin directory.  An empty flavor
-    #   or "release"/"prod"/"production" means the production install.
-    local flavor="${1:-release}"
+    # Resolve the requested flavor to a bin directory.  With no
+    #   argument, or "prod"/"production", the target is the installed
+    #   production build -- whatever it happens to be (serial today,
+    #   parallel once the default flips; ARCHITECTURE 4.2).  Every other
+    #   name, including "serial" and "mpi", is a flavor under
+    #   envs/<name>/bin.  The switcher deliberately makes no assumption
+    #   about which build production is, so a build name is never
+    #   conflated with "the installed default".
+    local flavor="${1:-prod}"
     local target_bin
     case "$flavor" in
-        release|prod|production)
-            flavor="release"
+        prod|production)
+            flavor="prod"
             target_bin="$IMAGO_DIR/bin"
             ;;
         *)
