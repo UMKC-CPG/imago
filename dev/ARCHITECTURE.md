@@ -414,7 +414,8 @@ every option off the compile and link flags are byte-for-byte
 identical to the historical build, so the production default is
 never disturbed; the instrumentation is only ever appended.
 `CMakePresets.json` bundles the common combinations as named
-presets (`gfortran-release` / `-debug` / `-audit` / `-asan`), each
+presets (`gfortran-serial` / `-mpi` / `-debug` / `-audit` / `-asan`
+/ `-profile` / `-gprof`), each
 building into its own tree and installing to a per-preset sandbox,
 so a preset can never overwrite the production install.
 

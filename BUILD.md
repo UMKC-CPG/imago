@@ -103,7 +103,7 @@ cmake --build --preset gfortran-asan   # build (or: make -C build/gfortran-asan)
 
 | Preset             | What you get                               |
 | ------------------ | ------------------------------------------ |
-| `gfortran-release` | optimized, no instrumentation (reference)  |
+| `gfortran-serial`  | optimized serial, no MPI/ELPA (reference)  |
 | `gfortran-debug`   | the historical debug flags                 |
 | `gfortran-audit`   | debug + checks + FP traps + signaling NaN  |
 |                    | + extra warnings (static/runtime hunting)  |

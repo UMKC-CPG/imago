@@ -1387,7 +1387,7 @@ around all three.
 
 **1. The debugging environment exists and is unused.** Phase 0 of
 `dev/DEBUG.md` is complete: `CMakePresets.json` gives
-`gfortran-release`, `gfortran-debug`, `gfortran-audit` and
+`gfortran-serial`, `gfortran-debug`, `gfortran-audit` and
 `gfortran-asan`; `BUILD.md` documents them; an instrumented binary
 has been shown to run a real deck clean. But Phases 1-3 never ran
 and the findings ledger holds ZERO entries. The instrumented build

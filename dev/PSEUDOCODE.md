@@ -16351,7 +16351,7 @@ caller, which the chain forbids.
 
 ### 24.7 Checks
 
-1. **Serial build unchanged.**  `gfortran-release` (h5fc, no
+1. **Serial build unchanged.**  `gfortran-serial` (h5fc, no
    `-DIMAGO_MPI`) compiles the new module as stubs; the
    `bn_small_c` and `bn_small_g` baselines reproduce to every
    printed digit.

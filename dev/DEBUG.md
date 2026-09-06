@@ -36,7 +36,7 @@ the normal way, with the DEBUG entry left as a pointer.
     correctly. `IMAGO_CHECKS`, `IMAGO_FPE_TRAP`, `IMAGO_INIT_SNAN`,
     `IMAGO_WARN_EXTRA` and `IMAGO_SANITIZE` are all present.
   - *0b* -- `CMakePresets.json` exists and carries
-    `gfortran-release`, `gfortran-debug`, `gfortran-audit` and
+    `gfortran-serial`, `gfortran-debug`, `gfortran-audit` and
     `gfortran-asan`, each binding its own build tree.
   - *0d* -- an instrumented `imagoG` ran a full all-electron Gamma
     SCF to completion with zero AddressSanitizer errors.
@@ -721,7 +721,7 @@ here and run Phases 1-3 gfortran-only.
 change to compile semantics).*
 
 - `CMakePresets.json` (cmake 3.26 supports it) with named presets
-  `gfortran-release`, `gfortran-debug`, `gfortran-audit` (checks +
+  `gfortran-serial`, `gfortran-debug`, `gfortran-audit` (checks +
   SNaN + FPE + extra warnings), and `gfortran-asan` (sanitize =
   address + leak).
 - Each preset binds a dedicated build directory (the existing

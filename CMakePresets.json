@@ -13,10 +13,10 @@
       }
     },
     {
-      "name": "gfortran-release",
+      "name": "gfortran-serial",
       "inherits": "gfortran-base",
-      "displayName": "gfortran: release (optimized, no instrumentation)",
-      "description": "Optimized production-style build (-O3). Same flags as the default RELEASE build; useful for a clean reference binary.",
+      "displayName": "gfortran: serial (optimized, no MPI)",
+      "description": "Optimized serial build (-O3) with the serial HDF5 wrapper (h5fc) and no MPI or ELPA. The explicit serial fallback build (ARCHITECTURE 4.2); also the clean reference binary for correctness comparisons.",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     },
     {
@@ -84,7 +84,7 @@
     }
   ],
   "buildPresets": [
-    { "name": "gfortran-release", "configurePreset": "gfortran-release" },
+    { "name": "gfortran-serial", "configurePreset": "gfortran-serial" },
     { "name": "gfortran-debug", "configurePreset": "gfortran-debug" },
     { "name": "gfortran-audit", "configurePreset": "gfortran-audit" },
     { "name": "gfortran-asan", "configurePreset": "gfortran-asan" },
