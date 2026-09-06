@@ -475,11 +475,13 @@ and reproduces the serial user experience -- the launcher appears
 only when a job asks for ranks -- but "one rank" is one ELPA rank,
 not the serial `ZHEGV` path.
 
-Second, the switcher's reserved names must be revisited when the
-rename lands. `envs.sh` currently maps no-argument / `release` /
-`prod` / `production` to the installed default bin; with the
-installed default now parallel, `release` is ambiguous and `serial`
-must resolve to the serial flavor rather than to production.
+Second, the switcher's reserved names were decoupled from the build
+name ahead of the flip (done). `envs.sh` reaches the installed
+default only through no-argument / `prod` / `production` -- whatever
+build is installed -- and every other name, `serial` and `mpi`
+included, is an ordinary flavor. No build name is conflated with the
+default, so the switcher stays correct whichever build production
+becomes. The retired `release` alias had no callers.
 
 Retiring `gfortran-debug`. Its flags come entirely from
 `CMAKE_BUILD_TYPE=Debug` (`-Og -g -fcheck=all -fimplicit-none
@@ -501,9 +503,10 @@ says so.
 Implementation order, when this is taken up: (1) rename the serial
 preset and build the production install from the `gfortran-mpi`
 configuration; (2) prove the noise-floor agreement gate above;
-(3) update the `envs.sh` reserved-name mapping; (4) update
-`BUILD.md` and the preset list in 4.1; (5) retire or rename
-`gfortran-debug`.
+(3) update the `envs.sh` reserved-name mapping (done -- the switcher
+no longer conflates a build name with the installed default);
+(4) update `BUILD.md` and the preset list in 4.1; (5) retire or
+rename `gfortran-debug`.
 
 ---
 
