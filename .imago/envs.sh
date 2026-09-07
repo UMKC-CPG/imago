@@ -207,7 +207,7 @@ _imago_env_add() {
 #     --no-rc            leave the .imago/ resource-control files alone
 #     --no-kaleidoscope  skip the kaleidoscope flight-runner package
 #
-# The first call configures the production tree build/release if it does
+# The first call configures the production tree build/base if it does
 #   not exist yet.  That is a *configure*, not a build: CMake still probes
 #   the Fortran compiler when it configures the project, so the compiler
 #   wrapper must be on PATH for that one step (activate the cpg
@@ -236,11 +236,13 @@ imago_scripts() {
         esac
     done
 
-    # The production install lives in the hand-driven build/release tree,
-    #   whose install prefix is $IMAGO_DIR (BUILD.md).  Configure it once
-    #   if it is missing; configure builds nothing, so the engine is never
-    #   compiled on this path.
-    local tree="$IMAGO_DIR/build/release"
+    # The production install lives in the hand-driven build/base tree,
+    #   whose install prefix is $IMAGO_DIR (BUILD.md).  It is the visible
+    #   foundation the flavors overlay -- named for that role rather than
+    #   a build type, so it stays accurate as the default toolchain
+    #   changes.  Configure it once if it is missing; configure builds
+    #   nothing, so the engine is never compiled on this path.
+    local tree="$IMAGO_DIR/build/base"
     if [ ! -f "$tree/CMakeCache.txt" ]; then
         echo "imago_scripts: configuring $tree (one-time) ..."
         mkdir -p "$tree" || return 1

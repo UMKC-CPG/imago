@@ -37,7 +37,7 @@ recorded in dev/DEBUG.md.
 ## makes variant attribution unreliable -- dev/DEBUG.md records
 ## the method rule):
 ##
-##     cd build/release && make clean
+##     cd build/base && make clean
 ##     make -j8 imagoG > uninit_real.log    2>&1
 ##     make -j8 imago  > uninit_complex.log 2>&1
 

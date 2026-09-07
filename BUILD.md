@@ -26,12 +26,16 @@ path.
 
 ## Normal (production) build
 
-The hand-driven production trees live in `build/release` and
-`build/debug`. From a configured session:
+The hand-driven production trees live in `build/base` and
+`build/debug`. The `base` tree is the visible foundation the build
+flavors overlay (`gfortran-base` today, `intel-base` in the future);
+it is named for that role, not for a build type, so the name stays
+accurate as the default toolchain changes. From a configured
+session:
 
 ```
-cdrelease            # cd $IMAGO_DIR/build/release
-cmake ../..          # configure (defaults to a RELEASE build)
+cdbase               # cd $IMAGO_DIR/build/base
+cmake ../..          # configure (defaults to an optimized build)
 make install         # build and install into $IMAGO_DIR/bin
 ```
 
@@ -61,7 +65,7 @@ It drives CMake's install step for only the script-related install
 components, so the Fortran engine is never rebuilt -- the engine is
 compiled per *flavor* (see the section below), which has nothing to
 do with installing a script. The first call configures the
-production tree `build/release` if it is missing; that step is a
+production tree `build/base` if it is missing; that step is a
 configure, not a build, but CMake still probes the compiler, so
 activate `cpg` once for it. After that, every refresh is instant.
 
@@ -115,7 +119,7 @@ cmake -DCMAKE_BUILD_TYPE=Debug -DIMAGO_SANITIZE=address ../..
 `CMakePresets.json` bundles the common combinations. Each preset
 builds into its **own** tree `build/<preset-name>/` and installs to
 a throwaway prefix inside that tree, so a preset can never overwrite
-the production install or the `build/release` / `build/debug` trees.
+the production install or the `build/base` / `build/debug` trees.
 
 ```
 cmake --preset gfortran-asan     # configure
@@ -139,8 +143,8 @@ every warning the compiler can give" -> `gfortran-audit`; "I want
 to know where the time goes" -> `gfortran-profile` under
 `valgrind --tool=callgrind`, and `gfortran-gprof` only when a
 call count or the call graph is the question.  The profile
-preset's binaries run at release speed, so a wall-clock baseline
-taken with them is a baseline for the production build.
+preset's binaries run at full optimized speed, so a wall-clock
+baseline taken with them is a baseline for the production build.
 
 Intel (`ifort`) presets are deferred: they need an `h5fc` that
 wraps `ifort` (a matching HDF5 build), tracked as step 0c in

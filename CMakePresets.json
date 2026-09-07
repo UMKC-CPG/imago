@@ -5,7 +5,7 @@
     {
       "name": "gfortran-base",
       "hidden": true,
-      "description": "Shared settings for the gfortran (h5fc) builds. Each preset gets its own build tree under build/<preset-name>, and installs to a throwaway prefix inside that tree -- so a preset NEVER overwrites the production install in $IMAGO_DIR/bin or the hand-driven build/release and build/debug trees.",
+      "description": "Shared settings for the gfortran (h5fc) builds. Each preset gets its own build tree under build/<preset-name>, and installs to a throwaway prefix inside that tree -- so a preset NEVER overwrites the production install in $IMAGO_DIR/bin or the hand-driven build/base and build/debug trees.",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "environment": { "FC": "h5fc" },
       "cacheVariables": {
