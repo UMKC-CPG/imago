@@ -44,6 +44,27 @@ complex build) and `imagoG` (the gamma-point-only, real build,
 which is faster and uses about half the memory). `imago.py`
 selects between them automatically from the k-point files.
 
+### Updating only the scripts
+
+The scripts, the `kaleidoscope` package, and the `.imago/` rc files
+are pure Python/bash, so refreshing them in `bin/` needs no compile
+and no flavor. The `imago_scripts` shell function -- defined in
+`envs.sh`, which `imagorc` sources for you -- does exactly that:
+
+```
+imago_scripts                    # scripts + kaleidoscope + rc
+imago_scripts --no-rc            # leave the .imago/ rc files alone
+imago_scripts --no-kaleidoscope  # skip the kaleidoscope package
+```
+
+It drives CMake's install step for only the script-related install
+components, so the Fortran engine is never rebuilt -- the engine is
+compiled per *flavor* (see the section below), which has nothing to
+do with installing a script. The first call configures the
+production tree `build/release` if it is missing; that step is a
+configure, not a build, but CMake still probes the compiler, so
+activate `cpg` once for it. After that, every refresh is instant.
+
 ## Debugging builds (the bug-squashing campaign)
 
 The top-level `CMakeLists.txt` adds opt-in instrumentation options,

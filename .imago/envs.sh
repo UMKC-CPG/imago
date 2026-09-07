@@ -2,7 +2,10 @@
 ## SPDX-License-Identifier: ECL-2.0
 ## Copyright (c) 2026 Paul Rulis
 
-# envs.sh -- switch the active Imago toolchain between build "flavors".
+# envs.sh -- shell helpers for the Imago toolchain.  It defines two
+#   functions: imago_env, which switches the active toolchain between
+#   build "flavors", and imago_scripts, which refreshes the production
+#   scripts in bin/ without recompiling the Fortran engine.
 #
 # This file is meant to be *sourced* (not executed), normally from your
 # shell startup right after sourcing the Imago rc file, e.g.:
@@ -182,4 +185,91 @@ _imago_env_add() {
 
     echo "imago_env: flavor '$flavor' ready.  Activate with:" \
          " imago_env $flavor"
+}
+
+
+# imago_scripts -- refresh the production toolchain (the Python/bash
+#   scripts, the kaleidoscope package, and the .imago/ resource-control
+#   files) into $IMAGO_DIR/bin and $IMAGO_DIR/.imago WITHOUT recompiling
+#   the Fortran engine.
+#
+# The engine is compiled per *flavor* (see imago_env); rebuilding it has
+#   nothing to do with updating a script, so this path never invokes the
+#   compiler.  It drives CMake's install step for only the script-related
+#   install components -- "scripts", "kaleidoscope" and "rc", tagged in
+#   src/scripts/CMakeLists.txt -- and "cmake --install" only runs install
+#   rules, it never builds a target.  Routing through CMake keeps a single
+#   source of truth for "what is a script" (the SCRIPTS list in that
+#   CMakeLists), so there is no parallel copy list here to drift out of
+#   step with it.
+#
+# Options:
+#     --no-rc            leave the .imago/ resource-control files alone
+#     --no-kaleidoscope  skip the kaleidoscope flight-runner package
+#
+# The first call configures the production tree build/release if it does
+#   not exist yet.  That is a *configure*, not a build: CMake still probes
+#   the Fortran compiler when it configures the project, so the compiler
+#   wrapper must be on PATH for that one step (activate the cpg
+#   environment).  Every later call skips straight to the install and is
+#   instant.
+imago_scripts() {
+    if [ -z "$IMAGO_DIR" ]; then
+        echo "imago_scripts: IMAGO_DIR is not set; source the Imago" \
+             "rc file first." >&2
+        return 1
+    fi
+
+    # Parse the two opt-out switches.  Both default to "on" so that a
+    #   bare "imago_scripts" refreshes the whole toolchain.
+    local install_rc=1 install_kaleidoscope=1 arg
+    for arg in "$@"; do
+        case "$arg" in
+            --no-rc)           install_rc=0 ;;
+            --no-kaleidoscope) install_kaleidoscope=0 ;;
+            *)
+                echo "imago_scripts: unknown option '$arg'" >&2
+                echo "  usage: imago_scripts [--no-rc]" \
+                     "[--no-kaleidoscope]" >&2
+                return 1
+                ;;
+        esac
+    done
+
+    # The production install lives in the hand-driven build/release tree,
+    #   whose install prefix is $IMAGO_DIR (BUILD.md).  Configure it once
+    #   if it is missing; configure builds nothing, so the engine is never
+    #   compiled on this path.
+    local tree="$IMAGO_DIR/build/release"
+    if [ ! -f "$tree/CMakeCache.txt" ]; then
+        echo "imago_scripts: configuring $tree (one-time) ..."
+        mkdir -p "$tree" || return 1
+        if ! ( cd "$tree" && cmake ../.. ); then
+            echo "imago_scripts: configure failed -- is the compiler" \
+                 "wrapper (h5fc) on PATH?  Activate cpg and retry." >&2
+            return 1
+        fi
+    fi
+
+    # Install only the requested components.  "--prefix $IMAGO_DIR" makes
+    #   the destination explicit and independent of how the tree happened
+    #   to be configured, so scripts always land in the production bin.
+    echo "imago_scripts: installing scripts into $IMAGO_DIR/bin ..."
+    cmake --install "$tree" --prefix "$IMAGO_DIR" \
+          --component scripts || return 1
+
+    if [ "$install_kaleidoscope" -eq 1 ]; then
+        echo "imago_scripts: installing the kaleidoscope package ..."
+        cmake --install "$tree" --prefix "$IMAGO_DIR" \
+              --component kaleidoscope || return 1
+    fi
+
+    if [ "$install_rc" -eq 1 ]; then
+        echo "imago_scripts: installing rc files into $IMAGO_DIR" \
+             "/.imago ..."
+        cmake --install "$tree" --prefix "$IMAGO_DIR" \
+              --component rc || return 1
+    fi
+
+    echo "imago_scripts: done."
 }

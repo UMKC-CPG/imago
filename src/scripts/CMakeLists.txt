@@ -59,18 +59,31 @@ set (RC_FILES
    vasp2sklrc.py viewCellrc.py
    xyz2sklrc.py)
 
-install (PROGRAMS ${SCRIPTS} DESTINATION bin)
+# The three script-related installs below are tagged with CMake
+# install COMPONENTs (scripts / kaleidoscope / rc).  This lets the
+# toolchain be refreshed into bin/ (and .imago/) WITHOUT recompiling
+# the Fortran engine: the imago_scripts helper in .imago/envs.sh runs
+# "cmake --install --component ..." for just these components, and
+# that install step never builds a target.  A plain "make install"
+# still installs every component, so the full production install is
+# unchanged -- the tags are purely additive.
+install (PROGRAMS ${SCRIPTS} DESTINATION bin COMPONENT scripts)
 
 # Install the kaleidoscope flight-runner package (DESIGN 6.2)
 # as a directory under bin/.  Unlike the flat scripts above it is
 # a Python *package*, so the whole directory is copied; it becomes
 # importable as `kaleidoscope` by any script run out of bin/
 # (bin/ is the script's sys.path[0]) and by a Parsl worker whose
-# PYTHONPATH includes bin/.  Only the .py sources are installed --
-# FILES_MATCHING excludes __pycache__ and any other stray files.
+# PYTHONPATH includes bin/.  Only the .py sources are installed:
+# FILES_MATCHING keeps just the *.py files, and the __pycache__
+# directories are pruned with an explicit EXCLUDE so the install
+# carries no compiled bytecode and no empty cache directories.
 install (DIRECTORY kaleidoscope
          DESTINATION bin
-         FILES_MATCHING PATTERN "*.py")
+         COMPONENT kaleidoscope
+         FILES_MATCHING
+         PATTERN "__pycache__" EXCLUDE
+         PATTERN "*.py")
 
 # SPECIAL PROCESS FOR RC FILES: #################################
 # Install RC files only if they do not already exist, so that user
@@ -85,7 +98,7 @@ option(IMAGO_FORCE_RC_INSTALL
 
 foreach(RC_FILE ${RC_FILES})
     if(IMAGO_FORCE_RC_INSTALL)
-        install(PROGRAMS ${RC_FILE} DESTINATION ".imago")
+        install(PROGRAMS ${RC_FILE} DESTINATION ".imago" COMPONENT rc)
     else()
         install(CODE "
             set(_src \"${CMAKE_CURRENT_SOURCE_DIR}/${RC_FILE}\")
@@ -100,6 +113,6 @@ foreach(RC_FILE ${RC_FILES})
                 message(STATUS
                     \"Skipping existing RC file: \${_dst}\")
             endif()
-        ")
+        " COMPONENT rc)
     endif()
 endforeach()
