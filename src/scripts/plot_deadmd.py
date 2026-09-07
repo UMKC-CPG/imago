@@ -566,7 +566,17 @@ def main():
 
     print("Done.")
     if show:
-        input("All plots open — press Enter to close them and exit.")
+        # Hold the figures on screen until the viewer closes them.
+        #   Each figure was raised with plt.show(block=False) as it was
+        #   drawn (see save_figure), which returns immediately, so
+        #   without something blocking here the interpreter would exit
+        #   and take every window with it.  A final blocking plt.show()
+        #   is matplotlib's own idiom for that wait, and it makes
+        #   closing the windows the way to end the session -- no
+        #   terminal keystroke needed, and no reading from standard
+        #   input anywhere in this script.
+        print("Close the plot windows to exit.")
+        plt.show()
 
 
 def record_command():

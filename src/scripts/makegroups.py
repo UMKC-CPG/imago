@@ -350,6 +350,13 @@ def loen_input_values(matcher, sub_spec):
             str(params['cutoff']), str(params['angleSqueeze'])]
 
 
+# A LOEN parameter as it appears on the makeinput command line: an
+#   optionally signed integer or decimal, with an optional exponent.
+#   Used to confirm that what this script forwards to a child process
+#   really is the numeric parameter it is documented to be.
+_NUMERIC_ARGUMENT = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
+
+
 def _run_makeinput(work_dir, loen_values):
     """Run the first, ungrouped makeinput in the working directory.
 
@@ -362,9 +369,24 @@ def _run_makeinput(work_dir, loen_values):
     (DESIGN 5.10.2).
     """
 
+    # Every LOEN value is a number by construction (loen_input_values
+    #   stringifies six numeric matcher parameters), so check that here
+    #   rather than assume it.  The check states the contract at the
+    #   point the values leave this program, and it turns a malformed
+    #   matcher into a named error instead of a confusing failure
+    #   inside makeinput's own argument parsing.
+    for value in loen_values:
+        if not _NUMERIC_ARGUMENT.fullmatch(str(value)):
+            raise ValueError(
+                f"_run_makeinput: LOEN parameter {value!r} is not "
+                f"numeric; the LOEN block takes numbers only.")
+
     command = [sys.executable, _resolve_sibling('makeinput.py'),
                '-loeninput', *loen_values]
-    subprocess.run(command, cwd=work_dir, check=True)
+    # shell=False is the default and is written out deliberately: the
+    #   command is a list, so its elements go to the new process as
+    #   argv with no shell to reinterpret them.
+    subprocess.run(command, cwd=work_dir, check=True, shell=False)
 
 
 def _run_loen(work_dir):
@@ -377,7 +399,9 @@ def _run_loen(work_dir):
 
     command = [sys.executable, _resolve_sibling('imago.py'),
                '-loen', '-scf', 'no']
-    subprocess.run(command, cwd=work_dir, check=True)
+    # Every element here is a literal; shell=False (the default) is
+    #   stated for the same reason as in _run_makeinput above.
+    subprocess.run(command, cwd=work_dir, check=True, shell=False)
 
 
 def find_loen_descriptor(work_dir):

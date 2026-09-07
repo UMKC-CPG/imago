@@ -3,6 +3,7 @@
 ## Copyright (c) 2026 Paul Rulis
 
 import argparse as ap
+import ast
 import os
 import sys
 from datetime import datetime
@@ -266,11 +267,128 @@ class Data():
     fold_kp = v.Mesh()
     path_kp = v.Mesh()
 
+    # A BZ.<n> file is a data file written by makeKPoints (Fortran) and
+    #   by makeinput.py.  Although it uses Python assignment syntax,
+    #   every statement in it is a plain "Data.<attr> = <literal>" whose
+    #   right-hand side is a numeric literal: an int or a float, or a
+    #   nested list/tuple of them.  These are the ONLY attribute names a
+    #   BZ file is permitted to set.  The loader below checks every
+    #   assignment target against this set and rejects anything else, so
+    #   a corrupt or tampered file cannot quietly introduce unexpected
+    #   state.  The remaining Data fields (num_mesh_kpoints, path_kp_mag
+    #   and friends) are computed here from these, never read from file.
+    _ALLOWED_BZ_ATTRIBUTES = frozenset({
+        "real_cell_mags", "recip_cell_mags",
+        "real_cell_vectors", "recip_cell_vectors",
+        "real_cell_vertices", "recip_cell_vertices",
+        "real_cell_edges", "recip_cell_edges",
+        "real_cell_faces", "recip_cell_faces",
+        "bz_cell_faces", "bz_cell_edges", "bz_cell_vertices",
+        "num_kpoints_abc", "mesh_kpoints", "folded_kpoints",
+        "kpoint_weights", "num_total_BZ_path_KP",
+        "num_high_symmetry_BZ_paths",
+        "num_high_symmetry_BZ_points_per_path",
+        "high_symmetry_BZ_kpoints"})
+
     def __init__(self, settings):
-        # Read the class variable values from the settings file.
-        exec(open("BZ." + f"{settings.bz_to_show}").read())
+        # Load the Brillouin-zone geometry chosen by the -bz option.
+        #   load_bz_file reads the file as pure data (see its docstring);
+        #   it never executes the contents of the file.
+        self.load_bz_file(f"BZ.{settings.bz_to_show}")
         Data.num_mesh_kpoints = m.prod(Data.num_kpoints_abc)
         Data.num_folded_kpoints = len(Data.kpoint_weights)
+
+
+    def load_bz_file(self, path):
+        """Safely load a BZ.<n> file into the Data class variables.
+
+        A BZ file records the geometry of one Brillouin zone -- the real
+        and reciprocal cell vectors, vertices, edges and faces, the
+        k-point mesh, the folded k-points and their weights, and the
+        high-symmetry band path -- as a sequence of assignments of the
+        form "Data.<attr> = <literal>", written by makeKPoints and
+        appended to by makeinput.py.
+
+        The file is read as DATA, not run as a program.  That
+        distinction matters: executing the file (with exec(), say) would
+        run any Python it happened to contain, so a BZ file that an
+        attacker had planted on disk -- or that was built from text
+        pulled out of a database field -- could run arbitrary commands
+        with the privileges of whoever viewed the cell.
+
+        The safe reading proceeds in three steps.  ast.parse turns the
+        text into a syntax tree, which builds an inert description of
+        the file and executes none of it.  Each statement is then
+        required to have the exact shape "Data.<attr> = <value>" with
+        <attr> drawn from _ALLOWED_BZ_ATTRIBUTES.  Finally the <value>
+        is evaluated with ast.literal_eval, which understands only
+        literals -- numbers, strings, tuples, lists, dicts, and a
+        leading + or - -- and raises on any function call, variable
+        name, or other operator.  The worst a hostile or malformed file
+        can do is fail to load, raising a ValueError that names it.
+        """
+        with open(path, encoding="utf-8") as bz_file:
+            source_text = bz_file.read()
+
+        # Turn the text into a syntax tree.  Parsing runs nothing from
+        #   the file; it only produces a tree we can inspect and vet
+        #   before deciding which parts of it, if any, to trust.
+        try:
+            syntax_tree = ast.parse(source_text, filename=path)
+        except SyntaxError as parse_error:
+            raise ValueError(f"BZ file '{path}' is not well formed: "
+                             f"{parse_error}") from parse_error
+
+        # Admit only the assignment of a single literal to one
+        #   whitelisted Data attribute, then evaluate and store it.
+        for statement in syntax_tree.body:
+            attribute_name = self._check_bz_assignment(statement, path)
+            try:
+                value = ast.literal_eval(statement.value)
+            except (ValueError, SyntaxError) as value_error:
+                raise ValueError(
+                    f"BZ file '{path}' gives 'Data.{attribute_name}' a "
+                    f"non-literal value; only numbers, and lists or "
+                    f"tuples of them, are allowed.") from value_error
+            setattr(Data, attribute_name, value)
+
+
+    @staticmethod
+    def _check_bz_assignment(statement, path):
+        """Validate one BZ-file statement; return its target attribute.
+
+        Every statement in a BZ file must be a plain assignment of the
+        form "Data.<attr> = <value>" with exactly one target, and <attr>
+        must name a field the file is allowed to set.  Any other shape
+        -- an import, a bare expression, a function call, a chained or
+        multiple-target assignment, or an assignment to anything but a
+        whitelisted Data attribute -- raises ValueError instead.
+
+        The value is deliberately NOT evaluated here.  This routine
+        settles only the question of shape; the caller evaluates the
+        value with ast.literal_eval once the shape is known to be safe.
+        """
+        if not isinstance(statement, ast.Assign) or \
+                len(statement.targets) != 1:
+            raise ValueError(
+                f"BZ file '{path}' contains a statement that is not a "
+                f"single 'Data.<attr> = <value>' assignment.")
+
+        target = statement.targets[0]
+        assigns_to_data = (isinstance(target, ast.Attribute) and
+                           isinstance(target.value, ast.Name) and
+                           target.value.id == "Data")
+        if not assigns_to_data:
+            raise ValueError(
+                f"BZ file '{path}' assigns to something other than a "
+                f"Data attribute.")
+
+        if target.attr not in Data._ALLOWED_BZ_ATTRIBUTES:
+            raise ValueError(
+                f"BZ file '{path}' sets the unknown or disallowed "
+                f"field 'Data.{target.attr}'.")
+
+        return target.attr
 
 
     def form_real_cell(self, settings):

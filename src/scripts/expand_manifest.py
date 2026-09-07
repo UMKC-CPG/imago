@@ -56,6 +56,7 @@ here would only override that.
 import argparse
 import contextlib
 import os
+import re
 import sys
 import tempfile
 import tomllib
@@ -246,6 +247,139 @@ def _ask_yes_no(ask, prompt: str, default: bool) -> bool:
                     default)
 
 
+# The longest answer any prompt here has a use for.  A curator types
+#   element symbols, short descriptions and labels; anything longer is
+#   a paste accident, and refusing it keeps a runaway string out of the
+#   manifest rather than discovering it later during a read.
+MAX_ANSWER_LENGTH = 200
+
+# Characters that carry special meaning to a command shell.  No answer
+#   this script accepts has a use for one: the fields are element
+#   symbols, site numbers, short labels and short descriptions.  They
+#   are refused at the prompt rather than escaped further downstream,
+#   so that a value which could be misread by anything that later
+#   handles a manifest never enters the file in the first place.
+SHELL_METACHARACTERS = frozenset(";|&$`<>\\(){}[]")
+
+# The shapes the two structured free-text answers may take.  Both
+#   permit an empty answer, because both prompts legitimately default
+#   to blank -- a label left blank is derived at harvest time, and the
+#   element default is blank when the sketch carried no composition
+#   hint.  Refusing blank here would leave a curator with no way past
+#   the prompt.
+ELEMENT_PATTERN = re.compile(r"[A-Za-z]{0,3}")
+LABEL_PATTERN = re.compile(r"[A-Za-z0-9._:-]*")
+
+
+def clean_answer(raw: str) -> str:
+    """Normalize one typed answer before it is used for anything.
+
+    Two things are removed.  Control characters -- anything below
+    ``0x20`` plus ``DEL`` -- are stripped, because a terminal answer
+    that carries an embedded newline, escape sequence or NUL is either
+    a paste accident or an attempt to smuggle structure into a value,
+    and no legitimate answer here contains one.  Surrounding whitespace
+    goes with them.
+
+    An over-long answer is refused outright rather than silently
+    truncated, since a truncated element symbol or label would be
+    wrong in a way nobody would notice until much later.
+
+    The manifest writer already escapes what it emits (the TOML basic
+    string quoting in ``curation_manifest._quote``), so this is a
+    second, earlier line of defence rather than the only one: it keeps
+    a value that cannot be meant from entering the program at all,
+    instead of relying on every later consumer to render it safely.
+    """
+
+    cleaned = "".join(character for character in raw
+                      if ord(character) >= 0x20 and character != "\x7f")
+    cleaned = cleaned.strip()
+    if len(cleaned) > MAX_ANSWER_LENGTH:
+        raise ValueError(
+            f"answer is {len(cleaned)} characters; the limit is "
+            f"{MAX_ANSWER_LENGTH}")
+    found = sorted(set(cleaned) & SHELL_METACHARACTERS)
+    if found:
+        raise ValueError(
+            f"answer contains {' '.join(found)}, which cannot appear "
+            f"in a manifest field; please rephrase without it")
+    return cleaned
+
+
+def _as_element(answer: str) -> str:
+    """Return ``answer`` if it looks like an element symbol, else raise.
+
+    One to three letters, or blank when the sketch offered no
+    composition hint and the curator has nothing to fill in yet.
+    """
+
+    if not ELEMENT_PATTERN.fullmatch(answer):
+        raise ValueError(
+            f"{answer!r} is not an element symbol (one to three "
+            f"letters)")
+    return answer
+
+
+def _as_label(answer: str) -> str:
+    """Return ``answer`` if it is a usable label, else raise.
+
+    Labels name an entry for later reference, so they are held to
+    letters, digits and the few separators those names use.  Blank is
+    allowed and means the label is derived at harvest time.
+    """
+
+    if not LABEL_PATTERN.fullmatch(answer):
+        raise ValueError(
+            f"{answer!r} is not a valid label (letters, digits and "
+            f". _ : - only)")
+    return answer
+
+
+def _as_system_type(answer: str) -> str:
+    """Return ``answer`` if it names a system type, else raise."""
+
+    if answer not in VALID_SYSTEM_TYPES:
+        raise ValueError(
+            f"{answer!r} is not one of "
+            f"{'/'.join(VALID_SYSTEM_TYPES)}")
+    return answer
+
+
+def _as_atom_site(answer: str) -> int:
+    """Return ``answer`` as a site index, else raise.
+
+    Sites are counted from one, so zero and negatives are refused here
+    rather than becoming an out-of-range index much later.
+    """
+
+    try:
+        site = int(answer)
+    except ValueError:
+        raise ValueError(f"{answer!r} is not a whole number") from None
+    if site < 1:
+        raise ValueError(f"atom_site must be 1 or greater, not {site}")
+    return site
+
+
+def _ask_until_valid(ask, prompt: str, default: str, convert):
+    """Ask until ``convert`` accepts the answer, then return its value.
+
+    ``convert`` turns the typed text into the value the caller wants
+    and raises ``ValueError`` when it cannot.  A rejected answer is
+    reported and the question is asked again, so a slip of the finger
+    costs one retry rather than the whole curation session -- the
+    manifest is only written after every structure has been walked
+    through, so an exception here would discard all of it.
+    """
+
+    while True:
+        try:
+            return convert(ask(prompt, default))
+        except ValueError as error:
+            print(f"  -- {error}; please try again.", file=sys.stderr)
+
+
 def build_interactive(sources: list[ReferenceSolid], ask, *,
                       basis: str, functional: str,
                       kpoint_integration: str, scf_threshold: float,
@@ -303,9 +437,15 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
         hint = hints.get(source.reference_id, {})
         hint_elements = hint.get("elements") or []
         hint_description = hint.get("description", "")
-        system_type = ask(
-            f"system_type ({'/'.join(VALID_SYSTEM_TYPES)})",
-            source.system_type or system_type_default)
+        # Check the answer against the vocabulary the prompt shows.
+        #   Without this the value is only validated much later, when
+        #   the finished manifest is read back (guidance_db), so a typo
+        #   surfaced after the whole session rather than at the prompt
+        #   that caused it.
+        system_type = _ask_until_valid(
+            ask, f"system_type ({'/'.join(VALID_SYSTEM_TYPES)})",
+            source.system_type or system_type_default,
+            _as_system_type)
 
         entries: list[ReferenceEntry] = []
         # The first entry defaults to yes; once one is added, "add
@@ -322,8 +462,12 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
                 hint_elements[len(entries)]
                 if len(entries) < len(hint_elements)
                 else (hint_elements[0] if hint_elements else ""))
-            element = ask("  element", element_default)
-            atom_site = int(ask("  atom_site", "1"))
+            element = _ask_until_valid(
+                ask, "  element", element_default, _as_element)
+            # A non-numeric atom_site used to raise straight out of the
+            #   loop, losing every answer given so far; re-ask instead.
+            atom_site = _ask_until_valid(
+                ask, "  atom_site", "1", _as_atom_site)
             # Default to yes only until this element has its one
             #   default entry, so accepting defaults yields exactly
             #   one default per element (rule 7).
@@ -333,7 +477,9 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
             if is_default:
                 default_elements.add(element)
             description = ask("  description", hint_description)
-            label = ask("  label (blank to derive at harvest)", "")
+            label = _ask_until_valid(
+                ask, "  label (blank to derive at harvest)", "",
+                _as_label)
 
             # No per-entry fingerprints are authored here: the
             #   preferred recipe is the database-wide
@@ -366,10 +512,28 @@ def build_interactive(sources: list[ReferenceSolid], ask, *,
 
 def _input_ask(prompt: str, default: str) -> str:
     """The real prompt: show the default in brackets and return the
-    curator's reply, or the default when they press Enter."""
+    curator's reply, or the default when they press Enter.
 
-    raw = input(f"{prompt} [{default}]: ").strip()
-    return raw if raw else default
+    The reply is passed through :func:`clean_answer` before it is
+    returned, so nothing downstream ever sees a raw terminal line.
+    Every answer this script accepts ends up as a field of the
+    manifest it writes, so the value is normalized at the one point it
+    enters the program rather than at each of the places it is used.
+
+    The prompt repeats when :func:`clean_answer` refuses a reply, so
+    a rejected answer costs one retry rather than raising out of the
+    curation loop and discarding the session's work.  Re-asking here
+    rather than in each caller means every prompt is covered, including
+    the free-text ones that need no further checking of their own.
+    """
+
+    while True:
+        try:
+            raw = clean_answer(input(f"{prompt} [{default}]: "))
+        except ValueError as error:
+            print(f"  -- {error}.", file=sys.stderr)
+            continue
+        return raw if raw else default
 
 
 @contextlib.contextmanager

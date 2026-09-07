@@ -3,6 +3,7 @@
 ## Copyright (c) 2026 Paul Rulis
 
 import argparse as ap
+import ast
 import pandas as pd
 import os
 import sys
@@ -517,6 +518,38 @@ class ScriptSettings():
         self.curve_mark_size = args.curve_mark_size
 
 
+    def parse_style_token(self, token, line_number, path):
+        """Convert one curve_styles.dat matplotlib token to a value.
+
+        Column one of curve_styles.dat holds a Python literal in text
+        form: either a dash tuple such as (0,(10,1)), which matplotlib
+        reads as an on/off dash pattern, or a quoted style name such as
+        "'solid'". Either way it must be turned into the real Python
+        object before the matplotlib emitter can pass it along as a
+        linestyle argument.
+
+        The conversion uses ast.literal_eval, which understands only
+        literals -- numbers, strings, tuples, lists, dicts, and a
+        leading + or - -- and raises on a function call or a bare name.
+        That restriction is the point. curve_styles.dat is a plain data
+        file on disk, and anyone able to write to $IMAGO_DATA can edit
+        it. Evaluating a line of it with the general-purpose eval would
+        run whatever that line contained, so a tampered style file
+        could execute arbitrary code the moment somebody plotted a
+        graph. literal_eval cannot call anything, so the worst a
+        tampered or simply mistyped file can do is fail here, loudly,
+        naming the file and the line at fault.
+        """
+        try:
+            return ast.literal_eval(token)
+        except (ValueError, SyntaxError) as token_error:
+            raise ValueError(
+                f"{path} line {line_number}: the matplotlib style "
+                f"column must be a Python literal (a dash tuple such "
+                f"as (0,(10,1)), or a quoted name such as \"'solid'\"), "
+                f"not {token!r}.") from token_error
+
+
     def process_settings(self):
 
         # The options defining the visuals for the lines may need to be
@@ -547,7 +580,8 @@ class ScriptSettings():
         #   active display backend, so that the self.curve_style list
         #   ends up holding tokens the chosen backend understands
         #   directly with no later translation.
-        with open(f"{IMAGO_DATA}/curve_styles.dat", "r") as dat:
+        style_path = f"{IMAGO_DATA}/curve_styles.dat"
+        with open(style_path, "r") as dat:
             style_lines = dat.read().splitlines()
         if (self.display == "plotly"):
             # The plotly column is a plain dash string such as "solid"
@@ -560,9 +594,13 @@ class ScriptSettings():
         else:
             # The matplotlib column is a Python literal -- either a dash
             #   tuple like (0,(10,1)) or a quoted style name -- so it
-            #   must be evaluated before it can be dropped straight into
-            #   a plt.plot linestyle argument by the matplotlib emitter.
-            styles = [eval(line.split()[0]) for line in style_lines]
+            #   must be converted from text before it can be dropped
+            #   straight into a plt.plot linestyle argument by the
+            #   matplotlib emitter. parse_style_token does that
+            #   conversion without executing the file; see its docstring.
+            styles = [self.parse_style_token(line.split()[0],
+                    line_number, style_path)
+                    for line_number, line in enumerate(style_lines, 1)]
 
         # Append styles from curve_styles.dat starting at the requested
         #   index and stepping by the given step while remaining within

@@ -79,8 +79,11 @@ CONSIDERATIONS AS YOU PREPARE YOUR INPUT FILE
 """
 
 import argparse as ap
+import ast
 import math
+import operator
 import os
+import re
 import shutil
 import sys
 from collections import Counter
@@ -6145,6 +6148,253 @@ def _get_elec_and_states(settings, nuc_charge, num_total_core_states,
     return num_electrons, num_states_used
 
 
+# ---------------------------------------------------------------------
+# Safe evaluation of the arithmetic found in a SYBD path file.
+#
+# A SYBD database file (share/sybdDB/<lattice>) states its high-symmetry
+# k-point path in terms of small algebraic expressions, because the path
+# vertices of a monoclinic or triclinic cell depend on the cell's own
+# lattice parameters.  A file therefore holds lines such as
+#
+#     eta = (1.0 - b / c * cos(alpha)) / (2.0 * sin(alpha)**2)
+#
+# and coordinate fields such as "1.00000000-phi".  Both must be worked
+# out numerically before the k-point path can be written.
+#
+# These expressions are DATA, but unlike the literals handled elsewhere
+# they are genuine arithmetic, so ast.literal_eval is not enough: real
+# operators and the trigonometric functions have to be supported.  What
+# follows is therefore a small evaluator that walks the parsed syntax
+# tree itself and computes only the node kinds named below.  Anything a
+# SYBD file has no business containing -- an attribute lookup, a
+# subscript, a comprehension, a call to anything but the whitelisted
+# math functions -- has no branch here and is refused.
+#
+# The reason for the care: these files live in $IMAGO_DATA/sybdDB, and
+# the path name is chosen automatically from the cell's symmetry, so a
+# user does not necessarily know which file a run will read.  Handing
+# their contents to the built-in eval would let a doctored database file
+# run arbitrary code during ordinary input generation.
+# ---------------------------------------------------------------------
+
+# The functions a SYBD expression may call.  This is the same set the
+#   script has always offered, kept whole so that no existing database
+#   file loses vocabulary: the three that current files actually use
+#   (cos, sin, tan) plus the inverse, root and reciprocal forms.
+_SYBD_MATH_FUNCTIONS = {
+    "cos": math.cos,
+    "sin": math.sin,
+    "tan": math.tan,
+    "sqrt": math.sqrt,
+    "acos": math.acos,
+    "asin": math.asin,
+    "atan": math.atan,
+    "cot": lambda angle: 1.0 / math.tan(angle),
+    "sec": lambda angle: 1.0 / math.cos(angle),
+    "csc": lambda angle: 1.0 / math.sin(angle),
+}
+
+# The only bare names an expression may mention.  Every other name --
+#   the lattice variables and the a/b/c magnitudes -- is substituted
+#   textually with its number before evaluation ever begins, so by the
+#   time an expression arrives here no other name should remain.
+_SYBD_CONSTANTS = {"pi": math.pi}
+
+# The arithmetic an expression may perform.
+_SYBD_BINARY_OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Pow: operator.pow,
+}
+_SYBD_UNARY_OPERATORS = {
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+# Ceiling on an exponent's magnitude.  Real path equations never raise
+#   anything beyond the square, so this is enormously generous; its job
+#   is to stop a hostile file from writing 9**9**9, which is perfectly
+#   valid arithmetic that would otherwise wedge the script computing an
+#   integer with hundreds of millions of digits.
+_SYBD_MAX_EXPONENT = 1000
+
+
+def substitute_sybd_name(expression, name, value):
+    """Replace whole-word uses of ``name`` in ``expression``.
+
+    A SYBD expression names three kinds of quantity: the cell angles
+    (``alpha``, ``beta``, ``gamma``), the lattice magnitudes (``a``,
+    ``b``, ``c``), and any lattice variable defined earlier in the same
+    file.  Each is replaced by its number before the expression is
+    evaluated.
+
+    The match is anchored on word boundaries, which is what makes the
+    replacement safe for the single-letter magnitudes.  The letters a,
+    b and c also occur inside the names of the functions an expression
+    may call -- ``cos``, ``csc``, ``sec``, ``acos``, ``sqrt`` -- and
+    inside longer variable names, so a plain substring replacement
+    would corrupt them.  A word boundary requires a non-word character
+    on each side, so ``a`` matches in ``(a ** 2`` and in ``2.0 * a``
+    but not in ``alpha`` or ``acos``, and ``eta`` does not match inside
+    ``zeta``.
+
+    The value is parenthesised.  A variable that works out negative
+    would otherwise change the meaning of the expression it is
+    substituted into: ``mu ** 2`` becoming ``-0.1 ** 2`` is
+    -(0.1**2) in Python, because exponentiation binds more tightly
+    than a leading minus.  Wrapping gives ``(-0.1) ** 2``, which is
+    what the algebra means.
+    """
+
+    return re.sub(rf"\b{re.escape(name)}\b", f"({value})", expression)
+
+
+def evaluate_sybd_expression(expression, context):
+    """Evaluate one arithmetic expression from a SYBD path file.
+
+    Computes the value of ``expression`` -- a lattice-variable equation
+    or a k-point coordinate field, with all variable names already
+    substituted by their numbers -- using only the arithmetic and the
+    math functions a SYBD file is permitted to use.
+
+    The expression is parsed into a syntax tree and then walked node by
+    node, computing the handful of node kinds a path expression can
+    legitimately contain.  Nothing is executed: an expression that
+    reaches for anything outside that set has no branch to take and is
+    refused with a ValueError naming ``context``, a short phrase saying
+    which file and which line the expression came from.
+
+    Parameters
+    ----------
+    expression : str
+        The arithmetic to evaluate, e.g. "(1.0 - 0.5 * cos(1.57)) / 2.0".
+    context : str
+        Where the expression came from, used in any error message.
+
+    Returns
+    -------
+    float or int
+        The value of the expression.
+    """
+    try:
+        syntax_tree = ast.parse(expression, mode="eval")
+    except SyntaxError as parse_error:
+        raise ValueError(
+            f"{context}: cannot read the expression {expression!r} -- "
+            f"it is not valid arithmetic ({parse_error.msg}).") \
+            from parse_error
+
+    return _evaluate_sybd_node(syntax_tree.body, expression, context)
+
+
+def _evaluate_sybd_node(node, expression, context):
+    """Compute the value of one node of a SYBD expression tree.
+
+    Recognizes numbers, the whitelisted constants, unary plus and minus,
+    the five arithmetic operators, and calls to the whitelisted math
+    functions.  Every other node kind falls through to the refusal at
+    the end, which is what keeps the evaluator from being a general
+    Python interpreter.
+    """
+    # A literal number.  Booleans are excluded deliberately: True is an
+    #   int to Python, but it is not arithmetic anyone means to write.
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or \
+                not isinstance(node.value, (int, float)):
+            raise ValueError(
+                f"{context}: the expression {expression!r} contains the "
+                f"non-numeric value {node.value!r}.")
+        return node.value
+
+    # A bare name, which may only be one of the known constants.
+    if isinstance(node, ast.Name):
+        if node.id not in _SYBD_CONSTANTS:
+            raise ValueError(
+                f"{context}: the expression {expression!r} uses the "
+                f"unknown name {node.id!r}.  Lattice variables must be "
+                f"defined earlier in the file, and the only built-in "
+                f"name is 'pi'.")
+        return _SYBD_CONSTANTS[node.id]
+
+    # Unary plus or minus, as in the leading sign of a coordinate.
+    if isinstance(node, ast.UnaryOp):
+        apply_unary = _SYBD_UNARY_OPERATORS.get(type(node.op))
+        if apply_unary is None:
+            raise ValueError(
+                f"{context}: the expression {expression!r} uses an "
+                f"unsupported unary operator.")
+        return apply_unary(
+            _evaluate_sybd_node(node.operand, expression, context))
+
+    # Binary arithmetic.
+    if isinstance(node, ast.BinOp):
+        apply_binary = _SYBD_BINARY_OPERATORS.get(type(node.op))
+        if apply_binary is None:
+            raise ValueError(
+                f"{context}: the expression {expression!r} uses an "
+                f"unsupported operator.  Only + - * / and ** are "
+                f"allowed.")
+        left_value = _evaluate_sybd_node(node.left, expression, context)
+        right_value = _evaluate_sybd_node(node.right, expression,
+                                          context)
+
+        # Guard the exponent so a hostile file cannot ask for a number
+        #   with hundreds of millions of digits and hang the script.
+        if isinstance(node.op, ast.Pow) and \
+                abs(right_value) > _SYBD_MAX_EXPONENT:
+            raise ValueError(
+                f"{context}: the expression {expression!r} raises to "
+                f"the power {right_value}, beyond the permitted "
+                f"magnitude of {_SYBD_MAX_EXPONENT}.")
+
+        try:
+            return apply_binary(left_value, right_value)
+        except ZeroDivisionError as division_error:
+            raise ValueError(
+                f"{context}: the expression {expression!r} divides by "
+                f"zero.  Check the cell parameters this path was "
+                f"chosen for.") from division_error
+
+    # A call to one of the whitelisted math functions.  The function
+    #   must be named directly: "cos(x)" is admissible, anything of the
+    #   form "<something>.cos(x)" is not, because an attribute lookup is
+    #   the usual first step out of a restricted evaluator.
+    if isinstance(node, ast.Call):
+        if not isinstance(node.func, ast.Name):
+            raise ValueError(
+                f"{context}: the expression {expression!r} calls "
+                f"something other than a plain math function.")
+        if node.func.id not in _SYBD_MATH_FUNCTIONS:
+            permitted = ", ".join(sorted(_SYBD_MATH_FUNCTIONS))
+            raise ValueError(
+                f"{context}: the expression {expression!r} calls the "
+                f"unknown function {node.func.id!r}.  Permitted "
+                f"functions are: {permitted}.")
+        if node.keywords:
+            raise ValueError(
+                f"{context}: the expression {expression!r} passes a "
+                f"keyword argument to {node.func.id!r}; the math "
+                f"functions take a single plain argument.")
+        arguments = [_evaluate_sybd_node(argument, expression, context)
+                     for argument in node.args]
+        try:
+            return _SYBD_MATH_FUNCTIONS[node.func.id](*arguments)
+        except (TypeError, ValueError, ZeroDivisionError) as call_error:
+            raise ValueError(
+                f"{context}: the expression {expression!r} could not "
+                f"be computed: {call_error}") from call_error
+
+    # Anything else -- an attribute, a subscript, a comprehension, a
+    #   lambda, a walrus -- is not arithmetic and is refused.
+    raise ValueError(
+        f"{context}: the expression {expression!r} contains a "
+        f"construct that is not permitted in a path file.  Only "
+        f"numbers, + - * / **, parentheses and the math functions may "
+        f"appear.")
+
+
 def _process_sybd_path(settings, sc, imago_fh):
     """Process the SYBD high-symmetry path file and write it to imago.dat.
 
@@ -6209,34 +6459,29 @@ def _process_sybd_path(settings, sc, imago_fh):
 
         # Substitute angles (in radians).
         for angle in range(1, 4):
-            while angle_name[angle] in eqn:
-                eqn = eqn.replace(angle_name[angle],
-                                  str(sc.full_cell_angle[angle]))
+            eqn = substitute_sybd_name(eqn, angle_name[angle],
+                                       sc.full_cell_angle[angle])
 
         # Substitute previously defined variables.
         for prev in range(1, var):
-            while variable_name[prev] in eqn:
-                eqn = eqn.replace(variable_name[prev],
-                                  str(variable_eqn[prev]))
+            eqn = substitute_sybd_name(eqn, variable_name[prev],
+                                       variable_eqn[prev])
 
-        # Substitute lattice magnitudes.  They appear as " a ", " b ", " c "
-        # (with surrounding spaces) to avoid colliding with function names
-        # like cos, csc, sec, etc.
+        # Substitute the lattice magnitudes a, b and c.  The match is
+        # on whole words, so a magnitude is found wherever it stands --
+        # at the start of an expression, or just inside a parenthesis --
+        # and not inside a function name such as cos or acos.
         for axis in range(1, 4):
-            letter = " " + chr(ord("a") + axis - 1) + " "
-            while letter in eqn:
-                eqn = eqn.replace(letter, str(sc.full_cell_mag[axis]))
+            eqn = substitute_sybd_name(eqn, chr(ord("a") + axis - 1),
+                                       sc.full_cell_mag[axis])
 
-        # Evaluate the equation to a number.
-        import math
-        # Make math functions available for eval.
-        safe_ns = {"__builtins__": {}, "cos": math.cos, "sin": math.sin,
-                   "tan": math.tan, "sqrt": math.sqrt, "acos": math.acos,
-                   "asin": math.asin, "atan": math.atan, "pi": math.pi,
-                   "cot": lambda x: 1.0 / math.tan(x),
-                   "sec": lambda x: 1.0 / math.cos(x),
-                   "csc": lambda x: 1.0 / math.sin(x)}
-        variable_eqn.append(eval(eqn, safe_ns))
+        # Evaluate the equation to a number.  The expression is worked
+        #   out by evaluate_sybd_expression, which computes arithmetic
+        #   and the math functions but cannot execute anything else;
+        #   see the block above _process_sybd_path for why that matters.
+        variable_eqn.append(evaluate_sybd_expression(
+            eqn, f"{sybd_path}, definition of "
+                 f"'{variable_name[var]}'"))
 
     # Read the path specification line.
     vals = prep(sybd_lines[line_idx])
@@ -6279,12 +6524,19 @@ def _process_sybd_path(settings, sc, imago_fh):
         for axis in range(3):
             expr = vals[axis]
             for var in range(1, num_latt_vars + 1):
-                while variable_name[var] in expr:
-                    expr = expr.replace(variable_name[var],
-                                        str(variable_eqn[var]))
-            # Remove double negatives.
+                expr = substitute_sybd_name(expr, variable_name[var],
+                                            variable_eqn[var])
+            # Remove double negatives.  Substituted values arrive
+            #   parenthesised, so a negative one can no longer produce
+            #   a "--" pair; this stays for any that a path file
+            #   spells out by hand.
             expr = expr.replace("--", "+")
-            vals[axis] = str(eval(expr))
+            # Work the coordinate out with the same restricted
+            #   evaluator used for the variable definitions above, so
+            #   that a coordinate field cannot execute code either.
+            vals[axis] = str(evaluate_sybd_expression(
+                expr, f"{sybd_path}, high-symmetry k-point {kp}, "
+                      f"axis {axis + 1}"))
 
         # Write to imago.dat.
         imago_fh.write(f"{float(vals[0]):12.8f}{float(vals[1]):12.8f}"

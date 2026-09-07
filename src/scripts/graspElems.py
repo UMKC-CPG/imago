@@ -22,6 +22,8 @@
 
 import argparse as ap
 import os
+import shlex
+import stat
 import sys
 import subprocess
 import re
@@ -206,6 +208,15 @@ def build_comm_list(specs):
             if i + 1 >= len(specs):
                 sys.exit(f"Error: element '{token}' given without a basis.")
             basis = specs[i+1]
+            # Check the basis names a real basis.  The 'total' branch
+            #   above already checks this, and without the same check
+            #   here a mistyped basis travelled the whole way into the
+            #   directory names and the generated job scripts, where
+            #   it produced a broken script instead of an error the
+            #   user could act on.
+            if basis != 'all' and basis not in all_bases:
+                sys.exit(f"Error: '{basis}' is not a basis; expected "
+                         f"one of {', '.join(all_bases)} or 'all'.")
             if basis == 'all':
                 for b in all_bases:
                     tmparr.extend([token, b])
@@ -314,16 +325,94 @@ def count_blocks(rcsf_path):
     return len(blocks)
 
 
+def make_executable(path):
+    """Give a generated script its execute bits, as ``chmod +x`` does.
+
+    The run scripts this module writes are launched by the batch job
+    files, so they need to be executable.  The mode is changed through
+    ``os.chmod`` rather than by handing a ``chmod`` command line to a
+    shell: the file name goes to the system call as data, so it needs
+    no quoting and there is no shell to misread it whatever the name
+    turns out to be.
+
+    The existing mode is read first and the execute bits are added to
+    it, so the file keeps whatever read and write permissions it was
+    created with -- the same additive behaviour ``chmod +x`` has, as
+    opposed to assigning a fixed mode.
+    """
+
+    current_mode = os.stat(path).st_mode
+    os.chmod(path, current_mode
+             | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+# The Grasp2K programs this script is allowed to launch.  The pipeline
+#   drives a fixed sequence of them, so the set is closed and can be
+#   stated here.  run_grasp checks its argument against this set before
+#   building a path from it, which keeps the name of the program to be
+#   executed a choice among known constants rather than a string that
+#   merely happens, today, to be passed from a caller in this file.
+GRASP_PROGRAMS = frozenset({
+    'rnucleus', 'csl', 'rangular', 'rwfnestimate', 'rmcdhf',
+    'readrwf'})
+
+# Characters that would carry special meaning if the answer script
+#   below were ever handled by a command shell.  It is not -- it goes
+#   to the child process's standard input -- but the answers a Grasp2K
+#   program expects are numbers, single letters, file names and orbital
+#   occupation strings, none of which need any of these.  Refusing them
+#   means the safety of this call does not rest on the reader knowing
+#   where the text ends up.  Parentheses and commas are deliberately
+#   NOT in the set: occupation strings such as "2s(2)" use them.
+STDIN_METACHARACTERS = frozenset(";|&$`<>\\")
+
+
 def run_grasp(program, stdin_text, cwd):
-    """Run a Grasp2K program with the given stdin text."""
-    grasp_bin = os.environ.get('GRASP_BIN',
-                               os.path.join(os.environ['GRASP_DIR'], 'bin'))
+    """Run a Grasp2K program, feeding it ``stdin_text`` on its stdin.
+
+    The program is named by ``program`` and must be one of
+    :data:`GRASP_PROGRAMS`; it is looked up in the Grasp2K binary
+    directory given by ``$GRASP_BIN``, or ``$GRASP_DIR/bin``.
+
+    ``stdin_text`` is the script of answers the Grasp2K program's own
+    interactive prompts expect.  It is handed to ``subprocess`` as
+    ``input=``, which writes it to the child's standard input once the
+    child is already running: it is data consumed by that program, and
+    at no point part of a command line.  The command itself is the
+    single-element argv list ``[exe]`` and is run with ``shell=False``,
+    so no shell ever parses any of it and shell metacharacters in the
+    stdin script carry no special meaning.
+    """
+
+    if program not in GRASP_PROGRAMS:
+        raise ValueError(
+            f"run_grasp: {program!r} is not a known Grasp2K program; "
+            f"expected one of {', '.join(sorted(GRASP_PROGRAMS))}.")
+
+    found = sorted(set(stdin_text) & STDIN_METACHARACTERS)
+    if found:
+        raise ValueError(
+            f"run_grasp: the answer script for {program} contains "
+            f"{' '.join(found)}, which no Grasp2K prompt expects; "
+            f"refusing to run it.")
+
+    grasp_bin = os.environ.get('GRASP_BIN')
+    if grasp_bin is None:
+        grasp_dir = os.environ.get('GRASP_DIR')
+        if grasp_dir is None:
+            sys.exit("ERROR: neither GRASP_BIN nor GRASP_DIR is set, "
+                     "so the Grasp2K programs cannot be located.")
+        grasp_bin = os.path.join(grasp_dir, 'bin')
+
     exe = os.path.join(grasp_bin, program)
     print(f"  Running {program}...", flush=True)
+    # shell=False is the default; it is written out because this call
+    #   is the reason the stdin script above needs no quoting, and a
+    #   reader checking that should not have to recall the default.
     result = subprocess.run(
         [exe],
         input=stdin_text, text=True,
-        capture_output=True, cwd=cwd
+        capture_output=True, cwd=cwd, shell=False
     )
     if result.returncode != 0:
         print(f"ERROR running {program} in {cwd}:\n{result.stderr}",
@@ -521,12 +610,26 @@ cd "$WORK/ELEM_FILES/graspElems"
                           jobFile.write(batchHead[k])
                           jobFile2.write(batchHead[k])
 
-              jobFile.write("cd "+commList[i+1]+"/"+commList[i]+"\n")
-              jobFile.write("./run"+commList[i]+" > "+commList[i]+"out &\n")
+              # Quote every value interpolated into the generated
+              #   scripts.  Both values are validated before they get
+              #   here -- the element against elem_list, the basis
+              #   against all_bases -- so nothing that needs quoting
+              #   should reach this point.  Quoting anyway means the
+              #   safety of these lines is a property of the lines
+              #   themselves: a later change that loosened either
+              #   validator could not silently turn a generated script
+              #   into a way of running arbitrary commands.
+              elem_dir = shlex.quote(commList[i+1]+"/"+commList[i])
+              run_script = shlex.quote("./run"+commList[i])
+              run_log = shlex.quote(commList[i]+"out")
+              rscf_log = shlex.quote(commList[i]+"RSCFout")
+
+              jobFile.write("cd "+elem_dir+"\n")
+              jobFile.write(run_script+" > "+run_log+" &\n")
               jobFile.write("cd ../..\n")
 
-              jobFile2.write("cd "+commList[i+1]+"/"+commList[i]+"\n")
-              jobFile2.write("./runRSCF > "+commList[i]+"RSCFout &\n")
+              jobFile2.write("cd "+elem_dir+"\n")
+              jobFile2.write("./runRSCF > "+rscf_log+" &\n")
               jobFile2.write("cd ../..\n")
 
           atNum=_ed.get_element_z(commList[i])
@@ -582,8 +685,7 @@ cd "$WORK/ELEM_FILES/graspElems"
           g.write("S1\n\n")
 
           g.close()
-          comm="chmod +x run"+commList[i]
-          os.system(comm)
+          make_executable("run"+commList[i])
 
           g=open("runRSCF",'w')
 
@@ -603,8 +705,7 @@ cd "$WORK/ELEM_FILES/graspElems"
           g.write("S1\n")
 
           g.close()
-          comm="chmod +x runRSCF"
-          os.system(comm)
+          make_executable("runRSCF")
           os.chdir('../..')
           elemCount+=1
 

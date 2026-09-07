@@ -9140,6 +9140,120 @@ is not carried only in conversation.
   it.  Do this as its own small cleanup commit, separate
   from the C74 producer work, so the dedupe is easy to
   review and revert independently.
+- [x] T3. DONE 2026-09-07 -- both prompts now validate and
+  re-ask, via `_ask_until_valid` with the `_as_atom_site` and
+  `_as_system_type` converters, and every reply is normalized by
+  `clean_answer` on the way in.  Landed as the SEC-005
+  remediation (`dev/SECURITY_TODO.md`), which needed the same
+  validation for a different reason.  Original entry:
+  Harden the two interactive prompts in
+  `src/scripts/expand_manifest.py` so a slip of the finger
+  does not discard a curation session.  Found 2026-09-07
+  while tracing the SEC-005 report (`dev/SECURITY_TODO.md`);
+  neither is a security defect, and the report itself was
+  rejected.
+    1. `atom_site = int(ask("  atom_site", "1"))` (line 326)
+       has no guard, so any non-numeric answer raises an
+       uncaught `ValueError` and ends the run.  Every answer
+       given for that structure so far is lost, because the
+       manifest is only written after the whole loop
+       finishes.  Re-ask on a bad answer instead, the way a
+       prompt normally would.
+    2. The `system_type` prompt (line 306) displays
+       `VALID_SYSTEM_TYPES` but does not check the answer
+       against it.  Nothing is silently corrupted -- the
+       value is validated downstream when the manifest is
+       loaded (`guidance_db.py:599`) -- but the curator finds
+       out about a typo only after the whole session is over
+       and the file is being read back.  Check at the prompt
+       and re-ask.
+  Both live in the same interactive loop, so do them
+  together.  A small shared "ask until the answer parses"
+  helper would serve both and any prompt added later.
+- [x] T4. DONE 2026-09-07 -- repaired the four SYBD lattice
+  paths that could not generate a band-structure input at all
+  (`monoc3`, `monoc4`, `monoc5`, `orthoi`).  Two separate
+  causes, found while verifying the SEC-002/SEC-003 evaluator
+  (`dev/SECURITY_TODO.md`); neither was a security defect.
+    1. CODE.  The lattice magnitudes were substituted by
+       searching for `" a "`, `" b "`, `" c "` WITH surrounding
+       spaces, a trick meant to avoid colliding with the letters
+       inside `cos`, `csc` and friends.  It failed whenever the
+       magnitude opened an expression or followed a `(`, leaving
+       a bare `b` that died as an unknown name.  `makeinput.py`
+       now substitutes on word boundaries via
+       `substitute_sybd_name`, which matches a magnitude
+       wherever it stands and never inside a longer name.  The
+       substituted value is parenthesised so a negative variable
+       cannot change the meaning of `x ** 2`.  This alone
+       repaired `orthoi` entirely and `monoc3`/`monoc4`'s
+       `delta`; 38 already-working equations are unchanged.
+    2. DATA.  Three files carried syntax errors that had made
+       them unparseable since they were written.  Fixed in
+       `src/data/sybdDB.tgz` (and the unpacked `share/sybdDB`):
+       `monoc3` and `monoc4` had lost the factor 2 from
+       `eta` (`+  *` with nothing between), and `monoc5` was
+       missing a closing parenthesis in `zeta` and the `*`
+       before `cos(alpha)` in `eta`.
+  All 25 paths now evaluate: 48 equations and 954 k-point
+  coordinates, no failures.  TWO related questions are left
+  A fifth file, `monoc2`, was then repaired on the programmer's
+  ruling: its `eta` divided by `c` where every sibling divides
+  by `b`, which parses and so produced a silently wrong number
+  rather than a crash.  `monoc1` and `monoc2` differed by
+  exactly one character across their whole variable block while
+  their paths differ substantially, which is what MCLC1 and
+  MCLC2 are meant to be.  They now agree to every printed digit.
+  This is the only change in the campaign that alters output
+  that a previously COMPLETING run produced -- see the note in
+  `dev/SECURITY_TODO.md`.
+  Finally the programmer corrected five `monoc5` k-points
+  (`I`, `I_1`, `F_1`, `H_1`, `Y_1`) that had been written as
+  negatives of their published values.  All of the above was
+  then checked against the source the database was built from
+  -- Setyawan and Curtarolo, Comput. Mater. Sci. 49 (2010)
+  299-312 -- which confirms every repair: MCLC5's 16 k-points
+  and 4-segment path against Table 19 and Fig. 21, MCLC3/4's
+  restored factor of 2 against Table 18, and MCLC1/MCLC2's
+  shared definition list against Table 17.
+- [x] T5. DONE 2026-09-07 -- audited the WHOLE k-point database
+  against Setyawan and Curtarolo, Comput. Mater. Sci. 49 (2010)
+  299-312: all 25 paths against their figure captions and all
+  302 k-point entries against Tables 2-21.  This grew out of T4,
+  where repairing five files raised the obvious question of
+  whether the other twenty were sound.  They were not.
+    - All 25 PATHS are correct, including segmentation.  Two
+      that looked wrong are not: `mono`'s fourth point `C` is a
+      real MCL k-point (0,1/2,1/2) from Table 16 rather than a
+      mangled Gamma, and `tric1a`/`tric2a` being identical is
+      correct because they share Table 20.
+    - 14 files were already clean: `sc`, `fcc`, `bcc`, `tet`,
+      `teti2`, `ortho`, `orthoc`, `orthof2`, `hex`, `monoc1`,
+      `monoc2`, `monoc5`, `tric1a`, `tric2a`.
+    - TWELVE k-points were wrong across 9 files, all corrected
+      in `src/data/sybdDB.tgz` (19 lines, since several points
+      appear in two files or twice in one):
+      `teti1` M was at the ORIGIN instead of (-1/2,1/2,1/2), so
+      every BCT1 band structure ran a degenerate Gamma-X-M-Gamma
+      segment; `orthoi` Z; `orthof1`/`orthof3` A (a duplicate of
+      A_1) and `orthof1` X_1 (copied from X with only the first
+      component changed); `monoc3`/`monoc4` H_1 and Y_1 (the
+      same "-1+x written for 1-x" slip already fixed in
+      `monoc5`); `rhomb1` B and B_1; `rhomb2` Q (which used nu
+      where eta was meant) and P_1; `tric1b`/`tric2b` X and Y.
+    - THREE differences were left alone deliberately.  `mono`'s
+      M and `orthof1`/`orthof3`'s A_1 differ from the published
+      values by exactly (0,0,-1), a reciprocal lattice vector,
+      so they are the SAME k-point written in a different
+      representative -- eigenvalues are unaffected and only the
+      interpolated segment to the neighbouring point shifts.
+      `sc` also spells its label `Gamma` where every other file
+      writes `GAMMA`.
+  After the repair the whole database evaluates -- 48 equations
+  and 954 coordinates, no failures -- and every coordinate range
+  is sane.  Any band structure computed for one of the nine
+  affected lattice types before 2026-09-07 followed a wrong
+  path and should be recomputed.
 
 ---
 
