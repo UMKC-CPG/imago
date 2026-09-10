@@ -11,8 +11,13 @@ without reading any CMake.
 Imago is built with CMake and a Fortran compiler that **must match
 the compiler that built the HDF5 library** -- the two cannot read
 each other's `.mod` files. On this system the compiler is reached
-through `FC=h5fc`, an HDF5 wrapper around gfortran. The build also
-reads `IMAGO_DIR` to know where to install.
+through an HDF5 wrapper around gfortran, and **which wrapper depends
+on the environment**: `cpg` carries the serial HDF5 and so supplies
+`h5fc`, while `cpgp` carries the MPI-enabled build and supplies
+`h5pfc` instead -- neither environment has the other's. So `FC` is
+not a constant to be set once in a shell startup file; a hardcoded
+`FC=h5fc` is correct in `cpg` and names a missing program in `cpgp`.
+The build also reads `IMAGO_DIR` to know where to install.
 
 The normal session setup (the shell aliases expand to this):
 
@@ -66,8 +71,20 @@ components, so the Fortran engine is never rebuilt -- the engine is
 compiled per *flavor* (see the section below), which has nothing to
 do with installing a script. The first call configures the
 production tree `build/base` if it is missing; that step is a
-configure, not a build, but CMake still probes the compiler, so
-activate `cpg` once for it. After that, every refresh is instant.
+configure, not a build, but CMake still probes the compiler, so an
+HDF5 wrapper has to be on the path for it.
+
+Either environment supplies one, and `imago_scripts` picks from what
+is actually present rather than trusting `$FC` -- `$FC` if it
+resolves, else `h5fc`, else `h5pfc` -- and reports the choice. That
+matters because the two environments carry different wrappers, so an
+`$FC` naming `cpg`'s `h5fc` is simply absent under `cpgp`: a
+configure failure with nothing actually wrong behind it. When the
+wrapper chosen is not `h5fc` the run says so, because `build/base`
+is the *production* tree and whatever is cached in it is what a
+later `make install` there would link the engine against. Use `cpg`
+for that first call if you want the serial production binary. After
+the configure, every refresh is instant and needs no compiler.
 
 ## Debugging builds (the bug-squashing campaign)
 
@@ -242,6 +259,14 @@ the production `bin/` with the engine executables (`imago`,
 `imagoG`, ...) overlaid by the flavor build -- so every helper
 script and the `share/` database are reused unchanged, nothing is
 duplicated, and the production install is never touched.
+
+The two halves come from different places, which is what decides
+what has to exist first. The engine half is taken from the preset's
+own build tree, so a flavor can be added before the production
+engine has ever been compiled. The script half is symlinked from
+`bin/`, so run `imago_scripts` before adding a flavor if `bin/` is
+still empty -- otherwise the flavor gets its engine but none of the
+Python drivers that call it, and `envs.sh` says so when it happens.
 
 The switcher is `envs.sh`. Like the `imagorc` file, it is tracked
 in `.imago/` from the clone and sourced in place -- it is never

@@ -50,6 +50,17 @@ dependencies:
   # HDF5 built against that MPI: provides h5pfc, and serves serial
   #   HDF5 use as well.
   - hdf5=1.14.*=mpi_openmpi_*
+  # zlib is named here for its DEVELOPMENT half, which nothing else
+  #   pulls in.  HDF5 depends on "libzlib", and that package ships only
+  #   the runtime libz.so.1; the linker symlink libz.so and zlib.h come
+  #   from the separate "zlib" package.  Because "h5pfc -show" puts -lz
+  #   on every link line it produces, an env without this fails EVERY
+  #   Fortran link with "cannot find -lz" -- including the compiler
+  #   probe CMake runs, so the failure lands at configure time and
+  #   reads as a broken compiler rather than a missing library.  cpg
+  #   happens to carry zlib already, which is why only the parallel
+  #   builds ever hit it.
+  - zlib
   # Dense linear algebra: OpenBLAS (as in cpg), ScaLAPACK/BLACS on the
   #   same MPI, and ELPA -- the eigensolver ARCHITECTURE 6.6 names for
   #   the distributed generalized eigenproblem.

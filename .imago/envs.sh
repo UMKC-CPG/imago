@@ -64,6 +64,30 @@ _imago_path_drop() {
 }
 
 
+# Internal helper: echo the HDF5 Fortran compiler wrapper that this
+#   environment actually provides.  The two supported environments ship
+#   different wrappers -- cpg carries the serial HDF5 build (h5fc) and
+#   cpgp the MPI-enabled one (h5pfc) -- so a single hardcoded $FC names
+#   a program that exists in one of them and not in the other.  Order
+#   of preference: an $FC that resolves on PATH is honored as the
+#   user's explicit choice, then the serial wrapper, then the parallel
+#   one.  Echoes nothing and returns 1 when none of the three resolve.
+_imago_pick_fortran_wrapper() {
+    if [ -n "$FC" ] && command -v "$FC" > /dev/null 2>&1; then
+        printf '%s' "$FC"
+        return 0
+    fi
+    local candidate
+    for candidate in h5fc h5pfc; do
+        if command -v "$candidate" > /dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+
 imago_env() {
     if [ -z "$IMAGO_DIR" ]; then
         echo "imago_env: IMAGO_DIR is not set; source the Imago rc" \
@@ -150,6 +174,13 @@ imago_env() {
 #   with the freshly built engine executables overlaid.  A full preset
 #   build is run so every engine executable (not just imago/imagoG) is
 #   the instrumented one.
+#
+# The engine half of a flavor stands on its own: the overlay takes what
+#   the preset build produced, so a flavor can be added before the
+#   production engine has ever been installed.  Only the script half
+#   comes from $IMAGO_DIR/bin, since the Python drivers and the share/
+#   database are compiler-agnostic and are deliberately not rebuilt
+#   per flavor.
 _imago_env_add() {
     local flavor="$1"
     if [ -z "$flavor" ]; then
@@ -169,22 +200,49 @@ _imago_env_add() {
     rm -rf "$envbin"
     mkdir -p "$envbin"
     # Symlink the whole production toolchain (scripts + helper exes) so
-    #   every helper resolves and tracks production automatically.
-    ln -s "$IMAGO_DIR"/bin/* "$envbin"/ 2>/dev/null
+    #   every helper resolves and tracks production automatically.  An
+    #   empty production bin is worth saying out loud rather than
+    #   swallowing: the flavor still gets its engine below, but none of
+    #   the Python drivers that call it, so imago.py would be missing.
+    if [ -n "$(ls -A "$IMAGO_DIR/bin" 2>/dev/null)" ]; then
+        ln -s "$IMAGO_DIR"/bin/* "$envbin"/ 2>/dev/null
+    else
+        echo "imago_env: note -- $IMAGO_DIR/bin is empty, so this" \
+             "flavor gets no scripts." >&2
+        echo "           Run imago_scripts to populate it, then" \
+             "add the flavor again." >&2
+    fi
 
-    # Overlay every freshly built executable whose name matches a
-    #   production binary (the Fortran engine and its auxiliaries).
-    local exe name
+    # Overlay every freshly built executable (the Fortran engine and
+    #   its auxiliaries) onto the flavor bin.  The search is confined
+    #   to the build tree's src/ subtree because that is where the
+    #   project's own programs land; everything CMake builds for its
+    #   own purposes -- the compiler-identification a.out files and the
+    #   ABI-detection binaries -- sits under CMakeFiles/ instead, so
+    #   naming src/ separates real programs from probe artifacts
+    #   without consulting anything outside this build.
+    local exe name overlaid=0
     while IFS= read -r exe; do
         name="$(basename "$exe")"
-        if [ -e "$IMAGO_DIR/bin/$name" ]; then
-            ln -sf "$exe" "$envbin/$name"
-        fi
-    done < <(find "$tree" -type f -executable \
-                  ! -name '*.so' ! -name '*.so.*' ! -name '*.a')
+        ln -sf "$exe" "$envbin/$name"
+        overlaid=$((overlaid + 1))
+    done < <(find "$tree/src" -type f -executable \
+                  ! -name '*.so' ! -name '*.so.*' ! -name '*.a' \
+                  2>/dev/null)
 
-    echo "imago_env: flavor '$flavor' ready.  Activate with:" \
-         " imago_env $flavor"
+    # Linking nothing means the build produced no programs, which the
+    #   loop above cannot distinguish from success on its own.  Report
+    #   it rather than announcing a flavor that has no engine in it.
+    if [ "$overlaid" -eq 0 ]; then
+        echo "imago_env: flavor '$flavor' has NO engine -- no built" \
+             "programs were found under" >&2
+        echo "           $tree/src.  The preset build may have" \
+             "failed; check its output above." >&2
+        return 1
+    fi
+
+    echo "imago_env: flavor '$flavor' ready ($overlaid programs)." \
+         " Activate with:  imago_env $flavor"
 }
 
 
@@ -209,10 +267,12 @@ _imago_env_add() {
 #
 # The first call configures the production tree build/base if it does
 #   not exist yet.  That is a *configure*, not a build: CMake still probes
-#   the Fortran compiler when it configures the project, so the compiler
-#   wrapper must be on PATH for that one step (activate the cpg
-#   environment).  Every later call skips straight to the install and is
-#   instant.
+#   the Fortran compiler when it configures the project, so an HDF5
+#   compiler wrapper must be on PATH for that one step.  Either supported
+#   environment supplies one -- cpg has h5fc, cpgp has h5pfc -- and the
+#   wrapper that gets used is chosen from what is actually present and
+#   then reported.  Every later call skips straight to the install and
+#   is instant.
 imago_scripts() {
     if [ -z "$IMAGO_DIR" ]; then
         echo "imago_scripts: IMAGO_DIR is not set; source the Imago" \
@@ -242,13 +302,43 @@ imago_scripts() {
     #   a build type, so it stays accurate as the default toolchain
     #   changes.  Configure it once if it is missing; configure builds
     #   nothing, so the engine is never compiled on this path.
+    # A configure that fails partway still leaves CMakeCache.txt behind,
+    #   so the presence of that file does not answer "is this tree ready
+    #   to install from?".  cmake_install.cmake is written only once
+    #   generation completes, and it is the very file the install step
+    #   below reads, so it is both the honest marker and the one whose
+    #   absence would otherwise surface much later as a bare "Error
+    #   processing file" with no hint that configuring is what failed.
     local tree="$IMAGO_DIR/build/base"
-    if [ ! -f "$tree/CMakeCache.txt" ]; then
-        echo "imago_scripts: configuring $tree (one-time) ..."
+    if [ ! -f "$tree/cmake_install.cmake" ]; then
+        # CMake probes the Fortran compiler even for a configure that
+        #   compiles nothing, so a wrapper has to resolve right here.
+        #   Ask the environment which one it has rather than trusting a
+        #   $FC that may name the other environment's wrapper.
+        local wrapper
+        if ! wrapper="$(_imago_pick_fortran_wrapper)"; then
+            echo "imago_scripts: no HDF5 compiler wrapper found" \
+                 "(tried \$FC, h5fc, h5pfc).  Activate cpg for the" >&2
+            echo "               serial toolchain or cpgp for the" \
+                 "parallel one, then retry." >&2
+            return 1
+        fi
+        # build/base is the production tree, so whichever wrapper is
+        #   used here is cached in it, and a later "make install" links
+        #   the engine against that environment's HDF5.  Say so plainly
+        #   whenever the serial wrapper is not the one being cached.
+        if [ "$wrapper" != "h5fc" ]; then
+            echo "imago_scripts: note -- caching FC=$wrapper in the" \
+                 "production tree build/base.  A later 'make install'" >&2
+            echo "               there links the engine against this" \
+                 "environment's HDF5, not the serial one." >&2
+        fi
+        echo "imago_scripts: configuring $tree with FC=$wrapper" \
+             "(one-time) ..."
         mkdir -p "$tree" || return 1
-        if ! ( cd "$tree" && cmake ../.. ); then
-            echo "imago_scripts: configure failed -- is the compiler" \
-                 "wrapper (h5fc) on PATH?  Activate cpg and retry." >&2
+        if ! ( cd "$tree" && FC="$wrapper" cmake ../.. ); then
+            echo "imago_scripts: configure failed even though" \
+                 "$wrapper is on PATH; see the CMake output above." >&2
             return 1
         fi
     fi
@@ -267,8 +357,8 @@ imago_scripts() {
     fi
 
     if [ "$install_rc" -eq 1 ]; then
-        echo "imago_scripts: installing rc files into $IMAGO_DIR" \
-             "/.imago ..."
+        echo "imago_scripts: installing rc files into" \
+             "$IMAGO_DIR/.imago ..."
         cmake --install "$tree" --prefix "$IMAGO_DIR" \
               --component rc || return 1
     fi
