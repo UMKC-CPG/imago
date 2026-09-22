@@ -1,8 +1,5 @@
 # Imago Project
 
-> **Session setup:** Run `/color blue` and `/rename Imago` at the
-> start of each session.
-
 ## Document Hierarchy
 
 This project follows a five-level document chain. All design
