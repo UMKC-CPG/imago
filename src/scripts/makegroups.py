@@ -357,6 +357,41 @@ def loen_input_values(matcher, sub_spec):
 _NUMERIC_ARGUMENT = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
 
 
+def _numeric_argument(value):
+    """Return one LOEN parameter as the command-line word it must be.
+
+    The value is first required to look like a number, and is then
+    REBUILT from the number it denotes rather than passed along as the
+    text that was checked.  The two steps do different jobs and both
+    are wanted.  The pattern match rejects a malformed matcher with a
+    named error instead of letting it fail obscurely inside makeinput's
+    own argument parsing.  The rebuild makes the word that reaches the
+    child process one that Python's own integer or float formatter
+    produced, so its character content is a property of this function
+    rather than an inherited property of whatever produced the value --
+    a string arriving here cannot pass any character of itself through
+    to the command (dev/SECURITY_TODO.md, SEC-010).
+
+    Integers are rebuilt as integers so the LOEN block keeps the
+    spelling it has always had: ``twoj1``, ``twoj2``, ``max_neigh`` and
+    the method code are whole numbers, and turning them into ``4.0``
+    would change the block makeinput writes.  Anything else is rebuilt
+    as a float, which is the right form for ``cutoff`` (Bohr) and
+    ``angleSqueeze``.  ``nan`` and ``inf`` never reach the conversion:
+    the pattern above does not admit them.
+    """
+
+    text = str(value)
+    if not _NUMERIC_ARGUMENT.fullmatch(text):
+        raise ValueError(
+            f"_run_makeinput: LOEN parameter {value!r} is not "
+            f"numeric; the LOEN block takes numbers only.")
+    try:
+        return str(int(text))
+    except ValueError:
+        return repr(float(text))
+
+
 def _run_makeinput(work_dir, loen_values):
     """Run the first, ungrouped makeinput in the working directory.
 
@@ -370,19 +405,16 @@ def _run_makeinput(work_dir, loen_values):
     """
 
     # Every LOEN value is a number by construction (loen_input_values
-    #   stringifies six numeric matcher parameters), so check that here
-    #   rather than assume it.  The check states the contract at the
-    #   point the values leave this program, and it turns a malformed
-    #   matcher into a named error instead of a confusing failure
-    #   inside makeinput's own argument parsing.
-    for value in loen_values:
-        if not _NUMERIC_ARGUMENT.fullmatch(str(value)):
-            raise ValueError(
-                f"_run_makeinput: LOEN parameter {value!r} is not "
-                f"numeric; the LOEN block takes numbers only.")
+    #   stringifies six numeric matcher parameters), so the arguments
+    #   are rebuilt from those numbers here rather than forwarded as
+    #   the strings that arrived.  Passing on a freshly formatted
+    #   number states the contract at the point the values leave this
+    #   program, instead of leaving it a property of a caller several
+    #   files away -- see :func:`_numeric_argument`.
+    checked_values = [_numeric_argument(value) for value in loen_values]
 
     command = [sys.executable, _resolve_sibling('makeinput.py'),
-               '-loeninput', *loen_values]
+               '-loeninput', *checked_values]
     # shell=False is the default and is written out deliberately: the
     #   command is a list, so its elements go to the new process as
     #   argv with no shell to reinterpret them.

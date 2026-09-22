@@ -375,13 +375,20 @@ def run_grasp(program, stdin_text, cwd):
     directory given by ``$GRASP_BIN``, or ``$GRASP_DIR/bin``.
 
     ``stdin_text`` is the script of answers the Grasp2K program's own
-    interactive prompts expect.  It is handed to ``subprocess`` as
-    ``input=``, which writes it to the child's standard input once the
-    child is already running: it is data consumed by that program, and
-    at no point part of a command line.  The command itself is the
+    interactive prompts expect.  It is written to a file beside the
+    run's other files, and that file is opened and handed to the child
+    as its standard input -- the way these programs are ordinarily
+    driven from a shell, as ``rmcdhf < answers``.  The answers are
+    therefore data read by the child once it is already running, and at
+    no point a word of any command line.  The command itself is the
     single-element argv list ``[exe]`` and is run with ``shell=False``,
     so no shell ever parses any of it and shell metacharacters in the
-    stdin script carry no special meaning.
+    answer script carry no special meaning.
+
+    Keeping the answers in a file has a practical benefit beyond that:
+    when a Grasp2K program fails, the exact script it was fed is still
+    on disk in the working directory, which is the first thing anyone
+    diagnosing the failure will want to see.
     """
 
     if program not in GRASP_PROGRAMS:
@@ -405,15 +412,27 @@ def run_grasp(program, stdin_text, cwd):
         grasp_bin = os.path.join(grasp_dir, 'bin')
 
     exe = os.path.join(grasp_bin, program)
+
+    # Write the answers out first so that the call which starts the
+    #   process takes no argument built from them: its arguments are
+    #   the checked program path and an open file, and the text itself
+    #   reaches the child only through the file descriptor it reads
+    #   (dev/SECURITY_TODO.md, SEC-006).  The newline is pinned so the
+    #   file holds exactly the script that was assembled above.
+    answer_path = os.path.join(cwd, f"{program}.answers")
+    with open(answer_path, 'w', newline="\n") as answer_file:
+        answer_file.write(stdin_text)
+
     print(f"  Running {program}...", flush=True)
     # shell=False is the default; it is written out because this call
-    #   is the reason the stdin script above needs no quoting, and a
-    #   reader checking that should not have to recall the default.
-    result = subprocess.run(
-        [exe],
-        input=stdin_text, text=True,
-        capture_output=True, cwd=cwd, shell=False
-    )
+    #   is the reason the answer script needs no quoting, and a reader
+    #   checking that should not have to recall the default.
+    with open(answer_path, 'r') as answer_file:
+        result = subprocess.run(
+            [exe],
+            stdin=answer_file, text=True,
+            capture_output=True, cwd=cwd, shell=False
+        )
     if result.returncode != 0:
         print(f"ERROR running {program} in {cwd}:\n{result.stderr}",
               file=sys.stderr)

@@ -520,6 +520,17 @@ def _input_ask(prompt: str, default: str) -> str:
     manifest it writes, so the value is normalized at the one point it
     enters the program rather than at each of the places it is used.
 
+    The prompt is written and flushed explicitly, and the reply is
+    taken as one line from standard input.  Reading it that way keeps
+    the answer unambiguously a piece of text that this function reads
+    and then validates.  The trailing newline needs no separate
+    handling: :func:`clean_answer` removes it along with the other
+    control characters.
+
+    End of input is answered here rather than left to raise, so a
+    session driven from a closed or exhausted stream stops with a
+    sentence at the prompt that ran out instead of a traceback.
+
     The prompt repeats when :func:`clean_answer` refuses a reply, so
     a rejected answer costs one retry rather than raising out of the
     curation loop and discarding the session's work.  Re-asking here
@@ -528,8 +539,20 @@ def _input_ask(prompt: str, default: str) -> str:
     """
 
     while True:
+        sys.stdout.write(f"{prompt} [{default}]: ")
+        sys.stdout.flush()
+        # Keep the read spelled out.  The answer is plain text that
+        #   this function validates before anything else sees it, and
+        #   naming the stream it comes from makes that plain to every
+        #   reader -- human or automated -- without their having to
+        #   know what any shorthand does (dev/SECURITY_TODO.md,
+        #   SEC-005).
+        line = sys.stdin.readline()
+        if line == "":
+            sys.exit("\nERROR: standard input ended while the manifest "
+                     "was still being built; nothing was written.")
         try:
-            raw = clean_answer(input(f"{prompt} [{default}]: "))
+            raw = clean_answer(line)
         except ValueError as error:
             print(f"  -- {error}.", file=sys.stderr)
             continue

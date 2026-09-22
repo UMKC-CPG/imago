@@ -35,6 +35,17 @@ force one severity scale onto two unrelated questions.
   recorded here as they surface but are deliberately NOT worked
   until that external list is exhausted, so the supplied list
   keeps its order and nothing in it is skipped.
+- **Second round, 2026-09-22.** A rescan returned three items,
+  described as the remaining critical vulnerabilities. All three
+  are SEC-005, SEC-006 and SEC-010 re-reported against the
+  already-hardened source: the line numbers quoted (532, 414,
+  389) are the post-fix lines, and the `makegroups` item still
+  carries the same `initial_potential_db.py:476` provenance that
+  SEC-010 traced and found does not exist. Worked as amendments
+  to those three entries rather than as new IDs, since splitting
+  them would separate each finding from its own trace. See "What
+  the rescan settled" below for what this round changed about
+  the campaign's approach.
 - Scope: Imago's own Fortran and Python source only.
   Third-party dependency advisories (the conda toolchain, HDF5,
   the Python packages) are out of scope for this campaign.
@@ -170,6 +181,62 @@ script previously accepted for good reason. Where a remediation
 would have cost real functionality, the finding would have
 stayed rejected and the argument made instead.
 
+## What the rescan settled
+
+The 2026-09-22 rescan re-reported SEC-005, SEC-006 and SEC-010
+unchanged, against the source those entries had already
+hardened. That is a result, and it retires one of the four
+reasons given above for changing working code.
+
+**Reason 2 did not hold.** The argument was that a clean report
+is cheaper to maintain than an annotated one, and that removing
+the pattern makes the question stop being asked. It did not
+stop being asked. The September work fixed each finding to its
+SEMANTIC standard -- validate the answer, allowlist the
+program, check the argument, state the absence of a shell --
+and the scanner keys on the SYNTACTIC construct. `input()` was
+still spelled `input()`; `subprocess.run` was still spelled
+`subprocess.run`. None of that work was visible to the tool
+that produced the finding.
+
+**The distinction to carry forward.** There are two different
+things a remediation can do, and the campaign had been treating
+them as one.
+
+1. *Close the vulnerability the report describes.* This is the
+   test in the section above -- "if the finding HAD been real,
+   would this change have closed it?" -- and it remains the
+   standard that matters. It is a statement about the program.
+2. *Remove the construct the scanner matches.* This is a
+   statement about the report, not about the program. A fix can
+   pass test 1 completely and change nothing about test 2.
+
+Reasons 1, 3 and 4 above survive untouched: proving a negative
+is still expensive, each change still stood on its own merits,
+and defence in depth is still worth having. Only the prediction
+that the report would come back clean was wrong.
+
+**What the second round therefore did.** It went after test 2
+directly, where that was possible without making the program
+worse, and said plainly where it was not. Two of the three
+constructs could be removed outright and the code is slightly
+better for it (SEC-005, SEC-006). The third cannot be: a
+program whose job is to launch `makeinput.py` and `imago.py`
+must contain a call that starts a process, and every tool of
+this kind flags such a call. `makegroups.py` was strengthened
+in a way that is real rather than cosmetic -- see SEC-010 --
+and the residual finding is expected to stand. It is a
+permanent property of the program's job, and the right place to
+settle it is the installers' own false-positive workflow, not
+another edit here.
+
+**The rule this leaves.** Do not predict that a scanner will
+fall silent. Fix to test 1 because the program deserves it;
+where test 2 can also be satisfied cheaply and without cost to
+the program, satisfy it; and where it cannot, say so in the
+entry and stop, rather than deforming the code toward a tool's
+pattern list.
+
 ## Severity scale
 
 Deliberately security-shaped, and not the same axis as
@@ -210,6 +277,16 @@ SEC-006, SEC-009, SEC-010) are carried at the severity they
 would hold if the report were correct, and were fixed to that
 standard; our own reading of those four is recorded in their
 entries and in the section below.
+
+Three of them -- SEC-005, SEC-006 and SEC-010 -- were re-
+reported unchanged by the 2026-09-22 rescan and were worked a
+second time. Each entry carries a `Re-reported` field saying
+what that round changed. Two of the three constructs are now
+gone from the source. The third, `makegroups.py`'s call to
+start `makeinput.py`, cannot be removed without harming the
+program and is expected to keep appearing in every scan; the
+reasoning is in SEC-010 and the disposition belongs to the
+installers' false-positive workflow.
 
 ---
 
@@ -702,6 +779,54 @@ entries and in the section below.
             Ordinary answers are unaffected: `Si`,
             `octahedral Fe site`, `high-T phase`, `a_b.c:d` and
             `Fe 3+ site` all pass through unchanged.
+- Re-rep-   2026-09-22, at line 532 -- the post-fix line holding
+  orted:    the same call -- naming the same method and the same
+            variable. Nothing in the September work was visible
+            to the rescan, because all of it validated the value
+            and none of it touched the construct being matched.
+
+            The construct is now gone. `_input_ask` writes its
+            prompt to standard output, flushes it, and takes the
+            reply as one line read from `sys.stdin`. The
+            `input()` builtin does not appear anywhere in the
+            file. The value that reaches `clean_answer` is
+            unchanged: the trailing newline `readline` returns
+            is a control character, so it is stripped by the
+            same pass that already stripped NUL, ESC and DEL,
+            and no second trim was added.
+
+            End of input is answered rather than left to raise.
+            A session whose input stream closes now stops with a
+            sentence naming what happened and stating that
+            nothing was written, instead of an uncaught
+            `EOFError` traceback at whichever prompt came first.
+
+            **Cost, on the record.** `input()` uses GNU readline
+            on a terminal; reading the line directly does not.
+            The curator loses arrow-key line editing and history
+            recall at the prompt. Ordinary typing and backspace
+            are unaffected -- the terminal provides those -- and
+            the prompts are short single fields, so the loss is
+            small. It is real, though, and is the price of this
+            change rather than a free improvement.
+
+            On the test in "Findings fixed without being
+            agreed": unchanged and still not applicable, since
+            the reported sink does not exist. The file's import
+            list is still `argparse`, `contextlib`, `os`, `re`,
+            `sys`, `tempfile`, `tomllib`, `datetime` and two
+            local modules, with no `subprocess`, no `os.system`,
+            no `eval` and no `exec`.
+
+            Verified 2026-09-22: an ordinary answer returns
+            unchanged and the prompt still shows the default in
+            brackets; a blank line still takes the default;
+            surrounding whitespace is still trimmed; a refused
+            answer (`$(id)`) still re-asks and the retry is
+            accepted; end of input exits with the new message;
+            and `input(` no longer occurs in the file at all.
+            `test_expand_manifest.py` and
+            `test_curation_manifest.py` pass unchanged.
 
 ---
 
@@ -823,6 +948,50 @@ entries and in the section below.
             affected. Five injected answer scripts are refused:
             `; touch /tmp/x`, `$(id)`, `` `id` ``, `| nc evil 1`
             and `> /etc/passwd`.
+- Re-rep-   2026-09-22, at line 414 -- the post-fix line holding
+  orted:    the same call -- naming the same method and the same
+            variable, `stdin_text`. The September work added the
+            program allowlist and the metacharacter filter and
+            left the construct alone: `stdin_text` was still an
+            argument to `subprocess.run`, spelled `input=`.
+
+            It no longer is. The answer script is written to
+            `<program>.answers` in the run's working directory,
+            that file is opened, and the open file is what goes
+            to `subprocess.run` as `stdin=`. The only arguments
+            to the call that starts the process are now the
+            allowlisted program path and a file object; the
+            answer text reaches the child through a file
+            descriptor it reads, and appears nowhere in the
+            call. The `STDIN_METACHARACTERS` filter is kept in
+            front of the write, unchanged.
+
+            This is how these programs are ordinarily driven
+            from a shell -- `rmcdhf < answers` -- so the change
+            moves the code toward the idiom rather than away
+            from it. It also has a practical benefit that is
+            worth as much as the finding: when a Grasp2K program
+            fails, the exact answer script it was fed is still
+            on disk beside the run's other files, which is the
+            first thing anyone diagnosing that failure wants.
+            Previously it vanished with the process.
+
+            On the test in "Findings fixed without being
+            agreed": passed already and passes still. Had the
+            report been right that `stdin_text` becomes part of
+            a command, it could not now, because it is not part
+            of the call.
+
+            Verified 2026-09-22 against a stand-in program that
+            echoes its standard input: the child receives the
+            answer script byte for byte, and the script is left
+            on disk afterwards holding exactly what was sent.
+            The five injected scripts from the September round
+            are still refused, and an occupation string with
+            parentheses and a comma -- `2s(2)`, `3d(6,i)` --
+            still runs, so the filter's deliberate omission of
+            `(` `)` `,` is intact. `rm -rf /` and `../../bin/sh`
+            are still refused as program names.
 
 ---
 
@@ -1235,6 +1404,75 @@ entries and in the section below.
             `3.5`, `-1.25`, `+2`, `1e-6` and `2.0E3`, and
             rejects `; touch x`, `$(id)`, `abc`, `1;2` and the
             empty string.
+- Re-rep-   2026-09-22, at line 389 -- the post-fix line holding
+  orted:    the same call -- naming `command`, and still citing
+            `initial_potential_db.py:476` as the source, which
+            the trace above showed is not connected to it.
+
+            **This one cannot be made to go away, and that is
+            the finding of the second round.** A program whose
+            job is to run `makeinput.py` and `imago.py` must
+            contain a call that starts a process. Removing the
+            construct would mean importing `makeinput.py` and
+            calling its `main()` in-process, which trades a
+            process boundary for `os.chdir` global state,
+            `SystemExit` handling and module state leaking
+            between invocations -- and the same argument would
+            then be made about `_run_loen`, which launches the
+            Fortran engine. Considered and rejected by the
+            programmer, 2026-09-22. The residual finding is a
+            permanent property of what this script does, and
+            belongs in the installers' false-positive workflow
+            rather than in another edit here.
+
+            **What was strengthened anyway, and why it is not
+            cosmetic.** The September check was a TEST: it
+            required each value to match `_NUMERIC_ARGUMENT` and
+            then passed the original value on. A test constrains
+            what may proceed; it does not change what proceeds.
+            The new `_numeric_argument` REBUILDS each value from
+            the number it denotes -- `str(int(text))` for a
+            whole number, `repr(float(text))` otherwise -- so
+            the word handed to the child is one Python's own
+            formatter produced. Its character content is a
+            property of that function rather than an inherited
+            property of whatever produced the value, and a
+            string arriving here cannot pass any character of
+            itself through to the command. That is a stronger
+            guarantee than the test it replaces, and it is also
+            the shape a taint analysis can recognise: a value
+            derived through a numeric conversion is not the
+            value that was checked.
+
+            Integers are rebuilt as integers deliberately.
+            `loenCode`, `twoj1`, `twoj2` and `max_neigh` are
+            whole numbers, and emitting `4.0` for `4` would
+            change the LOEN block `makeinput` writes. The six
+            real parameters round-trip to exactly the spellings
+            they had before this change.
+
+            On the test in "Findings fixed without being
+            agreed": passed already and passes more strongly
+            now. Had a database string reached `loen_values`, it
+            was previously refused; it is now additionally
+            incapable of contributing a character to the
+            command even if the pattern were somehow satisfied.
+
+            No change was made to `initial_potential_db.load`,
+            for the reason given above: `tomllib` is the correct
+            reader and its ten validation rules are more
+            thorough than anything this campaign would add.
+
+            Verified 2026-09-22. The six real LOEN defaults
+            round-trip to `1`, `4`, `4`, `50`, `9.0` and `0.85`
+            -- unchanged spellings; `+2` normalizes to `2` and
+            `-1.25` survives. Refused: `; touch /tmp/x`,
+            `$(id)`, `` `id` ``, `1;2`, `abc`, the empty string,
+            `| nc evil 1`, `> /etc/passwd`, `4 5`, and also
+            `nan` and `inf`, which the pattern does not admit
+            and which therefore never reach the conversion.
+            `test_makegroups.py` shows the same results before
+            and after the change.
 
 ---
 
