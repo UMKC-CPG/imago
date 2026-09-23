@@ -35,17 +35,32 @@ force one severity scale onto two unrelated questions.
   recorded here as they surface but are deliberately NOT worked
   until that external list is exhausted, so the supplied list
   keeps its order and nothing in it is skipped.
-- **Second round, 2026-09-22.** A rescan returned three items,
-  described as the remaining critical vulnerabilities. All three
-  are SEC-005, SEC-006 and SEC-010 re-reported against the
-  already-hardened source: the line numbers quoted (532, 414,
-  389) are the post-fix lines, and the `makegroups` item still
-  carries the same `initial_potential_db.py:476` provenance that
-  SEC-010 traced and found does not exist. Worked as amendments
+- **Second round, 2026-09-22 -- CLOSED, PASSED 2026-09-23.** A
+  rescan returned three items, described as the remaining
+  critical vulnerabilities. All three were SEC-005, SEC-006 and
+  SEC-010 re-reported against the already-hardened source: the
+  line numbers quoted (532, 414, 389) were the post-fix lines,
+  and the `makegroups` item still carried the same
+  `initial_potential_db.py:476` provenance. Worked as amendments
   to those three entries rather than as new IDs, since splitting
-  them would separate each finding from its own trace. See "What
-  the rescan settled" below for what this round changed about
-  the campaign's approach.
+  them would separate each finding from its own trace.
+
+  **The scanner is Checkmarx** (identified 2026-09-23). The
+  scan after these changes returned clean and the installers'
+  requirements are met -- including `makegroups.py`, which this
+  ledger had predicted would keep firing. See "What the rescan
+  settled" for what the round changed about the campaign's
+  approach, and SEC-010's `Outcome` field for why that
+  prediction was wrong and why making it was the mistake.
+
+  **Checkmarx facts worth keeping.** There is no inline
+  suppression comment (no `# nosec` equivalent); the supported
+  dispositions are the result state -- Not Exploitable, usually
+  proposed and then confirmed -- and query customization.
+  Editing a flagged line changes the result's similarity ID, so
+  triage state on it can revert to "To Verify"; a finding that
+  reappears untriaged after a fix is not necessarily a
+  regression.
 - Scope: Imago's own Fortran and Python source only.
   Third-party dependency advisories (the conda toolchain, HDF5,
   the Python packages) are out of scope for this campaign.
@@ -237,6 +252,22 @@ the program, satisfy it; and where it cannot, say so in the
 entry and stop, rather than deforming the code toward a tool's
 pattern list.
 
+**Amended 2026-09-23, after the round's own prediction failed.**
+The scan came back clean, `makegroups.py` included -- the one
+item this document had said would recur on every scan forever.
+The rule above is right but was stated one-sidedly. Read it in
+both directions: do not predict that a scanner will fall
+silent, and do not predict that it will keep firing. Two
+rounds have now produced one confident prediction each, in
+opposite directions, and both were wrong. The tool's behaviour
+is not something this project can model from the outside, and
+nothing should be staked on a guess about it.
+
+What survived both rounds is the part that was never a
+prediction: each change stood on its own merits. That is the
+only ground worth building on, and it is the ground
+ARCHITECTURE 13 is written from.
+
 ## Severity scale
 
 Deliberately security-shaped, and not the same axis as
@@ -284,9 +315,15 @@ second time. Each entry carries a `Re-reported` field saying
 what that round changed. Two of the three constructs are now
 gone from the source. The third, `makegroups.py`'s call to
 start `makeinput.py`, cannot be removed without harming the
-program and is expected to keep appearing in every scan; the
-reasoning is in SEC-010 and the disposition belongs to the
-installers' false-positive workflow.
+program and remains in place; what changed there is that the
+arguments are rebuilt rather than merely checked (SEC-010).
+
+**The 2026-09-23 scan returned clean on all three, and the
+installers' requirements are met.** This document predicted
+that the `makegroups.py` item would recur regardless; it did
+not. SEC-010's `Outcome` field and "What the rescan settled"
+both record that, because a ledger that quietly drops its own
+failed predictions is worth less than one that keeps them.
 
 ---
 
@@ -1294,16 +1331,28 @@ installers' false-positive workflow.
 - Our       Three independent findings, any one of which is
   reading:  sufficient.
 
-            **1. The claimed data flow does not exist.**
-            `makegroups.py` never reads the potential database.
-            It does not import `initial_potential_db`, and the
-            string does not occur anywhere in the file. Its
-            entire import list is `argparse`, `glob`, `os`,
-            `re`, `shutil`, `subprocess`, `sys`,
-            `collections.OrderedDict`, `datetime`, and two local
-            modules (`matchers`, `structure_control`). There is
-            no path, direct or indirect, from that loader to
-            this call site.
+            **1. The claimed data flow does not exist as a
+            single execution path.** `makegroups.py` never reads
+            the potential database. It does not import
+            `initial_potential_db`, and the string does not
+            occur anywhere in the file. Its entire import list
+            is `argparse`, `glob`, `os`, `re`, `shutil`,
+            `subprocess`, `sys`, `collections.OrderedDict`,
+            `datetime`, and two local modules (`matchers`,
+            `structure_control`).
+
+            > **CORRECTED 2026-09-23.** The sentence that stood
+            > here read: "There is no path, direct or indirect,
+            > from that loader to this call site." That was
+            > wrong, and the heading above has been narrowed to
+            > match. A path does exist for a whole-program
+            > analysis, through a shared helper that this file
+            > exports. It is traced in the `Re-reported` field
+            > below. The error came from checking what
+            > `makegroups.py` IMPORTS and stopping there,
+            > without checking who calls INTO it -- see
+            > ARCHITECTURE 13.4, which exists because of this
+            > mistake.
 
             The values actually passed are built two lines
             above the call:
@@ -1473,6 +1522,76 @@ installers' false-positive workflow.
             and which therefore never reach the conversion.
             `test_makegroups.py` shows the same results before
             and after the change.
+- The      Traced 2026-09-23, after the scanner was identified
+  bridge:  as Checkmarx. The report's cross-file claim is not a
+            phantom. `makegroups.py` exports
+            `loen_input_values` (line 335), and that helper is
+            called from TWO modules:
+
+                build_initial_potentials.py:1070
+                    makegroups.loen_input_values(
+                        matcher, declaration.sub_spec)
+                makegroups.py:520, :603
+                    _run_makeinput(
+                        work_dir, loen_input_values(...))
+
+            The first caller sits downstream of the very loader
+            the report names: `initial_potential_db.load` reads
+            the manifest at line 476-477, `curation_manifest`
+            builds `ReferenceSolid` from it, and
+            `producer_fingerprint_declarations` turns those into
+            the `declaration.sub_spec` handed to the helper. The
+            second caller reaches `subprocess.run`
+            (`makegroups.py:421`, formerly 389).
+
+            A context-insensitive interprocedural taint
+            analysis, which is what Checkmarx performs by
+            default, taints the helper's `sub_spec` parameter
+            from the first call site and carries that taint out
+            through its return value into the second. Neither
+            call site produces the flow alone; merging them
+            does. **No single run traverses it** --
+            `build_initial_potentials` puts the values into
+            `loen_options["loeninput"]` for a `CalcUnit` to
+            dispatch and never calls `_run_makeinput` -- so the
+            finding remains not exploitable, for the three
+            reasons above and now a fourth: `_numeric_argument`
+            sits at line 414, between the merged return value
+            and the sink.
+
+            The general lesson is bigger than this entry and is
+            written up as ARCHITECTURE 13.4: **a shared helper
+            is a taint bridge.** Before asserting that module A
+            cannot reach module B, check who calls INTO A, not
+            only what A imports.
+- Outcome: **PASSED. Reported by the programmer 2026-09-23: the
+            rescan after these changes returned clean, and the
+            installers' requirements are met.** All three items
+            cleared, `makegroups.py` included.
+
+            **A prediction recorded here was wrong, and the
+            error is worth more than the result.** The
+            2026-09-22 round predicted this item would keep
+            firing forever, on the reasoning that the construct
+            cannot be removed and that Checkmarx would not treat
+            a numeric round-trip as sanitization without a
+            custom query. The construct indeed was not removed.
+            The finding cleared anyway. The most likely
+            explanation is that `_numeric_argument` reads as a
+            sanitizer to the analysis after all -- the value
+            reaching the sink is constructed by `int()`/`float()`
+            formatting and is not the value that arrived -- which
+            is precisely the difference between REBUILDING a
+            value and merely TESTING it.
+
+            So the rule the previous round drew ("do not predict
+            that a scanner will fall silent") holds in both
+            directions. It was stated there as a caution against
+            predicting silence; it is equally a caution against
+            predicting noise. Neither prediction was worth
+            making. What was worth doing was the change itself,
+            which is defensible on its own merits whatever any
+            tool reports.
 
 ---
 

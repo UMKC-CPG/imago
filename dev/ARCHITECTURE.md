@@ -3957,3 +3957,187 @@ Note that `O_TimeStamps` declares a `banner` variable
 (`timeStamps.f90:24`) that nothing reads -- it is dead, and
 predates this work. It should be removed rather than confused
 with `O_Banner`.
+
+## 13. Untrusted Input and Process Execution
+
+*Settled by the security campaign of 2026-09-07 and 2026-09-22,
+tracked in `dev/SECURITY_TODO.md` -- a ledger of findings rather
+than a level of the chain. No VISION goal or principle drives
+this section: it was forced by an external vulnerability report
+rather than chosen. It belongs in ARCHITECTURE anyway, because
+what the campaign settled constrains module boundaries and call
+shapes, and a ledger entry is read once while this has to govern
+code nobody has written yet.*
+
+Imago reads files it did not write. A skeleton comes from a
+collaborator, a structure comes from a public database, a
+manifest is hand-edited by a curator, a scratch directory is
+shared on a cluster. The engine also launches other programs:
+scripts drive `makeinput.py`, `imago.py` and the Grasp2K
+binaries as child processes. Those two facts together are the
+whole of this section's subject. Everything below exists
+because a campaign against an external vulnerability report
+(SEC-001 through SEC-010, two rounds, 2026-09-07 and
+2026-09-22) found real defects at exactly their intersection.
+
+The rules are stated as architecture rather than as advice
+because they constrain module boundaries and call shapes, not
+just style, and because three of them were learned by getting
+them wrong first.
+
+### 13.1 Data is never code
+
+No value that arrives from a file, a database, a prompt or an
+environment variable may be evaluated. `eval`, `exec` and
+`pickle.load` are excluded from this codebase for anything with
+an external origin, without exception and regardless of how
+constrained the namespace looks. Four of the ten findings in
+the first round were `eval` or `exec` on file content, and one
+of them -- `viewCell.py` executing a `BZ.<n>` geometry file as
+Python -- meant that any such file could run anything.
+
+TOML is the project's data format for this reason and not
+merely by taste. `tomllib` yields dicts, lists, strings,
+numbers, booleans and dates, and has no way to express a call.
+The contrast worth holding in mind is `pickle.load`, which
+takes the same binary handle and is indistinguishable at the
+call site from `tomllib.load` to anyone skimming, and which
+executes arbitrary code by design with no injection required.
+A reader checking this codebase for that distinction is
+checking the right thing.
+
+Where a value genuinely must be computed from text -- a lattice
+equation in a SYBD file, a k-point coordinate -- it goes
+through a purpose-built evaluator that understands only the
+grammar it is meant to accept. That is a parser, not a
+sandbox, and the difference is that a parser cannot be escaped
+from because it has nowhere to escape to.
+
+### 13.2 Starting a process has a fixed shape
+
+Every call that starts a child process in this codebase takes
+the same form, and a new one that does not is wrong:
+
+- The command is a **list**, never a string. The elements
+  become `argv` through `execve`, so no shell parses them and
+  metacharacters carry no meaning.
+- `shell=False` is **written out** at the call even though it
+  is the default. The absence of a shell is the reason the
+  arguments need no quoting, and a reader checking that should
+  not have to recall a default.
+- The program name comes from a **closed set of constants**
+  declared in the module, checked before it is joined to a
+  directory. `graspElems.py`'s `GRASP_PROGRAMS` is the model.
+  This also closes path traversal: an unchecked name joined to
+  a binary directory can escape it with `../`.
+- Data **for** the child goes over its standard input as a
+  file, not as an argument to the call that starts it. Writing
+  the input to a file first and passing the open file as
+  `stdin=` keeps the payload out of the call entirely, and it
+  matches how these programs are driven from a shell anyway.
+
+### 13.3 Validate by rebuilding, not by testing
+
+This is the rule that took two rounds to learn and is the one
+most easily got wrong, because the wrong version looks
+identical to the right one at a glance.
+
+A **test** constrains what may proceed:
+
+    if not NUMERIC.fullmatch(str(value)):
+        raise ValueError(...)
+    command = [..., *values]          # the ORIGINAL values
+
+A **rebuild** changes what proceeds:
+
+    def numeric_argument(value):
+        text = str(value)
+        if not NUMERIC.fullmatch(text):
+            raise ValueError(...)
+        try:
+            return str(int(text))
+        except ValueError:
+            return repr(float(text))
+
+    command = [..., *[numeric_argument(v) for v in values]]
+
+Both refuse the same inputs. Only the second guarantees the
+character content of what reaches the child, because the word
+it passes on was constructed by Python's own formatter and is
+not the word that arrived. A string reaching the rebuild cannot
+contribute a single character to the command.
+
+The property to want is this: the safety of the call should be
+a local property of the function that makes it, not an
+inherited property of a caller several files away. A test
+leaves the guarantee upstream, where a later edit can
+invalidate it silently. A rebuild brings it home.
+
+Where the value is genuinely free text and cannot be rebuilt
+from a type -- a curator's description, an answer script for an
+interactive program -- validate it at the single point it
+enters the program, hold it to a positive shape where one
+exists, and refuse rather than escape. `expand_manifest.py`'s
+`clean_answer` is the model.
+
+### 13.4 A shared helper is a taint bridge
+
+The rule with the largest blast radius, learned from being
+wrong in the ledger.
+
+`makegroups.py` does not import `initial_potential_db`. That
+was checked, correctly, and then used to conclude that no path
+existed between the two -- which was false. `makegroups.py`
+*exports* `loen_input_values`, and `build_initial_potentials.py`
+imports both modules and calls that helper with data that
+originated in the database. The helper's return value then
+flows, in `makegroups.py`'s own other callers, to a
+`subprocess.run`. No single run traverses the join. A
+whole-program analysis traverses it easily, because it merges a
+function's parameters and return value across every call site.
+
+Three consequences for how modules are laid out and reasoned
+about:
+
+1. **Reachability is not an import question.** Before asserting
+   that module A cannot reach module B, check who calls INTO A,
+   not only what A imports. The import list answers a narrower
+   question than it appears to.
+2. **A helper exported to another module joins their data
+   flows.** That is usually fine and often the point -- sharing
+   `loen_input_values` is exactly what keeps the producer's LOEN
+   block and the grouping flow comparable. But the sharing is a
+   seam, and it belongs in the seam inventory that any DESIGN or
+   PSEUDOCODE section touching existing code has to write.
+3. **Put the guard between the shared helper and the sink.** A
+   check upstream of the helper protects one caller. A rebuild
+   downstream of it, immediately before the call that consumes
+   the value, protects every caller including ones written
+   later.
+
+### 13.5 Scope, and what this does not license
+
+`src/scripts/` leaf utilities are worked inline against these
+rules. A finding inside the compiled engine -- anything under
+`src/imago/`, `src/atomSCF/` and the other subprograms -- goes
+down the document chain normally, because a change there is
+engine algorithm work and the gate exists to protect exactly
+that.
+
+Two cautions, both earned.
+
+**Do not deform the code toward a scanner.** These rules are
+written because each makes the program better to read and
+harder to misuse. None of them is here to satisfy a tool. Where
+a construct cannot be removed without harming the program --
+and a script whose job is to launch another program must
+contain a call that starts one -- the right response is to
+state that plainly in the ledger and stop.
+
+**Do not predict what a scanner will report.** This project has
+now made one confident prediction in each direction and been
+wrong both times: that removing a pattern would produce a clean
+report, and that an irremovable pattern would be reported
+forever. Neither prediction was worth making. Judge a change by
+whether it closes a real weakness and whether it leaves the
+code clearer, and let the report say what it says.

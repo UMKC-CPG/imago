@@ -331,6 +331,64 @@ skl/                  Example skeleton input files
   that take a command to run; the `*rc.py` resource-control files
   and imported library modules (no `__main__`) are exempt.
 
+## Security Conventions
+
+**ARCHITECTURE 13 governs this; `dev/SECURITY_TODO.md` is the
+ledger of findings.** Read ARCHITECTURE 13 before writing any
+code that reads a file someone else wrote or starts a child
+process. The rules below are the short form; the reasoning,
+and the mistakes that produced each one, are there.
+
+Imago reads files it did not write -- skeletons from
+collaborators, structures from public databases, manifests from
+curators, scratch directories shared on a cluster -- and it
+launches other programs. Every defect the security campaign
+found was at the intersection of those two facts.
+
+**Data is never code.** Never `eval`, `exec` or `pickle.load`
+anything whose origin is a file, a database, a prompt or an
+environment variable, however restricted the namespace looks.
+Use `tomllib`: TOML cannot express a call. Where text genuinely
+must become a value, write a parser for the grammar you mean to
+accept -- not a sandbox.
+
+**Starting a process has one shape.** A list argv, never a
+string. `shell=False` written out at the call even though it is
+the default. The program name taken from a closed set of
+constants declared in the module and checked before it is
+joined to a directory. Data *for* the child written to a file
+and passed as `stdin=`, never as an argument to the call.
+
+**Validate by rebuilding, not by testing.** A check that raises
+and then forwards the original value leaves the guarantee
+upstream. Return a value you constructed instead --
+`str(int(text))`, `repr(float(text))` -- so the safety of the
+call is a local property of the function making it. This
+distinction is subtle, easy to get wrong, and took this project
+two rounds to learn.
+
+**Reachability is not an import question.** Before claiming
+module A cannot reach module B, check who calls INTO A, not
+only what A imports. A helper that A exports joins A's callers
+to B's data. This project asserted "no path, direct or
+indirect" on an import list alone and was wrong. Put the guard
+between the shared helper and the sink, where it protects every
+caller including ones not yet written.
+
+**Do not write code for a scanner.** Every rule above earns its
+place by making the program better to read and harder to
+misuse. Where a construct cannot be removed without harming the
+program -- a script whose job is to launch another program must
+contain a call that starts one -- say so in the ledger and
+stop. And do not predict what a scanner will report: this
+project has guessed in both directions and been wrong both
+times.
+
+**When you touch any of this, update the ledger.** A security
+change to a `src/scripts/` leaf tool is worked inline, outside
+the PSEUDOCODE gate. A finding inside the compiled engine goes
+down the chain normally.
+
 ## Documentation Policy
 
 This is an academic codebase used by students who frequently
