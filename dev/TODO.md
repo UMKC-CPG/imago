@@ -9254,6 +9254,39 @@ is not carried only in conversation.
   is sane.  Any band structure computed for one of the nine
   affected lattice types before 2026-09-07 followed a wrong
   path and should be recomputed.
+- [ ] T6. Decide whether `record_command()` should log runs that
+  never happened.  Observed 2026-09-28: running
+  `cod_fish.py --help` from `src/tests/` left an untracked
+  `command` file behind holding
+  `Cmnd: .../cod_fish.py --help`.  This affects EVERY runnable
+  script following the convention, not just `cod_fish.py`.
+
+  The cause is not a bug in any one script.  The convention
+  (CLAUDE.md, Key Conventions) calls `record_command()` from the
+  `if __name__ == "__main__":` block *before* `main()`, and that
+  placement is deliberate and correct for its own purpose: it
+  logs the real `sys.argv`, and it keeps the log from firing when
+  the test suite calls `main(argv)` directly.  But argparse
+  handles `--help` inside `parse_args()`, which is inside
+  `main()`, so the entry is already written by the time the
+  process exits having done nothing.  An argparse *error* -- a
+  mistyped option, exit code 2 -- is logged the same way.
+
+  The nuisance is small but real: asking a script for help
+  anywhere inside the repository leaves an untracked `command`
+  file that shows up in `git status` and can be committed by
+  accident.  It also makes the log less useful for its stated
+  purpose, since a reader cannot tell a real invocation from
+  someone reading the usage.
+
+  **This entry records the decision to make, not the fix.**  The
+  question is whether a `--help` is worth recording at all.  If
+  the answer is no, a guard on `-h`/`--help` before recording is
+  a one-line change per script and needs no level; anything that
+  reaches further -- recording after a successful parse, or
+  teaching the helper which exits count as runs -- changes the
+  convention itself across every script and belongs in
+  PSEUDOCODE before it is coded.
 
 ---
 
