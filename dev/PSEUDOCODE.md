@@ -8385,6 +8385,113 @@ function build_interactive(sources, ask, **shared):
         reference_solids = solids)
 ```
 
+### 11.7 Keeping the CIFs `cod_fish pin` already fetched (DESIGN 5.7)
+
+`pin` downloads every chosen structure's CIF and keeps none of
+them.  It fetches each one to read four things -- the revision,
+the derived `reference_id`, the composition hint and the
+`source_description` -- and then lets the bytes go.  A curator
+who wants the CIF files themselves has to fetch each one a
+second time through `cod_fish get`, having already paid for the
+download.  `--save-cif` writes out what is already in hand.
+
+**Seam inventory.**  This attaches to a running program, so
+every quantity it touches is named here before any of it is
+written.
+
+- **CIF bytes** come from `fetch_cif(cod_id)` in `pin`'s loop,
+  once per chosen row.  They are held in a loop local that dies
+  each iteration, which is the quantity this change preserves.
+- **`revision`** comes from `cif_revision(bytes)` in the same
+  iteration, and is held on the pinned record.
+- **`reference_id`** comes from `_auto_reference_id(bytes)`, same
+  iteration, held on the pinned record as the *base* name only.
+- **The final solid name** comes from `_named_pins(pinned)`, and
+  is held by the two manifest emitters rather than by `pin`.  It
+  cannot exist until every row has been pinned.
+- **The output directory** comes from the new CLI option and is
+  read in `_run_pin`, at write time.
+
+**The one fact that decides the structure.**  The name a
+structure carries in the manifest is NOT `entry.reference_id`.
+It is the name `_named_pins` assigns, which appends a counter
+when two pinned structures reduce to the same base -- two
+polymorphs from the same paper in the same space group do
+exactly that.  So `_named_pins` cannot know its answer until
+every row is pinned, and a file named inside `pin`'s own loop
+would use the base name instead.  Two such structures would
+then write the same path: one CIF silently overwriting the
+other, and the surviving file matching only one of the two
+`[[reference_solid]]` blocks that claim it.  A curator would
+find a manifest naming a structure whose CIF held a different
+one.
+
+That rules out writing from inside the fetch loop.  The bytes
+must survive until the names are settled, so `pin` carries them
+on the record it already returns, and the write happens where
+`_named_pins` is already being walked.  Holding them costs
+nothing at this scale: `pin` is for a handful of chosen rows,
+not a search result set, and that is a property of the verb
+rather than a limit being imposed here.
+
+```
+function pin(tokens, session_rows):
+    # UNCHANGED except for the added "cif" field.  Every other
+    # consumer reads the record by key, so carrying one more
+    # key is invisible to them.
+    pinned = []
+    for cod_id in resolve_ids(tokens, session_rows):
+        data = fetch_cif(cod_id)
+        pinned.append({
+            "id"           : cod_id,
+            "revision"     : cif_revision(data),
+            "reference_id" : auto_reference_id(data),
+            "elements"     : composition(data),
+            "description"  : source_description(data),
+            "cif"          : data })       # the bytes, kept
+    return pinned
+
+function save_pinned_cifs(pinned, directory):
+    # Walk the SAME iterator the emitters walk, so a file's name
+    # and its [[reference_solid]] name come from one place and
+    # cannot disagree.  Returns the paths written, for the report.
+    make_directory(directory, ok_if_exists = True)
+    written = []
+    for (name, entry) in named_pins(pinned):
+        path = join(directory, name + ".cif")
+        write_bytes(path, entry["cif"])
+        written.append(path)
+    return written
+
+function run_pin(args):
+    pinned = pin(args.targets, load_session())
+    # The manifest goes to standard output, so the CIF report
+    # must NOT: a redirected `pin > manifest.toml` would
+    # otherwise take the report into the manifest.  It goes to
+    # standard error, which stays on the terminal.
+    if args.save_cif is not None:
+        for path in save_pinned_cifs(pinned, args.save_cif):
+            print_err("Wrote " + path)
+    if args.sketch_only: print(manifest_fragment(pinned))
+    else:                print(complete_manifest(pinned))
+```
+
+**Why the option takes an optional directory.**  `pin` writes
+one file per chosen row, so it needs a place rather than a
+path -- `get`'s `-o` names a single output and does not
+generalize.  Bare `--save-cif` writes into the current
+directory, which is where `pin > manifest.toml` puts the
+manifest, so the common case needs no argument.  A named
+directory is created when absent, because requiring the curator
+to `mkdir` first would fail a pin AFTER its downloads.
+
+**What is deliberately not done.**  An existing file of the same
+name is overwritten rather than refused.  Re-pinning the same
+rows is the ordinary way to refresh a manifest whose revisions
+have moved, and a refusal would make the second pin fail
+halfway with some files written.  The report names every path
+written, so an overwrite is visible rather than silent.
+
 ## 12. imago.py Callable API (DESIGN 6.1)
 
 The refactor of `imago.py` from a command-line-only

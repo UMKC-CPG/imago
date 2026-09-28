@@ -322,14 +322,15 @@ class TestPinDispatch:
     _PINNED = [{"id": "9008463", "revision": "291735",
                 "reference_id": "si_fd-3m_227_2010"}]
 
-    def _run(self, monkeypatch, capsys, sketch_only):
+    def _run(self, monkeypatch, capsys, sketch_only, save_cif=None):
         # Stub pin() so no network is hit; run _run_pin with a minimal
-        #   args stand-in carrying just the two fields it reads.
+        #   args stand-in carrying just the three fields it reads.
         monkeypatch.setattr(cod_fish, "pin",
                             lambda targets, session_rows=None: self._PINNED)
         monkeypatch.setattr(cod_fish, "load_session", lambda: [])
         args = types.SimpleNamespace(targets=["1"],
-                                     sketch_only=sketch_only)
+                                     sketch_only=sketch_only,
+                                     save_cif=save_cif)
         assert cod_fish._run_pin(args) == 0
         return capsys.readouterr().out
 
@@ -344,6 +345,58 @@ class TestPinDispatch:
         out = self._run(monkeypatch, capsys, sketch_only=True)
         assert "# fill in" in out
         assert "[defaults]" not in out
+
+
+class TestSaveCif:
+    """``pin --save-cif`` writes out the CIFs the pin already fetched,
+    named by the reference_id each structure's manifest block carries
+    (PSEUDOCODE 11.7)."""
+
+    # Two structures that reduce to the SAME base reference_id.  This
+    #   is the case the pseudocode says decides where the write has to
+    #   happen: the second one's manifest name gains a counter, and a
+    #   file named during the fetch loop would not know that yet.
+    _COLLIDING = [
+        {"id": "9008463", "revision": "291735",
+         "reference_id": "si_fd-3m_227_2010", "cif": b"FIRST STRUCTURE"},
+        {"id": "1010064", "revision": "247114",
+         "reference_id": "si_fd-3m_227_2010", "cif": b"SECOND STRUCT"}]
+
+    def test_names_match_the_manifest_and_do_not_collide(self, tmp_path):
+        target = tmp_path / "cifs"          # deliberately absent
+        written = cod_fish.save_pinned_cifs(self._COLLIDING, str(target))
+        assert target.is_dir()              # created on demand
+        assert len(set(written)) == 2       # neither overwrote the other
+
+        # Each file must hold the structure its own manifest block
+        #   names -- not whichever happened to be pinned last.
+        manifest = cod_fish._complete_manifest(self._COLLIDING)
+        named = list(cod_fish._named_pins(self._COLLIDING))
+        for (name, entry), path in zip(named, written):
+            assert path.endswith(f"{name}.cif")
+            assert open(path, "rb").read() == entry["cif"]
+            assert f'reference_id = "{name}"' in manifest
+
+    def test_repin_overwrites_rather_than_failing(self, tmp_path):
+        first = cod_fish.save_pinned_cifs(self._COLLIDING, str(tmp_path))
+        again = cod_fish.save_pinned_cifs(self._COLLIDING, str(tmp_path))
+        assert first == again
+
+    def test_report_stays_off_standard_output(self, monkeypatch, capsys,
+                                              tmp_path):
+        # `pin > manifest.toml` is the whole authoring step, so a report
+        #   on standard output would be redirected into the manifest.
+        monkeypatch.setattr(cod_fish, "pin",
+                            lambda targets, session_rows=None:
+                            self._COLLIDING)
+        monkeypatch.setattr(cod_fish, "load_session", lambda: [])
+        args = types.SimpleNamespace(targets=["1"], sketch_only=False,
+                                     save_cif=str(tmp_path))
+        assert cod_fish._run_pin(args) == 0
+        captured = capsys.readouterr()
+        assert "Wrote " not in captured.out
+        assert captured.out.lstrip().startswith("schema_version")
+        assert captured.err.count("Wrote ") == 2
 
 
 class TestStoichiometry:

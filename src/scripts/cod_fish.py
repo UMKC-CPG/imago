@@ -22,7 +22,9 @@ reproducible acquisition:
                 their current revisions and print a complete, runnable
                 manifest (or, with ``--sketch-only``, a sketch for
                 expand_manifest to finish) -- the bridge from browsing to
-                a pinned pull.
+                a pinned pull.  ``--save-cif`` additionally keeps the
+                CIFs the pin already fetched, named to match their
+                manifest blocks.
 * ``rank``   -- advisory triage: when a composition has many entries,
                 annotate and order them by interpretable signals so a
                 student can spot the likely "real" phase.  It narrows the
@@ -38,6 +40,7 @@ Command-line usage::
     cod_fish.py search --elements Si O --max-extra 1
     cod_fish.py rank   --elements SiO2-as-elements ...
     cod_fish.py pin 2 5 7                          # by row index
+    cod_fish.py pin 2 5 7 --save-cif cifs/ > manifest.toml
     cod_fish.py get 9008463 --revision 291735 -o au.cif
 """
 
@@ -571,10 +574,16 @@ def pin(tokens, session_rows=None):
     discovery hints.
 
     Returns a list of ``{id, revision, reference_id, elements,
-    description}`` dicts.  Only the chosen few are fetched -- to read
-    each one's revision and derive, from the CIF metadata, its
+    description, cif}`` dicts.  Only the chosen few are fetched -- to
+    read each one's revision and derive, from the CIF metadata, its
     reference_id, its composition, and a human description; a broad
-    search is never downloaded wholesale."""
+    search is never downloaded wholesale.
+
+    The CIF bytes are carried on the record under ``cif`` rather than
+    discarded once those four fields are read, so
+    :func:`save_pinned_cifs` can write out the files this fetch already
+    paid for.  Holding them costs nothing at this scale: ``pin`` is for
+    the handful of rows a curator chose, never for a whole search."""
 
     pinned = []
     for cod_id in resolve_ids(tokens, session_rows):
@@ -584,8 +593,44 @@ def pin(tokens, session_rows=None):
             "revision": cif_revision(data),
             "reference_id": _auto_reference_id(data),
             "elements": _composition(data),
-            "description": _source_description(data)})
+            "description": _source_description(data),
+            "cif": data})
     return pinned
+
+
+def save_pinned_cifs(pinned, directory):
+    """Write each pinned structure's CIF into ``directory``, named by
+    the reference_id its manifest block will carry.  Returns the list of
+    paths written, in pinned order.
+
+    The naming is the whole point of doing this here rather than inside
+    :func:`pin`'s fetch loop.  A structure's manifest name is not its
+    raw ``reference_id`` but the one :func:`_named_pins` assigns, which
+    appends a counter when two pinned structures reduce to the same base
+    -- two polymorphs reported in the same paper and space group do
+    exactly that.  That answer is not known until every row is pinned,
+    so a file named during the fetch would use the base name, and the
+    second such structure would overwrite the first while the manifest
+    went on claiming both.  Walking the same iterator the manifest
+    emitters walk means a file's name and its ``[[reference_solid]]``
+    name come from one place and cannot disagree.
+
+    The directory is created when it does not exist, because asking the
+    curator to make it first would fail the pin only after its downloads
+    had been paid for.  An existing file of the same name is
+    overwritten: re-pinning is the ordinary way to refresh a manifest
+    whose revisions have moved, and refusing would leave a half-written
+    set behind.  Every path is returned so the caller can report it,
+    which keeps an overwrite visible rather than silent."""
+
+    os.makedirs(directory, exist_ok=True)
+    written = []
+    for name, entry in _named_pins(pinned):
+        path = os.path.join(directory, f"{name}.cif")
+        with open(path, "wb") as handle:
+            handle.write(entry["cif"])
+        written.append(path)
+    return written
 
 
 # ============================================================
@@ -759,6 +804,13 @@ def _run_pin(args):
             "pin needs at least one row index or COD id, e.g. "
             "`cod_fish.py pin 1 3`")
     pinned = pin(args.targets, session_rows=load_session())
+    # The manifest goes to standard output, because the whole authoring
+    #   step is `cod_fish.py pin <ids> > manifest.toml`.  The saved-CIF
+    #   report therefore goes to standard error: on standard output it
+    #   would be redirected into the manifest and corrupt it.
+    if args.save_cif is not None:
+        for path in save_pinned_cifs(pinned, args.save_cif):
+            print(f"Wrote {path}", file=sys.stderr)
     if args.sketch_only:
         print(_manifest_fragment(pinned))
     else:
@@ -866,6 +918,17 @@ def _build_parser():
              "element and description hints) for expand_manifest to "
              "finish, instead of the default complete, runnable "
              "manifest.  Default: off (complete manifest).")
+    # Keep the fetched CIFs (pin).
+    parser.add_argument(
+        "--save-cif", nargs="?", const=".", default=None, metavar="DIR",
+        help="pin: also write each pinned structure's CIF into DIR, "
+             "named <reference_id>.cif to match its manifest block.  "
+             "pin downloads these anyway, so this costs no extra "
+             "fetch.  DIR is created if absent, and an existing file "
+             "of the same name is overwritten; each path written is "
+             "reported on standard error so it does not land in a "
+             "redirected manifest.  Default: off; with the flag and "
+             "no DIR, the current directory.")
     return parser
 
 
