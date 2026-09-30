@@ -8,12 +8,13 @@ PLOT_DEADMD: Plotting utility for DEAD-MD genetic algorithm runs
 =============================================================================
 
 Reads the dat files produced by deadmd.py and saves PNG plots to the
-current directory. By default all eight plots are generated. Use the
+current directory. By default all plots are generated (a plot whose
+input file is missing, e.g. an older run, is skipped with a note). Use the
 optional --plots flag to select a subset, and --show to pop up the
 plots interactively via X11.
 
 Usage:
-    plot_deadmd.py <element> [--plots PLOT [PLOT ...]] [--show]
+    plot_deadmd.py [element] [--plots PLOT [PLOT ...]] [--show]
 
 Positional arguments:
     element     Chemical symbol of the target element (e.g. h, c, si).
@@ -27,6 +28,8 @@ Optional arguments:
                   original-energy   -- total energy: best individual vs avg
                   original-density  -- density: best individual vs average
                   original-element  -- element %: best individual vs average
+                  original-energy-per-atom -- energy per atom (E/N):
+                                       best individual vs average
 
                   best-fitness      -- fitness of the best-fitness member
                   lowest-energy     -- lowest total energy per generation
@@ -36,6 +39,11 @@ Optional arguments:
                   best-element      -- actual vs target element % of the
                                        best-element-match member, plus
                                        deviation from target
+                  lowest-energy-per-atom -- lowest energy per atom (E/N)
+                                       per generation
+                  best-composition  -- at% of each target element of the
+                                       lowest-composition-metric member
+                                       vs target, plus the metric
 
     --show      Pop up each plot interactively in addition to saving the
                 PNG. Requires an active X11 display (i.e. SSH with -X or
@@ -59,23 +67,26 @@ Examples:
                              original-density original-element
 
 Input files (must exist in the current directory):
-    best_per_gen.dat        written by record_best_member()
     averages_per_gen.dat    written by record_generation_averages()
-    best_by_fitness_profile_per_gen.dat  written by record_best_member()
-    best_by_fitness_per_gen.dat    \\
-    best_by_energy_per_gen.dat      |  written by record_best_quantities()
-    best_by_density_per_gen.dat     |
-    best_by_element_per_gen.dat    /
+    best_by_fitness_per_gen.dat             \\
+    best_by_energy_per_gen.dat               |
+    best_by_energy_per_atom_per_gen.dat      |  written by
+    best_by_density_per_gen.dat              |  record_best_quantities()
+    best_by_element_per_gen.dat              |
+    best_by_composition_per_gen.dat         /   (target_composition only)
 
 Output files (written to the current directory):
     fitness_per_gen.png
     total_energy_per_gen.png
     density_per_gen.png
     element_pct_per_gen.png
+    energy_per_atom_per_gen.png
     best_by_fitness_per_gen.png
     best_by_energy_per_gen.png
     best_by_density_per_gen.png
     best_by_element_per_gen.png
+    best_by_energy_per_atom_per_gen.png
+    best_by_composition_per_gen.png
 
 Run from the same directory where deadmd.py was executed.
 =============================================================================
@@ -90,8 +101,8 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Backend selection must happen before pyplot is imported. We check for
 # --show in sys.argv here so we can make the decision early. If --show is
-# requested and a DISPLAY is available, we leave matplotlib to pick its
-# default interactive backend (usually TkAgg via X11). Otherwise we force
+# requested and a DISPLAY is available, we use the interactive
+# TkAgg backend (X11). Otherwise we force
 # the non-interactive Agg backend which is always safe on HPC nodes.
 # ---------------------------------------------------------------------------
 _SHOW_REQUESTED = "--show" in sys.argv
@@ -105,9 +116,18 @@ if _SHOW_REQUESTED and not _DISPLAY_AVAILABLE:
     )
     _SHOW_REQUESTED = False
 
+import matplotlib
 if not _SHOW_REQUESTED:
-    import matplotlib
     matplotlib.use("Agg")  # non-interactive, safe for HPC
+else:
+    # Ask for TkAgg explicitly. Left to itself matplotlib prefers QtAgg
+    # when PyQt is installed, and on the cluster nodes Qt's xcb plugin
+    # cannot load (libxcb-cursor0 is missing), which aborts the script.
+    # If Tk is unavailable, fall back to matplotlib's own choice.
+    try:
+        matplotlib.use("TkAgg")
+    except ImportError:
+        pass
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -122,10 +142,13 @@ ALL_PLOTS = [
     "original-energy",
     "original-density",
     "original-element",
+    "original-energy-per-atom",
     "best-fitness",
     "lowest-energy",
     "best-density",
     "best-element",
+    "lowest-energy-per-atom",
+    "best-composition",
 ]
 
 
@@ -141,14 +164,20 @@ def parse_args():
         epilog=(
             "Available plot names:\n"
             "  original-fitness  original-energy  original-density\n"
-            "  original-element  best-fitness     lowest-energy\n"
+            "  original-element  original-energy-per-atom\n"
+            "  best-fitness      lowest-energy\n"
             "  best-density      best-element\n"
+            "  lowest-energy-per-atom  best-composition\n"
         )
     )
     parser.add_argument(
         "element",
         type=str,
-        help="Chemical symbol of the target element (e.g. h, c, si)."
+        nargs="?",
+        default=None,
+        help=("Chemical symbol of the tracked element (e.g. h, c, si). "
+              "Optional: read from deadmd.in when omitted, and a "
+              "mismatch with deadmd.in is reported.")
     )
     parser.add_argument(
         "--plots",
@@ -177,18 +206,23 @@ def parse_args():
 # File loading
 # ---------------------------------------------------------------------------
 
-def load_dat_file(filename):
+def load_dat_file(filename, required=True):
     """
     Load a whitespace-delimited dat file with a one-line header and return
     a dictionary mapping column names to numpy arrays of float values.
 
     Args:
         filename: path to the dat file
+        required: if False, a missing file returns None (plot skipped)
 
     Returns:
-        dict of {column_name: np.ndarray}
+        dict of {column_name: np.ndarray}, or None
     """
     if not os.path.exists(filename):
+        if not required:
+            print(f"Skipped: '{filename}' not found (older run, or the "
+                  f"option that writes it is off).")
+            return None
         print(f"Error: '{filename}' not found. Run deadmd.py first.")
         sys.exit(1)
 
@@ -210,6 +244,9 @@ def load_dat_file(filename):
             # Skip repeated header lines that appear when the dat file
             # is appended to across multiple deadmd.py runs.
             continue
+        # A generation where every member crashed is written as a short
+        # row of nan; pad it so all columns keep the same length.
+        parsed += [float("nan")] * (len(headers) - len(parsed))
         for header, value in zip(headers, parsed):
             data[header].append(value)
 
@@ -252,6 +289,44 @@ def save_figure(fig, filename, show=False):
         plt.pause(0.1)  # let the window event loop initialise
 
 
+# Minimum y-axis spans. Without them matplotlib zooms to the data, so a
+# 0.02 g/cm3 or 1 at% difference fills the whole panel and looks huge.
+DENSITY_SPAN = 0.2   # g/cm3
+ELEMENT_SPAN = 5.0   # at%
+
+
+def set_min_span(axes, span, from_zero=False):
+    """Widen the y range to at least `span`: centred on the data, or
+    starting at 0 (deviation panels) when from_zero is True."""
+    low, high = axes.get_ylim()
+    if from_zero:
+        axes.set_ylim(0.0, max(high, span))
+    elif high - low < span:
+        middle = 0.5 * (low + high)
+        axes.set_ylim(middle - 0.5 * span, middle + 0.5 * span)
+
+
+def element_from_deadmd_in(filename="deadmd.in"):
+    """
+    Return the element deadmd.py tracks in element_evolve and the
+    best_by_element / element_pct columns: the `target_element` line if
+    present, else the first element of `target_composition`. None if
+    deadmd.in is missing or has neither.
+    """
+    if not os.path.exists(filename):
+        return None
+    first_composition = None
+    with open(filename) as in_file:
+        for line in in_file:
+            words = line.split("#")[0].split()
+            if len(words) >= 2 and words[0] == "target_element":
+                return words[1].lower()
+            if (len(words) >= 2 and words[0] == "target_composition"
+                    and first_composition is None):
+                first_composition = words[1].lower()
+    return first_composition
+
+
 # ---------------------------------------------------------------------------
 # Original four plots (best-by-fitness vs population average)
 # ---------------------------------------------------------------------------
@@ -292,10 +367,61 @@ def plot_original_energy(generations, best_energy, avg_energy, show):
     style_axes(axes,
                title="Total Energy per Generation",
                xlabel="Generation",
-               ylabel="Total Energy (eV)")
+               ylabel="Total Energy (kcal/mol)")
 
     fig.tight_layout()
     save_figure(fig, "total_energy_per_gen.png", show)
+
+
+def average_energy_per_atom(avgs, n_gens):
+    """
+    Population-average E/N per generation. Runs from 2026-09-30 on write
+    it as avg_energy_per_atom in averages_per_gen.dat; for older runs it
+    is recomputed from generation_<g>/<m>/lammps/{totE,natoms}_evolve,
+    skipping crashed members (sentinel >= 1e90) as deadmd.py does.
+    """
+    if "avg_energy_per_atom" in avgs:
+        return avgs["avg_energy_per_atom"]
+    averages = []
+    for gen in range(1, n_gens + 1):
+        values = []
+        member = 1
+        while os.path.isdir(f"generation_{gen}/{member}"):
+            lammps_dir = f"generation_{gen}/{member}/lammps"
+            try:
+                with open(f"{lammps_dir}/totE_evolve") as e_file:
+                    energy = float(e_file.read().split()[-1])
+                with open(f"{lammps_dir}/natoms_evolve") as n_file:
+                    natoms = float(n_file.read().split()[-1])
+            except (OSError, ValueError, IndexError):
+                energy = natoms = 1e99
+            if energy < 1e90 and natoms < 1e90:
+                values.append(energy / natoms)
+            member += 1
+        averages.append(np.mean(values) if values else float("nan"))
+    return np.array(averages)
+
+
+def plot_original_energy_per_atom(generations, best_epa, avg_epa, show):
+    """
+    Plot energy per atom (E/N, the quantity the fitness energy metric
+    uses) of the best-by-fitness individual and population average per
+    generation.
+    """
+    fig, axes = plt.subplots(figsize=(8, 5))
+
+    axes.plot(generations, best_epa, marker="o", linewidth=2,
+              color="steelblue", label="Best individual")
+    axes.plot(generations, avg_epa, marker="s", linewidth=2,
+              linestyle="--", color="coral", label="Population average")
+
+    style_axes(axes,
+               title="Energy per Atom per Generation",
+               xlabel="Generation",
+               ylabel="Energy per atom (kcal/mol/atom)")
+
+    fig.tight_layout()
+    save_figure(fig, "energy_per_atom_per_gen.png", show)
 
 
 def plot_original_density(generations, best_density, avg_density, show):
@@ -314,6 +440,7 @@ def plot_original_density(generations, best_density, avg_density, show):
                title="Density per Generation",
                xlabel="Generation",
                ylabel="Density (g/cm³)")
+    set_min_span(axes, DENSITY_SPAN)
 
     fig.tight_layout()
     save_figure(fig, "density_per_gen.png", show)
@@ -336,6 +463,7 @@ def plot_original_element(generations, best_pct, avg_pct, element, show):
                title=f"{element_label} Percentage per Generation",
                xlabel="Generation",
                ylabel=f"{element_label} Percentage (%)")
+    set_min_span(axes, ELEMENT_SPAN)
 
     fig.tight_layout()
     save_figure(fig, "element_pct_per_gen.png", show)
@@ -379,7 +507,7 @@ def plot_lowest_energy(generations, energy, show):
     style_axes(axes,
                title="Lowest Total Energy per Generation",
                xlabel="Generation",
-               ylabel="Total Energy (eV)")
+               ylabel="Total Energy (kcal/mol)")
 
     fig.tight_layout()
     save_figure(fig, "best_by_energy_per_gen.png", show)
@@ -406,7 +534,7 @@ def plot_best_density(generations, actual, target, deviation, show):
                 linestyle="--", color="coral", label="Target density")
 
     style_axes(ax_top,
-               title="Best Density Match per Generation",
+               title="",
                xlabel="",
                ylabel="Density (g/cm³)")
 
@@ -418,6 +546,8 @@ def plot_best_density(generations, actual, target, deviation, show):
                xlabel="Generation",
                ylabel="Density Deviation (g/cm³)")
     ax_bot.set_title("")
+    set_min_span(ax_top, DENSITY_SPAN)
+    set_min_span(ax_bot, DENSITY_SPAN / 2, from_zero=True)
 
     fig.suptitle("Best Density Match per Generation",
                  fontsize=14, fontweight="bold")
@@ -458,12 +588,77 @@ def plot_best_element(generations, actual, target, deviation, element, show):
                ylabel=f"{element_label} % Deviation")
     ax_bot.set_title("")
 
+    set_min_span(ax_top, ELEMENT_SPAN)
+    set_min_span(ax_bot, ELEMENT_SPAN / 2, from_zero=True)
+
     fig.suptitle(
         f"Best {element_label} Percentage Match per Generation",
         fontsize=14, fontweight="bold"
     )
     fig.tight_layout()
     save_figure(fig, "best_by_element_per_gen.png", show)
+
+
+def plot_lowest_energy_per_atom(generations, energy_per_atom, show):
+    """
+    Plot the lowest energy per atom (E/N) in each generation, the
+    quantity the fitness energy metric uses. Its member can differ from
+    the lowest-total-energy member because members keep different atom
+    counts.
+    """
+    fig, axes = plt.subplots(figsize=(8, 5))
+
+    axes.plot(generations, energy_per_atom, marker="o", linewidth=2,
+              color="darkgreen", label="Lowest-E/N member")
+
+    style_axes(axes,
+               title="Lowest Energy per Atom per Generation",
+               xlabel="Generation",
+               ylabel="Energy per atom (kcal/mol/atom)")
+
+    fig.tight_layout()
+    save_figure(fig, "best_by_energy_per_atom_per_gen.png", show)
+
+
+def plot_best_composition(data, show):
+    """
+    Two-panel plot for the member with the lowest composition metric
+    each generation (best_by_composition_per_gen.dat).
+
+    Top panel:  at% of each target element (solid) and its target
+                (dashed, same colour; the target is in the column
+                header, e.g. 'si(9.43)').
+    Bottom panel: the composition metric
+                  (1/n) sum_El |x_El - x_target,El| / sigma_El.
+    """
+    generations = data["gen"].astype(int)
+    fig, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(8, 8),
+                                          sharex=True)
+
+    element_columns = [c for c in data
+                       if c not in ("gen", "member", "comp_metric")]
+    for column in element_columns:
+        element, _, target = column.partition("(")
+        line, = ax_top.plot(generations, data[column], marker="o",
+                            linewidth=2, label=f"{element.capitalize()} %")
+        if target:
+            ax_top.axhline(float(target.rstrip(")")), linestyle="--",
+                           color=line.get_color(),
+                           label=f"{element.capitalize()} target")
+
+    style_axes(ax_top, title="", xlabel="",
+               ylabel="Composition (at%)")
+    ax_top.legend(fontsize=9, ncol=2)
+
+    ax_bot.plot(generations, data["comp_metric"], marker="^",
+                linewidth=2, color="purple", label="Composition metric")
+    style_axes(ax_bot, title="", xlabel="Generation",
+               ylabel="Composition metric (lower is better)")
+
+    fig.suptitle("Best Composition Match per Generation",
+                 fontsize=14, fontweight="bold")
+    fig.tight_layout()
+    save_figure(fig, "best_by_composition_per_gen.png", show)
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +668,18 @@ def plot_best_element(generations, actual, target, deviation, element, show):
 def main():
     args    = parse_args()
     element = args.element
+    tracked = element_from_deadmd_in()
+    if element is None:
+        if tracked is None:
+            print("Error: no element given and none found in deadmd.in "
+                  "(target_element or target_composition).")
+            sys.exit(1)
+        element = tracked
+    elif tracked is not None and element.lower() != tracked:
+        print(f"Warning: you gave '{element}', but deadmd.in makes deadmd.py "
+              f"track '{tracked}' (target_element, else the first element "
+              f"of target_composition). Labelling as '{tracked}'.")
+        element = tracked
     plots   = set(args.plots)
     show    = _SHOW_REQUESTED  # resolved at import time against DISPLAY
 
@@ -480,11 +687,11 @@ def main():
     needs_original = any(p.startswith("original-") for p in plots)
 
     if needs_original:
-        best = load_dat_file("best_by_fitness_profile_per_gen.dat")
+        best = load_dat_file("best_by_fitness_per_gen.dat")
         avgs = load_dat_file("averages_per_gen.dat")
         if len(best["gen"]) != len(avgs["gen"]):
             print(
-                f"Error: best_by_fitness_profile_per_gen.dat has "
+                f"Error: best_by_fitness_per_gen.dat has "
                 f"{len(best['gen'])} rows but averages_per_gen.dat has "
                 f"{len(avgs['gen'])} rows. The dat files are from "
                 f"different runs -- delete them all and rerun deadmd.py."
@@ -526,6 +733,14 @@ def main():
             show=show
         )
 
+    if "original-energy-per-atom" in plots:
+        plot_original_energy_per_atom(
+            generations_orig,
+            best_epa=best["energy_per_atom"],
+            avg_epa=average_energy_per_atom(avgs, len(generations_orig)),
+            show=show
+        )
+
     # --- New plots ---
     if "best-fitness" in plots:
         bf = load_dat_file("best_by_fitness_per_gen.dat")
@@ -563,6 +778,22 @@ def main():
             element=element,
             show=show
         )
+
+    if "lowest-energy-per-atom" in plots:
+        epa = load_dat_file("best_by_energy_per_atom_per_gen.dat",
+                            required=False)
+        if epa is not None:
+            plot_lowest_energy_per_atom(
+                generations=epa["gen"].astype(int),
+                energy_per_atom=epa["energy_per_atom"],
+                show=show
+            )
+
+    if "best-composition" in plots:
+        bc = load_dat_file("best_by_composition_per_gen.dat",
+                           required=False)
+        if bc is not None:
+            plot_best_composition(bc, show=show)
 
     print("Done.")
     if show:

@@ -89,11 +89,37 @@ their sections are defined as follows:
    The "stage" keyword may be repeated multiple times in the
       input file.
 
+   (4b) Target density (OPTIONAL):
+   Keyword: "target_density"
+   Required Value: Floating point density in g/cc.
+   Every compressing stage (0 < squish_factor < 1) then stops squishing as
+      soon as the live density reaches the target (LAMMPS fix halt, checked
+      every 10 steps), and runs the rest of its steps at the fixed box.
+      The squish_factor becomes the most the box may shrink in that stage:
+      if it cannot reach the target, the stage ends below it.  The box only
+      changes every squish_step_size steps, so a smaller step size gives a
+      smaller overshoot.  Stages with squish_factor 0 or 1 are unaffected.
+
+   NOTE (2026-09-23): the generated lammps.in always uses
+      special_bonds lj/coul 0 0 0.5 and an MD timestep of 0.1 fs (so a
+      stage's run_steps cover 5 times less time than with the old 0.5),
+      logs every reaction's event count (thermo f_reaction[*] every 500
+      steps; final counts appended to rxn_counts_evolve), and writes
+      final.data after the final minimisation.
+
+   Keyword: "seed" (optional)
+   Value: positive integer.  Seeds every random draw (packmol, velocities,
+      bond/react seeds), so the same seed and input give the same LAMMPS
+      input.  The -s option overrides it; without either a seed is drawn.
+      The seed used is recorded in the file "seeds".
+
    (5) Reactions:
    Keyword: "reactions"
    Required Value: Integer number of different kinds of reactions.
-   Section Definition: One line with 5 components for each type
-      of reaction.  Each line contains a pair of <MOLECULENAME> + element-type
+   Section Definition: One line for each type of reaction:
+         <MOL1> <SITE1> <MOL2> <SITE2> <PROB> [RMAX] inter|intra [rmin R]
+                                                   [max_rxn N]
+      Each line contains a pair of <MOLECULENAME> + element-type
       designations followed by a real number between 0.0 and 1.0 inclusive.  The
       <MOLECULENAME> values must be consistent with those specified in the
       "Components" section and the element-type values must be elements and
@@ -101,10 +127,66 @@ their sections are defined as follows:
       probability that the reaction will occur once the molecular fragments are
       sufficiently close.  So, for example a reaction leading with some
       probability (say 0.86) to the binding of two ch4 molecules would be
-      expressed on one line as: "ch4_1 c-1 ch4_1 c-1 0.86".
+      expressed on one line as: "ch4_1 c-1 ch4_1 c-1 0.86 inter".
+      An OPTIONAL number after the probability is the reaction's Rmax in
+      Angstrom (the largest initiator-atom distance at which fix bond/react
+      may fire), e.g. "ch4_1 c-1 ch4_1 c-1 0.86 4.0 inter".  Without it Rmax
+      is 5.0.
+      REQUIRED at the end of the line: "inter" (the bond forms between two
+      different molecules) or "intra" (within one molecule, e.g. si-h),
+      written to lammps.in as fix bond/react's "molecule inter|intra".
+      OPTIONAL after it: "rmin R", the smallest initiator distance (A) at
+      which the reaction may fire (default 0.0), e.g.
+      "c6h19nsi2_1 si-1 c6h19nsi2_1 c-1 0.99 inter" or
+      "c6h19nsi2_1 si-1 c6h19nsi2_1 h-1 0.0005 5.0 intra rmin 2.0".
+      OPTIONAL too: "max_rxn N" (a whole number >= 1), fix bond/react's cap:
+      the reaction stops after N events (a cap, not a quota -- it never
+      pushes a reaction up to N), e.g.
+      "c6h19nsi2_1 si-1 c6h19nsi2_1 c-1 0.004 5.0 inter max_rxn 26".
+      Without it the reaction is uncapped.
    NOTE: The working expectation in all cases is that every
       reaction will require that an H atom is discharged from each molecule
       before the binding between the requested underlying atoms can take place.
+   NOTE (2026-09-25): the reaction templates come from the precursorDB
+      (<MOL1>__<MOL2>/rxnTemplates/{pre,post}Rxn.<SITE1>_<SITE2>.data and
+      <SITE1>_<SITE2>.map).  Every angle implied by a post template's bonds
+      but missing from it (the linkage angles across the new bond) is added
+      automatically, and any new bond or angle type is added to lammps.dat.
+      lammps.in uses reset_mol_ids no, so "inter" reactions keep firing
+      inside a growing network.
+
+   (6) Bond coefficient overrides (OPTIONAL):
+   Keyword: "bond_override"
+   Required Value: Integer number of override lines that follow.
+   Section Definition: One line per overridden element pair, with four
+      space-separated components:
+         <EL1> <EL2> <R0> <K>
+      (a) EL1, EL2 -- the two element symbols, in either order;
+      (b) R0 -- the equilibrium bond length to use (Angstroms), replacing
+          the UFF value r_i + r_j - r_EN;
+      (c) K -- the harmonic force constant, as one of:
+             a number -- used verbatim as the LAMMPS Bond Coeff K
+                (kcal/mol/A^2, convention E = K(r - r0)^2).  NOTE that
+                "bond_parameter_scale" is NOT applied on top of an explicit
+                number: what is written here is what LAMMPS gets.
+             "uff"    -- rescale the UFF K to the new length.  UFF has
+                K proportional to r0^-3, so K_new = K_uff * (r_uff/R0)^3;
+                a longer bond becomes softer.  This is the self-consistent
+                UFF choice.  "bond_parameter_scale" still applies.
+             "keep"   -- leave K at the UFF value computed for the ORIGINAL
+                r0, changing the equilibrium length only.
+                "bond_parameter_scale" still applies.
+   WHY this exists: the UFF r0 is a sum of element natural radii and has no
+      input from the molecule being modelled, so it can be far from the real
+      bond length of a specific compound.  Measured examples: silica Si-O
+      1.71588 against 1.608 in the glass (+6.7%); o-carborane B-B 1.676
+      against ~1.78 experimental (-6%).  See the per-material DIAGNOSIS.md.
+   The keyword is OPTIONAL and purely additive: an input file without it
+      produces byte-identical output to before the keyword existed.
+   Example section:
+      bond_override 2
+      B B 1.7800 uff
+      B C 1.7100 uff
 
 Example input:
 
@@ -115,16 +197,39 @@ Example input:
 
    cell_size 100.0
    max_speed 5.0
+   seed 12345
 
    stage 0.33 500 nvt 800 800 500 100000
+   stage 1.0 500 nvt 800 300 500 50000
 
    reactions 6
-   b10c2h12 b-1 b10c2h12 b-1 0.85
-   b10c2h12 b-1 ch4 c-1 0.85
-   b10c2h12 b-1 c2h6 c-1 0.75
-   ch4 c-1 ch4 c-1 0.5
-   ch4 c-1 c2h6 c-1 0.7
-   c2h6 c1 c2h6 c-1 0.8
+   b10c2h12 b-1 b10c2h12 b-1 0.85 inter
+   b10c2h12 b-1 ch4 c-1 0.85 inter
+   b10c2h12 b-1 c2h6 c-1 0.75 inter
+   ch4 c-1 ch4 c-1 0.5 inter
+   ch4 c-1 c2h6 c-1 0.7 inter
+   c2h6 c-1 c2h6 c-1 0.8 inter
+
+Example input (a-SiCN:H, A95 run4 rebuilt; jobs/a-SiCN:H/A95/run4_condense):
+
+   composition 1
+   c6h19nsi2_1 Family1 20
+
+   cell_size 41.28
+   max_speed 0.4
+   seed 123694907
+
+   stage 0.55 500 nvt 300 300 100 200000
+   stage 1.00 500 nvt 300 700 100 50000
+   stage 1.00 500 nvt 700 700 100 200000
+   stage 1.00 500 nvt 700 300 100 50000
+   stage 0.597 500 nvt 300 300 100 100000
+   stage 1.00 500 nvt 300 300 100 100000
+   reactions 4
+   c6h19nsi2_1 si-1 c6h19nsi2_1 c-1 0.99 inter
+   c6h19nsi2_1 c-1 c6h19nsi2_1 c-1 0.01 inter
+   c6h19nsi2_1 si-1 c6h19nsi2_1 n-1 0.99 inter
+   c6h19nsi2_1 si-1 c6h19nsi2_1 h-1 0.0005 intra rmin 2.0
 
 
 Prepare molecules and reactions.
@@ -628,6 +733,15 @@ $IMAGO_RC/condenserc.py.
                     "on a collision course near cell center. "
                     "Only works for <= 3 molecules."))
 
+        # The -s option seeds this script's random numbers (packmol seed,
+        # bond/react seeds, molecule velocities), so the same seed and input
+        # give the same LAMMPS input. Without it a seed is drawn and recorded
+        # in the file "seeds" either way.
+        parser.add_argument('-s', '--seed', dest='seed', type=int,
+            default=None, help=("Random seed (positive integer). "
+                "Overrides 'seed N' in the input file. Default: drawn "
+                "at random and recorded in ./seeds"))
+
     def reconcile(self, args):
         """Reconcile command line arguments with rc defaults.
 
@@ -638,6 +752,7 @@ $IMAGO_RC/condenserc.py.
         """
         self.input_file = args.input_file
         self.force_collision = args.force_collision
+        self.seed = args.seed
 
     def record_clp(self):
         """Record the command line parameters to the command file.
@@ -653,6 +768,17 @@ $IMAGO_RC/condenserc.py.
             for argument in sys.argv:
                 cmd.write(f" {argument}")
             cmd.write("\n\n")
+
+
+# Absolute path of the seed record (set in main; the script changes
+# directory while it writes the LAMMPS files).
+SEED_FILE = "seeds"
+
+
+def record_seed(label, value):
+    """Append one seed drawn from the seeded stream to ./seeds."""
+    with open(SEED_FILE, "a") as f:
+        f.write(f"{label} {value}\n")
 
 
 # ================================================================
@@ -715,6 +841,17 @@ class Condense:
         #   angle to merge into that cluster during angle-type discovery.
         #   See DESIGN 4.8.6.
         self.angle_cluster_tolerance = 5.0
+        # bond_r0_override: per-element-pair replacement for the UFF bond
+        #   coefficients, keyed by the sorted tuple (Z_low, Z_high) and
+        #   holding (r0, k_mode, k_value, label).  Empty by default, so a
+        #   run that
+        #   does not use the "bond_override" keyword behaves exactly as it
+        #   did before the keyword existed.  See the module docstring
+        #   section (6) for why this is needed and what the K modes mean.
+        self.bond_r0_override = {}
+        # Element pairs already reported by _apply_bond_override, so the
+        #   provenance line is printed once per pair, not once per bond.
+        self._bond_override_reported = set()
 
         # ----- Stage data (populated by parse_input_file) -----
         self.num_stages = 0
@@ -726,6 +863,11 @@ class Condense:
         self.ensemble_temp_end = [None]
         self.ensemble_temp_damp = [None]
         self.run_steps = [None]
+        # Optional "target_density" (g/cc). When given, every compressing
+        #   stage (0 < squish_factor < 1) stops squishing as soon as the
+        #   live density reaches it (fix halt), then finishes the stage's
+        #   steps at the fixed box. None keeps the plain squish.
+        self.target_density = None
 
         # ----- Composition data -----
         self.num_molecule_types = 0
@@ -748,6 +890,18 @@ class Condense:
         # rxn_binding[side][rxn]: side is 1 or 2.
         self.rxn_binding = [None,[None],[None]]
         self.rxn_probability = [None]
+        # Rmax (Angstrom): bond/react's maximum initiator distance, per
+        #   reaction. Optional 6th value on a reaction line; default 5.0.
+        self.rxn_rmax = [None]
+        # molecule inter|intra (required on the reaction line) and Rmin
+        #   (optional "rmin R", default 0.0) per reaction.
+        self.rxn_molecule = [None]
+        self.rxn_rmin = [None]
+        # max_rxn N (optional): bond/react stops that reaction after N
+        #   events. None = no cap.
+        self.rxn_max_rxn = [None]
+        # Random seed from the input file ("seed N"); -s overrides it.
+        self.seed = None
 
         # ----- Database objects -----
         self.element_data = None
@@ -796,6 +950,65 @@ class Condense:
         # instantiation.
         self._sc_class = StructureControl
 
+    def _apply_bond_override(self, z1, z2, k_ij, r_ij):
+        """Apply a "bond_override" entry, if one names this element pair.
+
+        Called at both sites that compute bond coefficients, immediately
+        after the UFF values and ``bond_parameter_scale`` have been
+        applied.  A pair with no override is returned untouched, so an
+        input file without the keyword is unaffected.
+
+        Parameters
+        ----------
+        z1, z2 : int
+            Atomic numbers of the two bonded elements, in any order.
+        k_ij : float
+            The UFF force constant, already multiplied by
+            ``bond_parameter_scale`` (kcal/mol/A^2, LAMMPS convention
+            E = K(r - r0)^2).
+        r_ij : float
+            The UFF equilibrium bond length (Angstroms).
+
+        Returns
+        -------
+        k_ij, r_ij : float
+            Unchanged if this pair is not overridden, otherwise the
+            replacement values.  The module docstring section (6)
+            defines the three K modes.
+        """
+
+        if not self.bond_r0_override:
+            return k_ij, r_ij
+
+        key = (z1, z2) if z1 <= z2 else (z2, z1)
+        if key not in self.bond_r0_override:
+            return k_ij, r_ij
+
+        r0_new, k_mode, k_value, label = self.bond_r0_override[key]
+
+        if k_mode == "value":
+            # Used verbatim: bond_parameter_scale is deliberately NOT
+            # applied on top of a number the user wrote out in full.
+            k_new = k_value
+        elif k_mode == "uff":
+            # UFF has K proportional to r0^-3 (Rappe eq. 3), so scaling by
+            # (r_uff / r0_new)^3 gives what the UFF formula would have
+            # produced at the new length: a longer bond is softer.
+            k_new = k_ij * (r_ij / r0_new) ** 3
+        else:                                     # "keep"
+            k_new = k_ij
+
+        if key not in self._bond_override_reported:
+            self._bond_override_reported.add(key)
+            print(
+                f"bond_override {label}:"
+                f" r0 {r_ij:.5f} -> {r0_new:.5f} A,"
+                f" K {k_ij:.4f} -> {k_new:.4f} kcal/mol/A^2"
+                f" (K mode: {k_mode})"
+            )
+
+        return k_new, r0_new
+
     # ============================================================
     # Step 2: Parse the input file
     # ============================================================
@@ -842,6 +1055,23 @@ class Condense:
                 elif keyword == "max_speed":
                     self.max_speed = float(values[1])
 
+                # ----- Random seed -----
+                elif keyword == "seed":
+                    self.seed = int(values[1])
+                    if self.seed < 1:
+                        sys.exit(f"seed must be a positive integer, got "
+                                 f"{values[1]}.")
+
+                # ----- Target density -----
+                # Density (g/cc) at which compressing stages stop
+                # squishing.  See the stage writer.
+                elif keyword == "target_density":
+                    self.target_density = float(values[1])
+                    if self.target_density <= 0:
+                        print("target_density must be positive, got "
+                              f"{values[1]}.")
+                        sys.exit(1)
+
                 # ----- Bond parameter scale -----
                 # Global multiplier for every UFF-derived bond force
                 # constant K_ij.  Overrides the hardcoded default
@@ -850,6 +1080,68 @@ class Condense:
                     self.bond_parameter_scale = (
                         float(values[1])
                     )
+
+                # ----- Bond coefficient overrides -----
+                # Replaces the UFF-derived (r0, K) for the named element
+                # pairs.  See the module docstring section (6).
+                elif keyword == "bond_override":
+                    num_overrides = int(values[1])
+
+                    for _ in range(num_overrides):
+                        vals = f.readline().strip().split()
+                        if len(vals) != 4:
+                            sys.exit(
+                                f"bond_override needs 4 values"
+                                f" (EL1 EL2 R0 K), got:"
+                                f" '{' '.join(vals)}'."
+                            )
+
+                        sym1, sym2 = vals[0], vals[1]
+                        z1 = self.element_data.get_element_z(
+                            sym1.lower()
+                        )
+                        z2 = self.element_data.get_element_z(
+                            sym2.lower()
+                        )
+                        if not z1 or not z2:
+                            sys.exit(
+                                f"bond_override: unknown element in"
+                                f" '{sym1} {sym2}'."
+                            )
+                        if z1 > z2:
+                            z1, z2 = z2, z1
+                            sym1, sym2 = sym2, sym1
+
+                        r0_new = float(vals[2])
+                        if r0_new <= 0.0:
+                            sys.exit(
+                                f"bond_override: r0 must be positive,"
+                                f" got {r0_new}."
+                            )
+
+                        k_spec = vals[3].lower()
+                        if k_spec in ("uff", "keep"):
+                            k_mode, k_value = k_spec, None
+                        else:
+                            k_mode = "value"
+                            k_value = float(k_spec)
+                            if k_value < 0.0:
+                                sys.exit(
+                                    f"bond_override: K must be >= 0,"
+                                    f" got {k_value}."
+                                )
+
+                        if (z1, z2) in self.bond_r0_override:
+                            sys.exit(
+                                f"bond_override: element pair"
+                                f" '{vals[0]} {vals[1]}' listed twice."
+                            )
+                        # The label is carried so the provenance line can
+                        # name the elements without reaching into
+                        # ElementData's internals from a hot loop.
+                        self.bond_r0_override[(z1, z2)] = (
+                            r0_new, k_mode, k_value, f"{sym1}-{sym2}"
+                        )
 
                 # ----- Angle stiffness coefficient -----
                 # Dimensionless calibration that converts the geometric
@@ -912,6 +1204,30 @@ class Condense:
                         self.rxn_mol_name[2].append(vals[2].lower())
                         self.rxn_binding[2].append(vals[3].lower())
                         self.rxn_probability.append(float(vals[4]))
+                        # Optional: rmax (a number), then the keywords
+                        # "intra" / "inter" and "rmin R", in any order.
+                        extra = vals[5:]
+                        rmax = 5.0
+                        if extra and re.match(r'^[0-9.eE+-]+$', extra[0]):
+                            rmax = float(extra.pop(0))
+                        if rmax <= 0:
+                            print(f"Reaction {rxn}: rmax must be positive,"
+                                  f" got {vals[5]}.")
+                            sys.exit(1)
+                        self.rxn_rmax.append(rmax)
+                        molecule, rmin, max_rxn = self.parse_react_options(
+                            extra, f"Reaction {rxn}")
+                        self.rxn_max_rxn.append(max_rxn)
+                        if molecule is None:
+                            sys.exit(f"Reaction {rxn}: say inter (two "
+                                     f"molecules) or intra (within one) at "
+                                     f"the end of the line: "
+                                     f"{' '.join(vals)}")
+                        self.rxn_molecule.append(molecule)
+                        self.rxn_rmin.append(0.0 if rmin is None else rmin)
+                        if self.rxn_rmin[rxn] >= rmax:
+                            sys.exit(f"Reaction {rxn}: rmin {rmin} must be "
+                                     f"below rmax {rmax}.")
 
     # ============================================================
     # Step 3: Compute implicit input
@@ -1045,6 +1361,43 @@ class Condense:
             # Copy the map files.
             shutil.copy2(os.path.join(rxn_tmpl_src, f"{rxn_binding_pair}.map"),
                 os.path.join(rxn_dir, f"{rxn_mol_binding_pair}.map"))
+            print(f"Reaction {rxn} {rxn_mol_binding_pair}: molecule "
+                  f"{self.rxn_molecule[rxn]}, rmin {self.rxn_rmin[rxn]}, "
+                  f"rmax {self.rxn_rmax[rxn]}"
+                  + (f", max_rxn {self.rxn_max_rxn[rxn]}"
+                     if self.rxn_max_rxn[rxn] is not None else ""))
+
+    @staticmethod
+    def parse_react_options(words, where):
+        """Read "intra" / "inter", "rmin R" and "max_rxn N" from a list of
+        words.
+
+        Returns (molecule, rmin, max_rxn); each is None when not given.
+        """
+        molecule, rmin, max_rxn = None, None, None
+        words = list(words)
+        while words:
+            w = words.pop(0).lower()
+            if w in ("intra", "inter"):
+                molecule = w
+            elif w == "rmin" and words:
+                try:
+                    rmin = float(words.pop(0))
+                except ValueError:
+                    sys.exit(f"{where}: rmin needs a number.")
+                if rmin < 0:
+                    sys.exit(f"{where}: rmin must be >= 0, got {rmin}.")
+            elif w == "max_rxn" and words:
+                try:
+                    max_rxn = int(words.pop(0))
+                except ValueError:
+                    sys.exit(f"{where}: max_rxn needs a whole number.")
+                if max_rxn < 1:
+                    sys.exit(f"{where}: max_rxn must be >= 1, got {max_rxn}.")
+            else:
+                sys.exit(f"{where}: unknown reaction option '{w}' "
+                         f"(expected intra, inter, rmin R or max_rxn N).")
+        return molecule, rmin, max_rxn
 
     # ============================================================
     # Step 5: Run packmol
@@ -1082,7 +1435,8 @@ class Condense:
             pack.write("#Packmol input file from condense.\n\n")
 
             # Insert the random seed and tolerance.
-            rand_seed = random.randint(0, 99999)
+            rand_seed = random.randint(1, 99999)
+            record_seed("packmol", rand_seed)
             pack.write(f"seed {rand_seed}\n")
             pack.write("tolerance 5.0\n")
 
@@ -1453,6 +1807,9 @@ class Condense:
                     atom1_z, atom2_z
                 )
                 k_ij *= self.bond_parameter_scale
+                k_ij, r_ij = self._apply_bond_override(
+                    atom1_z, atom2_z, k_ij, r_ij
+                )
                 while len(unique_bond_coeffs) <= found:
                     unique_bond_coeffs.append(None)
                 unique_bond_coeffs[found] = (
@@ -1763,21 +2120,36 @@ bond_style harmonic
 angle_style harmonic
 # Bump per-atom neighbor buffer from default 2000 to 5000: the EA in deadmd.py
 # can generate compression ratios dense enough to overflow the default buffer.
-neigh_modify one 5000 delay 100 every 50 check yes
-#comm_modify mode single cutoff 20.0
+# delay 0 every 1 check yes: rebuild as soon as any atom moves half the skin.
+# 'delay 100 every 50' gave hundreds of dangerous builds (possible missed pair
+# interactions) during fix deform compression (silica run11: 611 / 252 / 845).
+neigh_modify one 5000 delay 0 every 1 check yes
+# Ghost cutoff 15 A (default = pair cutoff + skin): with MPI ranks,
+# bond/react must see a candidate's bonded neighbours as ghosts, or it stops
+# with "needs ghost atoms from further away" (2 of 20 members at 4 ranks,
+# 40 HMDS; dead-md_dev/jobs/features/comm_cutoff). 15 fixed both at no
+# extra cost; 20 also works but runs ~1.5x slower. Raise it if the error
+# returns (larger Rmax or templates).
+comm_modify mode single cutoff 15.0
 pair_modify shift yes mix sixthpower
 newton on
 
 # Atom definition
-read_data lammps.dat extra/bond/per/atom 25 extra/special/per/atom 25
+# extra/angle: reactions add angles too (linkage angles in the post
+# templates), so each atom needs room for more than it starts with.
+read_data lammps.dat extra/bond/per/atom 25 extra/special/per/atom 25 extra/angle/per/atom 15
 
-special_bonds lj/coul 0 1 1
+# 1-2 pairs excluded, 1-3 halved: 0 1 1 kept full 1-2/1-3 LJ inside every
+# molecule and stretched its bonds (a-SiCN:H), and bond/react templates that
+# trigger on 1-5 pairs need them in the neighbour list.
+special_bonds lj/coul 0 0 0.5
 
 ########################
 # Initialization
 ########################
 
-timestep 0.5
+# 0.1 fs: 0.5 nearly killed a-SiCN:H A95 run1.
+timestep 0.1
 
 # Set up output
 
@@ -1807,8 +2179,9 @@ dump_modify bond_dump &
               colname 3 btype &
               colname 4 dist
 
-#compute ang all property/local aatom1 aatom2 aatom3 atype
-#dump angles all local 500 dump.angle.coarse index c_ang[1] c_ang[2] c_ang[3] c_ang[4]
+compute ang all property/local aatom1 aatom2 aatom3 atype
+compute theta all angle/local theta
+dump angles all local 500 dump.angle.coarse c_ang[1] c_ang[2] c_ang[3] c_ang[4] c_theta
 
 
 ########################
@@ -1853,14 +2226,19 @@ region simcell block EDGE EDGE EDGE EDGE EDGE EDGE units box
             # containing every atom NOT currently being stabilized;
             # the main integrator below uses that group so stabilized
             # atoms are not double-integrated.
+            # reset_mol_ids no: by default bond/react gives every connected
+            # cluster one molecule ID after each reaction, so 'molecule
+            # inter' then forbids any further bond inside a growing network
+            # (the universal 19-event stall of a-SiCN:H A93, 2026-08-21).
             lmpin.write(
                 "fix reaction all bond/react "
-                "stabilization yes statted_grp 0.05 &\n"
+                "stabilization yes statted_grp 0.05 reset_mol_ids no &\n"
             )
             for rxn in range(1, self.num_reaction_types + 1):
                 # Prepare the map file and print the react command for each
                 # reaction.
-                rand_seed = random.randint(0, 99999)
+                rand_seed = random.randint(1, 99999)
+                record_seed(f"bond/react RXN{rxn}", rand_seed)
                 n1 = self.rxn_mol_name[1][rxn]
                 b1 = self.rxn_binding[1][rxn]
                 n2 = self.rxn_mol_name[2][rxn]
@@ -1869,11 +2247,14 @@ region simcell block EDGE EDGE EDGE EDGE EDGE EDGE units box
                 rxn_dir = self.rxn_template_dir
                 shutil.copy2(os.path.join(rxn_dir, map_file), map_file,)
                 prob = self.rxn_probability[rxn]
+                rmax = self.rxn_rmax[rxn]
                 line = (
-                    f"  react RXN{rxn} all 100 0.0 "
-                    f"5.0 MOLpre{rxn} MOLpost{rxn} "
-                    f"{map_file} prob {prob} "
-                    f"{rand_seed} molecule inter"
+                    f"  react RXN{rxn} all 100 {self.rxn_rmin[rxn]} "
+                    f"{rmax} MOLpre{rxn} MOLpost{rxn} "
+                    f"{map_file} prob {prob} {rand_seed}"
+                    + (f" max_rxn {self.rxn_max_rxn[rxn]}"
+                       if self.rxn_max_rxn[rxn] is not None else "")
+                    + f" molecule {self.rxn_molecule[rxn]}"
                 )
                 if rxn < self.num_reaction_types:
                     lmpin.write(f"{line} &\n")
@@ -1955,6 +2336,13 @@ region simcell block EDGE EDGE EDGE EDGE EDGE EDGE units box
             # addition to whatever other equilibration it is doing.
             lmpin.write("velocity all zero linear\n\n")
 
+            # Log the cumulative event count of every reaction every 500
+            # steps (the dump interval), so counts never have to be
+            # reverse-engineered from atom counts.
+            lmpin.write("thermo 500\n"
+                        "thermo_style custom step temp pe density"
+                        " f_reaction[*]\n\n")
+
             # Fill the LAMMPS input file with the requested stages.  Each stage
             # specifies an ensemble type (nve or nvt) and optional box
             # deformation.  NVE uses pure Newtonian dynamics (no thermostat) so
@@ -2004,19 +2392,56 @@ region simcell block EDGE EDGE EDGE EDGE EDGE EDGE units box
                     )
                     sys.exit(1)
 
-                # Run the simulation stage.
+                # Run the simulation stage.  With a target density, a
+                # compressing stage is halted as soon as the live density
+                # reaches it (checked every 10 steps; the box only changes
+                # every squish_step steps, so that sets the overshoot).
+                # "error continue" lets the script carry on after the halt.
+                # The rest of the stage's steps then run at the fixed box
+                # ("upto" the stage's planned end), so every member gets
+                # the same MD time whether or not, and when, it halted.
                 run_steps = self.run_steps[stage]
-                lmpin.write(f"run {run_steps}\n")
+                halt = (self.target_density is not None
+                        and 0 < squish_factor < 1)
+                if halt:
+                    target = self.target_density
+                    lmpin.write(
+                        f"variable rho equal density\n"
+                        f"variable stage{stage}_end equal"
+                        f" $(step+{run_steps})\n"
+                        f"fix stop all halt 10 v_rho >= {target}"
+                        f" error continue message yes\n"
+                        f"run {run_steps}\n"
+                        f"unfix stop\n"
+                        f"unfix squish\n"
+                        f'if "$(density) >= {target}" then'
+                        f' "print \'Stage {stage} REACHED target {target}'
+                        f' at step $(step), density $(density)\'"'
+                        f' else'
+                        f' "print \'Stage {stage} did NOT reach target'
+                        f' {target}: full squish, density $(density)\'"\n'
+                        f"run ${{stage{stage}_end}} upto\n"
+                    )
+                else:
+                    lmpin.write(f"run {run_steps}\n")
 
                 # Turn off the fixes.
-                if squish_factor > 0:
+                if squish_factor > 0 and not halt:
                     lmpin.write("unfix squish\n")
                 lmpin.write("unfix ensemble\n\n")
+
+            # Final event count per reaction, one line per run.
+            counts = " ".join(f"$(f_reaction[{r}])"
+                              for r in range(1, self.num_reaction_types + 1))
+            lmpin.write(f'print "{counts}" append rxn_counts_evolve\n'
+                        f'print "Reaction counts (RXN1..RXN'
+                        f'{self.num_reaction_types}): {counts}"\n')
 
             # Final tail of the LAMMPS input file.
             lmpin.write("""
 undump coord_dump
 undump bond_dump
+undump angles
 
 # Final density calculation
 variable final_density equal density
@@ -2045,6 +2470,8 @@ print "system_total_energy ${teng};"
 print "Number of atoms is ${natoms};"
 print "Lattice constant (Angstrom) is ${length};"
 """)
+            # Keep the minimised structure (bonds included).
+            lmpin.write("write_data final.data\n")
 
         # ------------------------------------------------
         # Write the slurm submission file
@@ -2079,6 +2506,131 @@ print "Lattice constant (Angstrom) is ${length};"
     # ============================================================
     # Step 7: Normalize types
     # ============================================================
+
+    def complete_template_angles(self):
+        """Add every angle implied by a post template's bonds but not listed.
+
+        The precursorDB post templates carry the angles of the molecules as
+        they were, but not the angles across the bond the reaction creates
+        (e.g. Si-C-Si and H-C-Si around a new Si-CH2-Si bridge).  Without
+        them every linkage is floppy.  For each lammps/postRxn* file, every
+        a-v-b with a-v and v-b bonded that is not listed is appended.  Its
+        theta_0 is taken from an existing angle on the same vertex atom
+        (else the same vertex element, else 109.5 with a warning); its local
+        type is reused when the same tag and theta_0 already exist, else a
+        new local type is made.  normalize_types (called next) then merges
+        the new local types into lammps.dat's Angle Coeffs with UFF K, just
+        as it does for new bond types such as C-C.
+        """
+
+        element_data = self.element_data
+
+        for post_path in sorted(glob.glob(os.path.join("lammps",
+                                                        "postRxn*"))):
+            with open(post_path, 'r') as f:
+                lines = f.read().splitlines()
+
+            num_atoms = num_bonds = num_angles = 0
+            angles_header = angles_start = None
+            tag = {}          # atom id -> "elem species molecule"
+            neighbours = {}   # atom id -> set of bonded atom ids
+            listed = set()    # (a, v, b) with a < b
+            angle_rows = []   # (vertex id, base_tag, theta_0, local id)
+
+            i = 0
+            while i < len(lines):
+                s = lines[i].strip()
+                if re.match(r'^\d+\s+atoms$', s):
+                    num_atoms = int(s.split()[0])
+                elif re.match(r'^\d+\s+bonds$', s):
+                    num_bonds = int(s.split()[0])
+                elif re.match(r'^\d+\s+angles$', s):
+                    num_angles = int(s.split()[0])
+                    angles_header = i
+                elif s == "Types":
+                    for k in range(num_atoms):
+                        vals = lines[i + 2 + k].split()
+                        tag[int(vals[0])] = " ".join(vals[3:6])
+                        neighbours[int(vals[0])] = set()
+                    i += 1 + num_atoms
+                elif s == "Bonds":
+                    for k in range(num_bonds):
+                        vals = lines[i + 2 + k].split()
+                        a, b = int(vals[2]), int(vals[3])
+                        neighbours[a].add(b)
+                        neighbours[b].add(a)
+                    i += 1 + num_bonds
+                elif s == "Angles":
+                    angles_start = i + 2
+                    for k in range(num_angles):
+                        vals = lines[angles_start + k].split()
+                        a, v, b = int(vals[2]), int(vals[3]), int(vals[4])
+                        listed.add((min(a, b), v, max(a, b)))
+                        angle_rows.append((v, " ".join(vals[6:15]),
+                                           float(vals[15]), int(vals[1])))
+                    i += 1 + num_angles
+                i += 1
+
+            if angles_header is None or angles_start is None:
+                continue
+
+            implied = set()
+            for v, nbrs in neighbours.items():
+                nb = sorted(nbrs)
+                for x in range(len(nb)):
+                    for y in range(x + 1, len(nb)):
+                        implied.add((nb[x], v, nb[y]))
+
+            missing = sorted(implied - listed, key=lambda t: (t[1], t))
+            spurious = listed - implied
+            if spurious:
+                print(f"WARNING: {post_path} lists {len(spurious)} "
+                      f"angle(s) not implied by its bonds: "
+                      f"{sorted(spurious)}")
+            if not missing:
+                continue
+
+            next_local = max((r[3] for r in angle_rows), default=0) + 1
+            new_rows = []
+            for a, v, b in missing:
+                # Canonical end order: lower Z first (as the producers do).
+                za = element_data.get_element_z(tag[a].split()[0])
+                zb = element_data.get_element_z(tag[b].split()[0])
+                if za > zb:
+                    a, b = b, a
+                base_tag = f"{tag[a]} {tag[v]} {tag[b]}"
+
+                # theta_0 follows the vertex: same atom, else same element.
+                v_elem = tag[v].split()[0]
+                theta_0 = next((r[2] for r in angle_rows if r[0] == v), None)
+                if theta_0 is None:
+                    theta_0 = next((r[2] for r in angle_rows
+                                    if r[1].split()[3] == v_elem), None)
+                if theta_0 is None:
+                    theta_0 = 109.5
+                    print(f"WARNING: {post_path}: no angle on a {v_elem} "
+                          f"vertex to take theta_0 from; using 109.5 for "
+                          f"{base_tag}")
+
+                local_id = next((r[3] for r in angle_rows
+                                 if r[1] == base_tag and r[2] == theta_0),
+                                None)
+                if local_id is None:
+                    local_id = next_local
+                    next_local += 1
+                angle_rows.append((v, base_tag, theta_0, local_id))
+
+                num_angles += 1
+                new_rows.append(f"{num_angles} {local_id} {a} {v} {b}  "
+                                f"# {base_tag} {theta_0} {local_id}")
+
+            lines[angles_header] = f"{num_angles} angles"
+            insert_at = angles_start + num_angles - len(new_rows)
+            lines[insert_at:insert_at] = new_rows
+            with open(post_path, 'w') as f:
+                f.write("\n".join(lines) + "\n")
+            print(f"{os.path.basename(post_path)}: added {len(new_rows)} "
+                  f"linkage angle(s)")
 
     def normalize_types(self):
         """Unify atom, bond, and angle types across all files.
@@ -2363,6 +2915,9 @@ print "Lattice constant (Angstrom) is ${length};"
                 atom1_z, atom2_z
             )
             k_ij *= self.bond_parameter_scale
+            k_ij, r_ij = self._apply_bond_override(
+                atom1_z, atom2_z, k_ij, r_ij
+            )
             unique_bond_coeffs[bond_unique_id] = (
                 [None, k_ij, r_ij]
             )
@@ -2952,6 +3507,19 @@ def main():
     # Read the main input file.
     condense.parse_input_file()
 
+    # Seed every random draw of this run and record it, so a run can be
+    # rebuilt exactly (same seed + same condense.in -> same LAMMPS input).
+    # -s on the command line wins over "seed N" in condense.in; with
+    # neither, a seed is drawn.  Nothing random happens before this point.
+    seed = settings.seed if settings.seed is not None else condense.seed
+    if seed is None:
+        seed = random.SystemRandom().randint(1, 2**31 - 1)
+    random.seed(seed)
+    global SEED_FILE
+    SEED_FILE = os.path.abspath("seeds")
+    with open(SEED_FILE, "w") as f:
+        f.write(f"condense {seed}\n")
+
     # Compute implicit information not explicitly given in the input file.
     condense.compute_implicit_input()
 
@@ -2963,6 +3531,9 @@ def main():
 
     # Create LAMMPS data_file, LAMMPS in_file, and the slurm submission file.
     condense.create_lammps_files()
+
+    # Add the angles across each newly created bond to the post templates.
+    condense.complete_template_angles()
 
     # Make all types and bond types consistent across all files.
     condense.normalize_types()
