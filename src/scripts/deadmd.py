@@ -110,9 +110,11 @@ within the file does not matter.
     # its directory, not to deadmd.o.
     cores_per_member   1
 
-    # lmp picks the LAMMPS binary: parallel (lmp_parallel, MPI; default) or
-    # serial (lmp, one core per member; forces cores_per_member 1). Serial
-    # is exact for bond/react inter_unlinked (DIAGNOSIS pin 9).
+    # lmp picks how the one LAMMPS binary (lmp, the MPI build from the
+    # cpg_lammps module) is launched: parallel (default; several MPI ranks
+    # per member) or serial (one rank, so one core per member; forces
+    # cores_per_member 1). Serial is exact for bond/react inter_unlinked
+    # (DIAGNOSIS pin 9).
     lmp                parallel
 
     # ga_seed seeds the GA's own random numbers (initial genomes, selection,
@@ -473,7 +475,7 @@ def initialize_population():
     squish_upper   = 0.33
     ga_seed        = None   # drawn below when not given
     cores_per_member = None # None: plan_cores shares the cores automatically
-    lmp_mode       = "parallel"   # lmp serial|parallel: which LAMMPS binary
+    lmp_mode       = "parallel"   # lmp serial|parallel: ranks per member
     # Composition term (optional): target at% per element and the
     # tolerance each deviation is measured in. Defaults: 1 at% for every
     # element except H, 2 at%; "composition_tolerance El t ..." overrides.
@@ -866,14 +868,16 @@ def initialize_population():
             sys.exit(f"[DEAD-MD] lmp must be serial or parallel, got "
                      f"{lmp_mode}")
         if lmp_mode == "serial":
-            # The serial binary runs one rank: one core per member.
+            # Serial mode launches one rank: one core per member.
             if cores_per_member not in (None, 1):
                 sys.exit(f"[DEAD-MD] lmp serial runs each member on 1 core; "
                          f"cores_per_member {cores_per_member} needs lmp "
                          f"parallel")
             cores_per_member = 1
-        # Find the executables now, not after the first member fails.
-        lmp_bin = "lmp" if lmp_mode == "serial" else "lmp_parallel"
+        # Find the executables now, not after the first member fails. One
+        # binary serves both modes: lmp from the cpg_lammps module is the
+        # MPI build, and the mode only decides how many ranks srun starts.
+        lmp_bin = "lmp"
         for exe in (lmp_bin, "srun"):
             if shutil.which(exe) is None:
                 sys.exit(f"[DEAD-MD] cannot find the executable '{exe}' in "
@@ -1107,7 +1111,7 @@ def srun_mem_option():
 
 def run_member(member_dir, member, cores, gen_count, target_element,
                exp_pdf, pdf_options, gate_options, mem_opt,
-               lmp_bin="lmp_parallel"):
+               lmp_bin="lmp"):
     """
     Build and run one member: condense.py, LAMMPS on `cores` MPI
     ranks, then the per-member analysis. Several of these run at once in
@@ -1133,11 +1137,12 @@ def run_member(member_dir, member, cores, gen_count, target_element,
             # No -s: the member seed is the "seed" line of its condense.in
             # (written below with the rest of the member's input).
             run("condense.py", member_dir)
-            # lmp_bin is lmp_parallel (MPI build, openmpi/gcc libs baked in
-            # as RPATH, so no module load is needed) or the serial lmp
-            # (always 1 core). Both go through srun: --exact and a memory
-            # share let several members' steps share the job's cores at
-            # once, and Slurm keeps each on its own core(s).
+            # lmp_bin is lmp, the MPI build from the cpg_lammps module
+            # (its openmpi/gcc libraries are baked in as RPATH, so no
+            # module load is needed on the compute node); `cores` is 1
+            # in serial mode. Every member goes through srun: --exact and
+            # a memory share let several members' steps share the job's
+            # cores at once, and Slurm keeps each on its own core(s).
             run(f"srun --exact -n {cores} {mem_opt} {lmp_bin} "
                 f"-in lammps.in", lammps_dir)
             run("dump2skl.py -d dump.coarse -a lammps.dat -f -1", lammps_dir)
@@ -1217,8 +1222,7 @@ def run_lammps_simulations(population, population_size, num_cores, target_elemen
                            rxns, rxn_options, max_speed, stages, gen_count,
                            exp_pdf=None,
                            pdf_options=("neutron", 0.05), gate_options=None,
-                           elite_sources=None, cores_per_member=None,
-                           lmp_mode="parallel"):
+                           elite_sources=None, cores_per_member=None):
     """
     This function will create the necessary input files for a lammps condensation
     and run lammps for each member of the Genetic Algorithm (GA)
@@ -1306,7 +1310,7 @@ def run_lammps_simulations(population, population_size, num_cores, target_elemen
         to_run.append(member)
 
     cores, slots = plan_cores(len(to_run), num_cores, cores_per_member)
-    lmp_bin = "lmp" if lmp_mode == "serial" else "lmp_parallel"
+    lmp_bin = "lmp"
     if to_run:
         per = (f"{cores[0]} core(s) each" if len(set(cores)) == 1
                else "cores " + " ".join(map(str, cores)))
@@ -2533,7 +2537,7 @@ def main():
                                composition_num, reactions_num, rxns,
                                rxn_options, max_speed, stages, gen_count, exp_pdf,
                                pdf_options, gate_options, elite_sources,
-                               cores_per_member, lmp_mode)
+                               cores_per_member)
         # Fix the energy reference at the first generation that has a
         # scored member (normally generation 1).
         if energy_ref is None:
