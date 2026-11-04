@@ -7,11 +7,9 @@ nav_order: 2
 
 Imago is intended to be cloned from github, built on the local machine, and ran from source. Currently there are no downloadable release builds availble. This page is intended to take you through the entire setup process. On this page is the general instructions for setting up and installing imago, but there are some scenario-specific instructions available under **Tutorials** if you so desire.
 
-The following specific scenarios are available:
-- [Compile and install for system-wide use](link to tutorial page)
-- [Compile for a group](link to tutorial page)
-- [Compile and install for a single user](link to tutorial page)
-- [Blend group and single user options](link to tutorial page)
+The following step-by-step guides are available:
+- [Prerequisites](../tutorials/prerequisites.html): what the machine needs before Imago can be built, and how to check each item.
+- [Installing Imago](../tutorials/installation.html): a complete install under one user's home directory. A group install follows the same steps in a shared location, with each member sourcing that install's `imagorc`.
 
 If you are following one of the above guides, this page serves to describe the big-picture idea core to each tutorial and may still be helpful.
 
@@ -57,7 +55,7 @@ The full requirements of the OLCAO package are as follows:
 * Linear algebra libraries (lapack and blas, mkl, atlas, etc.)
 * HDF5 (including the Fortran interface and deflate filter)
 
-Additional guidance on setting these up can be found [here](link to prerequisites page under tutorials) and a basic approach can be found in the next section.
+Additional guidance on setting these up can be found in the [Prerequisites tutorial](../tutorials/prerequisites.html) and a basic approach can be found in the next section.
 
 ***IMPORTANT:*** Make sure that the fortran compiler used to compile your HDF5 install is the same one you'll be using. Different compilers are known to cause problems
 

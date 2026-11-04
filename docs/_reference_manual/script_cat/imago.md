@@ -63,7 +63,7 @@ USAGE: uolcao [-scf $basis] [-pscf $basis] [
 
 ## Detailed Calculation Information
 
-The -[option] and -scf[option] convention is consistent. Prepending scf to the calculation option will skip the scf portion of the calculation and instead use a pre-calculated scf for the property calculations. 
+The -[option] and -scf[option] convention is consistent. The plain form, for example `-dos`, is a **two-pass job**: an SCF pass with one basis, then a separate post-SCF pass that computes the property with its own (possibly different) basis. The `-scf[option]` form, for example `-scfdos`, is a **single-pass job**: the property is computed from the SCF pass itself. Checkpointing applies to both: if the SCF for the required basis has already completed in the directory (its `gs_scfV-<basis>.dat` exists), it is skipped and the job goes straight to its property pass, so one SCF serves any number of later property calculations.
 
 Most output files follow this naming convention, where the extension is option-specific:
 **[$edge]-[option]-[$basis].[extension]**

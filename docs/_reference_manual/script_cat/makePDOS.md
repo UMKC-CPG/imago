@@ -119,19 +119,23 @@ which data columns to include:
 | Curve definition                        | Meaning |
 |:----------------------------------------|:--------|
 |`TOTAL : all : all : all : TOTAL`        | The total DOS. Every element, species and type matches, and only the total column of each is included. |
-|`Si2_2 : Si : 2 : 2 : TOTAL`             | The total DOS of silicon atoms of species 2 and type 2. |
-|`Si_s : Si : all : all : s`              | The combined s orbitals of all silicon. |
-|`Si_2_3_4 : Si : 2 3 4 : all : TOTAL`    | The combined DOS of silicon species 2, 3 and 4. |
+|`Si2_2 : si : 2 : 2 : TOTAL`             | The total DOS of silicon atoms of species 2 and type 2. |
+|`Si_s : si : all : all : s`              | The combined s orbitals of all silicon. |
+|`Si_2_3_4 : si : 2 3 4 : all : TOTAL`    | The combined DOS of silicon species 2, 3 and 4. |
+
+Filter values are matched exactly against the raw file, which
+writes element names in lowercase, so write `si`, not `Si`. The
+label in the first field is free text and may use any case.
 
 A complete control file for a silicate might therefore read:
 
 ```
 LABEL : ELEMENT_NAME : SPECIES_ID : TYPE_ID : COL_LABELS
 TOTAL : all : all : all : TOTAL
-Si_s  : Si  : all : all : s
-Si_p  : Si  : all : all : p
-O_s   : O   : all : all : s
-O_p   : O   : all : all : p
+Si_s  : si  : all : all : s
+Si_p  : si  : all : all : p
+O_s   : o   : all : all : s
+O_p   : o   : all : all : p
 ```
 
 The output file has the energy scale in column one and one column
