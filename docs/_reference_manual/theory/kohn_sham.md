@@ -16,9 +16,16 @@ problem is replaced by a set of one-electron Kohn-Sham equations, one
 for each state, in which every electron moves in an effective
 potential built from the total electron density.  In atomic units:
 
-```
-[ -grad^2 + V_en(r) + V_ee(r) + V_xc[rho](r) ] Psi_nk(r) = E_n(k) Psi_nk(r)
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       [ -grad^2 + V_en(r) + V_ee(r) + V_xc[rho](r) ] Psi_nk(r)
+           = E_n(k) Psi_nk(r)                                      -->
+
+$$
+\Bigl[ -\nabla^2 + V_{e\text{-}n}(\mathbf r) + V_{e\text{-}e}(\mathbf r)
+       + V_{xc}[\rho](\mathbf r) \Bigr] \Psi_{n\mathbf k}(\mathbf r)
+  = E_n(\mathbf k)\, \Psi_{n\mathbf k}(\mathbf r)
+$$
 
 The first term is the kinetic energy.  The three potentials are the
 attraction of the electron to the nuclei, the classical Coulomb
@@ -28,9 +35,14 @@ many-electron problem that the first two terms leave out.  The
 electron density that enters the potentials is built from the
 occupied solutions:
 
-```
-rho(r) = sum over occupied (n, k) of  |Psi_nk(r)|^2
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       rho(r) = sum over occupied (n, k) of  |Psi_nk(r)|^2          -->
+
+$$
+\rho(\mathbf r) = \sum_{n,\mathbf k}^{\mathrm{occ}}
+                  \bigl| \Psi_{n\mathbf k}(\mathbf r) \bigr|^2
+$$
 
 The potential depends on the density, and the density depends on the
 solutions, so the equation is solved by iteration: guess a potential,
@@ -67,9 +79,13 @@ Substituting the Bloch sum expansion of the wave function (see the
 equation and projecting onto each basis function turns the
 differential equation into a matrix equation at each wave vector k:
 
-```
-| H(k) - E(k) S(k) | = 0
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       | H(k) - E(k) S(k) | = 0                                     -->
+
+$$
+\bigl| H(\mathbf k) - E(\mathbf k)\, S(\mathbf k) \bigr| = 0
+$$
 
 This is the secular equation, a generalized eigenvalue problem.  S is
 the overlap matrix, whose elements are the overlaps of pairs of Bloch
@@ -134,11 +150,20 @@ without further approximation.
 The total energy of the cell follows from the band energies with the
 usual density functional corrections for double counting:
 
-```
-E_total = sum over occupied (n, k) of E_n(k)
-        + integral of rho(r) [ eps_xc - V_xc - V_ee / 2 ] dr
-        + (1/2) sum over atom pairs of  Z_a Z_b / |R_a - R_b|
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       E_total = sum over occupied (n, k) of E_n(k)
+               + integral of rho(r) [ eps_xc - V_xc - V_ee / 2 ] dr
+               + (1/2) sum over atom pairs of  Z_a Z_b / |R_a - R_b| -->
+
+$$
+E_{\mathrm{total}}
+  = \sum_{n,\mathbf k}^{\mathrm{occ}} E_n(\mathbf k)
+  + \int \rho(\mathbf r)
+      \Bigl[ \varepsilon_{xc} - V_{xc} - \tfrac12 V_{e\text{-}e} \Bigr]
+      d\mathbf r
+  + \frac12 \sum_{a \ne b} \frac{Z_a Z_b}{|\mathbf R_a - \mathbf R_b|}
+$$
 
 The first term is the sum of occupied one-electron energies, the
 second removes the electron-electron interaction and
