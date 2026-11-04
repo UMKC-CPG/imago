@@ -24,18 +24,18 @@ Additionally, while currently in development, kaleidoscope will allow you to aut
 
 There are several external programs and databases that Imago has built-in support for using the conversion scripts. Supported external filetypes and their usual sources are given in a table at the bottom of this section. All conversion scripts use the naming convention [extension]2skl.py. Where [extension] is replaced by a filetype identifier (often the file's extenstion)
 
-|Filetype                                 |Most common srouces             | [extension]  |
-|:----------------------------------------|:-------------------------------|:------------:|
-|Crystallographic Information Framework   |Crystallography Open Database   |cif           |
-|LAMMPS dump file                         |LAMMPS                          |dump or lmp   |
-|Protein DataBank                         |RCSB                            |pdb           |
-|VASP position file                       |VASP                            |vasp          |
-|Imago Structure data file                |Imago                           |struct        |
-|xyz direct space file                    |N/A                             |xyz           |
+|Filetype                                 |Most common sources             | [extension]  | Script |
+|:----------------------------------------|:-------------------------------|:------------:|:------:|
+|Crystallographic Information Framework   |Crystallography Open Database   |cif           |[cif2skl.py](../reference_manual/script_cat/cif2skl.html)|
+|LAMMPS dump file                         |LAMMPS                          |dump          |[dump2skl.py](../reference_manual/script_cat/dump2skl.html)|
+|Protein DataBank                         |RCSB                            |pdb           |[pdb2skl.py](../reference_manual/script_cat/pdb2skl.html)|
+|VASP position file                       |VASP                            |vasp          |[vasp2skl.py](../reference_manual/script_cat/vasp2skl.html)|
+|Imago Structure data file                |Imago                           |struct        |[struct2skl.py](../reference_manual/script_cat/struct2skl.html)|
+|xyz direct space file                    |N/A                             |xyz           |[xyz2skl.py](../reference_manual/script_cat/xyz2skl.html)|
 
 ### Crystallography Open Database
 
-A very comprehensive source of material atomic structures is the Crystallography Open Database. Within Imago there is a script called cod\_fish.py. It can make api calls and download cif files directly for you. Additionally, you can define search parameters. See the script documentation for usage instructions [here](link to the cod_fish.py script documentation):
+A very comprehensive source of material atomic structures is the Crystallography Open Database. Within Imago there is a script called cod\_fish.py. It can make api calls and download cif files directly for you. Additionally, you can define search parameters. See the script documentation for usage instructions [here](../reference_manual/script_cat/cod_fish.html).
 
 ## Converting to Skeleton Files
 
