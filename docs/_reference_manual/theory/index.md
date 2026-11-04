@@ -53,3 +53,12 @@ the previous one.
 5. **[Core orthogonalization](core_orthogonalization.html)** -- the
    step that removes the core states from the secular equation and
    gives the method its name.
+6. **[Brillouin zone integration](brillouin_zone.html)** -- the
+   k-point mesh, its reduction by symmetry, and the choice between
+   Gaussian broadening and the linear analytic tetrahedron method.
+7. **[Calculated properties](properties.html)** -- what each
+   post-self-consistent property is as physics, and the `imago.py`
+   option that computes it.
+8. **[Core level spectroscopy](core_spectroscopy.html)** -- the
+   supercell method behind the photo-absorption cross section, with
+   an explicit core hole.
