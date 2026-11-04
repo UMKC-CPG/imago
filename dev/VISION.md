@@ -391,7 +391,9 @@ flight instead of an exhaustive grid search.
     individual kernels move between devices without
     rewrites, and the decision for each kernel is backed by
     the cost dataspace (Goal 6) rather than asserted up
-    front.
+    front. A stage-by-stage assessment of where offload
+    would pay, reasoned from the measured time map, is in
+    `dev/PERFORMANCE.md` ("GPU prospects").
 15. **Attribution is a non-negotiable, not a formality.** Imago
     cites the work it derives from, and it is built so that credit
     survives being passed on. Two obligations follow from that.

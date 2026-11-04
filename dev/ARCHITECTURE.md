@@ -730,6 +730,17 @@ Each phase is independently useful: phase 1 halves
 memory footprint and improves cache behavior; phase 2
 speeds up CPU execution; phase 3 adds GPU capability.
 
+**Which kernels, and in what order (assessed 2026-11-04).**
+The measured cost structure (6.8) ranks the candidates: the
+secular solve first, because ELPA (6.6) already carries GPU
+kernels and the change is a build and a flag; the
+three-centre integrals second, the larger gain but a kernel
+rewrite in the 6.2 shape; the electrostatic setup and the
+rest only after those two, when they become the floor. The
+reasoning, the memory limits, and the regime where offload
+does not pay at all are in `dev/PERFORMANCE.md` ("GPU
+prospects").
+
 ### 6.4 Reference: Prior Vectorized Integrals
 
 An earlier vectorized implementation exists outside this

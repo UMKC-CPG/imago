@@ -1380,6 +1380,99 @@ what removes both). The next lever is not more ranks on region
 A but region I: the 42.9 s of integral reads, dealt or cached
 read-once (candidate (ii)).
 
+## GPU prospects (assessed 2026-11-04)
+
+A thought exercise, not a measurement: where GPU offload would
+pay in `imago`, where it would not, and what the floors become
+once it does. It reasons from the coarse time map above and from
+the PA3/PA4-B/PA5a stage numbers, and it is recorded here so the
+reasoning can be checked against those numbers rather than
+re-derived. VISION Principle 14 is the governing rule (placement
+is empirical and per kernel); ARCHITECTURE 6.3 is the standing
+direction this assessment refines; DESIGN 9.8 holds the open
+question of how placement is expressed in Fortran. Nothing below
+changes a decision in the chain.
+
+**Where the time goes, restated.** Above toy size two stages are
+72-86 % of every run: the once-per-run three-centre potential
+integrals and the per-iteration secular solve. The solve grows
+faster with cell size, from 9 % on a small cell to 62 % at 1296
+atoms in the complex binary. The once-per-run electrostatic
+setup is 11-21 % at the large size. The valence density build is
+3-14 %. Everything else is noise at every size.
+
+**The secular solve is the clearest win.** It is a dense
+generalized Hermitian eigenproblem, full spectrum with
+eigenvectors, dimension in the tens of thousands at production
+size -- exactly the shape the GPU numerical libraries are built
+for, and ELPA, already the collective solver (ARCHITECTURE 6.6,
+PA4-B), ships GPU kernels. The code change is near zero: a GPU
+build of ELPA and a solver flag. The per-iteration cost means
+the gain multiplies by the iteration count. Two caveats. Memory:
+at valence dimension 12528 the complex H, S and eigenvector
+matrices are ~2.5 GB each and fit one device; at four times the
+dimension they are ~40 GB each and the problem becomes
+multi-device distributed, a different project. And eigensolvers
+scale less well on a GPU than GEMM does, because the
+tridiagonalization is memory-bound -- expect a strong factor
+over a full CPU node, not a spectacular one.
+
+**The three-centre integrals are the larger prize and the larger
+job.** They are closed-form Gaussian integrals, mutually
+independent, evaluated by the million, and arithmetic-bound on
+exponentials and error functions -- the toolchain finding above
+("The two toolchains are not equally fast") already showed the
+stage is bound by vector transcendental throughput, which is what
+a GPU supplies. But nothing is reusable: the stage is Fortran
+loops with cutoff filtering, angular-momentum recursion to f, and
+a per-term HDF5 write (DESIGN 9.5). Porting it means rewriting
+the inner kernel for the device (OpenMP target, OpenACC or CUDA
+Fortran -- the DESIGN 9.8 question) and restructuring the loop
+so work reaches the device in large batches, the ARCHITECTURE
+6.2 gather/compute shape. The payoff would also move a
+structural decision: once the integrals are cheap, the sensible
+design recomputes them each iteration on the device instead of
+storing them and inflating them from disk, which removes the
+read cost PF8 measured and the storage with it.
+
+**Where the floors move.** Amdahl's law is the whole story. With
+the solve and the integrals fast, the electrostatic setup becomes
+the floor -- a lattice sum with irregular structure, awkward on a
+device even though PA5a dealt it across ranks. Then HDF5 I/O, the
+valence density contraction and the per-iteration potential fit,
+each small today, become the next floors in turn. There is also
+a transfer floor: for small and medium cells the matrices are
+small enough that moving them to the device costs what solving
+them costs, and the integrals finish in seconds regardless. That
+regime -- the convergence sweeps and the database builds -- is
+served by many CPU jobs in flight (the kaleidoscope axis of
+VISION Goal 4), not by a device.
+
+**Where not to spend effort.** The valence density rank-k update
+(PSEUDOCODE 31) is a GEMM and would port trivially, but at a few
+percent of a run it does not justify a dependency on its own.
+And a device toolchain adds fragility this project has already
+felt in miniature: the 1.7x gap between two builds of the same
+compiler, above. A CUDA-aware Fortran + MPI + HDF5 stack
+multiplies that kind of risk, and PF7's toolchain pin would have
+to be redone for it.
+
+**A staged path, if pursued.**
+
+1. ELPA with GPU support for the solve. Small change, large-cell
+   win, measurable in a day against the existing baseline decks
+   under the layer-1 harness.
+2. A prototype of ONE three-centre kernel, the s-type integral,
+   offloaded and timed on the large deck. That single measurement
+   decides whether the full integral rewrite is worth doing.
+3. Only if both land: the electrostatic setup, and the decision to
+   recompute rather than store the integrals.
+
+**Summary.** Device offload would make `imago` faster at exactly
+the thing OLCAO was built for -- thousand-atom cells -- and would
+do little for anything smaller. Step 1 is cheap enough to try
+without committing to the rest.
+
 ## The situation, as of 2026-08-09
 
 Three things are true at once, and the campaign has to be planned

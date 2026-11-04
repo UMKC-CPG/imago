@@ -15142,7 +15142,11 @@ PSEUDOCODE 37 carries the mechanics and the seam inventory.
   kernel CPU/GPU boundary (VISION Principle 14) is expressed
   -- OpenACC, OpenMP target, CUDA Fortran, or a library
   boundary such as ELPA -- is open and will likely differ
-  per kernel.
+  per kernel. Which kernels are worth placing, and in what
+  order, is assessed in `dev/PERFORMANCE.md` ("GPU
+  prospects", 2026-11-04): the solve through ELPA's library
+  boundary first, then a single prototyped three-centre
+  kernel to decide the rest.
 - **Parallel-HDF5 chunk/block strategy.** PARTLY ANSWERED
   2026-08-23 by reading the layout (9.7): every packed matrix
   is a single compressed chunk at every size we run, which
