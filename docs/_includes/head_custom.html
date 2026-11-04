@@ -7,42 +7,20 @@
   LaTeX notation in a page into rendered equations in the browser.
   Theory pages write equations between $$ delimiters in Markdown.
 
-  Why the renderActions block is needed: GitHub Pages converts the
-  Markdown with kramdown, whose default math engine does not leave
-  the $$ delimiters in place.  It emits each equation as a
-  <script type="math/tex"> element (with "; mode=display" appended
-  for a block equation).  MathJax version 2 understood those script
-  elements natively; version 3 does not.  The "find" action below
-  walks the page for them and hands each one to MathJax as a math
-  item, which is the recipe the MathJax documentation gives for
-  kramdown output.  Removing it would leave every equation blank.
+  How the delimiters reach the browser: GitHub Pages converts the
+  Markdown with kramdown, whose math engine rewrites a $$ block as
+  \[ ... \] and an inline $$ span as \( ... \) in the HTML.  Those
+  are the delimiters MathJax 3 looks for by default, so no custom
+  configuration is needed and none should be added.  In particular
+  the "renderActions" option must be left alone: overriding its
+  "find" action replaces MathJax's own search for \[ \] and \( \),
+  and every equation then appears as raw LaTeX.
 
   The library is fetched from a public CDN, so a reader without
   access to that CDN sees the LaTeX source instead of equations.
   Every equation on the Theory pages also carries a plain-text form
   in an HTML comment above it for readers of the Markdown source.
 -->
-<script>
-  window.MathJax = {
-    options: {
-      renderActions: {
-        find: [10, function (doc) {
-          for (const node of document.querySelectorAll(
-                 'script[type^="math/tex"]')) {
-            const display = !!node.type.match(/; *mode=display/);
-            const math = new doc.options.MathItem(
-                node.textContent, doc.inputJax[0], display);
-            const text = document.createTextNode('');
-            node.parentNode.replaceChild(text, node);
-            math.start = {node: text, delim: '', n: 0};
-            math.end = {node: text, delim: '', n: 0};
-            doc.math.push(math);
-          }
-        }, '']
-      }
-    }
-  };
-</script>
 <script id="MathJax-script" async
   src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js">
 </script>
