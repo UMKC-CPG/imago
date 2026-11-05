@@ -11,22 +11,26 @@ message("At the set of scripts.")
 # .imago/ from the clone -- exactly like the sourced imagorc file --
 # rather than being installed into bin/ as a program.
 
+# Four files in this directory are deliberately NOT installed, because
+#   none of them can run as it stands: ab2pf.py and nanoTube.py are
+#   Python 2 and fail to parse under Python 3; collectSYBD.py is an
+#   unfinished stub with empty "if" and "for" bodies; lmp2skl.py has no
+#   entry point and hard-codes a private path.  They stay in src/scripts
+#   for future repair.  Add one back here when it works again.
 set (SCRIPTS
-   ab2pf.py angle_utils.py
+   angle_utils.py
    bond_analysis.py build_initial_potentials.py
    cif2skl.py cluster_probe.py cod_fish.py
-   collectSYBD.py condense.py curation_manifest.py
+   condense.py curation_manifest.py
    deadmd.py deadmd_validity.py dump2skl.py
    element_data.py element_pct.py expand_manifest.py
    graspElems.py
    guidance_db.py guidance_harvest.py guidance_promote.py
    hdf5Comp.py
    imago.py initial_potential_db.py insert3cbo.py interFit.py
-   lmp2skl.py
    make_veusz_graph.py makeBDB.py makeBOND.py makeFittedRhoV.py
    makegroups.py makePDOS.py makePotDB.py make_reactions.py makeSGDB.py
    makeSYBD.py makeinput.py matchers.py mesh_climb.py mod_struct.py
-   nanoTube.py
    org_radwavefn.py osrecurintg.py osrecurintgana.py osrecurintgnum.py
    osrecurintglib.py osrecurintg_makenum.py
    pdb2skl.py pdf_neutron.py plot_deadmd.py plotgraph.py porosity.py pot2plot.py
@@ -42,7 +46,7 @@ set (SCRIPTS
 set (RC_FILES
    bond_analysisrc.py
    clusterrc.py
-   collectSYBDrc.py condenserc.py
+   condenserc.py
    dump2sklrc.py
    esviewrc.py
    hdf5Comprc.py

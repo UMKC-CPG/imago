@@ -20,17 +20,31 @@ Imago is the successor to the long-running OLCAO codebase. The
 method retains its established name; only the code has been
 rebranded.
 
-## Building
-
-See [BUILD.md](BUILD.md) for the production build and the opt-in
-debugging builds.
-
 ## Documentation
 
-Project documentation is in [`docs/`](docs/). The design document
-chain -- vision, architecture, design, and pseudocode -- lives in
-[`dev/`](dev/) and is the authoritative description of how and why
-the code works the way it does.
+The user documentation is a website:
+
+**<https://umkc-cpg.github.io/imago/>**
+
+It covers installation, a first calculation from skeleton file to
+plotted density of states, a reference page for every script, and
+the theory behind the method. Start there if you want to install or
+use Imago. Its source is the [`docs/`](docs/) directory of this
+repository.
+
+The design document chain -- vision, architecture, design, and
+pseudocode -- lives in [`dev/`](dev/) and is the authoritative
+description of how and why the code works the way it does.
+
+## Building
+
+The ordinary install is described in the site's installation
+tutorial:
+
+<https://umkc-cpg.github.io/imago/tutorials/installation.html>
+
+See [BUILD.md](BUILD.md) for the developer's view: the build trees,
+the opt-in debugging builds, and the parallel toolchain.
 
 ## Contributing
 

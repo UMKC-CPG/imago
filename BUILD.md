@@ -6,6 +6,15 @@ bug-squashing campaign in `dev/DEBUG.md`. It is meant to be read
 cold -- you should be able to pick "I want a leak-checking build"
 without reading any CMake.
 
+It is written for developers on the group's cluster, where the
+compilers come from the `cpg` and `cpgp` conda environments named
+below. If you simply want to install and use Imago on your own
+machine, the step-by-step version with nothing site-specific in it
+is the installation tutorial on the documentation site,
+<https://umkc-cpg.github.io/imago/tutorials/installation.html>; the
+two agree on every command, and this note adds the toolchain detail
+behind them.
+
 ## Prerequisites (environment)
 
 Imago is built with CMake and a Fortran compiler that **must match

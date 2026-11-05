@@ -70,6 +70,28 @@ find the paper or book it came from without hunting.
 Attribution is not a formality in scientific software. It is the
 same obligation that governs a methods section.
 
+## Documentation
+
+The user documentation is the site at
+<https://umkc-cpg.github.io/imago/>, built by GitHub Pages from the
+`docs/` directory of this repository. Its Contributing page
+describes the site's layout and the front matter each page needs;
+read it before adding or editing a page.
+
+Two conventions tie the site to the source tree:
+
+- **Every installed script has a catalog page.** When a script is
+  added to the install list in `src/scripts/CMakeLists.txt`, a page
+  for it goes into `docs/_reference_manual/script_cat/`, written from
+  the script's docstring and its `--help` output, carrying the
+  `script` and `description` front-matter fields the catalog index
+  reads. A page that disagrees with `--help` is wrong, and the
+  script is the source of truth; fix the page.
+- **Only scripts that run are installed.** A script that does not
+  parse, or has no entry point, stays in `src/scripts/` for repair
+  but is left out of the install list, with a comment there saying
+  why, so that `bin/` never carries a program that cannot start.
+
 ## The Design Document Chain and Coding Style
 
 Imago follows a five-level document chain -- vision, architecture,
