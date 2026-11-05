@@ -56,17 +56,18 @@ installation tutorial explains why those three are what is needed.
 
 ## Developed by
 
-<!-- Affiliation marks.  Both are blue-on-transparent artwork, so they
-     sit on a white panel to stay legible under the site's dark color
-     scheme.  Heights are fixed so the square group mark and the wide
-     school wordmark align on one row. -->
-<p style="background: #ffffff; border-radius: 6px; padding: 1rem 1.5rem;
-          display: flex; align-items: center; gap: 2.5rem;
-          flex-wrap: wrap;">
+<!-- Affiliation marks on one row.  The sizes are set with inline
+     styles rather than height attributes because the theme's
+     stylesheet gives every image `height: auto`, which overrides the
+     attribute and lets an SVG render at its natural size. -->
+<p style="display: flex; align-items: center; gap: 2.5rem;
+          flex-wrap: wrap; margin: 1rem 0;">
   <img src="assets/images/cpg_logo.svg"
-       alt="Computational Physics Group" height="90">
+       alt="Computational Physics Group"
+       style="height: 64px; width: auto;">
   <img src="assets/images/umkc_sse_wordmark.svg"
-       alt="UMKC School of Science and Engineering" height="70">
+       alt="UMKC School of Science and Engineering"
+       style="height: 48px; width: auto;">
 </p>
 
 The Computational Physics Group in the School of Science and
