@@ -24,3 +24,13 @@
 <script id="MathJax-script" async
   src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js">
 </script>
+
+<!--
+  Browser-tab icon.  Modern browsers accept an SVG favicon directly,
+  which keeps the Imago logo as the single source for both the
+  sidebar image (the `logo` key in _config.yml) and the tab icon.
+  The path goes through relative_url so it is correct whether the
+  site is served from a domain root or from the /imago/ project path.
+-->
+<link rel="icon" type="image/svg+xml"
+      href="{{ '/assets/images/imago_logo.svg' | relative_url }}">

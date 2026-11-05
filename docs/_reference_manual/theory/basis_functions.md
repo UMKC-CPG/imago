@@ -17,19 +17,33 @@ electronic state carries a band index n and a wave vector k, even when
 the "solid" is a single molecule in a large cell.  The wave function
 of a state is expanded in Bloch sums:
 
-```
-Psi_nk(r) = sum over (i, gamma) of  C_{i gamma}^n(k) * b_{i gamma}(k, r)
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       Psi_nk(r) = sum over (i, gamma) of
+                   C_{i gamma}^n(k) * b_{i gamma}(k, r)               -->
+
+$$
+\Psi_{n\mathbf k}(\mathbf r)
+  = \sum_{i,\gamma} C^{\,n}_{i\gamma}(\mathbf k)\,
+    b_{i\gamma}(\mathbf k, \mathbf r)
+$$
 
 Here gamma runs over the atoms in the cell and i over the orbitals on
 each atom.  A Bloch sum is the same atomic orbital placed on every
 periodic image of one atom, each copy carrying the phase factor
 Bloch's theorem demands:
 
-```
-b_{i gamma}(k, r) = (1 / sqrt N) * sum over lattice vectors R of
-                    exp(i k . R) * u_i(r - R - t_gamma)
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       b_{i gamma}(k, r) = (1 / sqrt N) * sum over lattice vectors R
+                           of  exp(i k . R) * u_i(r - R - t_gamma)  -->
+
+$$
+b_{i\gamma}(\mathbf k, \mathbf r)
+  = \frac{1}{\sqrt N} \sum_{\mathbf R}
+    e^{\,i\mathbf k\cdot\mathbf R}\,
+    u_i(\mathbf r - \mathbf R - \mathbf t_\gamma)
+$$
 
 where t_gamma is the position of atom gamma in the cell.  The
 coefficients C are what the self-consistent calculation determines.
@@ -41,9 +55,16 @@ are fixed before the calculation begins.
 Each atomic orbital is a radial function times a real spherical
 harmonic:
 
-```
-u_i(r) = [ sum over j of  A_j * r^l * exp(-alpha_j r^2) ] * Y_lm(theta, phi)
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       u_i(r) = [ sum over j of  A_j * r^l * exp(-alpha_j r^2) ]
+                * Y_lm(theta, phi)                                  -->
+
+$$
+u_i(\mathbf r)
+  = \Bigl[ \sum_{j=1}^{N} A_j\, r^{\,l}\, e^{-\alpha_j r^2} \Bigr]
+    Y_{lm}(\theta, \phi)
+$$
 
 The index i stands for the full set of quantum numbers n, l, m.  The
 radial part is a linear combination of Gaussian-type orbitals (GTOs),

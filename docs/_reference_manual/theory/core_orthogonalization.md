@@ -45,18 +45,27 @@ very accurate for genuine core states, which are compact.  Second,
 each valence Bloch sum is replaced by an orthogonalized version:
 itself minus its projection onto every core Bloch sum.
 
-```
-b'_valence = b_valence  -  sum over core states c of  <b_c | b_valence> b_c
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       b'_valence = b_valence
+                    - sum over core states c of  <b_c | b_valence> b_c -->
+
+$$
+b'_{v} = b_{v} - \sum_{c} \langle b_c \,|\, b_v \rangle\, b_c
+$$
 
 The orthogonalized valence functions are, by construction, orthogonal
 to the core.  In this new basis the core-valence blocks vanish, the
 core block decouples, and the eigenvalue problem for the valence
 states closes on the valence-valence block alone:
 
-```
-| H'_vv(k) - E(k) S'_vv(k) | = 0
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       | H'_vv(k) - E(k) S'_vv(k) | = 0                             -->
+
+$$
+\bigl| H'_{vv}(\mathbf k) - E(\mathbf k)\, S'_{vv}(\mathbf k) \bigr| = 0
+$$
 
 The orthogonalized matrices H' and S' are the original
 valence-valence blocks plus correction terms built from the

@@ -18,21 +18,40 @@ codes tabulate them on a three-dimensional grid of points.  Imago
 instead writes each of them as a sum of atom-centered functions, and
 each atom-centered function as a sum of spherical Gaussians:
 
-```
-rho(r) = sum over atoms A of  rho_A(r - t_A),
-rho_A(r) = sum over j of  B_j * exp(-beta_j r^2)
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       rho(r)   = sum over atoms A of  rho_A(r - t_A),
+       rho_A(r) = sum over j of  B_j * exp(-beta_j r^2)              -->
+
+$$
+\rho(\mathbf r) = \sum_{A} \rho_A(\mathbf r - \mathbf t_A),
+\qquad
+\rho_A(\mathbf r) = \sum_{j=1}^{N} B_j\, e^{-\beta_j r^2}
+$$
 
 The Coulomb and exchange-correlation parts of the potential are
 written the same way:
 
-```
-V_Coul(r) = sum over atoms A of  V_C(r - t_A),
-V_C(r)  = -(Z_A / r) * exp(-zeta r^2)  -  sum over j of  D_j * exp(-beta_j r^2)
+<!-- Plain-text form of the equations below, for readers of the
+     Markdown source:
+       V_Coul(r) = sum over atoms A of  V_C(r - t_A),
+       V_C(r)    = -(Z_A / r) * exp(-zeta r^2)
+                   - sum over j of  D_j * exp(-beta_j r^2)
+       V_xc(r)   = sum over atoms A of  V_x(r - t_A),
+       V_x(r)    = sum over j of  F_j * exp(-beta_j r^2)              -->
 
-V_xc(r)  = sum over atoms A of  V_x(r - t_A),
-V_x(r)  = sum over j of  F_j * exp(-beta_j r^2)
-```
+$$
+V_{\mathrm{Coul}}(\mathbf r) = \sum_{A} V_C(\mathbf r - \mathbf t_A),
+\qquad
+V_C(\mathbf r) = -\frac{Z_A}{r}\, e^{-\zeta r^2}
+                 - \sum_{j=1}^{N} D_j\, e^{-\beta_j r^2}
+$$
+
+$$
+V_{xc}(\mathbf r) = \sum_{A} V_x(\mathbf r - \mathbf t_A),
+\qquad
+V_x(\mathbf r) = \sum_{j=1}^{N} F_j\, e^{-\beta_j r^2}
+$$
 
 The first term of V_C is the bare nuclear attraction, screened by a
 rapidly decaying Gaussian with a fixed exponent zeta (20 in Imago, the

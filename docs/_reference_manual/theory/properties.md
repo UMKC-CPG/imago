@@ -58,10 +58,16 @@ by spin, with no further approximation.  The projection uses
 Mulliken's population analysis: the fraction of a normalized state m
 that belongs to orbital i on atom alpha is
 
-```
-rho_{i alpha}^m = sum over (j, beta) of
-                  C_{i alpha}^m * C_{j beta}^m * S_{i alpha, j beta}
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       rho_{i alpha}^m = sum over (j, beta) of
+                         C_{i alpha}^m * C_{j beta}^m * S_{i alpha, j beta} -->
+
+$$
+\rho^{\,m}_{i\alpha}
+  = \sum_{j,\beta} C^{\,m}_{i\alpha}\, C^{\,m}_{j\beta}\,
+    S_{i\alpha,\, j\beta}
+$$
 
 the state's coefficient on the orbital times its overlap with every
 other orbital, which sums to one over all orbitals.  Peaks that line
@@ -155,10 +161,17 @@ promoted to an unoccupied state n by a photon of energy equal to the
 difference, with a probability given by the momentum matrix element
 between the two.  The real part of the optical conductivity is
 
-```
-sigma_1(E) ~ (1 / E) sum over (l occupied, n unoccupied, k) of
-             |<n| p |l>|^2  delta( E_n(k) - E_l(k) - E )
-```
+<!-- Plain-text form of the equation below, for readers of the
+     Markdown source:
+       sigma_1(E) ~ (1 / E) sum over (l occupied, n unoccupied, k) of
+                    |<n| p |l>|^2  delta( E_n(k) - E_l(k) - E )     -->
+
+$$
+\sigma_1(E) \;\propto\; \frac{1}{E}
+  \sum_{l\,\mathrm{occ}}\ \sum_{n\,\mathrm{unocc}}\ \sum_{\mathbf k}
+  \bigl| \langle n | \mathbf p | l \rangle \bigr|^2\,
+  \delta\bigl( E_n(\mathbf k) - E_l(\mathbf k) - E \bigr)
+$$
 
 and the imaginary dielectric function follows from it,
 epsilon_2 = 4 pi sigma_1 / omega.  The momentum matrix elements are
