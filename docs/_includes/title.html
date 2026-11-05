@@ -1,0 +1,18 @@
+<!--
+  The sidebar title, rendered inside the theme's site-title link at
+  the top of the navigation column.  Just the Docs offers this include
+  as a replacement point.  Its own version shows either the logo image
+  (when `logo` is set in _config.yml) or the site title text, never
+  both; this version shows the Imago logo with the word "Imago" beside
+  it.  The `logo` key is therefore left unset in _config.yml.
+
+  The image height is tied to the text size so the pair scales
+  together, and the flex layout keeps them on one line and vertically
+  centred.  The path goes through relative_url so it is correct under
+  the /imago/ project path.
+-->
+<span style="display: inline-flex; align-items: center; gap: 0.6rem;">
+  <img src="{{ '/assets/images/imago_logo.svg' | relative_url }}"
+       alt="" style="height: 2.2em; width: auto;">
+  <span>{{ site.title }}</span>
+</span>

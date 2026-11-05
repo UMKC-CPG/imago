@@ -64,10 +64,10 @@ installation tutorial explains why those three are what is needed.
           flex-wrap: wrap; margin: 1rem 0;">
   <img src="assets/images/cpg_logo.svg"
        alt="Computational Physics Group"
-       style="height: 64px; width: auto;">
+       style="height: 96px; width: auto;">
   <img src="assets/images/umkc_sse_wordmark.svg"
        alt="UMKC School of Science and Engineering"
-       style="height: 48px; width: auto;">
+       style="height: 72px; width: auto;">
 </p>
 
 The Computational Physics Group in the School of Science and

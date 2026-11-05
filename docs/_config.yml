@@ -51,11 +51,10 @@ gh_edit_view_mode: "tree"
 # Color scheme for the rendered site: "light" (default) or "dark".
 color_scheme: dark
 
-# Image shown in the sidebar header in place of the site title text.
-# The title above still serves as the image's alt text and as the
-# browser-tab title.  The path is resolved against the site's base
-# URL, so it must start at the root of /docs.
-logo: "/assets/images/imago_logo.svg"
+# The sidebar header shows the Imago logo beside the site title.  The
+# theme's own `logo` key would show the image INSTEAD of the title, so
+# it is deliberately not set; the header content comes from
+# _includes/title.html instead.
 
 ## Define Jekyll Collections
 
