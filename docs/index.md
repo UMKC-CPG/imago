@@ -1,88 +1,73 @@
 ---
-# Front matter drives how Just the Docs treats this page.  `title`
-# is the label the theme would show in the left-hand sidebar, but
-# `nav_exclude: true` keeps this page out of the sidebar altogether:
-# the site title in the header already links here, so a "Home" entry
-# would be a duplicate.  `nav_order: 1` is kept so the page sorts
-# first if the exclusion is ever lifted.  The presence of front
-# matter is also what tells Jekyll to render the page through the
+# Front matter drives where Just the Docs places this page.  `title`
+# is the label shown in the left-hand navigation sidebar, and
+# `nav_order: 1` pins this landing page to the very top of that list.
+# Its presence is also what tells Jekyll to render the page through the
 # active theme's layout.
 title: Home
 nav_order: 1
 nav_exclude: true
 ---
 
+<!-- The Imago logo sits to the right of the heading and opening
+     paragraphs.  Width is fixed so the SVG, which declares a
+     1024-pixel natural size, does not dominate the page. -->
+<img src="assets/images/imago_logo.svg" alt="Imago logo" width="180"
+     style="float: right; margin: 0 0 1rem 1.5rem;">
+
 # Imago
 
 Imago is an all-electron electronic structure code implementing the
-OLCAO (Orthogonalized Linear Combination of Atomic Orbitals) method.
-It computes the electronic properties of crystals, amorphous solids,
-nanoparticles, molecules, interfaces, and grain boundaries from a
-single framework: no pseudopotentials, periodic boundary conditions
-throughout, and a basis of atomic orbitals orthogonalized to the core
-so the secular equation stays small.  Imago is the successor to the
-long-running OLCAO codebase.  The method keeps its established name;
-only the code has been rebranded.
+OLCAO method, the Orthogonalized Linear Combination of Atomic
+Orbitals. It computes the electronic ground state of crystals,
+glasses, molecules, nanoparticles, interfaces and grain boundaries,
+and from it the properties that experiments measure: densities of
+states, band structures, bond orders and charges, optical spectra,
+and core-level spectra. It is developed by the Computational Physics
+Group at the University of Missouri-Kansas City and released under
+the Educational Community License 2.0.
 
-Imago is an academic code, developed by the Computational Physics
-Group at the University of Missouri--Kansas City and used for both
-research and student training.  Source and development live on
+This site is the user documentation. The source, the issue tracker
+and the design documents are on
 [GitHub](https://github.com/umkc-cpg/imago).
+
+<div style="clear: both;"></div>
 
 ## Where to start
 
-The pages below are ordered the way a first-time user meets them.
+| If you want to...                          | Go to |
+|:-------------------------------------------|:------|
+|Understand what Imago does and how a calculation flows | [Introduction](overview/introduction.html) and [Imago Workflow](overview/workflow.html) |
+|Install it and run your first calculation   | The [Tutorials](tutorials/index.html), which take you from a bare machine to a plotted density of states and band structure |
+|Look up an option of a script               | The [Script Catalog](reference_manual/script_cat/index.html), one page per script, searchable from the box above |
+|Understand the method behind the numbers    | The [Theory](reference_manual/theory/index.html) section, which follows the OLCAO book chapter by chapter and names the Imago option that controls each piece |
+|Turn output files into figures              | The [post-processing section](reference_manual/script_cat/index.html#post-processing) of the Script Catalog |
+|Fix or extend the documentation             | [Contributing](overview/contributing.html) |
 
-1. **[Introduction](overview/introduction.html)** -- what the OLCAO
-   method is and what makes Imago different from a pseudopotential
-   code.
-2. **[Setup](overview/setup.html)** -- prerequisites, cloning the
-   repository, building with CMake, installing, and validating the
-   install.  Imago is built from source; there are no binary
-   releases yet.
-3. **[Imago Workflow](overview/workflow.html)** -- the shape of a
-   calculation from an atomic structure file to plotted results:
-   convert the structure to a skeleton file, generate inputs with
-   `makeinput.py`, run the job with `imago.py`, then post-process.
+## Getting help
 
-## Reference
+If you cannot find what you need, the scripts themselves are the
+next place to look: every one carries a full description in its
+docstring and prints its options with `--help`. Beyond that, contact
+Dr. Paul Rulis at the University of Missouri-Kansas City. When
+reporting a problem, include the output of `env | grep IMAGO`, the
+error text, and the `runtime` file from the job directory; the
+installation tutorial explains why those three are what is needed.
 
-Once you know the shape of a calculation, the Reference Manual holds
-the details.
+## Developed by
 
-- **[Script Catalog](reference_manual/script_cat/index.html)** -- a
-  searchable list of the scripts that ship with Imago.  The two every
-  calculation uses are
-  [makeinput.py](reference_manual/script_cat/makeinput.html), which
-  turns a skeleton file into a complete job directory, and
-  [imago.py](reference_manual/script_cat/imago.html), the driver
-  that runs the self-consistent field and post-SCF calculations.
-- **[Post Processing](reference_manual/post_processing.html)** -- the
-  scripts that turn raw output into plots and into files other tools
-  can read.  For most results `plotgraph.py` is the right first stop.
+<!-- Affiliation marks.  Both are blue-on-transparent artwork, so they
+     sit on a white panel to stay legible under the site's dark color
+     scheme.  Heights are fixed so the square group mark and the wide
+     school wordmark align on one row. -->
+<p style="background: #ffffff; border-radius: 6px; padding: 1rem 1.5rem;
+          display: flex; align-items: center; gap: 2.5rem;
+          flex-wrap: wrap;">
+  <img src="assets/images/cpg_logo.svg"
+       alt="Computational Physics Group" height="90">
+  <img src="assets/images/umkc_sse_wordmark.svg"
+       alt="UMKC School of Science and Engineering" height="70">
+</p>
 
-## Status of this documentation
-
-This site is **incomplete** and grows over time.  Some links point at
-pages that do not exist yet; those are left in place deliberately, as
-reminders to the maintainers of what still needs writing.  If a page
-you need is missing or a link is broken, you have three options:
-
-- **Read the script's own help and source.**  Every script answers
-  `--help` with its options and defaults, and most scripts open with
-  a long comment block describing what they do and why.  This is the
-  preferred route, because the source is always current.
-- **Contact Dr. Paul Rulis** with questions, difficulties, or
-  solutions.  Good questions become documentation.
-- **Fix it yourself.**  The [Contributing](overview/contributing.html)
-  page explains how the site is built and how to submit changes.
-
-## Citation and license
-
-If you use Imago in published work, please cite it.  Machine-readable
-metadata is in the repository's `CITATION.cff`, which GitHub renders
-as a "Cite this repository" panel.  A DOI will be minted at the first
-tagged release; until then, cite the repository directly.
-
-Imago is licensed under the Educational Community License, Version
-2.0 (ECL-2.0).  Copyright (c) 2026 Paul Rulis.
+The Computational Physics Group in the School of Science and
+Engineering at the University of Missouri-Kansas City.

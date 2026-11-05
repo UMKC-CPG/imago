@@ -6,23 +6,33 @@ nav_order: 3
 
 # Imago Workflow
 
-In general performing calculations in Imago follows these steps:
-- Source atomic structure file (cif, pbd, skl, etc)
-- Convert structure file to [skeleton](link to skeleton file page) file (skl) if it isn't one
-   - cif2skl.py, pdb2skl.py, etc
-- Create a job directory for the structure and place the skeleton file in the directory
-- Make physics-informed decisions about what settings to use for the calculations
-- Run makeinput.py with your desired settings on the skeleton file
-- Run the imago.py script either by:
-   - Editing then submitting the generated slurm file. Or
-   - Running your desired calculations in the commandline using imago.py
-- Post processing and analysis
+In general, performing a calculation in Imago follows these steps:
 
-Additionally, while currently in development, kaleidoscope will allow you to automate this process. Once ready, you can create a "builder" to create a large set of different inputfiles (the makeinput.py step) and then run them while keeping track of any that fail.
+1. Obtain an atomic structure file (CIF, PDB, a LAMMPS dump, a VASP
+   file, or a skeleton written by hand).
+2. Convert it to a **skeleton** file (`imago.skl`) if it is not one
+   already, with the matching `<extension>2skl.py` script.
+3. Create a job directory for the structure and place the skeleton
+   in it.
+4. Make the physics-informed decisions about the calculation: the
+   k-point sampling, the basis, the exchange-correlation functional,
+   whether a band path is wanted.
+5. Run `makeinput.py` with those settings in the job directory.
+6. Run `imago.py`, either by submitting the generated batch script
+   or directly on the command line.
+7. Post-process and analyse.
+
+The [first calculation tutorial](../tutorials/first_calculation.html)
+performs all seven steps on silicon with every command shown and
+every output file explained. This page is the map; that page is the
+walk.
 
 ## Sourcing Atomic Structure Files
 
-There are several external programs and databases that Imago has built-in support for using the conversion scripts. Supported external filetypes and their usual sources are given in a table at the bottom of this section. All conversion scripts use the naming convention [extension]2skl.py. Where [extension] is replaced by a filetype identifier (often the file's extenstion)
+Imago has built-in support for several external file types through
+its conversion scripts. All of them follow the naming convention
+`<extension>2skl.py`, where `<extension>` identifies the file type,
+usually by its file extension.
 
 |Filetype                                 |Most common sources             | [extension]  | Script |
 |:----------------------------------------|:-------------------------------|:------------:|:------:|
@@ -35,36 +45,95 @@ There are several external programs and databases that Imago has built-in suppor
 
 ### Crystallography Open Database
 
-A very comprehensive source of material atomic structures is the Crystallography Open Database. Within Imago there is a script called cod\_fish.py. It can make api calls and download cif files directly for you. Additionally, you can define search parameters. See the script documentation for usage instructions [here](../reference_manual/script_cat/cod_fish.html).
+A very comprehensive source of material atomic structures is the
+Crystallography Open Database. Imago's
+[cod_fish.py](../reference_manual/script_cat/cod_fish.html) searches
+it by composition and downloads CIF files directly, pinning the
+database revision so that a structure can be fetched again exactly.
 
 ## Converting to Skeleton Files
 
-The table in the section on sourcing atomic structure files has a column for [extension]. Simply replace [extension] with the value in that column in [extension]2skl.py to call the correct script. The cannonical command line usage is:
-`[extension]2skl.py -i path/to/file -o path/to/output/location`
+For the PDB, VASP, Imago-structure and XYZ converters the canonical
+command line is:
 
-NOTE: there are 2 exceptions -- cif2skl and dump2skl. Their unique commandline usages are listed below.
-- cif2skl.py:
-   - `cif2skl.py [path/to/input.cif] [path/to/output.skl]`
-- dump2skl.py:
-   - `dump2skl.py -d [path/to/LAMMPS/dump/file] -a [path/to/LAMMPS/data/file] <-t [timestep] | -f [framenumber]>`
+```
+<extension>2skl.py -i path/to/file -o path/to/output.skl
+```
 
-Other options and detailed documentation can be found in each scripts individual documentation page under Reference Manual and Script Catalog.
+Two converters take their inputs differently:
+
+- `cif2skl.py path/to/input.cif [path/to/output.skl]`, which also
+  resolves and preserves the crystal's space group;
+- `dump2skl.py -d path/to/dump -a path/to/data <-t timestep | -f frame>`,
+  which needs the LAMMPS data file to identify elements and a frame
+  to extract.
+
+Other options and detailed documentation are on each script's page
+in the Script Catalog.
+
+The skeleton format itself is small: a title block, the cell
+parameters, the atoms of the asymmetric unit in fractional or
+Cartesian coordinates, a space-group token, a supercell line, and
+`prim` or `full`. The
+[first calculation tutorial](../tutorials/first_calculation.html#read-the-skeleton-file)
+explains each line using the shipped silicon skeleton, and
+`$IMAGO_DIR/skl/` holds four worked examples: silicon, diamond,
+graphite and quartz.
 
 ## Making the Inputs
 
-Use the makeinput.py documentation to familiarize yourself with the available options; and use the skeleton file documentation page to familiarize yourself with the structure of skeleton files.
+Use the [makeinput.py](../reference_manual/script_cat/makeinput.html)
+page to familiarize yourself with the available options. Once you
+have an idea what you are doing (even if it is just running the
+defaults), it is recommended that you make a `jobs/` directory in
+which to store all your calculations. In it, create a directory for
+each skeleton file you wish to run, place the skeleton there named
+`imago.skl`, and run `makeinput.py` with the options you wish. This
+generates the `inputs/` directory the engine reads, a `summary` of
+the system, and a batch submission script you can edit if your
+machine uses SLURM.
 
-Once you have an idea what your doing (even if it's just running defaults), it is recommended you make a jobs/ directory in which to store all your input files. In this directory--or wherever you put your inputs--you will create a directory for each skeleton file you wish to use as input. Enter this directory and in it place your skeleton file and name it imago.skl for ease. Run makeinput.py with the options you wish to generate all the necessary inputs. This will include a default slurm file which you can edit if your machine uses slurm submissions.
+Two options deserve attention on every run: the k-point sampling
+(`-kp` or `-kpd`), whose default of the Gamma point alone suits a
+large amorphous cell but not a small crystal; and `-slurm`, whose
+default partition and account are the authors' own.
 
 ## Running Imago
 
-Now that you have your inputs ready, it's time to run the calculations you want. What calculations are available and a description of each and their outputs can be found on the imago.py documentation page.
+Now that your inputs are ready, run the calculations you want. What
+calculations are available, and a description of each with its
+outputs, is on the [imago.py](../reference_manual/script_cat/imago.html)
+page.
 
-Either edit the slurm to inlcude, line by line, all the calculations you wish to run one at a time. imago.py can only run one type of calculation at a time. Or, you can run jobs using the commandline one at a time. Again, one run of imago.py can only do one calculation. It will place all output files in the job directory you run it from. This is another reason why it's good to have one directory per skeleton file for organization.
+One run of `imago.py` performs one calculation type, so either edit
+the batch script to run the calculations you want one after another,
+or run them from the command line one at a time. All output files
+land in the job directory you run from, which is another reason to
+keep one directory per skeleton. The SCF is performed once and
+reused: after the first calculation in a directory, any later
+calculation that needs the same basis skips straight to its own
+property pass.
 
 ## Post-processing
 
-While some files are intended to be human readable, many require some amount of post-processing to make any useful products. There are several scripts that come with Imago to help you do this and quickly produce usable items. Covering them all is out of the scope of this page, thus if you are interested, direct yourself to the [post-processing page](../reference_manual/post_processing.html) to find a list of scripts and example use cases. Additionally, some information about the post-processing nature of some of the calculations can be found on the imago.py documentation page.
+Some output files are directly plottable; many require
+post-processing to make useful products. The
+[post-processing section of the Script Catalog](../reference_manual/script_cat/index.html#post-processing)
+lists the scripts that do this, with
+[plotgraph.py](../reference_manual/script_cat/plotgraph.html) as the
+default plotter for densities of states, optical spectra and band
+structures. Some information about the post-processing nature of
+each calculation is also on the imago.py page.
 
-After this, Imago's role in your current analysis is over. Take what you get and do good science.
+After this, Imago's role in your current analysis is over. Take what
+you get and do good science.
 
+## Automating many calculations
+
+The `kaleidoscope` package dispatches sweeps of calculations across
+a cluster, with run reuse and a historical guidance database that
+predicts the k-point density a new structure needs. Today it is
+driven through
+[build_initial_potentials.py](../reference_manual/script_cat/build_initial_potentials.html)
+for the curated reference-structure database and is not yet a
+general command-line tool for user campaigns.

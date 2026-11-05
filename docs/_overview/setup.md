@@ -5,103 +5,122 @@ nav_order: 2
 ---
 # Setting up Imago
 
-Imago is intended to be cloned from github, built on the local machine, and ran from source. Currently there are no downloadable release builds availble. This page is intended to take you through the entire setup process. On this page is the general instructions for setting up and installing imago, but there are some scenario-specific instructions available under **Tutorials** if you so desire.
+Imago is intended to be cloned from GitHub, built on the local
+machine, and run from source. There are no downloadable release
+builds. This page is the condensed version of the setup process; the
+step-by-step guides are the tutorials:
 
-The following step-by-step guides are available:
-- [Prerequisites](../tutorials/prerequisites.html): what the machine needs before Imago can be built, and how to check each item.
-- [Installing Imago](../tutorials/installation.html): a complete install under one user's home directory. A group install follows the same steps in a shared location, with each member sourcing that install's `imagorc`.
+- [Prerequisites](../tutorials/prerequisites.html): what the machine
+  needs before Imago can be built, and how to check each item.
+- [Installing Imago](../tutorials/installation.html): a complete
+  install under one user's home directory. A group install follows
+  the same steps in a shared location, with each member sourcing
+  that install's `imagorc`.
 
-If you are following one of the above guides, this page serves to describe the big-picture idea core to each tutorial and may still be helpful.
+The install process in outline:
 
-A general overview of the following install process is:
-- Setting up Compilers
-- Cloning from Github
-- User environment setup
-- Compiling and install Imago
-- Validating install
+- Setting up the compilers and HDF5
+- Cloning from GitHub
+- Setting up the user environment
+- Compiling and installing Imago
+- Validating the install
 - Updating Imago
 
-## Pre-requisites
+## Prerequisites
 
-The full requirements of the OLCAO package are as follows:
+##### Compilers and build environment
 
-##### Compilers and build environment:
- 
-* A C compiler
-* A Fortran compiler capable of compiling Fortran 90/95 (e.g., gfortran or ifort).
-* The cmake (version >= 3.1.0) and GNU make programs.
-    * The cmake executable may be `cmake` or it may be `cmake3` depending on your machine.
+* A C compiler.
+* A Fortran compiler capable of Fortran 90/95 (gfortran or ifort).
+* CMake (version 3.1 or later) and GNU make. The CMake executable
+  may be `cmake` or `cmake3` depending on your machine.
 
-##### Perl and Perl libraries:
+##### Python
 
-* Perl (version 5.8.8 or later)
-* Not needed anymore: Inline::C
-* Not needed anymore: Math::MatrixReal
+* Python 3.11 or later.
+* numpy, scipy, pandas, matplotlib, mplcursors, h5py, sympy, vedo
+  and ase.
+* Optional: plotly and veusz, for plotgraph's alternative backends.
 
-##### Python and Python libraries
+Perl is not required. Earlier versions of the code used it; every
+tool is now Python or bash.
 
-* Python (version 3)
-* sympy
-* numpy
-* scipy
-* pandas
-* vedo
-* matplotlib
-* veusz (optional)
-* perl-app-cpanminus (optional)
+##### Other requirements
 
-##### Other requirements:
+* Linear algebra libraries: BLAS and LAPACK in any implementation
+  (reference, OpenBLAS, MKL, ATLAS).
+* HDF5, including the Fortran interface and the deflate filter.
 
-* Linear algebra libraries (lapack and blas, mkl, atlas, etc.)
-* HDF5 (including the Fortran interface and deflate filter)
-
-Additional guidance on setting these up can be found in the [Prerequisites tutorial](../tutorials/prerequisites.html) and a basic approach can be found in the next section.
-
-***IMPORTANT:*** Make sure that the fortran compiler used to compile your HDF5 install is the same one you'll be using. Different compilers are known to cause problems
+***IMPORTANT:*** the Fortran compiler used to build HDF5 must be the
+same one you build Imago with. The two compilers' module files are
+not interchangeable.
 
 ## Setting up Compilers
 
-We will assume that you have access to a Fortran and C compiler. Perhaps you are using a system wide install of gfortran and gcc or you have installed a compiler using conda. Regardless, you need to make sure that you have HDF5 correctly wrapping your desired compiler. Use `h5fc -showconfig` to see the HDF5 configuration. In the output, look to ensure that a "deflate" filter was turned on. Then, identify which compilers (Fortran and C) were used to compile HDF5. It is vital that the compiler that was used to build HDF5 be the same kind that you have on your system. E.g., if HDF5 was built with gfortan, but your system has ifort (or vice-versa), then you will probably have a problem because these two Fortran compilers do not seem to play nice with each other's module files.
+We assume you have a Fortran and C compiler, whether a system-wide
+gfortran and gcc or a compiler installed with conda. Either way you
+need HDF5 correctly wrapping that compiler. Run `h5fc -showconfig`
+and look for three things: that a "deflate" filter is on, that the
+Fortran interface is included, and which compilers built HDF5. It is
+vital that the compiler used to build HDF5 be the same kind you have
+on your system. If HDF5 was built with gfortran but your system has
+ifort, or the reverse, you will have a problem, because the two
+Fortran compilers cannot read each other's module files.
 
-If you don't have HDF5 installed, then you will need to do that either by asking your system administrators to do it, or by using conda, or by doing a self install. In any case, you will need to make sure as above that the "deflate" filter is on and that the Fortran interface is included. See [here](https://github.com/UMKC-CPG/olcao/wiki/HDF5-Installation-Guide) to learn how to install HDF5 yourself in your $HOME.
+If you do not have HDF5, ask your system administrators to install
+it, install it with conda, or build it yourself in your `$HOME`. In
+any case make sure the deflate filter is on and the Fortran
+interface is included. The Imago build is told to use `h5fc` as its
+Fortran compiler through the `FC` environment variable, which is how
+the match is enforced:
 
-For Perl, the version does not matter too much as long as it isn't really old. The hard part may be setting up the necessary Perl modules. Look in the above scenario links to learn how to install the necessary Perl modules for that scenario.
+```
+export FC=h5fc
+```
 
-For Python, use version 3. The Python modules are usually easy to install. Look in the above scenario links to learn how to install the necessary Python modules for that scenario.
+For Python, use a virtual environment and install the packages
+listed above into it with `pip`.
 
-## Cloning from github
+## Cloning from GitHub
 
-Once you have all required dependencies it's time to begin installation. If you already know how, use your preferred method to clone the Imago repository and move on to the next section. Otherwise, keep reading.
+Once you have the dependencies, clone the repository. If you already
+know how, use your preferred method and move on; otherwise:
 
-Steps:
-- use git to clone the repository to your desired location (Ideally: $HOME). You may use either https:// (first) methods or ssh (second) methodsto do so.
-   - `git clone https://github.com/UMKC-CPG/imago.git`
-   - `git clone git@github.com:UMKC-CPG/imago.git`
-- By default this will create an olcao/ directory wherever you run the clone command. If you wish to have a custom-named directiory, instead do:
-   - `git clone https://github.com/UMKC-CPG/imago.git <directoryName>` or 
-   - `git clone git@github.com:UMKC-CPG/imago.git <directoryName>`
-   - Where `<directoryName>` is the desired path to the install directory. Usually it is:
-      - $HOME/my/olacao/install/dir
-      - $HOME/olcao (default)
+- Clone to your desired location, ideally `$HOME`, over SSH or
+  HTTPS:
+   - `git clone git@github.com:umkc-cpg/imago.git`
+   - `git clone https://github.com/umkc-cpg/imago.git`
+- This creates an `imago/` directory. For a different name, add it
+  to the command: `git clone <url> <directoryName>`. The environment
+  file assumes `$HOME/imago` by default, so another location means
+  one edit in the next step.
 
-## Setting up User Environment
+## Setting up the User Environment
 
-Regardless of your unique scenario, it is highly recommended for each user to set up an "Imago Friendly" environment. This makes setup and use much easier on the users.
+Regardless of your scenario, each user should set up an "Imago
+friendly" environment. It makes setup and use much easier.
 
-To set up the user environment perform the following steps:
-- cd into the hidden .imago directory in the Repository
-- Edit the imagorc (NOT imagorc.py) file and edit the environment variables such that they correctly point to the neccesary directories.
-   - Make sure that IMAGO\_BRANCH is the path to the repository you used when cloning imago
-   - Make IMAGO\_DIR the path from system root to the start of your IMAGO\_BRANCH path. $HOME/$IMAGO\_BRANCH by default
-   - Note: IMAGO\_RC can be different from IMAGO\_DIR and will be where Imago will look for the imagorc.py file for defaults loading
-- Edit your .bashrc or bash profile file to include the following:
-   - Ask it to source the `imagorc` file you just edited.
-   - Include the following aliases:  
-     + `alias cmakedebug='cmake ../.. -DCMAKE_BUILD_TYPE=DEBUG'`  
-     + `alias cmakerelease='cmake ../.. -DCMAKE_BUILD_TYPE=RELEASE'`  
-     + `alias cdrelease='cd $IMAGO_DIR/build/release/'`  
-     + `alias cddebug='cd $IMAGO_DIR/build/debug/'`  
-     + `alias cdsrc='cd $IMAGO_DIR/src/olcao/'`  
+- Go to the hidden `.imago` directory in the repository.
+- Edit the `imagorc` file (not any `*rc.py` file) so that its
+  environment variables point to the right directories:
+   - `IMAGO_BRANCH` is the name of the clone directory, `imago` by
+     default.
+   - `IMAGO_DIR` is the full path to the clone, `$HOME/$IMAGO_BRANCH`
+     by default.
+   - `IMAGO_RC` is where the scripts look for their `*rc.py` default
+     files; it may differ from `IMAGO_DIR/.imago` if you keep
+     personal defaults elsewhere.
+   - `IMAGO_TEMP` is scratch space for the engine's large working
+     files; point it at a filesystem with room and create it.
+   - `IMAGO_QUEUE` is the batch system: 0 bash, 1 PBS, 2 LSF, 3
+     SLURM.
+- Edit your `.bashrc` or bash profile to source that `imagorc` file.
+  It sources `envs.sh` in turn, which defines the `imago_env` and
+  `imago_scripts` helper functions.
+- Optionally add aliases such as these:
+     + `alias cdbase='cd $IMAGO_DIR/build/base/'`
+     + `alias cddebug='cd $IMAGO_DIR/build/debug/'`
+     + `alias cdsrc='cd $IMAGO_DIR/src/imago/'`
      + `alias cdjobs='cd $IMAGO_DIR/jobs/'`
      + `alias interactive='srun -p interactive --mem=8G --pty /bin/bash'`
      + `alias interactive_login='srun -p interactive --mem=20G --pty /bin/bash --login'`
@@ -109,49 +128,69 @@ To set up the user environment perform the following steps:
      + `alias la='ls -latr'`
      + `alias shist='sacct --starttime $(date -d yesterday +%D-%R) --format=User,JobID,Jobname,partition,state,time,start,end,elapsed,MaxRss,MaxVMSize,nnodes,ncpus,nodelist'`
 
-After you finish editing your bashrc or bash profile, either source it or restart the terminal. This will set up your environment.
+If you use a Python virtual environment, activate it **before**
+sourcing `imagorc`: activation resets `PYTHONPATH`, and `imagorc`
+needs to add `$IMAGO_BIN` to it afterwards.
+
+After editing, source your profile or restart the terminal.
 
 ## Compiling and Installing Imago
 
-The first time you compile Imago:
-  * You need to make a compilation directory first:
-    - `cd $IMAGO_DIR`
-    - `mkdir build`
-    - `cd build`
-    - `mkdir release`
-    - `cd release`
-  * Then run cmake, compile/install, and unpack Imago databases:
-    - `cmakerelease`
-    - `make install`
-    - `unpackImagoDB.py`
+Imago builds out of source. The production tree is `build/base`; a
+debug build goes in `build/debug`. The first time:
 
-Later, if you are just editing existing files/scripts:
-  * Go to the compile directory.
-    - `cdrelease`
-  * Compile and install
-    - `make install`
+```
+mkdir -p $IMAGO_DIR/build/base
+cd $IMAGO_DIR/build/base
+cmake ../..          # or: cmake -DCMAKE_BUILD_TYPE=Debug ../..
+make install
+unpackImagoDB.py
+```
 
-Obviously, if you do more than just edit existing scripts and source files, then you will need to re-run cmake and may need to reinstall the Imago databases.
+`make install` builds the engine and installs it, every script and
+the resource-control files into `$IMAGO_DIR/bin` and
+`$IMAGO_DIR/.imago`. `unpackImagoDB.py` unpacks the basis, potential,
+space-group and band-path databases in `$IMAGO_DATA` and takes a few
+seconds.
 
-This is the basic outline of what you need to do to install the Imago package. See the above scenarios and machine specific instructions for more details. Happy computing!
+Later, after editing source files, go to the build directory and run
+`make install` again; it re-runs CMake if needed. If you only
+changed scripts, `imago_scripts` reinstalls the Python side with no
+compile at all. Instrumented builds (sanitizers, profiling, MPI) are
+described in `BUILD.md` at the repository root.
 
 ## Validating the Imago Installation
 
-* If all of the scripts were installed correctly, then the last step of running `unpackImagoDB.py` should spend a bit of time (5-15 seconds or so) and then return with no errors or other output.
-* Go to the check directory `cd $IMAGO_DIR/check` and run the `runCheck` script. If all goes well, you should see a report printed to the screen indicating success of various test calculations. Success in this case means that a calculation you are running now produces output that matches with previously computed data.
-* If things are not working well at this point you should probably contact your system administrator to save yourself time. Consider providing your administrator with your environment `env`, a copy-paste of any errors that were dumped to the screen, the `runtime` file if present, the `intermediate/fort.20` file if present, and the directory where you are doing this work when you ask for help.
+* `unpackImagoDB.py` should run for a few seconds and return with no
+  output. Errors here mean `$IMAGO_DATA` is wrong or the scripts are
+  not on your path.
+* `which imago.py` should find it under `$IMAGO_BIN`, and
+  `ls $IMAGO_BIN/imago $IMAGO_BIN/imagoG` should list both engines.
+* The Python test suite exercises the scripts without the engine.
+  With your virtual environment active, run from `$IMAGO_DIR`:
+  `python src/tests/test_o.py -m "not fortran"`.
+* The real test is the
+  [first calculation tutorial](../tutorials/first_calculation.html),
+  which runs silicon end to end in under a minute.
 
-### Updating OLCAO
+If things are not working at this point, contact your system
+administrator or Dr. Rulis. Provide your environment
+(`env | grep IMAGO`), a copy of any errors dumped to the screen, the
+`runtime` file if present, the `intermediate/fort.20` file if
+present, and the directory where you are doing the work.
 
-If you have used git to clone the olcao files directly from this repository, the task of keeping your install up to date is very simple if you are not doing any development yourself. Do the following steps:
+## Updating Imago
 
-  * Change to your OLCAO root directory with `cd $IMAGO_DIR`.
-  * Make sure that your remote directory is the UMKC-CPG repository (this github repository) by typing `git remote -v` after you . This should show something like `origin git@github.com/UMKC-CPG/imago.git`. If it does not, then you will need to change your remote directory using something like `git remote add imago github.com/UMKC-CPG/imago.git`.
-  * An assumption is that you are updating your local master branch which you can get to with `git checkout master`.
-  * If you know for certain that you want to merge the github version into your current branch you can use `git pull`. Proceed to the last step.
-  * If you just want to see the changes you can use `git fetch origin`. This should show you all the changes (if any).
-  * If you like what you see, then you can then merge the origin/master into your own local master with `git merge master origin/master`.
-  * If there are changes and you wish to install them, go to the "build/release" directory with `cdrelease`, and run `make install`. This will run cmake again if needed and then compile and install.
+If you cloned from this repository and are not doing development
+yourself, keeping up to date is simple:
 
-You are now up to date!
+* `cd $IMAGO_DIR`.
+* Check that your remote is this repository with `git remote -v`; it
+  should show `github.com:umkc-cpg/imago.git` or the HTTPS
+  equivalent.
+* You are on the `main` branch (`git checkout main` if not).
+* `git fetch origin` shows what has changed; `git pull` merges it.
+* Then `cd build/base` and `make install`. Re-run `unpackImagoDB.py`
+  only if the pull updated a `share/*.tgz` archive.
 
+You are now up to date.
