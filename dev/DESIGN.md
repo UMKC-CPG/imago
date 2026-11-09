@@ -17344,6 +17344,8 @@ generates (queue type 3, SLURM):
 #SBATCH -p <partition>
 #SBATCH -A <account>     ! omitted when empty
 ...
+source <imago_rc>/imagorc
+imago_env <flavor> || exit 1   ! only under a build flavor (14.6)
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export IMAGO_EXE="mpirun -np $SLURM_NTASKS"   ! only when ranks > 1
@@ -17431,3 +17433,105 @@ No flight layer, no cost prediction, no per-phase allocation
 front-end to the single-job path and nothing more; the same
 `ranks` number is what the flight layer (section 6) and the
 cost dataspace (section 8) will later generate and predict.
+
+### 14.6 The job runs the build its inputs were made under
+
+A batch job starts in a fresh shell, and the first thing the
+generated script does there is source `imagorc`. That file sets
+`IMAGO_BIN` to the production directory `$IMAGO_DIR/bin`
+without looking at what the variable held before. A user who
+activated a build flavor (ARCHITECTURE 4.1: `imago_env mpi`,
+`imago_env asan`, ...) and then ran `makeinput.py` therefore
+gets a script that silently runs a DIFFERENT build from the one
+in their shell -- and when production holds no engine at all
+(scripts only, the engine reached solely through flavors), a
+script that cannot run.
+
+The rule: **the generated script selects the flavor that was
+active when `makeinput.py` ran.** Immediately after the `source`
+line it carries
+
+```
+imago_env <flavor> || exit 1
+```
+
+and carries no such line when production was active. The
+`|| exit 1` matters: `imago_env` returns non-zero when the
+flavor directory is missing (deleted or never built on this
+machine), and a job that carried on would run production under
+a launcher meant for another build. Stopping is the visible
+outcome.
+
+Why select by NAME through `imago_env`, and not write the
+`IMAGO_BIN` path into the script: the switcher is the one place
+that knows what activating a flavor means (`IMAGO_BIN`, `PATH`,
+`PYTHONPATH`, and per-flavor extras such as the sanitizer
+options). A script that exported the path itself would be a
+second, partial copy of that knowledge.
+
+Why makeinput decides, and not `imagorc`: making `imagorc` keep
+an inherited `IMAGO_BIN` would tie the job to whatever the
+submitting shell exported at `sbatch` time -- invisible in the
+script, and absent entirely when the scheduler does not forward
+the environment. Written into the script, the choice can be
+read, edited and resubmitted.
+
+**Recognizing the active flavor.** `imago_env` leaves exactly
+one durable trace: `IMAGO_BIN` equals `$IMAGO_DIR/envs/<name>/bin`.
+makeinput compares the two environment variables after
+normalizing both paths:
+
+- `IMAGO_BIN` is `$IMAGO_DIR/bin`, or is unset: production; no
+  line is written.
+- `IMAGO_BIN` is `$IMAGO_DIR/envs/<name>/bin` and `<name>` is
+  made only of letters, digits, `_` and `-`: flavor `<name>`.
+- anything else (a hand-assembled overlay directory, or a
+  flavor name outside that alphabet): no line is written and a
+  warning on standard error says the job will run production,
+  naming the directory that could not be carried over. The run
+  is not aborted (VISION Principle 16).
+
+The alphabet restriction is ARCHITECTURE 13 applied: the name
+arrives from an environment variable and is written into a file
+the shell will execute, so it is data on its way to becoming
+code. makeinput writes the name it REBUILT from the match
+against that alphabet, never the original text, so the safety
+of the emitted line is a local property of the function that
+emits it.
+
+**Seam inventory (read at 7899124).**
+
+- `IMAGO_DIR`, `IMAGO_BIN` -- exported by `.imago/imagorc`
+  (`IMAGO_BIN` unconditionally to `$IMAGO_DIR/bin`), then
+  `IMAGO_BIN` repointed by `imago_env` in `.imago/envs.sh`.
+  Read by makeinput from its own environment at the moment the
+  submission file is written; makeinput reads neither today
+  (it reads only `IMAGO_RC`, for the `source` line).
+- `imago_env` -- a shell function defined by `envs.sh`, which
+  `imagorc` sources as its last act. So the function exists in
+  the job's shell once the `source` line has run, and the new
+  line must come AFTER it. `imagorc` also resets `IMAGO_EXE` to
+  empty, so the launcher export must stay after it too, as it
+  is today.
+- What `imago_env <name>` does inside the job: checks that
+  `$IMAGO_DIR/envs/<name>/bin` exists (returns 1 otherwise),
+  drops the previously active bin from `PATH` / `PYTHONPATH`,
+  prepends the flavor bin to both, and exports `IMAGO_BIN`. It
+  prints two lines to standard output, which land in the job's
+  output file and record which build ran. `imagorc` has by then
+  already put the production bin on `PATH`; it stays there
+  BEHIND the flavor bin, which is harmless -- a flavor bin holds
+  a link for every production script, so nothing falls through.
+- `imago.py` -- UNCHANGED. It takes `bin_dir` from `IMAGO_BIN`
+  and the launcher from `IMAGO_EXE`, both now correct by the
+  time it starts.
+- The submission-file writer (`_make_sub_file`) -- the one
+  routine edited. All three job bodies (plain, XANES base,
+  XANES target) and all four queue types share the `source`
+  line, so all gain the flavor line; the shell function is
+  bash, as `imagorc` itself already is.
+- NOT covered: the launcher and the Python interpreter. The
+  job finds `mpirun` and `python3` on the `PATH` the scheduler
+  forwards from the submitting shell (the `cpgp` environment
+  and the Imago virtual environment). That is a separate seam
+  from the build choice and is left as it is.

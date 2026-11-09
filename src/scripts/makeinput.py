@@ -6894,6 +6894,87 @@ def _compute_and_print_mem(settings, sc, file_set,
                     f"   {mem_optc[bt]:7.3f}\n")
 
 
+# The alphabet a build-flavor name may be written in: letters,
+#   digits, underscore and hyphen.  The name is copied into a shell
+#   script, so anything outside this set is refused rather than
+#   quoted (see active_flavor_name below).
+FLAVOR_NAME_PATTERN = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def active_flavor_name(imago_dir, imago_bin):
+    """Name the build flavor the current shell has activated.
+
+    A *build flavor* is an alternative build of the Fortran engine
+    kept under ``$IMAGO_DIR/envs/<name>/bin`` -- the MPI build, the
+    serial fallback, an AddressSanitizer build, and so on.  The
+    shell function ``imago_env <name>`` activates one by pointing
+    ``IMAGO_BIN`` at that directory, and that is the one trace it
+    leaves: comparing ``IMAGO_BIN`` with ``IMAGO_DIR`` tells us
+    which build the user is working under.
+
+    Why makeinput needs to know: a batch job starts in a fresh
+    shell and begins by sourcing ``imagorc``, which points
+    ``IMAGO_BIN`` back at the production directory.  Unless the
+    submission file selects the flavor again, the job runs a
+    different build from the one its inputs were prepared under
+    (or none, when production holds only scripts).  The writer
+    below uses this function to emit that selection.
+
+    The comparison is textual.  Both variables are built from the
+    same ``IMAGO_DIR`` text (by ``imagorc`` and ``imago_env``), so
+    they agree as text whenever they agree at all; only doubled
+    and trailing slashes are normalized away.
+
+    The returned name is the text the pattern MATCHED, never the
+    directory name as it arrived.  The name comes from an
+    environment variable and is about to be written into a file
+    that a shell will execute, so it is rebuilt from a closed
+    alphabet here, where the reader of the emitting code can see
+    that nothing else gets through.
+
+    Parameters
+    ----------
+    imago_dir : str
+        The install root, ``$IMAGO_DIR`` ("" when unset).
+    imago_bin : str
+        The active executable directory, ``$IMAGO_BIN`` ("" when
+        unset).
+
+    Returns
+    -------
+    tuple (str, bool)
+        ``(flavor, unrecognized)``.  ``flavor`` is the flavor name,
+        or "" when the production build is active.  ``unrecognized``
+        is True when ``imago_bin`` is neither production nor a
+        nameable flavor -- a hand-assembled overlay directory, say
+        -- so the caller can warn that it cannot be carried into
+        the job.
+    """
+    # With either variable missing there is nothing to compare; the
+    #   job will run whatever imagorc selects, which is production.
+    if imago_bin == "" or imago_dir == "":
+        return "", False
+
+    install_root = os.path.normpath(imago_dir)
+    active_bin = os.path.normpath(imago_bin)
+
+    # The production build: no selection is needed in the job.
+    if active_bin == os.path.join(install_root, "bin"):
+        return "", False
+
+    # A flavor has the shape <root>/envs/<name>/bin.  Peel the path
+    #   apart from the right and check each piece.
+    flavor_dir, last_part = os.path.split(active_bin)
+    envs_dir, flavor_text = os.path.split(flavor_dir)
+    if last_part == "bin" \
+            and envs_dir == os.path.join(install_root, "envs"):
+        name_match = FLAVOR_NAME_PATTERN.fullmatch(flavor_text)
+        if name_match:
+            return name_match.group(0), False
+
+    return "", True
+
+
 def _make_sub_file(settings, h, current_name, sub_dir, proj_home,
                    num_core_xanes, xanes_control):
     """Write the job submission script (PBS, LSF, Slurm, or bash).
@@ -6903,6 +6984,8 @@ def _make_sub_file(settings, h, current_name, sub_dir, proj_home,
     contains:
     * A system-specific header (scheduler directives or bash shebang).
     * Source of the imago environment.
+    * Selection of the build flavor that is active in the shell
+      running makeinput, when one is (see active_flavor_name).
     * The appropriate Imago commands for this file set.
 
     For XANES file sets (h > 0), the commands iterate over each excitable
@@ -7006,6 +7089,27 @@ def _make_sub_file(settings, h, current_name, sub_dir, proj_home,
             else str(settings.ranks)
         thread_env.append(
             f'export IMAGO_EXE="mpirun -np {np_expr}"\n')
+
+    # Carry the active build flavor into the job (DESIGN 14.6).
+    #   Every body below sources imagorc and then writes this list,
+    #   and imagorc points IMAGO_BIN back at the production build.
+    #   So the flavor selection goes at the FRONT of the list: it
+    #   lands directly after each `source` line, where the
+    #   imago_env shell function (defined by imagorc) exists.  The
+    #   `|| exit 1` stops the job if that flavor is not built on
+    #   the machine the job lands on, instead of letting it run
+    #   production under a launcher meant for another build.
+    flavor, unrecognized_bin = active_flavor_name(
+        os.environ.get("IMAGO_DIR", ""),
+        os.environ.get("IMAGO_BIN", ""))
+    if unrecognized_bin:
+        sys.stderr.write(
+            f"WARNING: IMAGO_BIN ({os.environ.get('IMAGO_BIN', '')}) "
+            "is neither the production bin nor a build flavor under "
+            "$IMAGO_DIR/envs; the submission file will run the "
+            "production build.\n")
+    if flavor != "":
+        thread_env.insert(0, f"imago_env {flavor} || exit 1\n")
 
     with open(sub_path, "w") as f:
         f.writelines(header)

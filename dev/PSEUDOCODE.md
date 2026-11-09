@@ -19096,6 +19096,8 @@ write the SLURM header:
 
 write the run body:
    source <imago_rc>/imagorc
+   if flavor != "":            resolved by 35.6
+      imago_env <flavor> || exit 1
    export OMP_NUM_THREADS=1
    export OPENBLAS_NUM_THREADS=1
    if ranks > 1:
@@ -19135,6 +19137,111 @@ launcher is exported, so the run is serial exactly as today.
 6. **No engine change.** `imago.dat` is byte-identical to
    today for the same physics input; no ranks/threads field
    appears anywhere the engine reads.
+
+### 35.6 Carrying the active build flavor into the job
+
+DESIGN 14.6: the generated script must run the build that was
+active when `makeinput.py` ran, because the `source imagorc`
+line at its head resets `IMAGO_BIN` to production.
+
+**Seam inventory (read at 7899124).**
+
+- `IMAGO_DIR`, `IMAGO_BIN` -- environment variables, set by
+  `.imago/imagorc` and (for `IMAGO_BIN`) repointed by
+  `imago_env` in `.imago/envs.sh` to `$IMAGO_DIR/envs/<name>/bin`.
+  Read here with `os.environ.get(..., "")`, once, inside
+  `_make_sub_file`, which is called once per file set.
+- `imago_env` -- a bash function that exists in the job's shell
+  only after `source <imago_rc>/imagorc` has run (`imagorc`
+  sources `envs.sh` last). The emitted line therefore follows
+  the `source` line in every body. It precedes the thread and
+  launcher exports only by convention; nothing in `imago_env`
+  touches them.
+- `_make_sub_file` in `makeinput.py` -- writes the `source`
+  line at three sites (plain body, XANES base body, XANES
+  target body), each followed by `f.writelines(thread_env)`.
+  `thread_env` is the list the shared run-time environment is
+  already collected in, built once before the file is opened.
+  The flavor line is placed at the FRONT of that list, so all
+  three bodies gain it from the one existing `writelines` call
+  and it lands directly after each `source` line.
+- Produced: at most one line of text in the submission file,
+  and at most one warning on standard error per file set.
+  Nothing is added to `Settings`, to the rc file or to the
+  command line: the flavor is a fact about the shell, not an
+  option.
+
+**The resolver.** A module-level function, pure apart from
+reading its two arguments:
+
+```
+activeFlavorName (imago_dir, imago_bin):
+   ! Returns (flavor, unrecognized).  flavor is "" for
+   !   production; unrecognized is true when imago_bin points
+   !   somewhere this routine cannot carry into a job.
+   if imago_bin == "" or imago_dir == "":
+      return ("", false)             ! nothing to compare
+   root = normalize (imago_dir)      ! collapse //, trailing /
+   bin  = normalize (imago_bin)
+   if bin == root/bin:
+      return ("", false)             ! production
+   if parent (parent (bin)) == root/envs
+         and basename (bin) == "bin":
+      text  = basename (parent (bin))
+      match = full match of text against [A-Za-z0-9_-]+
+      if match:
+         return (the matched string, false)   ! REBUILT value
+   return ("", true)
+```
+
+`normalize` is a purely textual path normalization; no link is
+resolved, because both variables are built from the same
+`IMAGO_DIR` text by `imagorc` and `imago_env` and so agree
+textually whenever they agree at all. The returned name is the
+string the pattern matched, not `text` (ARCHITECTURE 13,
+"validate by rebuilding"): the emitted shell line is safe by
+what this function constructs.
+
+**The writer's use of it,** before the submission file is
+opened and beside the existing thread and launcher lines:
+
+```
+(flavor, unrecognized) = activeFlavorName (env IMAGO_DIR,
+                                           env IMAGO_BIN)
+if unrecognized:
+   warn to stderr:
+      "WARNING: IMAGO_BIN (<path>) is neither the production
+       bin nor a build flavor under $IMAGO_DIR/envs; the
+       submission file will run the production build."
+if flavor != "":
+   put  "imago_env <flavor> || exit 1"  first in thread_env
+```
+
+**Checks.**
+
+7. **Production unchanged.** `IMAGO_BIN = $IMAGO_DIR/bin`, or
+   either variable unset: the generated file is byte-identical
+   to the one 35.4 produced before this subsection; nothing is
+   printed.
+8. **Flavor carried.** `IMAGO_BIN = $IMAGO_DIR/envs/mpi/bin`:
+   the line after `source .../imagorc` is
+   `imago_env mpi || exit 1`, in the plain body and in both
+   XANES bodies; a trailing slash or doubled slash in either
+   variable changes nothing.
+9. **Unrecognized directory.** `IMAGO_BIN = /some/overlay/bin`:
+   no `imago_env` line, one warning naming that path, exit
+   status of `makeinput.py` unaffected.
+10. **Hostile name.** `IMAGO_BIN = $IMAGO_DIR/envs/a;rm -rf x/bin`
+    (and a name holding a space, a `$`, or a newline): treated
+    as check 9 -- no `imago_env` line is written at all.
+11. **Missing flavor at run time.** With `envs/<flavor>` renamed
+    away after generation, the job stops at the `imago_env`
+    line with its "is not built" message and never reaches
+    `imago.py`.
+12. **Live.** A deck generated under `imago_env mpi` with
+    `-slurm -n 2` and submitted unedited runs the MPI engine on
+    two ranks; the job output opens with `imago_env`'s
+    "active flavor = mpi" lines.
 
 
 ## 36. The Distributed Valence Density Build
