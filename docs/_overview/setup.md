@@ -161,17 +161,20 @@ compile at all.
 
 ## Building Other Flavors of the Engine
 
-The build above is the *production* build. A second engine compiled
-differently is kept beside it as a *flavor* under
-`$IMAGO_DIR/envs/<name>/bin`, never installed over production. Only
-the Fortran programs differ between flavors, so a flavor's `bin` is
-symbolic links to the production `bin/` with the engine programs
-replaced by its own. Flavors are optional; the production build is
-all the tutorials need.
+The build above is the *production* build. Made as shown, with
+`FC=h5fc` and no extra options, it is an optimised serial engine: full
+compiler optimisation, the serial HDF5, and no MPI. "Production" names
+where the build is installed, `$IMAGO_DIR/bin`, and not a particular
+way of compiling it. A second engine compiled differently is kept
+beside it as a *flavor* under `$IMAGO_DIR/envs/<name>/bin`, never
+installed over production. Only the Fortran programs differ between
+flavors, so a flavor's `bin` is symbolic links to the production
+`bin/` with the engine programs replaced by its own. Flavors are
+optional; the production build is all the tutorials need.
 
 | Name      | What is compiled |
 |:----------|:-----------------|
-|`serial`   | Optimised, serial HDF5, no MPI. A plain reference build. |
+|`serial`   | Optimised, serial HDF5, no MPI. The same engine as a production build made as above; useful only when production was built some other way. |
 |`mpi`      | Optimised, with MPI and the ELPA parallel eigensolver. |
 |`debug`    | Low optimisation with gfortran's runtime checks and a backtrace. |
 |`audit`    | Debug plus floating-point traps, signaling-NaN initialisation and extra warnings. |

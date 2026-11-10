@@ -107,7 +107,11 @@ faster and uses about half the memory. `imago.py` picks between them
 for you.
 
 What you have just built is the *production* build, the one every
-shell uses unless told otherwise. A second engine compiled differently
+shell uses unless told otherwise. Built as above, with `FC=h5fc` and
+no extra options, it is an optimised serial engine: full compiler
+optimisation, the serial HDF5, and no MPI. The word "production" names
+the place the build is installed, `$IMAGO_DIR/bin`, and not a
+particular way of compiling it. A second engine compiled differently
 (in parallel, or with debugging checks) is kept beside it as a
 *flavor* rather than built over it; see
 [Other builds of the engine: flavors](#other-builds-of-the-engine-flavors)
@@ -179,7 +183,7 @@ every flavor at the same moment.
 
 | Name      | What is compiled | Use it when |
 |:----------|:-----------------|:------------|
-|`serial`   | Optimised code, serial HDF5, no MPI. | You want a plain serial engine to compare another build against. |
+|`serial`   | Optimised code, serial HDF5, no MPI. This is the same engine as a production build made by the steps above. | Production was built some other way (in parallel, say) and you want a serial engine beside it. On a standard install it adds nothing. |
 |`mpi`      | Optimised code with MPI and the ELPA parallel eigensolver, plus profiling symbols. | The cell is large enough that one core is too slow. |
 |`debug`    | Low optimisation, debugging symbols, every runtime check gfortran offers, and a backtrace on failure. | A run crashes and you need to know where. |
 |`audit`    | The debug build plus floating-point exception traps, reals initialised to signaling NaN, and extra compiler warnings. | You suspect an uninitialised variable or a numerical error such as a division by zero. |
