@@ -23,6 +23,7 @@ The install process in outline:
 - Cloning from GitHub
 - Setting up the user environment
 - Compiling and installing Imago
+- Optionally, building other flavors of the engine
 - Validating the install
 - Updating Imago
 
@@ -156,8 +157,58 @@ seconds.
 Later, after editing source files, go to the build directory and run
 `make install` again; it re-runs CMake if needed. If you only
 changed scripts, `imago_scripts` reinstalls the Python side with no
-compile at all. Instrumented builds (sanitizers, profiling, MPI) are
-described in `BUILD.md` at the repository root.
+compile at all.
+
+## Building Other Flavors of the Engine
+
+The build above is the *production* build. A second engine compiled
+differently is kept beside it as a *flavor* under
+`$IMAGO_DIR/envs/<name>/bin`, never installed over production. Only
+the Fortran programs differ between flavors, so a flavor's `bin` is
+symbolic links to the production `bin/` with the engine programs
+replaced by its own. Flavors are optional; the production build is
+all the tutorials need.
+
+| Name      | What is compiled |
+|:----------|:-----------------|
+|`serial`   | Optimised, serial HDF5, no MPI. A plain reference build. |
+|`mpi`      | Optimised, with MPI and the ELPA parallel eigensolver. |
+|`debug`    | Low optimisation with gfortran's runtime checks and a backtrace. |
+|`audit`    | Debug plus floating-point traps, signaling-NaN initialisation and extra warnings. |
+|`asan`     | Debug plus AddressSanitizer, with leak detection. |
+|`profile`  | Optimised code plus symbols, for timings and profilers. |
+|`gprof`    | Profile plus gprof instrumentation, for call counts. |
+
+Each name is the CMake preset `gfortran-<name>` in
+`CMakePresets.json`. The `imago_env` function builds, lists and
+selects them:
+
+```
+imago_env --add mpi    # compile the preset, assemble envs/mpi/bin
+imago_env mpi          # use it in this shell (repoints IMAGO_BIN)
+imago_env --list       # production and every flavor that is built
+imago_env              # back to production
+```
+
+Points to know before building one:
+
+* Presets need CMake 3.21 or later, newer than the plain build does.
+* A preset picks its own compiler wrapper and ignores `FC`: `h5fc`
+  for every flavor except `mpi`, which uses `h5pfc`.
+* The `mpi` flavor additionally needs an MPI library, an MPI-enabled
+  HDF5, ScaLAPACK and ELPA (found through `pkg-config`). These usually
+  sit in a separate environment from the serial HDF5; build and run
+  the flavor with that environment active.
+* A flavor borrows its scripts from `$IMAGO_DIR/bin`, so install the
+  production build, or at least run `imago_scripts`, first.
+* Activation lasts for one shell. A batch job starts a new shell, so
+  activate the flavor *before* running `makeinput.py`; the submission
+  file it writes then selects the same flavor inside the job.
+
+The [installation tutorial](../tutorials/installation.html) walks
+through each of these. `BUILD.md` at the repository root adds the
+developer detail: the individual instrumentation options behind the
+presets and the group's own compiler environments.
 
 ## Validating the Imago Installation
 
@@ -192,5 +243,8 @@ yourself, keeping up to date is simple:
 * `git fetch origin` shows what has changed; `git pull` merges it.
 * Then `cd build/base` and `make install`. Re-run `unpackImagoDB.py`
   only if the pull updated a `share/*.tgz` archive.
+* If you keep flavors, rebuild each one you use with
+  `imago_env --add <name>`; `make install` in `build/base` refreshes
+  the production engine only.
 
 You are now up to date.
