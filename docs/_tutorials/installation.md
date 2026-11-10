@@ -176,8 +176,10 @@ programs differ from one flavor to the next. The Python scripts and
 the databases do not depend on how the engine was compiled, so a
 flavor's `bin` is a set of symbolic links to the production `bin/`
 with the engine programs replaced by the flavor's own. Nothing is
-copied twice, and a script you update in production is updated in
-every flavor at the same moment.
+copied twice, and a script you reinstall in production is updated in
+every flavor at the same moment. (A script that is entirely *new* is
+the exception: a flavor holds one link per file, so it gains the new
+one only when the flavor is next updated, as described below.)
 
 ### The flavors available
 
@@ -280,16 +282,40 @@ only makes sense with the `mpi` flavor active.
 
 ### After changing the source
 
-A flavor's engine programs are links into its build tree, so
-recompiling that tree is enough to bring the flavor up to date:
+`--add` creates a flavor once. From then on, bring it up to date
+with `--update`:
 
 ```
+imago_env --update mpi    # recompile one flavor
+imago_env --update        # recompile every flavor that is built
+```
+
+The compile is incremental, so only the source files that changed
+are rebuilt, and there is no separate install step. `--update` also
+reassembles the flavor's `bin`, which is how a newly added script or
+program reaches it. Given a name that is not built, it stops and
+tells you to use `--add`, so a mistyped name cannot start an
+unintended build.
+
+As with `--add`, the environment the flavor was built in must be
+active. This matters for the form with no name: if you keep both
+the `mpi` flavor and others, no single environment can rebuild them
+all. `imago_env --update` then rebuilds the ones it can, leaves the
+rest exactly as they were, and lists the flavors that failed so you
+can update those by name from their own environment.
+
+If you are editing Fortran and recompiling repeatedly, you can skip
+the reassembly and compile the flavor's build tree directly. A
+flavor's engine programs are links into that tree, so the flavor
+sees the new programs as soon as the compile finishes:
+
+```
+cd $IMAGO_DIR
 cmake --build --preset gfortran-mpi
 ```
 
-Running `imago_env --add mpi` again does the same compile and also
-reassembles the flavor's `bin`, which is what you want when the set
-of scripts or programs has changed.
+The `cd` is required: CMake looks for `CMakePresets.json` in the
+directory it is run from.
 
 ## Keeping it up to date
 
@@ -307,11 +333,11 @@ changed. Re-run `unpackImagoDB.py` only if the `share/*.tgz`
 archives changed in the pull; `git pull` lists the files it updated.
 
 `make install` in `build/base` rebuilds the production engine only.
-If you keep flavors, rebuild each one you use after a pull as well,
+If you keep flavors, update each one you use after a pull as well,
 or it will go on running the engine from before the pull:
 
 ```
-imago_env --add mpi      # once per flavor in use
+imago_env --update mpi   # one flavor, from its own environment
 ```
 
 ## If something is wrong

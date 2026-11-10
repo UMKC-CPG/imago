@@ -291,14 +291,34 @@ Then:
 
 ```
 imago_env --add asan      # build the gfortran-asan preset and
-                          #   assemble envs/asan/bin (one-time / on
-                          #   rebuild)
+                          #   assemble envs/asan/bin (one-time)
 imago_env asan            # activate it: repoints IMAGO_BIN at the
                           #   asan flavor for this shell
 imago.py                  # now runs the instrumented engine
 imago_env                 # back to the production install
 imago_env --list          # show which flavors are built
+imago_env --update asan   # recompile it after a source change or
+                          #   a git pull, and reassemble its bin
+imago_env --update        # the same for every flavor that is built
 ```
+
+`--add` creates a flavor and `--update` maintains one. The two do
+the same work -- an incremental preset build followed by reassembling
+the flavor bin -- but `--update` refuses a name that is not built, so
+a mistyped name is reported rather than starting a fresh build of
+another preset. Reassembly matters because the bin holds one link per
+file: a script or program that is new since the flavor was assembled
+does not appear in it until then.
+
+A flavor has to be updated from the environment it was built in
+(`cpgp` for `mpi`, `cpg` for the rest), so the form with no name
+cannot rebuild every flavor in one go when both kinds exist. It
+rebuilds the ones the active environment allows, leaves the others
+with their previous build, and names the ones that failed. When
+iterating on Fortran, `cmake --build --preset gfortran-<name>` run
+from `$IMAGO_DIR` recompiles without reassembling, which is enough
+because the engine entries in the flavor bin are links into that
+build tree.
 
 `imago.py` launches the engine as `$IMAGO_BIN/imagoG`, so activating
 a flavor selects which build runs with no code changes. Activation

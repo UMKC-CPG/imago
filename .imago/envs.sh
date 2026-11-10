@@ -39,6 +39,10 @@
 #     imago_env --list        list the flavors that are built
 #     imago_env --add NAME    build preset gfortran-NAME and assemble
 #                             the flavor bin, so `imago_env NAME` works
+#     imago_env --update [NAME]
+#                             recompile flavor NAME and reassemble its
+#                             bin, after a source change or a git pull;
+#                             with no NAME, every flavor that is built
 #     imago_env --help        show this usage
 #
 # Examples:
@@ -47,6 +51,7 @@
 #     imago_env asan          # run the engine under AddressSanitizer
 #     imago_env audit         # run with checks + FP traps + warnings
 #     imago_env               # back to the installed production build
+#     imago_env --update mpi  # recompile the mpi flavor after an edit
 
 
 # Internal helper: echo $1 (a colon-separated PATH-like list) with every
@@ -115,6 +120,10 @@ imago_env() {
             ;;
         --add|-a)
             _imago_env_add "$2"
+            return $?
+            ;;
+        --update|-u)
+            _imago_env_update "$2"
             return $?
             ;;
     esac
@@ -243,6 +252,76 @@ _imago_env_add() {
 
     echo "imago_env: flavor '$flavor' ready ($overlaid programs)." \
          " Activate with:  imago_env $flavor"
+}
+
+
+# Update flavor $1: recompile it and reassemble its bin.  This is the
+#   command for a flavor that already exists and has fallen behind the
+#   source tree -- after editing Fortran, or after a git pull.  With no
+#   name, every flavor found under $IMAGO_DIR/envs is updated in turn.
+#
+# The work is exactly what --add does, and is done by calling it: the
+#   preset build is incremental, so only the changed sources recompile,
+#   and reassembling the bin picks up any script or program that has
+#   appeared since the flavor was last put together (the bin holds one
+#   link per file, so a NEW file is not seen until it is rebuilt).  The
+#   two verbs differ only in intent.  --add creates; --update refuses a
+#   name that is not built, so a mistyped name is reported instead of
+#   quietly starting a fresh build of some other preset.
+#
+# A flavor links against the libraries of the environment it was built
+#   in, so that environment must be the active one here too.  That is
+#   what makes the no-name form able to fail in part: with the serial
+#   environment active the mpi flavor cannot be rebuilt, and the other
+#   way round.  A flavor whose build fails keeps its previous bin and
+#   engine untouched (the bin is only replaced after a successful
+#   compile), the remaining flavors are still attempted, and the ones
+#   that failed are named at the end so they can be redone from the
+#   environment they need.
+_imago_env_update() {
+    local flavor="$1"
+
+    # One named flavor: it must already exist.
+    if [ -n "$flavor" ]; then
+        if [ ! -d "$IMAGO_DIR/envs/$flavor/bin" ]; then
+            echo "imago_env --update: flavor '$flavor' is not built" \
+                 "yet, so there is nothing to update." >&2
+            echo "           create it with:  imago_env --add $flavor" >&2
+            return 1
+        fi
+        _imago_env_add "$flavor"
+        return $?
+    fi
+
+    # No name: walk every flavor that is built.  The flavor name is the
+    #   directory that holds each bin, envs/<name>/bin.
+    local flavor_bin flavor_name
+    local updated_names="" failed_names=""
+    for flavor_bin in "$IMAGO_DIR"/envs/*/bin; do
+        [ -d "$flavor_bin" ] || continue
+        flavor_name="$(basename "$(dirname "$flavor_bin")")"
+        if _imago_env_add "$flavor_name"; then
+            updated_names="${updated_names:+$updated_names }$flavor_name"
+        else
+            failed_names="${failed_names:+$failed_names }$flavor_name"
+        fi
+    done
+
+    if [ -z "$updated_names" ] && [ -z "$failed_names" ]; then
+        echo "imago_env --update: no flavors are built; create one" \
+             "with:  imago_env --add NAME" >&2
+        return 1
+    fi
+
+    echo "imago_env: updated: ${updated_names:-(none)}"
+    if [ -n "$failed_names" ]; then
+        echo "imago_env: FAILED to update: $failed_names" >&2
+        echo "           These keep their previous build.  A flavor" \
+             "must be updated from the environment" >&2
+        echo "           it was built in; activate that environment" \
+             "and run:  imago_env --update NAME" >&2
+        return 1
+    fi
 }
 
 

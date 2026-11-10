@@ -183,14 +183,16 @@ optional; the production build is all the tutorials need.
 |`gprof`    | Profile plus gprof instrumentation, for call counts. |
 
 Each name is the CMake preset `gfortran-<name>` in
-`CMakePresets.json`. The `imago_env` function builds, lists and
-selects them:
+`CMakePresets.json`. The `imago_env` function builds, updates, lists
+and selects them:
 
 ```
-imago_env --add mpi    # compile the preset, assemble envs/mpi/bin
-imago_env mpi          # use it in this shell (repoints IMAGO_BIN)
-imago_env --list       # production and every flavor that is built
-imago_env              # back to production
+imago_env --add mpi     # once: compile the preset, assemble envs/mpi/bin
+imago_env --update mpi  # later: recompile after a source change or pull
+imago_env --update      # the same, for every flavor that is built
+imago_env mpi           # use it in this shell (repoints IMAGO_BIN)
+imago_env --list        # production and every flavor that is built
+imago_env               # back to production
 ```
 
 Points to know before building one:
@@ -204,6 +206,9 @@ Points to know before building one:
   the flavor with that environment active.
 * A flavor borrows its scripts from `$IMAGO_DIR/bin`, so install the
   production build, or at least run `imago_scripts`, first.
+* `--update` must be run in the environment the flavor was built in.
+  With no name it rebuilds what it can, leaves the others untouched,
+  and lists the flavors that failed so they can be updated by name.
 * Activation lasts for one shell. A batch job starts a new shell, so
   activate the flavor *before* running `makeinput.py`; the submission
   file it writes then selects the same flavor inside the job.
@@ -246,8 +251,8 @@ yourself, keeping up to date is simple:
 * `git fetch origin` shows what has changed; `git pull` merges it.
 * Then `cd build/base` and `make install`. Re-run `unpackImagoDB.py`
   only if the pull updated a `share/*.tgz` archive.
-* If you keep flavors, rebuild each one you use with
-  `imago_env --add <name>`; `make install` in `build/base` refreshes
-  the production engine only.
+* If you keep flavors, update each one you use with
+  `imago_env --update <name>`; `make install` in `build/base`
+  refreshes the production engine only.
 
 You are now up to date.
