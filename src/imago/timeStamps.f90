@@ -29,9 +29,13 @@
 !   the report just above itself. A stage that records nothing prints its
 !   stamps exactly as it always has.
 !
-! What the report prints is governed by two O_Verboseness categories:
-!   "timing" (the short summary; on by default) and "ranktiming" (one row
-!   per rank; off by default).
+! Every stage's calls and wall time are also added up over the whole run,
+!   together with what its reports found, and printRunTiming writes those
+!   totals as one table at the end of the log.
+!
+! What is printed is governed by two O_Verboseness categories: "timing"
+!   (the short summary of each stage and the end-of-run table; on by
+!   default) and "ranktiming" (one row per rank; off by default).
 !
 !****************************************************************************
 module O_TimeStamps
@@ -611,5 +615,189 @@ subroutine writeStageReport (opCode, wallSeconds)
    endif
 
 end subroutine writeStageReport
+
+
+! Return the plain name of the stage opCode: its banner label with the
+!   rows of asterisks and the blanks around the words taken off, so that
+!   '***************  Overlap Integrals  ***************' comes back as
+!   'Overlap Integrals'. The result is 41 characters long because that is
+!   the length of the longest name among the labels.
+function stageName (opCode)
+
+   ! Make sure that no funny variables are defined.
+   implicit none
+
+   ! Define the function result.
+   character(len=41) :: stageName
+
+   ! Declare passed dummy variables.
+   integer, intent(in) :: opCode
+
+   ! Define local variables.
+   integer :: firstChar ! Where the first word of the name begins.
+   integer :: lastChar  ! Where the last word of the name ends.
+
+   ! Step inward from each end of the label, past asterisks and blanks.
+   !   verify returns the position of the first character (or, with
+   !   back=.true., the last) that is NOT one of those two.
+   firstChar = verify(opLabels(opCode), '* ')
+   lastChar  = verify(opLabels(opCode), '* ', back=.true.)
+
+   ! A label holding nothing but asterisks and blanks has no name.
+   stageName = ' '
+   if (firstChar > 0) stageName = opLabels(opCode)(firstChar:lastChar)
+
+end function stageName
+
+
+! Write the end-of-run timing table: one row for every stage that ran,
+!   gathering in one place what the stage summaries said along the way
+!   (PSEUDOCODE 40.7). This is the table to read when choosing how many
+!   ranks the next run of a similar system should have. Called once, by
+!   Imago, after all the work is done and before the log is closed.
+!
+! The columns, and how to read them:
+!
+!!   calls      How many times the stage ran. A stage inside the SCF cycle
+!!              runs once per iteration.
+!!   wall s     The stage's wall-clock seconds, summed over its calls.
+!!   % run      That time as a percentage of the whole run. The stages
+!!              with large numbers here are the ones worth speeding up.
+!!   serial %   The seconds of work that only rank 0 did, as a percentage
+!!              of the stage's wall seconds: the part of the stage that
+!!              more ranks cannot shorten.
+!!   balance    The largest max/mean that any dealt phase of the stage
+!!              showed in any call. 1.0 is a perfectly even deal.
+!
+! A dash in the last two columns means the stage recorded no phases, so
+!   nothing is known about how its time divides. That is NOT the same as
+!   a serial share of zero: most stages are simply not instrumented yet.
+!
+! Rows come in the order the stages first started, which is the order a
+!   reader meets them in the log. The last two rows are the sum of the
+!   wall column ("all stages") and the run's own clock ("run"). They are
+!   printed side by side so that time spent outside every stage shows as
+!   a difference between them instead of hiding.
+subroutine printRunTiming
+
+   ! Import necessary modules.
+   use O_MPI, only: mpiRank, mpiSize
+   use O_Verboseness, only: isVerbose, VERB_TIMING
+
+   ! Make sure that no funny variables are defined.
+   implicit none
+
+   ! Define local variables.
+   integer (kind=int64) :: ticksNow ! The clock as the run ends.
+   real (kind=double) :: runSeconds ! The whole run, start to now.
+   real (kind=double) :: allStagesSeconds ! The sum of the wall column.
+   real (kind=double) :: runSharePercent  ! A wall time as a % of the run.
+   integer :: order  ! Loop index over the order of first starts.
+   integer :: opCode ! Loop index over the operation codes.
+   logical :: logIsOpen ! Whether unit 20 is still connected.
+   character(len=16) :: wallText ! The run's wall time, for the heading.
+   character(len=5)  :: rankWord ! "rank" or "ranks".
+   character(len=41) :: rowLabel ! The first column of a row. (A variable
+         !   and not a literal, so that it is padded on the right; see
+         !   the same note in writeStageReport.)
+   character(len=9)  :: serialText  ! The serial share, or a dash.
+   character(len=8)  :: balanceText ! The worst balance, or a dash.
+
+   ! Only rank 0 writes the log, and the table belongs to the "timing"
+   !   category along with the stage summaries it gathers.
+   if (mpiRank /= 0) return
+   if (.not. isVerbose(VERB_TIMING)) return
+
+   ! The log must still be open. Writing to a closed unit does not fail:
+   !   Fortran reconnects it to fort.20 and truncates, which would replace
+   !   the run's entire log with this table. Complain where it can still
+   !   be seen, and write nothing.
+   inquire (unit=20, opened=logIsOpen)
+   if (.not. logIsOpen) then
+      write (6,*) "The log was closed before the run timing table could"
+      write (6,*) "  be written; it is omitted."
+      return
+   endif
+
+   ! Read the run clock that initOperationLabels started.
+   call system_clock (ticksNow)
+   runSeconds = real (ticksNow - runStartTicks, double) &
+         & / real (clockTicksPerSecond, double)
+
+   ! The heading and the column titles.
+   write (wallText,fmt='(f16.1)') runSeconds
+   rankWord = 'ranks'
+   if (mpiSize == 1) rankWord = 'rank'
+   write (20,*)
+   write (20,fmt='(a,i0,a)') ' Run timing: ', mpiSize, ' '// &
+         & trim(rankWord)//', '//trim(adjustl(wallText))//' s wall'
+   rowLabel = 'stage'
+   write (20,fmt='(1x,a41,a6,a9,a6,a9,a8)') rowLabel, 'calls', 'wall s', &
+         & '% run', 'serial %', 'balance'
+
+   ! One row per stage, in the order the stages first started. Each pass
+   !   looks up the one operation code holding that place in the order.
+   allStagesSeconds = 0.0_double
+   do order = 1, numOpsStarted
+      do opCode = 1, numOpCodes
+         if (opFirstOrder(opCode) /= order) cycle
+
+         ! A stage that was started but never ended has no completed
+         !   call to report.
+         if (opCalls(opCode) == 0) cycle
+
+         allStagesSeconds = allStagesSeconds + opWallSeconds(opCode)
+         runSharePercent  = percentOf (opWallSeconds(opCode), runSeconds)
+
+         ! The last two columns are known only for a stage that recorded
+         !   phases. The balance needs a dealt time phase besides: a stage
+         !   with rank-0-only phases alone has a serial share and no deal
+         !   to be balanced, which its zero worst balance marks.
+         serialText  = adjustr('-        ')
+         balanceText = adjustr('-       ')
+         if (opHasPhases(opCode)) then
+            write (serialText,fmt='(i9)') nint (percentOf ( &
+                  & opSerialSeconds(opCode), opWallSeconds(opCode)))
+            if (opWorstBalance(opCode) > 0.0_double) then
+               write (balanceText,fmt='(f8.1)') opWorstBalance(opCode)
+            endif
+         endif
+
+         write (20,fmt='(1x,a41,i6,f9.1,f6.1,a9,a8)') stageName(opCode), &
+               & opCalls(opCode), opWallSeconds(opCode), runSharePercent, &
+               & serialText, balanceText
+      enddo
+   enddo
+
+   ! The two closing rows: what the stages add up to, and the run itself.
+   rowLabel = 'all stages'
+   write (20,fmt='(1x,a41,6x,f9.1,f6.1)') rowLabel, allStagesSeconds, &
+         & percentOf (allStagesSeconds, runSeconds)
+   rowLabel = 'run'
+   write (20,fmt='(1x,a41,6x,f9.1,f6.1)') rowLabel, runSeconds, &
+         & 100.0_double
+   call flush (20)
+
+end subroutine printRunTiming
+
+
+! Return part as a percentage of whole, or zero when whole is zero (a
+!   stage, or a whole run, too short for the clock to have ticked).
+function percentOf (part, whole)
+
+   ! Make sure that no funny variables are defined.
+   implicit none
+
+   ! Define the function result.
+   real (kind=double) :: percentOf
+
+   ! Declare passed dummy variables.
+   real (kind=double), intent(in) :: part
+   real (kind=double), intent(in) :: whole
+
+   percentOf = 0.0_double
+   if (whole > 0.0_double) percentOf = 100.0_double * part / whole
+
+end function percentOf
 
 end module O_TimeStamps

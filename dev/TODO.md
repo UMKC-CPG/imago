@@ -8635,7 +8635,14 @@ is not carried only in conversation.
     slots), a large cell, and a deck that reaches the
     mass-velocity call site.
   - Step two, part (c), PSEUDOCODE 40.7: the end-of-run table.
-    Open; checks 6 and 10 belong to it.
+    CODED 2026-11-10 (`printRunTiming`). Seen on the two small
+    benchmark decks at one and two ranks on the login node
+    (the compute nodes were in maintenance): the table is
+    written before the citations, is absent under `none`, and
+    energies are unchanged. Still to run, on compute nodes:
+    check 6, check 10 (a 16-rank SCF run), and the step-one
+    checks listed above. The entry stays open until those
+    pass.
 
 > **Parallel implementation (PA).**  Ruled 2026-08-18: MPI + ELPA
 > first, threads inside a rank as a companion.  ARCHITECTURE 6.5,

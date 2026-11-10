@@ -11,7 +11,7 @@ subroutine Imago
    use O_SCFHDF5
    use O_PSCFHDF5
    use O_CommandLine
-   use O_TimeStamps, only: initOperationLabels
+   use O_TimeStamps, only: initOperationLabels, printRunTiming
    use O_ElementData,     only: initElementData
    use O_MethodCitations, only: printMethodsBlock
    use O_MPI, only: mpiRank, mpiSize, barrierMPI, sendCtrlMPI, &
@@ -142,6 +142,13 @@ subroutine Imago
    if ((doLoEn == 1) .and. (mpiRank == 0)) then
       call loen(0)
    endif
+
+   ! Print the run timing table: every stage that ran, how long it took,
+   !   and how much of that more ranks could shorten. It comes after all
+   !   the work, so that every stage is in it, and before the citations,
+   !   which stay the closing words of the log. On a rank other than 0 it
+   !   does nothing.
+   call printRunTiming
 
    ! Print the citations for the methods this run actually exercised. This
    !   is the last thing the run does because it is only now settled which
