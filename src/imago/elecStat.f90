@@ -82,10 +82,14 @@ subroutine neutralAndNuclearQPot
    use O_Potential, only: potDim
 
    ! Import the MPI layer: the site deal, the sum-onto-root combine,
-   !   the worker wake-up, and the per-rank time gather (PSEUDOCODE
-   !   28; DESIGN 9.2's first exercise).
+   !   and the worker wake-up (PSEUDOCODE 28; DESIGN 9.2's first
+   !   exercise).
    use O_MPI, only: mpiRank, mpiSize, loadBalMPI, reduceSumMPI, &
-         & sendCtrlMPI, gatherTimesMPI, elecStatTask
+         & sendCtrlMPI, elecStatTask
+
+   ! Import the stage timing report, which this routine hands its
+   !   per-rank loop time and root's write time to (PSEUDOCODE 40.8).
+   use O_TimeStamps, only: recordDealtPhase, recordRootPhase
 
    ! Import external subroutines.
    use O_MathSubs
@@ -104,7 +108,6 @@ subroutine neutralAndNuclearQPot
    integer :: initSiteIdx, finSiteIdx
    integer :: clockBefore, clockAfter, clockRate
    real (kind=double), dimension (1) :: myLoopSeconds
-   real (kind=double), allocatable, dimension (:,:) :: allLoopSeconds
 
    ! Iteration dependent variables.  For each pair of potential sites these
    !   values will change when the potential type of either site changes.
@@ -693,13 +696,12 @@ subroutine neutralAndNuclearQPot
    call reduceSumMPI (nonLocalNucQPot)
    call reduceSumMPI (localNeutQPot)
    call reduceSumMPI (localNucQPot)
-   allocate (allLoopSeconds (1, mpiSize))
-   call gatherTimesMPI (myLoopSeconds, allLoopSeconds)
-   if (mpiRank == 0) then
-      write (20,*) 'ElecStat sub-stage 1 per-rank loop seconds:',&
-            & allLoopSeconds(1,:)
-   endif
-   deallocate (allLoopSeconds)
+
+   ! Hand this rank's loop time to the stage timing report as a dealt
+   !   phase of the electrostatic stage, operation code 14 (PSEUDOCODE
+   !   40.8).  The call is collective, so it is made here, before the
+   !   workers leave.
+   call recordDealtPhase (14, 'real loop', myLoopSeconds(1))
 
    ! Only root holds the summed result and the file; the workers
    !   release their copies and return to the solve server.
@@ -712,7 +714,10 @@ subroutine neutralAndNuclearQPot
       return
    endif
 
-   ! Record the potential overlap and local Q data.
+   ! Record the potential overlap and local Q data.  Root does this
+   !   alone, so the writes are timed and reported as a rank-0-only
+   !   phase: time that more ranks cannot shorten.
+   call system_clock (clockBefore, clockRate)
    call h5dwrite_f(potAlphaOverlap_did,H5T_NATIVE_DOUBLE, &
          & potAlphaOverlap(:,:),potPot,hdferr)
    if (hdferr /= 0) stop 'Failed to write pot alpha overlap'
@@ -735,6 +740,10 @@ subroutine neutralAndNuclearQPot
    if (hdferr /= 0) stop 'Failed to record potOLAndLocalQ success'
    call h5aclose_f(potOLAndLocalQ_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to close potOLAndLocalQ attribute'
+   call system_clock (clockAfter)
+   call recordRootPhase (14, 'write', &
+         & real (clockAfter - clockBefore, double) &
+         & / real (clockRate, double))
 
    ! Dellocate the variables from the global data structures that will not
    !   be used later.
@@ -767,7 +776,10 @@ subroutine residualQ
 
    ! Import the MPI layer (PSEUDOCODE 28; see neutralAndNuclearQPot).
    use O_MPI, only: mpiRank, mpiSize, loadBalMPI, reduceSumMPI, &
-         & sendCtrlMPI, gatherTimesMPI, elecStatTask
+         & sendCtrlMPI, elecStatTask
+
+   ! Import the stage timing report (see neutralAndNuclearQPot).
+   use O_TimeStamps, only: recordDealtPhase, recordRootPhase
 
    ! Import external subroutines.
    use O_MathSubs
@@ -786,7 +798,6 @@ subroutine residualQ
    integer :: initSiteIdx, finSiteIdx
    integer :: clockBefore, clockAfter, clockRate
    real (kind=double), dimension (1) :: myLoopSeconds
-   real (kind=double), allocatable, dimension (:,:) :: allLoopSeconds
 
    ! Iteration dependent variables.  For each pair of potential sites these
    !   values will change when the potential type of either site changes.
@@ -1142,13 +1153,11 @@ subroutine residualQ
    !   per-rank balance (PSEUDOCODE 28.2), as in the first
    !   sub-stage.
    call reduceSumMPI (nonLocalResidualQ)
-   allocate (allLoopSeconds (1, mpiSize))
-   call gatherTimesMPI (myLoopSeconds, allLoopSeconds)
-   if (mpiRank == 0) then
-      write (20,*) 'ElecStat sub-stage 2 per-rank loop seconds:',&
-            & allLoopSeconds(1,:)
-   endif
-   deallocate (allLoopSeconds)
+
+   ! Hand this rank's loop time to the stage timing report as a dealt
+   !   phase of the electrostatic stage, operation code 14.  Collective,
+   !   so made before the workers leave, as in the first sub-stage.
+   call recordDealtPhase (14, 'recip loop', myLoopSeconds(1))
 
    ! Only root holds the summed result and the file; the workers
    !   release their copies and return to the solve server.
@@ -1157,7 +1166,11 @@ subroutine residualQ
       return
    endif
 
-   ! Write to disk the matrices that will be used by main later.
+   ! Write to disk the matrices that will be used by main later.  Root
+   !   does this alone, so it is timed as a rank-0-only phase.  It
+   !   carries the same label as the first sub-stage's writes, so the
+   !   report adds the two into one "write" line for the stage.
+   call system_clock (clockBefore, clockRate)
    call h5dwrite_f(nonLocalResidualQ_did,H5T_NATIVE_DOUBLE, &
          & nonLocalResidualQ(:,:),potTypesPot,hdferr)
    if (hdferr /= 0) stop 'Failed to write non local residual charge'
@@ -1168,6 +1181,10 @@ subroutine residualQ
    if (hdferr /= 0) stop 'Failed to record nonLocalResidualQ success'
    call h5aclose_f(nonLocalResidualQ_aid,hdferr)
    if (hdferr /= 0) stop 'Failed to close nonLocalResidualQ attribute'
+   call system_clock (clockAfter)
+   call recordRootPhase (14, 'write', &
+         & real (clockAfter - clockBefore, double) &
+         & / real (clockRate, double))
 
    ! Deallocate matrix from a global data structure that will not be used
    !   later.

@@ -8591,6 +8591,52 @@ is not carried only in conversation.
   projection is per k-point. This is the number the GEMM recast
   (PA6 step 2) must beat and the deal is measured against.
 
+- [ ] PF10. Make the per-rank timing output READABLE. Raised
+  2026-11-09 on a 501-atom, 16-rank run: the two-centre stages
+  print sixteen full-precision numbers on one line, which nobody
+  reads and so nobody acts on -- and which hid that 117 of the
+  overlap stage's 119 s was serial work on rank 0 after the
+  dealt loop ended. Ruled by the programmer the same day, three
+  parts:
+  (a) A short SUMMARY per stage in place of the raw lines: rank
+      count and stage wall time; min / mean / max and max-over-
+      mean for each dealt phase; the rank-0-only time as its own
+      line; the serial share of the stage. Needs one new clock,
+      around the rank-0-only finish (orthogonalize, pack, write),
+      which nothing times today.
+  (b) The full PER-RANK table kept, but printed only on request
+      through `IMAGO_VERBOSENESS` (ARCHITECTURE 12).
+  (c) An END-OF-RUN table gathering every stage's wall time,
+      serial share and balance in one place -- the first thing a
+      user reads to choose a rank count. Second step, after (a)
+      and (b); it overlaps PF3 (accumulating timers) and should
+      be designed with it.
+  One shared routine should own the format: three formats exist
+  today at five call sites (the four two-centre stages through
+  `reducePairStage`, the two electrostatic sub-stages, the
+  three-centre table). Nothing parses the present lines
+  (`dev/tools/timemap.py` reads only the `Date is` stamps).
+  SPECIFIED 2026-11-09 and accepted by the programmer the same
+  day. The specification is ARCHITECTURE 12.3 (the `timing`
+  and `ranktiming` categories), DESIGN 9.11 (what is measured
+  and what each number means) and PSEUDOCODE 40 (the routines,
+  formats, call sites and checks); 25.6, 28.2 and 32.6 point
+  there. It puts the clocks in `O_TimeStamps`, which makes
+  that module an accumulating timer -- so it also answers PF3
+  "yes", in this minimal form. Coded in two steps:
+  - Step one, parts (a) and (b), PSEUDOCODE 40.3-40.6 and
+    40.8: CODED 2026-11-09. Checks 2, 5, 8 and 11 of 40.9
+    pass on the two small boron nitride benchmark decks at one
+    and four ranks (`jobs/pf10check`), and `timemap.py` still
+    reads the new log. Still to run: check 1 as a side-by-side
+    comparison of the two tables, check 3, check 4 in the
+    SERIAL build (one rank of the MPI build passes), check 7
+    (a restart that skips a stage), check 9 (more phases than
+    slots), a large cell, and a deck that reaches the
+    mass-velocity call site.
+  - Step two, part (c), PSEUDOCODE 40.7: the end-of-run table.
+    Open; checks 6 and 10 belong to it.
+
 > **Parallel implementation (PA).**  Ruled 2026-08-18: MPI + ELPA
 > first, threads inside a rank as a companion.  ARCHITECTURE 6.5,
 > 6.6 and 6.8 are the level above these; DESIGN 9 is the level

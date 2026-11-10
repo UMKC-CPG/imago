@@ -15717,6 +15717,133 @@ projected with SPIN-UP eigenvectors. `bond.F90:154`,
 `bond3C.F90:157` and `optc.F90:931` allocate the same single
 slab. Not run to confirm; recorded here so it is not lost.
 
+### 9.11 The Stage Timing Report
+
+**What it is for.** A reader of a parallel run's log has three
+questions about every stage: where did the time go, was the
+work evenly dealt, and would more ranks shorten it. The report
+answers those in words and a handful of numbers. Timing output
+that has to be decoded is not read, and timing that is not read
+changes no decision -- so the form of the report is part of its
+purpose, not a finish applied afterward.
+
+**The model.** A *stage* is one operation of `O_TimeStamps`
+(the overlap integrals, the electrostatic matrices, ...): the
+work between a start stamp and its end stamp. Inside a stage
+the report distinguishes three kinds of time, all measured on
+the wall clock:
+
+- A **dealt phase**: work every rank does a share of at once
+  (a pair loop, a reduce). Each rank times its own share, so
+  the phase has one number per rank.
+- A **rank-0-only phase**: work that only rank 0 does while
+  the others wait or idle (orthogonalizing, packing, writing a
+  matrix). One number.
+- The **stage wall time** `W`: rank 0's clock from the start
+  stamp to the end stamp. Rank 0 is the right clock because
+  every stage ends with rank 0, and the stage stamps a user
+  already reads are rank 0's.
+
+**The quantities reported per stage.**
+
+- For each dealt phase: the minimum, mean and maximum over
+  ranks, and **max / mean** -- the balance figure. 1.0 is a
+  perfect deal; 2.0 says the slowest rank took twice the
+  average, and the phase ran at half the speed an even deal
+  would give.
+- For each rank-0-only phase: its seconds.
+- **Not timed**: `W` minus rank 0's own seconds in every dealt
+  phase, minus every rank-0-only phase. It is printed always.
+  A small value certifies that the phases account for the
+  stage; a large one says the stage holds work nobody put a
+  clock on (or rank 0 waiting for slower ranks), which is
+  itself a finding.
+- **Serial share**: the rank-0-only seconds as a percentage of
+  `W`. This is the part of the stage that adding ranks cannot
+  shorten. It is deliberately the measured floor and not an
+  Amdahl projection: the not-timed remainder is NOT counted as
+  serial, because what it holds is unknown.
+
+A phase may instead carry a **count** per rank (the number of
+potential terms a rank was dealt, say). Counts are summarized
+the same way and take no part in the time arithmetic.
+
+**Three levels of detail,** governed by ARCHITECTURE 12:
+
+1. The *stage summary*, written inside the stage's own banner
+   just above its end stamp. Category `timing`, on by default.
+2. The *per-rank table*, one row per rank, written with the
+   summary. Category `ranktiming`, off by default.
+3. The *end-of-run table*, one row per stage that ran, written
+   once after all the work and before the method citations:
+   how many times the stage ran, its total wall time, its share
+   of the run, its serial share, and the worst balance figure
+   seen. Category `timing`. This is the table a user reads to
+   choose a rank count for the next run.
+
+A stage with no recorded phases (most of them, today) writes no
+summary and appears in the end-of-run table with its calls and
+wall time alone. So the table is complete for the run from the
+first day, and each stage gains its phase columns when someone
+instruments it.
+
+**What is deliberately not here.**
+
+- No per-call history. A stage that runs every SCF iteration
+  accumulates totals; the per-iteration spread stays in the
+  stamps.
+- No nesting. A stage timed inside another stage (none is,
+  today) would be counted in both rows of the end-of-run
+  table, and the "share of run" column would no longer sum to
+  the run. The table's total row is therefore the run's own
+  wall time, measured separately, never the column sum.
+- No CPU time, only wall time: a rank blocked in a reduce is
+  costing the user wall time, and that is what they are
+  deciding about.
+
+**Seam inventory (read at c663ac7).**
+
+- `timeStampStart` / `timeStampEnd` (`timeStamps.f90`) -- the
+  stage boundaries. Called by EVERY rank in the stages that
+  all ranks run in lockstep (the two-centre and three-centre
+  integral stages) and by rank 0 alone where the workers sit
+  in the task server (the electrostatic stage). Their writes
+  to unit 20 reach the log only on rank 0; a worker's unit 20
+  is discarded (or is its own rank log). They keep no state
+  today: each formats `date_and_time` and returns.
+- The per-rank seconds -- each rank's own `system_clock`
+  difference around its share, already taken at every site,
+  and gathered onto rank 0 by `gatherTimesMPI` (`mpi.F90`),
+  which is a collective call: every rank must make it, in the
+  same order. Rank 0 allocates the receiving array.
+- The sites that produce per-rank times today, and what each
+  writes: `reducePairStage` (`integrals.F90`), used by the
+  overlap, kinetic-energy, mass-velocity and nuclear-potential
+  stages -- loop and reduce seconds, two raw lines; the
+  three-centre stage `elecPotGaussOverlap` -- compute, lock
+  wait, write seconds and a term count, a fixed-width table
+  written AFTER its end stamp; `neutralAndNuclearQPot` and
+  `residualQ` (`elecStat.f90`) -- loop seconds, one raw line
+  each, both inside the single electrostatic stage.
+- The rank-0-only work those stages do after the dealt part:
+  `orthoOL` / `ortho` in the two-centre stages; the dataset
+  writes in the electrostatic sub-stages. Nothing times these
+  today.
+- `mpiRank`, `mpiSize` (`O_MPI`) -- set at start-up; 0 and 1 in
+  the serial build, where `gatherTimesMPI` copies rank 0's
+  vector across.
+- `isVerbose` (`O_Verboseness`) -- initialized in
+  `parseCommandLine` before the first stamp, so it is valid at
+  every point the report prints.
+- The end of the run (`Imago` in `imago.F90`): after the last
+  post-SCF call, `printMethodsBlock` writes the citations,
+  then unit 20 is closed, then the barrier and the `fort.2`
+  certificate. The end-of-run table must be written before
+  the close (a write to the closed unit silently truncates
+  the log) and is placed before the citations.
+- Readers of the present lines: none. `dev/tools/timemap.py`
+  reads only the `Date is` stamps, whose form is unchanged.
+
 ---
 
 ## 10. Runtime Citation Banner

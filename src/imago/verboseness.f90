@@ -45,12 +45,20 @@ module O_Verboseness
    ! The number of output categories that exist. Adding a category means
    !   raising this number, declaring one parameter below, and filling in
    !   one row of initCategoryTable. Nothing else moves.
-   integer, parameter :: numCategories = 1
+   integer, parameter :: numCategories = 3
 
    ! The public contract. The value of each parameter is a row of the
    !   category table, NOT a bit position. Nothing outside this module ever
    !   sees a bit position at all.
-   integer, parameter :: VERB_BANNER = 1
+   !
+   !! VERB_BANNER      "banner"      The identity and citation blocks.
+   !! VERB_TIMING      "timing"      The per-stage timing summaries and
+   !!                                the end-of-run timing table.
+   !! VERB_RANKTIMING  "ranktiming"  The per-rank table behind each
+   !!                                stage timing summary.
+   integer, parameter :: VERB_BANNER     = 1
+   integer, parameter :: VERB_TIMING     = 2
+   integer, parameter :: VERB_RANKTIMING = 3
 
    ! The category table. This is the single source of truth: a category's
    !   bit IS its row index minus one, so there is no second column of bit
@@ -84,6 +92,18 @@ subroutine initCategoryTable
 
    categoryName(VERB_BANNER)     = "banner"
    categoryInNormal(VERB_BANNER) = .true.
+
+   ! Where a stage's time went, and how much of it more ranks could
+   !   shorten, is something every user of a parallel run needs without
+   !   first learning that a switch exists. So it is part of "normal".
+   categoryName(VERB_TIMING)     = "timing"
+   categoryInNormal(VERB_TIMING) = .true.
+
+   ! One row per rank per stage. Wanted when a summary shows an uneven
+   !   deal and someone must find which rank; noise otherwise. A run asks
+   !   for it by name: IMAGO_VERBOSENESS=normal,ranktiming
+   categoryName(VERB_RANKTIMING)     = "ranktiming"
+   categoryInNormal(VERB_RANKTIMING) = .false.
 
 end subroutine initCategoryTable
 

@@ -262,31 +262,34 @@ end subroutine dealPairRange
 
 
 ! Combine the partial accumulators of a dealt two-centre stage onto
-!   root and log the per-rank costs (PSEUDOCODE 32.4 and 32.6).  Every
-!   rank calls this after its share of the pair loop: the three
-!   accumulator matrices are summed onto root in place (a no-op in the
-!   serial build), the reduce is timed, and root writes two lines to
-!   the log -- each rank's loop seconds, which are the balance record
-!   DESIGN 9.9 asks for, and each rank's reduce seconds, which are the
-!   price of every rank holding a full copy of the matrices (the form
-!   accepted for today's cell sizes and expected to be replaced; the
-!   number that decides when is kept on the record from the first
-!   run).  The core-valence accumulator is passed in because the
+!   root and record the per-rank costs (PSEUDOCODE 32.4, 32.6 and
+!   40.8).  Every rank calls this after its share of the pair loop: the
+!   three accumulator matrices are summed onto root in place (a no-op
+!   in the serial build), the reduce is timed, and two dealt phases go
+!   to the stage timing report -- each rank's loop seconds, which are
+!   the balance record DESIGN 9.9 asks for, and each rank's reduce
+!   seconds, which are the price of every rank holding a full copy of
+!   the matrices (the form accepted for today's cell sizes and expected
+!   to be replaced; the number that decides when is kept on the record
+!   from the first run).  The report itself is written by the stage's
+!   end stamp.  The core-valence accumulator is passed in because the
 !   overlap stage fills coreValeOL while the other three fill
 !   coreVale; the valence-valence and core-core accumulators are the
 !   module's own in every stage.
-subroutine reducePairStage (stageName, coreValeTarget, loopSeconds)
+subroutine reducePairStage (opCode, coreValeTarget, loopSeconds)
 
    ! Import necessary modules.
    use O_Kinds
-   use O_MPI, only: mpiRank, mpiSize, reduceSumMPI, gatherTimesMPI
+   use O_MPI, only: reduceSumMPI
+   use O_TimeStamps, only: recordDealtPhase
    use, intrinsic :: iso_fortran_env, only: int64
 
    ! Make sure that there are not accidental variable declarations.
    implicit none
 
    ! Define passed parameters.
-   character (len=*), intent(in) :: stageName ! For the log lines.
+   integer, intent(in) :: opCode ! The calling stage's O_TimeStamps
+         !   operation code, which its timing report is filed under.
 #ifndef GAMMA
    complex (kind=double), dimension (:,:,:), intent(inout) :: coreValeTarget
 #else
@@ -296,8 +299,7 @@ subroutine reducePairStage (stageName, coreValeTarget, loopSeconds)
 
    ! Define local variables.
    integer (kind=int64) :: ticksBefore, ticksAfter, ticksPerSecond
-   real (kind=double), dimension (2) :: mySeconds ! Loop, then reduce.
-   real (kind=double), allocatable, dimension (:,:) :: allSeconds
+   real (kind=double) :: reduceSeconds ! This rank's time in the reduce.
 
    ! Sum the three accumulators onto root, timing the whole exchange.
    call system_clock (ticksBefore, ticksPerSecond)
@@ -312,18 +314,15 @@ subroutine reducePairStage (stageName, coreValeTarget, loopSeconds)
 #endif
    call system_clock (ticksAfter)
 
-   ! Gather every rank's two times onto root and log them.
-   mySeconds(1) = loopSeconds
-   mySeconds(2) = real (ticksAfter - ticksBefore, double) &
+   ! Hand this rank's two times to the stage timing report.  Both calls
+   !   are collective: every rank makes them, in this order.  Note that
+   !   a rank's reduce time includes any wait for slower ranks to
+   !   arrive, so the rank that finishes its loop last shows the
+   !   shortest reduce.
+   reduceSeconds = real (ticksAfter - ticksBefore, double) &
          & / real (ticksPerSecond, double)
-   allocate (allSeconds (2, mpiSize))
-   call gatherTimesMPI (mySeconds, allSeconds)
-   if (mpiRank == 0) then
-      write (20,*) stageName, ' per-rank loop seconds:  ', allSeconds(1,:)
-      write (20,*) stageName, ' per-rank reduce seconds:', allSeconds(2,:)
-      call flush (20)
-   endif
-   deallocate (allSeconds)
+   call recordDealtPhase (opCode, 'pair loop', loopSeconds)
+   call recordDealtPhase (opCode, 'reduce', reduceSeconds)
 
 end subroutine reducePairStage
 
@@ -380,6 +379,8 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
    integer :: jStart, jStop
    integer (kind=int64) :: loopTicksBefore, loopTicksAfter, ticksPerSecond
    real (kind=double) :: loopSeconds
+   integer (kind=int64) :: orthoTicksBefore, orthoTicksAfter ! Clock
+         !   readings around root's orthogonalize-and-write step.
    integer, dimension (1) :: stageDoneVerdict ! Root's attribute read
    integer :: hdf5Status
    integer :: hdferr
@@ -895,22 +896,31 @@ subroutine gaussOverlapOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
 
    ! Stop the loop clock and combine every rank's partial matrices onto
    !   root (PSEUDOCODE 32.4); the per-rank loop and reduce seconds go
-   !   to the log.  In the serial build the reduce is a no-op.
+   !   to the stage timing report under this stage's operation code, 8.
+   !   In the serial build the reduce is a no-op.
    call system_clock (loopTicksAfter)
    loopSeconds = real (loopTicksAfter - loopTicksBefore, double) &
          & / real (ticksPerSecond, double)
 #ifndef GAMMA
-   call reducePairStage ('Overlap', coreValeOL, loopSeconds)
+   call reducePairStage (8, coreValeOL, loopSeconds)
 #else
-   call reducePairStage ('Overlap', coreValeOLGamma, loopSeconds)
+   call reducePairStage (8, coreValeOLGamma, loopSeconds)
 #endif
 
    ! Perform orthogonalization and save the results to disk.  Root
    !   only: it holds the file handles and the summed matrices.  The
    !   core-valence overlap stays allocated on every rank because the
    !   term stage's orthogonalization needs it there (PSEUDOCODE 25.1).
+   !   The step is timed and reported as a rank-0-only phase: it is the
+   !   part of this stage that more ranks cannot shorten (PSEUDOCODE
+   !   40.8).
    if (mpiRank == 0) then
+      call system_clock (orthoTicksBefore)
       call orthoOL(numComponents,fullCVDims,packedVVDims,did,CVdid,aid)
+      call system_clock (orthoTicksAfter)
+      call recordRootPhase (8, 'orthogonalize + write', &
+            & real (orthoTicksAfter - orthoTicksBefore, double) &
+            & / real (ticksPerSecond, double))
    endif
 
    ! Record the completion of this gaussian integration set.
@@ -959,6 +969,8 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
    integer :: jStart, jStop
    integer (kind=int64) :: loopTicksBefore, loopTicksAfter, ticksPerSecond
    real (kind=double) :: loopSeconds
+   integer (kind=int64) :: orthoTicksBefore, orthoTicksAfter ! Clock
+         !   readings around root's orthogonalize-and-write step.
    integer, dimension (1) :: stageDoneVerdict ! Root's attribute read
    integer :: hdf5Status
    integer :: hdferr
@@ -1390,9 +1402,9 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
    loopSeconds = real (loopTicksAfter - loopTicksBefore, double) &
          & / real (ticksPerSecond, double)
 #ifndef GAMMA
-   call reducePairStage ('KineticEnergy', coreVale, loopSeconds)
+   call reducePairStage (9, coreVale, loopSeconds)
 #else
-   call reducePairStage ('KineticEnergy', coreValeGamma, loopSeconds)
+   call reducePairStage (9, coreValeGamma, loopSeconds)
 #endif
 
    ! Perform orthogonalization and save the results to disk.  The 2 is an
@@ -1400,9 +1412,16 @@ subroutine gaussOverlapKE(packedVVDims,did,aid)
    !   done, and specifically that the result is for kinetic energy and that
    !   it should be written to the KE portion of the hdf5 file.  Root
    !   only; ortho frees the core-valence accumulator on its way out, so
-   !   a worker, which never enters it, frees its own copy here.
+   !   a worker, which never enters it, frees its own copy here.  The
+   !   step is timed and reported as a rank-0-only phase of this stage
+   !   (operation code 9): the part more ranks cannot shorten.
    if (mpiRank == 0) then
+      call system_clock (orthoTicksBefore)
       call ortho(2,packedVVDims,did,aid)
+      call system_clock (orthoTicksAfter)
+      call recordRootPhase (9, 'orthogonalize + write', &
+            & real (orthoTicksAfter - orthoTicksBefore, double) &
+            & / real (ticksPerSecond, double))
    else
 #ifndef GAMMA
       deallocate (coreVale)
@@ -1457,6 +1476,8 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
    integer :: jStart, jStop
    integer (kind=int64) :: loopTicksBefore, loopTicksAfter, ticksPerSecond
    real (kind=double) :: loopSeconds
+   integer (kind=int64) :: orthoTicksBefore, orthoTicksAfter ! Clock
+         !   readings around root's orthogonalize-and-write step.
    integer, dimension (1) :: stageDoneVerdict ! Root's attribute read
    integer :: hdf5Status
    integer :: hdferr
@@ -1893,9 +1914,9 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
    loopSeconds = real (loopTicksAfter - loopTicksBefore, double) &
          & / real (ticksPerSecond, double)
 #ifndef GAMMA
-   call reducePairStage ('MassVelocity', coreVale, loopSeconds)
+   call reducePairStage (30, coreVale, loopSeconds)
 #else
-   call reducePairStage ('MassVelocity', coreValeGamma, loopSeconds)
+   call reducePairStage (30, coreValeGamma, loopSeconds)
 #endif
 
    ! Perform orthogonalization and save the results to disk.  The 5 is an
@@ -1903,9 +1924,15 @@ subroutine gaussOverlapMV(packedVVDims,did,aid)
    !   done, and specifically that the result is for mass velocity and that
    !   it should be written to the MV portion of the hdf5 file.  Root
    !   only; a worker frees the core-valence accumulator itself (see
-   !   gaussOverlapKE).
+   !   gaussOverlapKE).  The step is timed and reported as a rank-0-only
+   !   phase of this stage (time stamp operation code 30).
    if (mpiRank == 0) then
+      call system_clock (orthoTicksBefore)
       call ortho(5,packedVVDims,did,aid)
+      call system_clock (orthoTicksAfter)
+      call recordRootPhase (30, 'orthogonalize + write', &
+            & real (orthoTicksAfter - orthoTicksBefore, double) &
+            & / real (ticksPerSecond, double))
    else
 #ifndef GAMMA
       deallocate (coreVale)
@@ -1959,6 +1986,8 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
    integer :: jStart, jStop
    integer (kind=int64) :: loopTicksBefore, loopTicksAfter, ticksPerSecond
    real (kind=double) :: loopSeconds
+   integer (kind=int64) :: orthoTicksBefore, orthoTicksAfter ! Clock
+         !   readings around root's orthogonalize-and-write step.
    integer, dimension (1) :: stageDoneVerdict ! Root's attribute read
    integer :: hdf5Status
    integer :: hdferr
@@ -2372,9 +2401,9 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
    loopSeconds = real (loopTicksAfter - loopTicksBefore, double) &
          & / real (ticksPerSecond, double)
 #ifndef GAMMA
-   call reducePairStage ('NuclearPotential', coreVale, loopSeconds)
+   call reducePairStage (10, coreVale, loopSeconds)
 #else
-   call reducePairStage ('NuclearPotential', coreValeGamma, loopSeconds)
+   call reducePairStage (10, coreValeGamma, loopSeconds)
 #endif
 
    ! Perform orthogonalization and save the results to disk.  The 3 is an
@@ -2382,9 +2411,15 @@ subroutine gaussOverlapNP(packedVVDims,did,aid)
    !   done, and specifically that the result is for the nuclear potential and
    !   that it should be written to the NP portion of the hdf5 file.  Root
    !   only; a worker frees the core-valence accumulator itself (see
-   !   gaussOverlapKE).
+   !   gaussOverlapKE).  The step is timed and reported as a rank-0-only
+   !   phase of this stage (time stamp operation code 10).
    if (mpiRank == 0) then
+      call system_clock (orthoTicksBefore)
       call ortho (3,packedVVDims,did,aid)
+      call system_clock (orthoTicksAfter)
+      call recordRootPhase (10, 'orthogonalize + write', &
+            & real (orthoTicksAfter - orthoTicksBefore, double) &
+            & / real (ticksPerSecond, double))
    else
 #ifndef GAMMA
       deallocate (coreVale)
@@ -2849,8 +2884,7 @@ subroutine elecPotGaussOverlap(packedVVDims,doneMask)
    use O_Potential, only: potDim
    use O_PotTypes, only: potTypes
    use O_PotSites, only: potSites, numPotSites
-   use O_MPI, only: mpiRank, mpiSize, barrierMPI, gatherTimesMPI,&
-         & stopMPI
+   use O_MPI, only: mpiRank, mpiSize, barrierMPI, stopMPI
    use O_SCFHDF5, only: writePotTermHDF5
 
    ! Make sure that there are not accidental variable declarations.
@@ -2899,9 +2933,9 @@ subroutine elecPotGaussOverlap(packedVVDims,doneMask)
    real (kind=double), allocatable, dimension (:,:,:) :: packedBuffer
 
    ! The per-rank stage accounting of PSEUDOCODE 25.6: compute, lock
-   !   wait, write, and the owned-term count, gathered to root.
+   !   wait, write, and the owned-term count.  Each is handed to the
+   !   stage timing report as a dealt phase when the stage ends.
    real (kind=double), dimension (4) :: myStageTimes
-   real (kind=double), allocatable, dimension (:,:) :: allStageTimes
    integer :: clockBefore, clockAfter, clockRate
 
    ! Make a time stamp.
@@ -3071,27 +3105,22 @@ subroutine elecPotGaussOverlap(packedVVDims,doneMask)
    !   the stage's honest wall time.
    call barrierMPI
 
+   ! Hand the per-rank accounting of PSEUDOCODE 25.6 to the stage
+   !   timing report (PSEUDOCODE 40.8), which the end stamp below then
+   !   writes: the balance is measured, not assumed, and the lock-wait
+   !   and write phases answer DESIGN 9.5's serialized-write question
+   !   on real decks.  The four calls are collective and come after
+   !   the barrier, so the stage's wall time still covers the wait for
+   !   the slowest rank.  The last one is a count, not a time: how many
+   !   potential terms each rank was dealt.
+   call recordDealtPhase (11, 'compute',   myStageTimes(1))
+   call recordDealtPhase (11, 'lock wait', myStageTimes(2))
+   call recordDealtPhase (11, 'write',     myStageTimes(3))
+   call recordDealtPhase (11, 'terms',     myStageTimes(4), &
+         & isCount=.true.)
+
    ! Make a finishing time stamp.
    call timeStampEnd (11)
-
-   ! Gather the per-rank accounting to root and print the table of
-   !   PSEUDOCODE 25.6: the balance is measured, not assumed, and the
-   !   wait and write columns answer DESIGN 9.5's serialized-write
-   !   question on real decks.
-   allocate (allStageTimes (4, mpiSize))
-   call gatherTimesMPI (myStageTimes, allStageTimes)
-   if (mpiRank == 0) then
-      write (20,*) 'Three-center term stage, per-rank accounting:'
-      write (20,fmt='(a)') &
-            & '   rank   compute s      wait s     write s  terms'
-      do n = 1, mpiSize
-         write (20,fmt='(i7,3f12.3,i7)') n-1, allStageTimes(1,n),&
-               & allStageTimes(2,n), allStageTimes(3,n),&
-               & nint (allStageTimes(4,n))
-      enddo
-      call flush (20)
-   endif
-   deallocate (allStageTimes)
 
 end subroutine elecPotGaussOverlap
 

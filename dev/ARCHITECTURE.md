@@ -3917,12 +3917,25 @@ Three behaviours are fixed:
 
 ### 12.3 Scope Today
 
-One category is defined: `banner`, governing the identity and
-citation block specified in DESIGN 10. `normal` includes it.
+Three categories are defined:
 
-The categories that will matter for the debugging and
+- `banner` -- the identity and citation block specified in
+  DESIGN 10. `normal` includes it.
+- `timing` -- the per-stage timing summaries and the end-of-run
+  timing table of DESIGN 9.11. `normal` includes it: where a
+  run's time went, and how much of it more ranks could shorten,
+  is something every user of a parallel run needs without
+  having to know a switch exists.
+- `ranktiming` -- the full per-rank table behind each stage
+  summary (DESIGN 9.11). `normal` does NOT include it: it is
+  one row per rank per stage, wanted when a summary shows an
+  uneven deal and someone has to find which rank, and noise
+  otherwise. A run asks for it with
+  `IMAGO_VERBOSENESS=normal,ranktiming`.
+
+The further categories that will matter for the debugging and
 parallelization work -- SCF iteration detail, integral and setup
-diagnostics, resource reporting, developer trace -- are
+diagnostics, developer trace -- are
 deliberately not enumerated here. Naming them before knowing
 what those campaigns need would fix a vocabulary against
 guesswork. Each is added later by appending one row to the name
@@ -3945,6 +3958,15 @@ by DESIGN 10 and is not begun here.
   method-citation registry of DESIGN 10.5 and its predicates.
   Uses `O_KPoints`, and later whatever further engine state a
   new predicate reads.
+- **O_TimeStamps** (`timeStamps.f90`): besides the start and end
+  stamps it has always written, it owns the stage timing report
+  of DESIGN 9.11 -- the clocks, the per-stage summary, the
+  per-rank table and the end-of-run table. For that it uses
+  `O_MPI` (the rank count and the gather of per-rank times) and
+  `O_Verboseness` (the `timing` and `ranktiming` categories).
+  Neither of those uses anything but `O_Kinds`, and both are
+  already compiled ahead of `timeStamps.f90`, so no cycle and
+  no build-order change follows.
 
 The last two were one module in the first draft of this
 section, and that arrangement cannot be compiled. The identity

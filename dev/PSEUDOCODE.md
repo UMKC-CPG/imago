@@ -16719,13 +16719,15 @@ idempotent-safe on workers, which never ran `initHDF5_SCF`.
 
 Each rank accumulates three wall-time counters over its owned
 terms: compute (pair loop + ortho compute), lock wait, and
-write.  `gatherTimesMPI` delivers them to root, which prints
-one line per rank into fort.20 after the stage:
+write, and counts the terms it owns.  The four are recorded as
+dealt phases of the stage timing report (section 40, call
+sites in 40.8), which gathers them to root and writes the
+stage summary and, on request, the per-rank table:
 
 ```
-PA3 rank    compute s     wait s    write s   terms
-     0        123.4         0.2       15.1      8
-     ...
+   rank     compute   lock wait       write       terms
+      0     123.400       0.200      15.100           8
+    ...
 ```
 
 This is the table TODO PA3 requires: the balance is measured
@@ -17271,9 +17273,12 @@ all ranks (root included):
          !   within a site -- only the outer range changes
    record my loop seconds
 reduceSumMPI each accumulator onto root
-gather the per-rank loop seconds; root logs one line
+record the per-rank loop seconds as a dealt phase of the
+      stage timing report (section 40; collective, so it
+      precedes the workers' return)
 root: write the datasets and the completion attribute, as
-      today; workers return to the server loop
+      today, timing the writes as a rank-0-only phase;
+      workers return to the server loop
 ```
 
 ### 28.3 Checks
@@ -18457,17 +18462,19 @@ in-place sum of one contribution).
 
 ### 32.6 Instrumentation
 
-Two lines per stage on root's unit 20, in PSEUDOCODE 28's
-form so the same offline reader serves both:
+Two dealt phases per stage, recorded through the stage timing
+report (section 40, call sites in 40.8), which writes them as
+a summary and, on request, a per-rank table:
 
 ```
-<Stage> per-rank loop seconds:   t_0 t_1 ... t_{N-1}
-<Stage> per-rank reduce seconds: r_0 r_1 ... r_{N-1}
+pair loop:  t_0 t_1 ... t_{N-1}     each rank's loop seconds
+reduce:     r_0 r_1 ... r_{N-1}     each rank's reduce seconds
 ```
 
-with `<Stage>` one of `Overlap`, `KineticEnergy`,
-`MassVelocity`, `NuclearPotential`. The first line is the
-balance record DESIGN 9.9 requires; the second is the cost of
+for each of the overlap, kinetic-energy, mass-velocity and
+nuclear-potential stages, together with one rank-0-only phase
+around the stage's orthogonalize-and-write step. The first is
+the balance record DESIGN 9.9 requires; the second is the cost of
 the full-copy form -- the number that grows with cell size and
 that the expiry of this form will be called on -- kept on the
 record from the first run. The stage stamps of `O_TimeStamps`
@@ -20115,3 +20122,391 @@ so no second floor is ever introduced.
 4. **The stamp falls.** The optical stage stamp on the large
    cell falls by the BLAS-3 factor, on the total and the partial
    paths both.
+
+
+## 40. The Stage Timing Report
+## (DESIGN 9.11; ARCHITECTURE 12.3; TODO PF10)
+
+### 40.1 What this codes
+
+DESIGN 9.11's report: a readable summary of each instrumented
+stage, the per-rank table behind it on request, and one table
+at the end of the run. It replaces the three formats of
+25.6, 28.2 and 32.6 -- those sections now state WHAT each stage
+measures, and this one states how every measurement is
+recorded and written. One module owns the clocks and the
+formats, so a stage instrumented later prints like the rest
+without anyone copying a `write` statement.
+
+Written in two steps that can be coded and accepted
+separately: the stage summary with its per-rank table (40.3 to
+40.6), then the end-of-run table (40.7). The accumulators the
+second step reads are filled by the first, so the second adds
+a printing routine and one call.
+
+### 40.2 Seam inventory (read at c663ac7)
+
+DESIGN 9.11 carries the inventory of what exists. What this
+section adds to or changes in each place:
+
+- `O_TimeStamps` (`timeStamps.f90`) -- gains module state and
+  four routines (40.3, 40.4). It newly uses `O_MPI` (`mpiRank`,
+  `mpiSize`, `gatherTimesMPI`) and `O_Verboseness`
+  (`isVerbose`, `VERB_TIMING`, `VERB_RANKTIMING`); both are
+  compiled before it in `complex/CMakeLists.txt` and
+  `real/CMakeLists.txt` already, and neither uses it.
+- `initOperationLabels` -- called exactly once, first thing in
+  `Imago` (`imago.F90:29`), on every rank. It is where the
+  accumulators are zeroed and the run clock is started. (The
+  `loen` routine imports the name and does not call it.)
+- `timeStampStart (opCode)` -- additionally records the start
+  tick of `opCode`. Allocates nothing.
+- `timeStampEnd (opCode)` -- additionally closes the stage's
+  clock, writes the report for whatever phases were recorded
+  against `opCode` since its start, and folds them into the
+  run totals. The stamp lines themselves are unchanged in form
+  and position, so `timemap.py` reads them as before.
+- `O_Verboseness` -- two rows appended to the category table
+  (`timing`, in `normal`; `ranktiming`, not), `numCategories`
+  raised to 3, two parameters declared. Nothing else in the
+  module changes (ARCHITECTURE 12.2: adding a category moves
+  nothing).
+- `reducePairStage` (`integrals.F90`) -- its `gatherTimesMPI`
+  call and two `write` lines are replaced by two
+  `recordDealtPhase` calls; it gains an `opCode` argument,
+  passed by its four callers (8, 9, 30, 10), since the stage
+  name string it takes today is not what the report is keyed
+  on. The four callers each put a clock around their
+  rank-0-only `orthoOL` / `ortho` call.
+- `elecPotGaussOverlap` (`integrals.F90`) -- its gather and
+  table move from AFTER `timeStampEnd (11)` to before it (and
+  after the barrier, which must stay first so the stage stamp
+  covers the wait for the slowest rank), and become four
+  `recordDealtPhase` calls. `myStageTimes` is filled as today.
+- `neutralAndNuclearQPot`, `residualQ` (`elecStat.f90`) --
+  each replaces its gather and raw line by one
+  `recordDealtPhase` call, made at the same point: after the
+  reduces and BEFORE the workers return to the task server,
+  because the call is collective. Rank 0 then times its
+  dataset writes. Their shared end stamp, `timeStampEnd (14)`
+  in `makeElectrostatics`, is reached by rank 0 only, which is
+  the only rank holding anything to print.
+- `Imago` (`imago.F90`) -- one call, `printRunTiming`, placed
+  immediately before `printMethodsBlock`.
+- Who allocates: the per-rank store (40.3) is allocated once
+  by rank 0 in `initOperationLabels`, `maxPhases` by `mpiSize`
+  doubles, and lives for the run. Each `recordDealtPhase` call
+  uses a one-by-`mpiSize` automatic array for the gather.
+
+### 40.3 Module state
+
+```
+maxPhases = 8                 ! phases one stage may record
+
+-- per operation code, all zero at start:
+opStartTicks   (numOpCodes)   ! tick of the latest start stamp
+opCalls        (numOpCodes)   ! completed start/end pairs
+opWallSeconds  (numOpCodes)   ! summed stage wall time
+opSerialSeconds(numOpCodes)   ! summed rank-0-only seconds
+opWorstBalance (numOpCodes)   ! largest max/mean of any dealt
+                              !   TIME phase, any call; 0 = none
+opHasPhases    (numOpCodes)   ! true once any phase is recorded
+opFirstOrder   (numOpCodes)   ! 1, 2, ... in order of first
+                              !   start; 0 = never ran
+numOpsStarted                 ! how many have a first order
+runStartTicks                 ! taken in initOperationLabels
+
+-- the phases recorded for stages that are open, rank 0 only:
+numPending
+pendingOp      (maxPhases)    ! the opCode each belongs to
+pendingKind    (maxPhases)    ! DEALT_TIME, DEALT_COUNT, ROOT_ONLY
+pendingLabel   (maxPhases)    ! character (len=24)
+pendingRanks   (maxPhases, mpiSize)   ! per-rank values (dealt)
+pendingSeconds (maxPhases)    ! the one value (ROOT_ONLY)
+```
+
+A dealt phase's label is at most 11 characters, because it
+also heads a 12-character column of the per-rank table; a
+rank-0-only label may use all 24. Six dealt phases is the most
+one table row can carry inside 80 columns, and `maxPhases`
+leaves room for two rank-0-only phases beside them.
+
+### 40.4 The recording routines
+
+```
+recordDealtPhase (opCode, label, myValue, isCount):
+   ! COLLECTIVE: every rank that took part in the phase calls
+   !   it, in the same order, each with its own value.
+   !   isCount is optional and false when absent.
+   gatherTimesMPI ([myValue]) -> allValues (1, mpiSize)
+   if mpiRank /= 0: return
+   if numPending == maxPhases:
+      write to unit 20, once per stage: "stage timing: more
+         than <maxPhases> phases recorded; '<label>' dropped"
+      return                       ! never stop a run for a report
+   numPending += 1
+   store opCode, label, kind (DEALT_COUNT if isCount, else
+         DEALT_TIME), and allValues (1,:) in the pending slot
+
+recordRootPhase (opCode, label, seconds):
+   ! NOT collective, and safe to call unguarded: it does
+   !   nothing on a rank other than 0.
+   if mpiRank /= 0: return
+   same capacity test as above
+   numPending += 1
+   store opCode, label, kind ROOT_ONLY, and seconds
+```
+
+Two `recordRootPhase` calls with the same `opCode` and label
+within one open stage ADD into the one pending slot. That is
+what lets the electrostatic stage's two sub-stages each report
+"write" and have the stage show one line.
+
+### 40.5 The stamps
+
+```
+timeStampStart (opCode):
+   validate opCode                          (as today)
+   opStartTicks (opCode) = system_clock tick
+   if opFirstOrder (opCode) == 0:
+      numOpsStarted += 1
+      opFirstOrder (opCode) = numOpsStarted
+   write the banner, label and date         (as today)
+
+timeStampEnd (opCode):
+   validate opCode                          (as today)
+   wallSeconds = (tick now - opStartTicks (opCode)) / rate
+   opCalls (opCode)       += 1
+   opWallSeconds (opCode) += wallSeconds
+   if mpiRank == 0 and any pending slot belongs to opCode:
+      writeStageReport (opCode, wallSeconds)        ! 40.6
+      remove those slots, closing the gap in the list
+   write the date, label and banner         (as today)
+```
+
+The report is therefore the last thing inside the stage's
+banner, directly above the end stamp it explains. A stage that
+recorded nothing (every stage not yet instrumented, and an
+instrumented one that found its work already done and returned
+early) writes nothing extra and still counts a call and its
+wall time.
+
+### 40.6 The stage report
+
+```
+writeStageReport (opCode, wallSeconds):
+   rankZeroDealt = 0;  serial = 0;  worst = 0
+   for each pending slot of opCode, in recorded order:
+      DEALT_TIME:  lowest, mean, highest over ranks;
+                   balance = highest / mean   (1.0 if mean == 0)
+                   rankZeroDealt += value of rank 0
+                   worst = max (worst, balance)
+      DEALT_COUNT: lowest, mean, highest, balance likewise;
+                   takes no part in the sums or in worst
+      ROOT_ONLY:   serial += seconds
+   notTimed    = wallSeconds - rankZeroDealt - serial
+   serialShare = 100 * serial / wallSeconds  (0 if wall == 0)
+
+   opSerialSeconds (opCode) += serial
+   opWorstBalance  (opCode)  = max (itself, worst)
+   opHasPhases     (opCode)  = true
+
+   if isVerbose (VERB_TIMING):      write the summary
+   if isVerbose (VERB_RANKTIMING):  write the per-rank table
+```
+
+The accumulation is outside both tests: what a run prints must
+not change what its end-of-run table says.
+
+The summary, with the layout fixed here because the layout is
+the point (DESIGN 9.11). Seconds to three decimals; a count
+phase prints its lowest and highest as integers and has
+"(count)" after its label:
+
+```
+ Stage timing: 16 ranks, 118.6 s wall
+   phase                         min       mean        max  max/mean
+   pair loop                   0.034      0.057      0.186       3.2
+   reduce                      0.407      0.929      1.224       1.3
+   rank 0 only: orthogonalize + write                117.160
+   not timed                                           0.021
+   serial share of this stage                           99 %
+```
+
+"Not timed" is a difference of clock readings, so when the
+phases account for the whole stage it lands a rounding error
+either side of zero. A value smaller in size than half the
+last printed digit (0.0005 s) is written as exactly zero, so
+that the line never reads "-0.000". A negative value larger
+than that is written as it stands: it means the phases claim
+more time than the stage took, which is a fault in the clocks
+that must stay visible.
+
+The per-rank table, one 12-character column per dealt phase in
+recorded order, headed by the phase labels:
+
+```
+ Stage timing by rank:
+   rank   pair loop      reduce
+      0       0.037       1.224
+      1       0.034       1.172
+    ...
+```
+
+Both blocks are preceded by one blank line. With one rank (and
+in the serial build) the summary is written just the same --
+lowest, mean and highest coincide and the balance is 1.0 --
+since which phase a stage's time sits in is worth knowing at
+any width.
+
+### 40.7 The end-of-run table
+
+```
+printRunTiming:
+   if mpiRank /= 0: return
+   if not isVerbose (VERB_TIMING): return
+   if unit 20 is not open:
+      say so on standard output and return   ! see below
+   runSeconds = (tick now - runStartTicks) / rate
+   write the heading with mpiSize and runSeconds
+   for order = 1 .. numOpsStarted:
+      op = the opCode whose opFirstOrder == order
+      skip it if opCalls (op) == 0     ! started, never ended
+      name = opLabels (op) with its asterisks and outer
+            blanks removed
+      write name, opCalls, opWallSeconds,
+            100 * opWallSeconds / runSeconds,
+            and -- only if opHasPhases (op) --
+            100 * opSerialSeconds / opWallSeconds and
+            opWorstBalance (a dash for each otherwise; a dash
+            for the balance also when it is 0, a stage with
+            rank-0-only phases alone)
+   write the sum of the wall column and its share
+   write runSeconds as the last row, share 100.0
+```
+
+```
+ Run timing: 16 ranks, 5432.1 s wall
+ stage                                    calls   wall s % run serial % balance
+ Parse Input Files                            1      0.4   0.0        -       -
+ Overlap Integrals                            1    118.6   2.2       99     3.2
+ Electronic Potential Integrals               1    912.0  16.8        4     1.4
+ Secular Equation                            19   3200.0  58.9        -       -
+ ...
+ all stages                                       5400.2  99.4
+ run                                              5432.1 100.0
+```
+
+The columns, in characters: one blank, the stage name in 41,
+calls in 6, wall seconds in 9, share of the run in 6, serial
+share in 9, balance in 8 -- 80 in all. The name column is 41
+wide because the longest stage label, "Modern Theory of
+Polarization Calculation", is 41 long (read from `opLabels`
+at c663ac7); that is also why this table starts one column
+in where the stage summary starts three. A new label longer
+than 41 would be cut short in this table, not overflow it.
+
+The columns mean what the same words mean in a stage summary
+(40.6), summed over every call of the stage: "serial %" is
+the stage's rank-0-only seconds as a percentage of its wall
+seconds, and "balance" is the largest max/mean any dealt time
+phase of the stage showed in any call.
+
+The test for an open log is the one `printMethodsBlock`
+makes, for the same reason: a write to a closed unit does not
+fail, it reconnects the unit and truncates the file, which
+would replace the whole log with this table.
+
+Rows are in the order the stages first started, which is the
+order a reader meets them in the log. The "all stages" row is
+the plain column sum and the "run" row is the run's own clock;
+the two are printed side by side so that time outside every
+stage -- or a stage counted twice by nesting, should one ever
+be timed inside another (DESIGN 9.11) -- shows as a difference
+between them instead of hiding.
+
+Called once from `Imago`, immediately before
+`printMethodsBlock`: after every stage has ended, and before
+unit 20 is closed.
+
+### 40.8 The call sites
+
+What each instrumented stage records. Every dealt value is the
+one the site already measures; only the root-only clocks are
+new.
+
+```
+two-centre stages (opCode 8, 9, 30, 10):
+   in reducePairStage, after the three reduces:
+      recordDealtPhase (opCode, "pair loop", loopSeconds)
+      recordDealtPhase (opCode, "reduce",    reduceSeconds)
+   in each caller, on rank 0:
+      start a clock; call orthoOL / ortho; stop it
+      recordRootPhase (opCode, "orthogonalize + write", t)
+
+three-centre stage (opCode 11), after the barrier and before
+      timeStampEnd (11):
+   recordDealtPhase (11, "compute",   myStageTimes (1))
+   recordDealtPhase (11, "lock wait", myStageTimes (2))
+   recordDealtPhase (11, "write",     myStageTimes (3))
+   recordDealtPhase (11, "terms",     myStageTimes (4),
+                     isCount = true)
+
+electrostatic stage (opCode 14):
+   neutralAndNuclearQPot, after its reduces, all ranks:
+      recordDealtPhase (14, "real loop", myLoopSeconds)
+   then rank 0, around its dataset and attribute writes:
+      recordRootPhase (14, "write", t)
+   residualQ, likewise:
+      recordDealtPhase (14, "recip loop", myLoopSeconds)
+      recordRootPhase (14, "write", t)     ! adds to the same line
+```
+
+A sub-stage that finds its completion attribute already set
+dispatches nothing and records nothing (28.2), so a restarted
+run's electrostatic summary shows only the sub-stages that
+ran.
+
+### 40.9 Checks
+
+1. **Stamps unchanged.** `dev/tools/timemap.py` on the log of
+   a run before and after the change gives the same table to
+   the stamps' own precision.
+2. **The arithmetic closes.** In every stage summary, rank 0's
+   dealt seconds (from the per-rank table) plus the rank-0-only
+   lines plus "not timed" equal the stage wall time to the
+   printed precision.
+3. **The numbers are the old numbers.** On one deck, built
+   before and after: the per-rank table's columns reproduce
+   the values of the raw lines they replace, within run-to-run
+   noise.
+4. **Serial build.** One rank, serial build: every summary
+   reads "1 rank" with lowest = mean = highest and balance
+   1.0; no `MPI` symbol is needed by `timeStamps.f90` beyond
+   what `O_MPI` already hides.
+5. **Categories.** `IMAGO_VERBOSENESS=none`: no summary, no
+   per-rank table, no run table, stamps still present.
+   Unset: summaries and run table, no per-rank table.
+   `normal,ranktiming`: all three. `ranktiming` alone: the
+   per-rank tables only.
+6. **The run table is print-independent.** The run table under
+   `timing` alone and under `timing,ranktiming` is the same
+   apart from timing noise; and its serial and balance columns
+   are filled although `none` suppressed every summary -- by
+   inspection of the accumulation in 40.6, since `none` prints
+   no table to compare.
+7. **Early return.** A restart that finds the overlap done
+   prints no overlap summary; the run table shows the stage
+   with one call and dashes.
+8. **Electrostatic lines merge.** A fresh run's electrostatic
+   summary has both loops and ONE "rank 0 only: write" line
+   whose value is the sum of the two sub-stages' writes.
+9. **Overflow is survivable.** With `maxPhases` temporarily 1,
+   a two-centre stage prints its first phase, one "dropped"
+   notice, and the run completes.
+10. **The run table accounts for the run.** On a 16-rank SCF
+    run "all stages" is within a few percent of "run"; the
+    difference is named in the acceptance note, not ignored.
+11. **Results untouched.** Total energy and iteration count of
+    a benchmark deck are identical before and after: nothing
+    here is on a path that computes.
